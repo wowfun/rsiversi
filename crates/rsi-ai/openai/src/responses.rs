@@ -32,11 +32,28 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
                 ]
             },
         )
-        .expect("static OpenAI Responses profile is valid"))
+        .expect("static OpenAI Responses profile is valid")
+        .with_reasoning_efforts(
+            self.config
+                .reasoning_efforts
+                .get(model)
+                .cloned()
+                .unwrap_or_default(),
+        ))
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
-        self.config.model_limits(model)?;
+        self.describe(model)?
+            .reasoning_efforts()
+            .resolve(request.settings().reasoning_effort())
+            .map_err(|e| {
+                ai_error(
+                    ErrorKind::Unsupported,
+                    ErrorPhase::Prepare,
+                    DispatchStatus::NotStarted,
+                    e.to_string(),
+                )
+            })?;
         validate_responses_request(request, self.config.responses_state)
     }
 
@@ -790,8 +807,20 @@ async fn responses_request(
     if let Some(value) = settings.top_p() {
         body.insert("top_p".to_owned(), json!(value));
     }
-    if let Some(value) = settings.reasoning_effort() {
-        body.insert("reasoning".to_owned(), json!({"effort":value}));
+    let effort = config
+        .reasoning_efforts
+        .get(model)
+        .cloned()
+        .unwrap_or_default()
+        .resolve(settings.reasoning_effort())
+        .map_err(|e| invalid_language_profile(e.reason()))?;
+    if let Some(value) = effort {
+        let wire = if config.disabled_reasoning_alias.as_ref() == Some(&value) {
+            "none"
+        } else {
+            value.as_str()
+        };
+        body.insert("reasoning".to_owned(), json!({"effort":wire}));
     }
     if !request.tools().is_empty() {
         body.insert(
@@ -1340,7 +1369,7 @@ impl ResponsesParser {
         self.provider_state_dirty = true;
         if let Some(usage) = response.get("usage") {
             output.push(LanguageEvent::Usage {
-                usage: responses_usage(usage),
+                usage: responses_usage(usage)?,
             });
         }
         let replay = if self.state == ResponsesState::Stateless {
@@ -1663,25 +1692,80 @@ fn is_language_terminal_event(event: &LanguageEvent) -> bool {
     )
 }
 
-fn responses_usage(value: &Value) -> TokenUsage {
-    TokenUsage {
-        input_tokens: value
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: value
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cache_read_tokens: value
-            .get("input_tokens_details")
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_u64),
-        cache_write_tokens: None,
-        reasoning_tokens: value
-            .get("output_tokens_details")
-            .and_then(|details| details.get("reasoning_tokens"))
-            .and_then(Value::as_u64),
+fn responses_usage(value: &Value) -> Result<TokenUsage, AiError> {
+    let required = |key| {
+        value.get(key).and_then(Value::as_u64).ok_or_else(|| {
+            ai_error(
+                ErrorKind::Protocol,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "Responses usage requires integer input and output totals",
+            )
+        })
+    };
+    let optional = |details: &str, field: &str| -> Result<Option<u64>, AiError> {
+        let invalid = || {
+            ai_error(
+                ErrorKind::Protocol,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "Responses usage breakdown requires a nonnegative integer",
+            )
+        };
+        let Some(details) = value.get(details).filter(|details| !details.is_null()) else {
+            return Ok(None);
+        };
+        let details = details.as_object().ok_or_else(invalid)?;
+        details
+            .get(field)
+            .filter(|count| !count.is_null())
+            .map(|count| count.as_u64().ok_or_else(invalid))
+            .transpose()
+    };
+    TokenUsage::new(
+        required("input_tokens")?,
+        required("output_tokens")?,
+        optional("input_tokens_details", "cached_tokens")?,
+        None,
+        optional("output_tokens_details", "reasoning_tokens")?,
+    )
+    .map_err(|error| {
+        ai_error(
+            ErrorKind::Protocol,
+            ErrorPhase::Stream,
+            DispatchStatus::Dispatched,
+            error.to_string(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[test]
+    fn malformed_optional_usage_is_rejected_instead_of_becoming_unknown() {
+        for count in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("2"),
+            serde_json::json!(11),
+        ] {
+            assert!(responses_usage(&serde_json::json!({"input_tokens":10,"output_tokens":3,"input_tokens_details":{"cached_tokens":count}})).is_err());
+        }
+        assert!(responses_usage(&serde_json::json!({"input_tokens":10,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":4}})).is_err());
+        assert!(
+            responses_usage(
+                &serde_json::json!({"input_tokens":10,"output_tokens":3,"input_tokens_details":[]})
+            )
+            .is_err()
+        );
+        let unknown = responses_usage(
+            &serde_json::json!({"input_tokens":10,"output_tokens":3,"input_tokens_details":null}),
+        )
+        .unwrap();
+        assert_eq!(unknown.cache_read_tokens(), None);
+        let zero = responses_usage(&serde_json::json!({"input_tokens":10,"output_tokens":3,"input_tokens_details":{"cached_tokens":0}})).unwrap();
+        assert_eq!(zero.cache_read_tokens(), Some(0));
     }
 }
 
@@ -1760,6 +1844,7 @@ mod tests {
     fn deferred_test_checkpoint() -> DeferredLanguageCheckpoint {
         DeferredLanguageCheckpoint::new(
             rsi_ai_protocol::PreparedCallSnapshot {
+                language_settings: None,
                 call_id: "deployment:1".to_owned(),
                 deployment_id: "deployment".to_owned(),
                 provider_family: "openai".to_owned(),

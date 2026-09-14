@@ -172,6 +172,7 @@ fn first_stream(state: &ServerState) -> Response {
 fn context() -> PrepareContext {
     PrepareContext::new(
         PreparedCallSnapshot {
+            language_settings: None,
             call_id: "deferred-call".into(),
             deployment_id: "openai".into(),
             provider_family: "openai".into(),

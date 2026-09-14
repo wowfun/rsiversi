@@ -3,7 +3,7 @@ use rsi_ai_protocol::{
     LanguageProfile, LanguageRequest, LanguageSettings, MAX_EXTENSION_BYTES,
     MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_REQUEST_BYTES, MediaDescriptor,
     MediaKind, Message, MessageContent, ProviderExtension, ProviderExtensionFormat,
-    ReasoningEffort, ResponseFormat, ToolCall, ToolCallKind, ToolChoice, ToolDefinition,
+    ReasoningEffortId, ResponseFormat, ToolCall, ToolCallKind, ToolChoice, ToolDefinition,
     validate_json_structure,
 };
 
@@ -144,7 +144,8 @@ fn language_profile_and_extension_formats_revalidate_during_deserialization() {
         "tool_dialect": "responses",
         "supports_freeform_tools": true,
         "image_tool_result": {"support": "unknown"},
-        "accepted_provider_extensions": []
+        "accepted_provider_extensions": [],
+        "reasoning_efforts": {"supported":[],"default":null}
     }))
     .expect_err("invalid profile limits must not deserialize");
     assert!(error.to_string().contains("token limits"), "{error}");
@@ -526,7 +527,7 @@ fn language_settings_round_trip_in_the_canonical_request() {
         .with_seed(42)
         .with_stop(vec!["END".to_owned(), "STOP".to_owned()])
         .expect("stop sequences")
-        .with_reasoning_effort(ReasoningEffort::High);
+        .with_reasoning_effort(ReasoningEffortId::new("high").unwrap());
     let request = LanguageRequest::new(vec![Message::user_text("hello").expect("message")])
         .expect("request")
         .with_settings(settings.clone())
@@ -537,8 +538,8 @@ fn language_settings_round_trip_in_the_canonical_request() {
     assert_eq!(decoded.settings(), &settings);
     assert_eq!(decoded.settings().max_output_tokens(), Some(4_096));
     assert_eq!(
-        decoded.settings().reasoning_effort(),
-        Some(ReasoningEffort::High)
+        decoded.settings().reasoning_effort().cloned(),
+        Some(ReasoningEffortId::new("high").unwrap())
     );
 }
 

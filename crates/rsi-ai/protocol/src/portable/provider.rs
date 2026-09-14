@@ -10,7 +10,7 @@ use std::fmt;
 /// Native provider business service contract.
 pub const PROVIDER_CONTRACT: &str = "rsi.ai.portable";
 /// Native provider business protocol version.
-pub const PROVIDER_VERSION: u32 = 1;
+pub const PROVIDER_VERSION: u32 = 2;
 /// Maximum encoded provider description or prepared response.
 pub const MAXIMUM_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum transient native state retained with a prepared call.

@@ -3,6 +3,9 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // AiError carries the public failure taxonomy.
 
+mod usage;
+pub use usage::UsageAccounting;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -29,6 +32,14 @@ use rsi_ai_transport::{
     transport_connect_error, transport_stream_error,
 };
 use serde::Deserialize;
+/// Lists candidates under the configured API base without registering a route.
+pub async fn discover_models(
+    transport: &dyn HttpTransport,
+    endpoint: &str,
+    secret: &rsi_credentials_protocol::SecretValue,
+) -> Result<Vec<rsi_ai_protocol::DiscoveredModel>, AiError> {
+    rsi_ai_openai::discovery::list(transport, endpoint, "/v1/models", secret).await
+}
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -48,7 +59,10 @@ pub struct ChatCompletionsConfig {
     path: String,
     allow_image_input: bool,
     developer_role: DeveloperMessageRole,
+    disabled_reasoning_alias: Option<rsi_ai_protocol::ReasoningEffortId>,
+    usage_accounting: UsageAccounting,
     language_models: LanguageModelProfiles,
+    reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
 
 impl ChatCompletionsConfig {
@@ -59,7 +73,10 @@ impl ChatCompletionsConfig {
             path: "/v1/chat/completions".to_owned(),
             allow_image_input: true,
             developer_role: DeveloperMessageRole::Developer,
+            disabled_reasoning_alias: None,
+            usage_accounting: UsageAccounting::default(),
             language_models: LanguageModelProfiles::default(),
+            reasoning_efforts: BTreeMap::new(),
         };
         config.validate()?;
         Ok(config)
@@ -86,6 +103,23 @@ impl ChatCompletionsConfig {
         self
     }
 
+    /// Declares whether input totals include cache tokens.
+    #[must_use]
+    pub const fn with_usage_accounting(mut self, accounting: UsageAccounting) -> Self {
+        self.usage_accounting = accounting;
+        self
+    }
+
+    /// Enables the explicit thinking switch with a provider-owned disabled effort ID.
+    #[must_use]
+    pub fn with_disabled_reasoning_alias(
+        mut self,
+        alias: rsi_ai_protocol::ReasoningEffortId,
+    ) -> Self {
+        self.disabled_reasoning_alias = Some(alias);
+        self
+    }
+
     /// Adds one exact model-capacity profile; duplicates and oversized maps fail.
     pub fn with_model_profile(
         mut self,
@@ -98,6 +132,20 @@ impl ChatCompletionsConfig {
         Ok(self)
     }
 
+    /// Declares exact reasoning choices for an already configured model.
+    pub fn with_reasoning_efforts(
+        mut self,
+        model: impl Into<String>,
+        efforts: rsi_ai_protocol::ReasoningEffortProfile,
+    ) -> Result<Self, AiError> {
+        let model = model.into();
+        self.model_limits(&model)?;
+        if self.reasoning_efforts.insert(model, efforts).is_some() {
+            return Err(invalid_profile("duplicate model effort declaration"));
+        }
+        Ok(self)
+    }
+
     fn model_limits(&self, model: &str) -> Result<LanguageModelLimits, AiError> {
         self.language_models
             .get(model)
@@ -105,7 +153,7 @@ impl ChatCompletionsConfig {
     }
 
     fn url(&self) -> String {
-        format!("{}{}", self.endpoint, self.path)
+        rsi_ai_openai::endpoint_url(&self.endpoint, &self.path)
     }
 
     fn validate(&self) -> Result<(), AiError> {
@@ -178,11 +226,28 @@ impl LanguageAdapter for ChatCompletionsAdapter {
             },
             Vec::new(),
         )
-        .expect("static Chat Completions profile is valid"))
+        .expect("static Chat Completions profile is valid")
+        .with_reasoning_efforts(
+            self.config
+                .reasoning_efforts
+                .get(model)
+                .cloned()
+                .unwrap_or_default(),
+        ))
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
-        self.config.model_limits(model)?;
+        self.describe(model)?
+            .reasoning_efforts()
+            .resolve(request.settings().reasoning_effort())
+            .map_err(|e| {
+                ai_error(
+                    ErrorKind::Unsupported,
+                    ErrorPhase::Prepare,
+                    DispatchStatus::NotStarted,
+                    e.to_string(),
+                )
+            })?;
         if request
             .hosted_tools()
             .iter()
@@ -269,11 +334,14 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                     if !(200..300).contains(&response.status) {
                         return Err(http_failure(response.status, response.body).await);
                     }
-                    Ok(translate_chat_stream(decode_sse(
-                        response.body,
-                        SseTermination::DoneSentinel,
-                        rsi_ai_transport::DEFAULT_SSE_FRAME_BYTES,
-                    )))
+                    Ok(translate_chat_stream(
+                        decode_sse(
+                            response.body,
+                            SseTermination::DoneSentinel,
+                            rsi_ai_transport::DEFAULT_SSE_FRAME_BYTES,
+                        ),
+                        config.usage_accounting,
+                    ))
                 })
             }))
         })
@@ -288,7 +356,11 @@ struct CompatiblePluginConfig {
     endpoint: String,
     path: String,
     allow_image_input: bool,
+    #[serde(default)]
+    usage_accounting: UsageAccounting,
     language_models: BTreeMap<String, LanguageModelLimits>,
+    #[serde(default)]
+    reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
 
 #[derive(Debug)]
@@ -344,10 +416,16 @@ impl rsi_meta::PluginFactory for OpenAiCompatibleFactory {
         let mut adapter = ChatCompletionsConfig::new(&config.endpoint)
             .and_then(|adapter| adapter.with_path(&config.path))
             .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?
-            .with_image_input(config.allow_image_input);
+            .with_image_input(config.allow_image_input)
+            .with_usage_accounting(config.usage_accounting);
         for (model, limits) in &config.language_models {
             adapter = adapter
                 .with_model_profile(model, *limits)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
+        for (model, efforts) in &config.reasoning_efforts {
+            adapter = adapter
+                .with_reasoning_efforts(model, efforts.clone())
                 .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         }
         let retained = serde_json::to_vec(desired)
@@ -494,8 +572,23 @@ async fn build_request_body(
     if !settings.stop().is_empty() {
         body.insert("stop".to_owned(), json!(settings.stop()));
     }
-    if let Some(value) = settings.reasoning_effort() {
-        body.insert("reasoning_effort".to_owned(), json!(value));
+    let effort = config
+        .reasoning_efforts
+        .get(model)
+        .cloned()
+        .unwrap_or_default()
+        .resolve(settings.reasoning_effort())
+        .map_err(|e| invalid_profile(e.reason()))?;
+    if let Some(value) = effort {
+        if let Some(disabled) = &config.disabled_reasoning_alias {
+            body.insert(
+                "thinking".into(),
+                json!({"type": if &value == disabled { "disabled" } else { "enabled" }}),
+            );
+        }
+        if config.disabled_reasoning_alias.as_ref() != Some(&value) {
+            body.insert("reasoning_effort".to_owned(), json!(value));
+        }
     }
     if !tools.is_empty() {
         body.insert("tools".to_owned(), Value::Array(tools));
@@ -778,7 +871,10 @@ struct ToolState {
 }
 
 #[allow(clippy::too_many_lines)] // One exhaustive stream grammar owns provider ordering.
-fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdapterStream {
+fn translate_chat_stream(
+    mut input: rsi_ai_transport::SseStream,
+    accounting: UsageAccounting,
+) -> LanguageAdapterStream {
     Box::pin(stream! {
         let mut next_output = 0_u32;
         let mut reasoning = None;
@@ -919,7 +1015,13 @@ fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdap
                     yield Ok(failed(ai_error(ErrorKind::Protocol, ErrorPhase::Stream, DispatchStatus::Dispatched, "provider emitted usage more than once")));
                     return;
                 }
-                usage = Some(wire.normalized());
+                match usage::normalize(wire, accounting) {
+                    Ok(value) => usage = Some(value),
+                    Err(reason) => {
+                        yield Ok(failed(ai_error(ErrorKind::Protocol, ErrorPhase::Stream, DispatchStatus::Dispatched, reason)));
+                        return;
+                    }
+                }
             }
         }
         let Some(finish) = finish else {
@@ -977,5 +1079,25 @@ fn failed(error: AiError) -> LanguageEvent {
     LanguageEvent::Failed {
         error,
         replay: None,
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::ChatCompletionsConfig;
+
+    #[test]
+    fn chat_accepts_origin_and_version_base_and_preserves_custom_paths() {
+        for base in ["https://api.openai.com", "http://127.0.0.1/gateway"] {
+            for suffix in ["", "/", "/v1", "/v1/"] {
+                let endpoint = format!("{base}{suffix}");
+                let config = ChatCompletionsConfig::new(&endpoint).unwrap();
+                assert_eq!(config.url(), format!("{base}/v1/chat/completions"));
+                assert_eq!(
+                    config.with_path("/chat/completions").unwrap().url(),
+                    format!("{}/chat/completions", endpoint.trim_end_matches('/'))
+                );
+            }
+        }
     }
 }

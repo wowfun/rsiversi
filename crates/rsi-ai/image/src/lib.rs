@@ -126,6 +126,7 @@ impl Router {
             Arc::new(MissingMediaResolver)
         };
         let snapshot = PreparedCallSnapshot {
+            language_settings: None,
             call_id: format!("call-{call_number}"),
             deployment_id: registration.deployment_id().to_owned(),
             provider_family: registration.provider_family().to_owned(),

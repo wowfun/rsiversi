@@ -1,9 +1,19 @@
 # rsi-ai-deepseek
 
+Model discovery reads `/models` under the configured endpoint using the shared
+OpenAI-list parser. Authentication and listing success do not prove inference
+compatibility, and absent capacity fields remain absent.
+
 This package defaults to the stateless OpenAI Responses protocol at `/responses`.
 Explicit `protocol = "chat-completions"` selects Chat at `/chat/completions`;
 there is no automatic protocol fallback. Endpoint, media and setting admission
 belong to this provider. The prepared snapshot records the selected protocol.
+
+The declared effort ID `off` disables thinking. Chat serializes it as
+`thinking.type = disabled` and omits `reasoning_effort`; Responses serializes it
+as `reasoning.effort = none`. Other declared IDs keep their exact spelling.
+Prepared settings retain the adapter's `off` identity. `max` is never aliased
+to `xhigh`.
 
 Responses reuses the bounded shared serializer and event parser with stateless
 history: no previous-response identity, background operation or stored-response

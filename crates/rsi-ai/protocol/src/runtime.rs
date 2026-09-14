@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AiError, ErrorKind, ImageEvent, ImageRequest, LanguageEvent, LanguageProfile, LanguageRequest,
+    AiError, ErrorKind, ImageEvent, ImageRequest, LanguageEvent, LanguageRequest,
     MAX_CONTENT_BLOCKS, MAX_EXTENSION_BYTES, ProviderExtension, validate_identifier,
 };
 
@@ -235,6 +235,8 @@ pub struct PreparedCallSnapshot {
     pub retry_policy: RetryPolicy,
     /// Lowercase SHA-256 of canonical provider-neutral request bytes.
     pub request_sha256: String,
+    /// Actual generation-pinned settings for Language; absent for Images.
+    pub language_settings: Option<crate::PreparedLanguageSettings>,
 }
 
 impl PreparedCallSnapshot {
@@ -271,6 +273,16 @@ impl PreparedCallSnapshot {
                 "prepared snapshot contains an invalid request digest",
             ));
         }
+        if let Some(settings) = &self.language_settings {
+            if self.capability != AiCapability::Language {
+                return Err(AiContractError::invalid(
+                    "Image snapshot contains Language settings",
+                ));
+            }
+            settings
+                .validate()
+                .map_err(|error| AiContractError::invalid(error.to_string()))?;
+        }
         self.retry_policy.validate()
     }
 }
@@ -295,6 +307,7 @@ impl<'de> Deserialize<'de> for PreparedCallSnapshot {
             credential_source: Option<CredentialSource>,
             retry_policy: RetryPolicy,
             request_sha256: String,
+            language_settings: Option<crate::PreparedLanguageSettings>,
         }
 
         let wire = WirePreparedCallSnapshot::deserialize(deserializer)?;
@@ -311,6 +324,7 @@ impl<'de> Deserialize<'de> for PreparedCallSnapshot {
             credential_source: wire.credential_source,
             retry_policy: wire.retry_policy,
             request_sha256: wire.request_sha256,
+            language_settings: wire.language_settings,
         };
         snapshot
             .validate()
@@ -711,6 +725,12 @@ pub enum ModelsError {
 /// Read-only committed Language model catalog; confers no invocation authority.
 #[async_trait]
 pub trait LanguageModels: fmt::Debug + Send + Sync + 'static {
+    /// Describes one exact committed route without credentials or provider I/O.
+    async fn describe_model(
+        &self,
+        model: &ModelRef,
+    ) -> Result<crate::LanguageModelDescription, ModelsError>;
+
     /// Lists committed configured routes without credentials or provider I/O.
     async fn list_models(
         &self,
@@ -731,7 +751,7 @@ impl LocalContract for LanguageModelsContract {
 #[async_trait]
 pub trait LanguageCall: fmt::Debug + Send + Sync + 'static {
     /// Describes one route without credentials, media reads, or provider I/O.
-    fn describe(&self, model: &ModelRef) -> Result<LanguageProfile, AiError>;
+    fn describe(&self, model: &ModelRef) -> Result<crate::LanguageModelDescription, AiError>;
     /// Validates and freezes one call without provider I/O.
     async fn prepare(
         &self,

@@ -12,18 +12,84 @@ use crate::{
 const MAX_SOURCE_FIELD_BYTES: usize = 16 * 1024;
 const MAX_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 
-/// Token counts reported for one provider attempt.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Inclusive token counts reported for one provider attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)] // Explicit units are part of the durable usage schema.
 pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    /// Input tokens served from a provider cache, when reported.
-    pub cache_read_tokens: Option<u64>,
-    /// Input tokens written to a provider cache, when reported.
-    pub cache_write_tokens: Option<u64>,
-    /// Output tokens attributed to hidden reasoning, when reported.
-    pub reasoning_tokens: Option<u64>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+}
+impl TokenUsage {
+    /// Validates inclusive totals and disjoint optional cache/reasoning subsets.
+    pub fn new(
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: Option<u64>,
+        cache_write_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+    ) -> Result<Self, StreamError> {
+        if input_tokens.checked_add(output_tokens).is_none()
+            || cache_read_tokens
+                .unwrap_or(0)
+                .checked_add(cache_write_tokens.unwrap_or(0))
+                .is_none_or(|cached| cached > input_tokens)
+            || reasoning_tokens.is_some_and(|reasoning| reasoning > output_tokens)
+        {
+            return Err(StreamError::invalid(
+                "usage.invalid_counters",
+                "inclusive totals overflow or a reported subset exceeds its total",
+            ));
+        }
+        Ok(Self {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        })
+    }
+    pub const fn input_tokens(&self) -> u64 {
+        self.input_tokens
+    }
+    pub const fn output_tokens(&self) -> u64 {
+        self.output_tokens
+    }
+    pub const fn cache_read_tokens(&self) -> Option<u64> {
+        self.cache_read_tokens
+    }
+    pub const fn cache_write_tokens(&self) -> Option<u64> {
+        self.cache_write_tokens
+    }
+    pub const fn reasoning_tokens(&self) -> Option<u64> {
+        self.reasoning_tokens
+    }
+}
+impl<'de> Deserialize<'de> for TokenUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(clippy::struct_field_names)] // Match the exact durable token counters.
+        struct Wire {
+            input_tokens: u64,
+            output_tokens: u64,
+            cache_read_tokens: Option<u64>,
+            cache_write_tokens: Option<u64>,
+            reasoning_tokens: Option<u64>,
+        }
+        let wire = Wire::deserialize(d)?;
+        Self::new(
+            wire.input_tokens,
+            wire.output_tokens,
+            wire.cache_read_tokens,
+            wire.cache_write_tokens,
+            wire.reasoning_tokens,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Why a language response stopped.

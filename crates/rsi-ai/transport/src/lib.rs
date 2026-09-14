@@ -29,8 +29,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use rsi_ai_protocol::{
-    AiError, DispatchStatus, ErrorKind, ErrorPhase, TokenUsage, sanitize_error_summary,
-    validate_identifier,
+    AiError, DispatchStatus, ErrorKind, ErrorPhase, sanitize_error_summary, validate_identifier,
 };
 use rsi_credentials_protocol::SecretValue;
 use serde::Deserialize;
@@ -469,6 +468,8 @@ pub struct ChatCompletionsFunctionDelta {
 pub struct ChatCompletionsUsage {
     /// Total prompt tokens charged by the provider.
     pub prompt_tokens: u64,
+    /// Optional `OpenAI` input breakdown, retained independently of aliases.
+    pub prompt_tokens_details: Option<ChatInputTokenDetails>,
     /// Total completion tokens charged by the provider.
     pub completion_tokens: u64,
     /// Provider-specific prompt cache-hit counter.
@@ -481,25 +482,11 @@ pub struct ChatCompletionsUsage {
     pub completion_tokens_details: Option<ChatCompletionTokenDetails>,
 }
 
-impl ChatCompletionsUsage {
-    #[must_use]
-    /// Converts provider-specific counters into the shared usage contract.
-    ///
-    /// `prompt_cache_hit_tokens` takes precedence over
-    /// `cache_read_input_tokens` when both are present.
-    pub fn normalized(self) -> TokenUsage {
-        TokenUsage {
-            input_tokens: self.prompt_tokens,
-            output_tokens: self.completion_tokens,
-            cache_read_tokens: self
-                .prompt_cache_hit_tokens
-                .or(self.cache_read_input_tokens),
-            cache_write_tokens: self.cache_creation_input_tokens,
-            reasoning_tokens: self
-                .completion_tokens_details
-                .and_then(|details| details.reasoning_tokens),
-        }
-    }
+/// Detailed input counters preserved without assigning cache accounting semantics.
+#[derive(Debug, Deserialize)]
+pub struct ChatInputTokenDetails {
+    /// Input cache-read subset according to the endpoint's declared wire convention.
+    pub cached_tokens: Option<u64>,
 }
 
 /// Detailed completion-token counters returned by a provider.

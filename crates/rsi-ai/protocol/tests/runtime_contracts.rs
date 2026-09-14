@@ -34,13 +34,20 @@ fn runtime_contracts_revalidate_during_deserialization() {
         "config_generation": 0,
         "credential_source": null,
         "retry_policy": RetryPolicy::default(),
-        "request_sha256": "0".repeat(64)
+        "request_sha256": "0".repeat(64),
+        "language_settings": null
     });
     serde_json::from_value::<PreparedCallSnapshot>(snapshot.clone())
         .expect_err("zero provider generation must fail");
 
     let mut valid_snapshot = snapshot;
     valid_snapshot["config_generation"] = json!(1);
+    for source in ["keyring", "file"] {
+        valid_snapshot["credential_source"] = json!({"kind":source});
+        let decoded: PreparedCallSnapshot = serde_json::from_value(valid_snapshot.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), valid_snapshot);
+    }
+
     serde_json::from_value::<DeferredLanguageCheckpoint>(json!({
         "call": valid_snapshot,
         "operation_id": "operation-1",
@@ -58,6 +65,7 @@ fn deferred_checkpoint_wire_is_stable_while_clones_share_immutable_state() {
         ProviderExtension::new("fixture", 1, json!({"cursor": 7})).expect("bounded state");
     let checkpoint = DeferredLanguageCheckpoint::new(
         PreparedCallSnapshot {
+            language_settings: None,
             call_id: "call-1".to_owned(),
             deployment_id: "deployment".to_owned(),
             provider_family: "provider".to_owned(),
@@ -83,7 +91,7 @@ fn deferred_checkpoint_wire_is_stable_while_clones_share_immutable_state() {
             r#"{"call":{"call_id":"call-1","deployment_id":"deployment","provider_family":"provider","capability":"language","model":"model","protocol":"protocol","transport":"transport","endpoint_fingerprint":"endpoint","config_generation":1,"credential_source":null,"retry_policy":{"max_retries":2,"retryable_kinds":["rate_limited","server","timeout","transport","output_validation"],"initial_delay_ms":500,"max_delay_ms":10000,"jitter_per_mille":100},"request_sha256":"#,
             "\"",
             "0000000000000000000000000000000000000000000000000000000000000000",
-            r#""},"operation_id":"operation-1","status":"in_progress","event_stream_terminal":false,"sequence_number":null,"provider_state":{"namespace":"fixture","version":1,"value":{"cursor":7}}}"#,
+            r#"","language_settings":null},"operation_id":"operation-1","status":"in_progress","event_stream_terminal":false,"sequence_number":null,"provider_state":{"namespace":"fixture","version":1,"value":{"cursor":7}}}"#,
         )
     );
 
@@ -101,6 +109,7 @@ fn deferred_checkpoint_wire_is_stable_while_clones_share_immutable_state() {
 #[test]
 fn deferred_batches_share_the_assembler_output_budget() {
     let snapshot = PreparedCallSnapshot {
+        language_settings: None,
         call_id: "call-1".to_owned(),
         deployment_id: "deployment".to_owned(),
         provider_family: "provider".to_owned(),

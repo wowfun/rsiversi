@@ -26,6 +26,7 @@ fn descriptor(bytes: &[u8]) -> MediaDescriptor {
 
 fn snapshot() -> PreparedCallSnapshot {
     PreparedCallSnapshot {
+        language_settings: None,
         call_id: "1".to_owned(),
         deployment_id: "deployment".to_owned(),
         provider_family: "provider".to_owned(),

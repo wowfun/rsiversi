@@ -38,6 +38,7 @@ fn context(
 ) -> PrepareContext {
     PrepareContext::new(
         PreparedCallSnapshot {
+            language_settings: None,
             call_id: "test-call".into(),
             deployment_id: "openai".into(),
             provider_family: "openai".into(),
@@ -736,7 +737,7 @@ async fn max_output_token_incomplete_response_preserves_partial_output() {
         output.finish_reason,
         rsi_ai_protocol::FinishReason::MaxTokens
     );
-    assert_eq!(output.usage.expect("usage").output_tokens, 8);
+    assert_eq!(output.usage.expect("usage").output_tokens(), 8);
     assert_eq!(
         output.replay.expect("replay").value()["response_id"],
         "resp-limit"

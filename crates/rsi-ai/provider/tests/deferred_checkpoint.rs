@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn call() -> PreparedCallSnapshot {
     PreparedCallSnapshot {
+        language_settings: None,
         call_id: "deployment:1".to_owned(),
         deployment_id: "deployment".to_owned(),
         provider_family: "provider".to_owned(),

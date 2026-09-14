@@ -6,7 +6,11 @@
 /// Bounded framing for explicit Portable provider business protocols.
 pub mod portable;
 
+mod discovery;
 mod error;
+pub use discovery::{
+    DiscoveredModel, MAX_DISCOVERED_MODELS, MAX_DISCOVERY_BYTES, validate_discovered_models,
+};
 mod language;
 mod media;
 mod runtime;
@@ -30,6 +34,8 @@ pub use rsi_tools_protocol::{
     FreeformFormat, FreeformToolDefinition,
     MAXIMUM_FREEFORM_GRAMMAR_BYTES as MAX_FREEFORM_GRAMMAR_BYTES, ToolDefinition,
 };
+mod description;
+pub use description::LanguageModelDescription;
 pub use runtime::{
     AiCapability, AiContractError, DeferredLanguageBatch, DeferredLanguageCall,
     DeferredLanguageCheckpoint, DeferredLanguageStream, DeferredStatus, ImageCall,
@@ -44,8 +50,7 @@ pub use semantic::{
     MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_BLOCKS_PER_MESSAGE, MAX_DESCRIPTION_BYTES,
     MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_LANGUAGE_MODEL_PROFILES,
     MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES, Message, MessageContent,
-    MessageRole, ProviderExtensionFormat, ReasoningEffort, ResponseFormat, SemanticError,
-    ToolChoice, ToolDialect,
+    MessageRole, ProviderExtensionFormat, ResponseFormat, SemanticError, ToolChoice, ToolDialect,
 };
 pub use validation::{
     JsonStructureError, identifier as validate_identifier, validate_json_structure,
@@ -79,3 +84,6 @@ pub const MAX_TOOLS: usize = 128;
 pub const MAX_TOOL_SCHEMA_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum raw bytes in one normalized binary chunk.
 pub const MAX_BINARY_CHUNK_BYTES: usize = 256 * 1024;
+
+mod effort;
+pub use effort::{PreparedLanguageSettings, ReasoningEffortId, ReasoningEffortProfile};

@@ -604,7 +604,11 @@ async fn route_visibility_is_gate_atomic_and_prepared_call_pins_provider_generat
     assert!(calls.describe(&model).is_err());
     gate.commit();
     assert_eq!(
-        calls.describe(&model).unwrap().context_window_tokens(),
+        calls
+            .describe(&model)
+            .unwrap()
+            .profile()
+            .context_window_tokens(),
         8_192
     );
 

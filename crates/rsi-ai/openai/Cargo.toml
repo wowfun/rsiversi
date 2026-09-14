@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+tokio-util.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true

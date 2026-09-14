@@ -3,12 +3,86 @@ use std::sync::Arc;
 use axum::{Router, routing::post};
 use rsi_ai_deepseek::{DeepSeekAdapter, DeepSeekConfig, DeepSeekProtocol};
 use rsi_ai_protocol::{
-    LanguageModelLimits, LanguageRequest, LanguageSettings, Message, ReasoningEffort,
+    LanguageModelLimits, LanguageRequest, LanguageSettings, Message, ReasoningEffortId,
 };
 use rsi_ai_provider::{LanguageAdapter, MissingMediaResolver};
 use rsi_ai_testkit::{complete_language, language_context};
 use rsi_ai_transport::ReqwestTransport;
 use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue};
+
+#[tokio::test]
+async fn disabled_effort_uses_each_protocols_wire_value() {
+    use rsi_ai_protocol::ReasoningEffortProfile;
+    for protocol in [
+        DeepSeekProtocol::Responses,
+        DeepSeekProtocol::ChatCompletions,
+    ] {
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let capture = received.clone();
+        let path = if protocol == DeepSeekProtocol::Responses {
+            "/responses"
+        } else {
+            "/chat/completions"
+        };
+        let app = Router::new().route(path, post(move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+            *capture.lock().unwrap() = Some(body);
+            if protocol == DeepSeekProtocol::Responses {
+                "data: {\"type\":\"response.created\",\"sequence_number\":0}\n\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"answer\",\"delta\":\"ok\",\"sequence_number\":1}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"reply\",\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}},\"sequence_number\":2}\n\n"
+            } else {
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let off = ReasoningEffortId::new("off").unwrap();
+        let config = DeepSeekConfig::with_endpoint(endpoint)
+            .unwrap()
+            .with_protocol(protocol)
+            .with_model_profile(
+                "model",
+                LanguageModelLimits::new(128_000, 4096, 8192).unwrap(),
+            )
+            .unwrap()
+            .with_reasoning_efforts(
+                "model",
+                ReasoningEffortProfile::new(vec![off.clone()], Some(off.clone())).unwrap(),
+            )
+            .unwrap();
+        let adapter = DeepSeekAdapter::new(config, Arc::new(ReqwestTransport::new().unwrap()));
+        assert_eq!(
+            adapter
+                .describe("model")
+                .unwrap()
+                .reasoning_efforts()
+                .resolve(Some(&off))
+                .unwrap(),
+            Some(off.clone())
+        );
+        let request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()])
+            .unwrap()
+            .with_settings(LanguageSettings::default().with_reasoning_effort(off))
+            .unwrap();
+        assert_eq!(
+            complete_language(&adapter, context("model"), "model", request)
+                .await
+                .unwrap()
+                .visible_text(),
+            "ok"
+        );
+        let body = received.lock().unwrap().take().unwrap();
+        if protocol == DeepSeekProtocol::Responses {
+            assert_eq!(body["reasoning"]["effort"], "none");
+        } else {
+            assert_eq!(body["thinking"]["type"], "disabled");
+            assert!(body.get("reasoning_effort").is_none());
+        }
+        server.abort();
+        let _ = server.await;
+    }
+}
 
 fn context(model: &str) -> rsi_ai_provider::PrepareContext {
     language_context(
@@ -284,7 +358,10 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
     );
     let request = LanguageRequest::new(vec![Message::user_text("hi").expect("message")])
         .expect("request")
-        .with_settings(LanguageSettings::default().with_reasoning_effort(ReasoningEffort::High))
+        .with_settings(
+            LanguageSettings::default()
+                .with_reasoning_effort(ReasoningEffortId::new("high").unwrap()),
+        )
         .expect("request settings");
     let error = complete_language(
         &adapter,
@@ -296,5 +373,5 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
     .expect_err("unsupported setting");
     let provider = error.provider_error().expect("provider failure");
     assert_eq!(provider.kind().code(), "provider.unsupported");
-    assert!(provider.to_string().contains("reasoning_effort"));
+    assert!(provider.to_string().contains("reasoning effort"));
 }

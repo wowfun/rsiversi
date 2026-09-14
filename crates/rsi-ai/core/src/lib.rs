@@ -9,8 +9,8 @@ use futures_util::StreamExt as _;
 use rsi_ai_protocol::{
     AiCapability, AiError, DeferredLanguageCall, DeferredLanguageCheckpoint,
     DeferredLanguageStream, DeferredStatus, DispatchStatus, ErrorKind, ErrorPhase, LanguageCall,
-    LanguageCallContract, LanguageProfile, LanguageRequest, LanguageStream, MessageContent,
-    ModelRef, PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedLanguageCall,
+    LanguageCallContract, LanguageRequest, LanguageStream, MessageContent, ModelRef,
+    PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedLanguageCall,
     sanitize_error_summary,
 };
 use rsi_ai_provider::{
@@ -128,6 +128,16 @@ impl Router {
             Arc::new(MissingMediaResolver)
         };
         let snapshot = PreparedCallSnapshot {
+            language_settings: Some(
+                rsi_ai_protocol::PreparedLanguageSettings::new(
+                    registration
+                        .language()
+                        .expect("validated language facet")
+                        .describe(model.model())?,
+                    request.settings().reasoning_effort().cloned(),
+                )
+                .map_err(|error| invalid(error.to_string()))?,
+            ),
             call_id: format!("call-{call_number}"),
             deployment_id: registration.deployment_id().to_owned(),
             provider_family: registration.provider_family().to_owned(),
@@ -197,6 +207,14 @@ impl Router {
 
 #[async_trait]
 impl rsi_ai_protocol::LanguageModels for Router {
+    async fn describe_model(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, rsi_ai_protocol::ModelsError> {
+        LanguageCall::describe(self, model)
+            .map_err(|error| rsi_ai_protocol::ModelsError::Invalid(error.to_string()))
+    }
+
     async fn list_models(
         &self,
         after: Option<&ModelRef>,
@@ -249,13 +267,27 @@ impl rsi_ai_protocol::LanguageModels for Router {
 
 #[async_trait]
 impl LanguageCall for Router {
-    fn describe(&self, model: &ModelRef) -> Result<LanguageProfile, AiError> {
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
         let route = self.route(model)?;
-        route
+        let profile = route
             .registration
             .language()
             .expect("route checked its Language facet")
-            .describe(model.model())
+            .describe(model.model())?;
+        let registration = &route.registration;
+        rsi_ai_protocol::LanguageModelDescription::new(
+            model.clone(),
+            profile,
+            registration.config_generation(),
+            registration.endpoint_fingerprint(),
+            registration.protocol(),
+            registration.transport(),
+            registration.provider_family(),
+        )
+        .map_err(|error| invalid(error.to_string()))
     }
 
     async fn prepare(

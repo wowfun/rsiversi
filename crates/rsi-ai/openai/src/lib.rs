@@ -74,6 +74,8 @@ pub enum ResponsesState {
 pub struct OpenAiConfig {
     endpoint: String,
     language_models: LanguageModelProfiles,
+    reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
+    disabled_reasoning_alias: Option<rsi_ai_protocol::ReasoningEffortId>,
     responses_path: String,
     responses_state: ResponsesState,
     responses_developer_role: MessageRole,
@@ -84,6 +86,8 @@ impl Default for OpenAiConfig {
         Self {
             endpoint: "https://api.openai.com".to_owned(),
             language_models: LanguageModelProfiles::default(),
+            reasoning_efforts: BTreeMap::new(),
+            disabled_reasoning_alias: None,
             responses_path: "/v1/responses".into(),
             responses_state: ResponsesState::Stored,
             responses_developer_role: MessageRole::Developer,
@@ -92,6 +96,17 @@ impl Default for OpenAiConfig {
 }
 
 impl OpenAiConfig {
+    /// Maps one endpoint-owned disabled-reasoning ID to Responses `none`.
+    /// The semantic profile and original request identity are preserved.
+    #[must_use]
+    pub fn with_disabled_reasoning_alias(
+        mut self,
+        alias: rsi_ai_protocol::ReasoningEffortId,
+    ) -> Self {
+        self.disabled_reasoning_alias = Some(alias);
+        self
+    }
+
     /// Creates endpoint policy after validating every capability URL.
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
@@ -141,6 +156,22 @@ impl OpenAiConfig {
         Ok(self)
     }
 
+    /// Declares exact reasoning choices for an already configured model.
+    pub fn with_reasoning_efforts(
+        mut self,
+        model: impl Into<String>,
+        efforts: rsi_ai_protocol::ReasoningEffortProfile,
+    ) -> Result<Self, AiError> {
+        let model = model.into();
+        self.model_limits(&model)?;
+        if self.reasoning_efforts.insert(model, efforts).is_some() {
+            return Err(invalid_language_profile(
+                "duplicate model effort declaration",
+            ));
+        }
+        Ok(self)
+    }
+
     fn model_limits(&self, model: &str) -> Result<LanguageModelLimits, AiError> {
         self.language_models.get(model).ok_or_else(|| {
             invalid_language_profile("language model has no configured capacity profile")
@@ -148,8 +179,21 @@ impl OpenAiConfig {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.endpoint)
+        endpoint_url(&self.endpoint, path)
     }
+}
+
+/// Preserves custom API prefixes and explicit non-versioned paths while accepting
+/// both an `OpenAI` origin and the commonly supplied `/v1` API base.
+#[must_use]
+pub fn endpoint_url(endpoint: &str, path: &str) -> String {
+    let endpoint = endpoint.trim_end_matches('/');
+    let path = if endpoint.ends_with("/v1") && path.starts_with("/v1/") {
+        &path[3..]
+    } else {
+        path
+    };
+    format!("{endpoint}{path}")
 }
 
 fn invalid_language_profile(message: impl Into<String>) -> AiError {
@@ -192,6 +236,7 @@ macro_rules! http_adapter {
 http_adapter!(OpenAiResponsesAdapter);
 http_adapter!(OpenAiImageAdapter);
 
+pub mod discovery;
 mod media;
 mod responses;
 mod shared;
@@ -205,6 +250,8 @@ struct OpenAiPluginConfig {
     language: bool,
     image: bool,
     language_models: BTreeMap<String, LanguageModelLimits>,
+    #[serde(default)]
+    reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
 
 #[derive(Debug)]
@@ -268,6 +315,11 @@ impl rsi_meta::PluginFactory for OpenAiFactory {
         for (model, limits) in &config.language_models {
             adapter = adapter
                 .with_model_profile(model, *limits)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
+        for (model, efforts) in &config.reasoning_efforts {
+            adapter = adapter
+                .with_reasoning_efforts(model, efforts.clone())
                 .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         }
         let retained = serde_json::to_vec(desired)

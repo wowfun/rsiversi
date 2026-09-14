@@ -269,6 +269,7 @@ pub struct LanguageProfile {
     supports_freeform_tools: bool,
     image_tool_result: ImageToolResultCapability,
     accepted_provider_extensions: Vec<ProviderExtensionFormat>,
+    reasoning_efforts: crate::ReasoningEffortProfile,
 }
 
 impl<'de> Deserialize<'de> for LanguageProfile {
@@ -287,6 +288,7 @@ impl<'de> Deserialize<'de> for LanguageProfile {
             supports_freeform_tools: bool,
             image_tool_result: ImageToolResultCapability,
             accepted_provider_extensions: Vec<ProviderExtensionFormat>,
+            reasoning_efforts: crate::ReasoningEffortProfile,
         }
 
         let profile = WireProfile::deserialize(deserializer)?;
@@ -299,6 +301,7 @@ impl<'de> Deserialize<'de> for LanguageProfile {
             profile.image_tool_result,
             profile.accepted_provider_extensions,
         )
+        .map(|profile_value| profile_value.with_reasoning_efforts(profile.reasoning_efforts))
         .map_err(serde::de::Error::custom)
     }
 }
@@ -329,9 +332,21 @@ impl LanguageProfile {
             supports_freeform_tools,
             image_tool_result,
             accepted_provider_extensions,
+            reasoning_efforts: crate::ReasoningEffortProfile::default(),
         };
         profile.validate()?;
         Ok(profile)
+    }
+
+    /// Installs the adapter's validated reasoning choices into this profile.
+    #[must_use]
+    pub fn with_reasoning_efforts(mut self, efforts: crate::ReasoningEffortProfile) -> Self {
+        self.reasoning_efforts = efforts;
+        self
+    }
+
+    pub fn reasoning_efforts(&self) -> &crate::ReasoningEffortProfile {
+        &self.reasoning_efforts
     }
 
     pub const fn context_window_tokens(&self) -> u32 {
@@ -785,22 +800,6 @@ impl<'de> Deserialize<'de> for ResponseFormat {
     }
 }
 
-/// Provider-neutral reasoning effort requested by a language call.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReasoningEffort {
-    /// Smallest provider-supported reasoning budget.
-    Minimal,
-    /// Low reasoning budget.
-    Low,
-    /// Provider-default medium reasoning budget.
-    Medium,
-    /// High reasoning budget.
-    High,
-    /// Highest extended reasoning budget.
-    Xhigh,
-}
-
 /// Optional generation controls. Unsupported controls must be rejected by the
 /// selected adapter during Prepare, never silently omitted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -811,7 +810,7 @@ pub struct LanguageSettings {
     top_p: Option<f64>,
     seed: Option<i64>,
     stop: Vec<String>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<crate::ReasoningEffortId>,
 }
 
 impl<'de> Deserialize<'de> for LanguageSettings {
@@ -827,7 +826,7 @@ impl<'de> Deserialize<'de> for LanguageSettings {
             top_p: Option<f64>,
             seed: Option<i64>,
             stop: Vec<String>,
-            reasoning_effort: Option<ReasoningEffort>,
+            reasoning_effort: Option<crate::ReasoningEffortId>,
         }
 
         let wire = WireSettings::deserialize(deserializer)?;
@@ -882,8 +881,17 @@ impl LanguageSettings {
 
     #[must_use]
     /// Sets requested reasoning effort when supported by the adapter.
-    pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+    pub fn with_reasoning_effort(mut self, effort: crate::ReasoningEffortId) -> Self {
         self.reasoning_effort = Some(effort);
+        self
+    }
+    /// Replaces the complete reasoning choice, including a return to the adapter default.
+    #[must_use]
+    pub fn with_optional_reasoning_effort(
+        mut self,
+        effort: Option<crate::ReasoningEffortId>,
+    ) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 
@@ -907,8 +915,8 @@ impl LanguageSettings {
         &self.stop
     }
 
-    pub const fn reasoning_effort(&self) -> Option<ReasoningEffort> {
-        self.reasoning_effort
+    pub fn reasoning_effort(&self) -> Option<&crate::ReasoningEffortId> {
+        self.reasoning_effort.as_ref()
     }
 
     /// Revalidates all optional generation controls and aggregate stop bounds.
@@ -1468,7 +1476,11 @@ pub struct SemanticError {
 }
 
 impl SemanticError {
-    fn new(code: &'static str, field: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        code: &'static str,
+        field: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             code,
             field: field.into(),

@@ -17,7 +17,7 @@ use rsi_ai_openai_compatible::{ChatCompletionsAdapter, ChatCompletionsConfig};
 use rsi_ai_protocol::{
     ContentBlock, ErrorKind, ErrorPhase, LanguageEvent, LanguageModelLimits, LanguageRequest,
     LanguageSettings, MAX_CONTENT_BLOCKS, MediaDescriptor, MediaKind, Message, MessageContent,
-    ReasoningEffort, ResponseFormat, ToolCall, ToolCallKind,
+    ReasoningEffortId, ResponseFormat, ToolCall, ToolCallKind,
 };
 use rsi_ai_provider::{AbortSignal, LanguageAdapter, MediaResolver, MissingMediaResolver};
 use rsi_ai_testkit::{InMemoryMediaResolver, complete_language, language_context};
@@ -37,6 +37,29 @@ fn credential() -> ResolvedCredential {
         secret: SecretValue::new("super-secret").expect("secret"),
         source: CredentialSource::Keyring,
     }
+}
+
+#[tokio::test]
+async fn discovery_uses_the_same_version_base_as_inference() {
+    let app = Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async { axum::Json(json!({"data": [{"id": "fixture-model"}]})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for suffix in ["", "/v1", "/v1/"] {
+        let models = rsi_ai_openai_compatible::discover_models(
+            &ReqwestTransport::new().unwrap(),
+            &format!("http://{address}{suffix}"),
+            &SecretValue::new("fixture-key").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "fixture-model");
+    }
+    server.abort();
 }
 
 async fn complete(
@@ -309,6 +332,16 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
     let adapter = ChatCompletionsAdapter::new(
         ChatCompletionsConfig::new(format!("http://{address}"))
             .and_then(|config| config.with_model_profile("deepseek-reasoner", model_limits()))
+            .and_then(|config| {
+                config.with_reasoning_efforts(
+                    "deepseek-reasoner",
+                    rsi_ai_protocol::ReasoningEffortProfile::new(
+                        vec![ReasoningEffortId::new("medium").unwrap()],
+                        None,
+                    )
+                    .unwrap(),
+                )
+            })
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
@@ -398,7 +431,7 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
                 .with_seed(7)
                 .with_stop(vec!["END".to_owned()])
                 .expect("stop")
-                .with_reasoning_effort(ReasoningEffort::Medium),
+                .with_reasoning_effort(ReasoningEffortId::new("medium").unwrap()),
         )
         .expect("settings")
         .with_response_format(
@@ -432,9 +465,9 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
         ]
     );
     let usage = output.usage.expect("usage");
-    assert_eq!(usage.input_tokens, 10);
-    assert_eq!(usage.output_tokens, 5);
-    assert_eq!(usage.cache_read_tokens, Some(3));
+    assert_eq!(usage.input_tokens(), 10);
+    assert_eq!(usage.output_tokens(), 5);
+    assert_eq!(usage.cache_read_tokens(), Some(3));
 
     let (headers, body) = capture.0.lock().expect("capture").take().expect("call");
     assert_eq!(headers["authorization"], "Bearer super-secret");
@@ -472,4 +505,60 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
         "data:image/png;base64,iVBORw=="
     );
     assert!(!format!("{body:?}").contains("super-secret"));
+}
+
+#[tokio::test]
+async fn thinking_switch_uses_the_configured_alias_and_is_opt_in() {
+    let capture = Capture::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .with_state(capture.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for (enabled, effort, thinking, wire_effort) in [
+        (true, Some("disabled-by-provider"), Some("disabled"), None),
+        (true, Some("off"), Some("enabled"), Some("off")),
+        (false, Some("off"), None, Some("off")),
+        (true, None, None, None),
+    ] {
+        let mut config = ChatCompletionsConfig::new(format!("http://{address}"))
+            .unwrap()
+            .with_model_profile("fixture-model", model_limits())
+            .unwrap()
+            .with_reasoning_efforts(
+                "fixture-model",
+                rsi_ai_protocol::ReasoningEffortProfile::new(
+                    vec![
+                        ReasoningEffortId::new("disabled-by-provider").unwrap(),
+                        ReasoningEffortId::new("off").unwrap(),
+                    ],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if enabled {
+            config = config.with_disabled_reasoning_alias(
+                ReasoningEffortId::new("disabled-by-provider").unwrap(),
+            );
+        }
+        let adapter =
+            ChatCompletionsAdapter::new(config, Arc::new(ReqwestTransport::new().unwrap()));
+        let mut settings = LanguageSettings::default();
+        if let Some(effort) = effort {
+            settings = settings.with_reasoning_effort(ReasoningEffortId::new(effort).unwrap());
+        }
+        let request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()])
+            .unwrap()
+            .with_settings(settings)
+            .unwrap();
+        complete(&adapter, request, Arc::new(MissingMediaResolver))
+            .await
+            .unwrap();
+        let (_, body) = capture.0.lock().unwrap().take().unwrap();
+        assert_eq!(body["thinking"]["type"].as_str(), thinking);
+        assert_eq!(body["reasoning_effort"].as_str(), wire_effort);
+    }
+    server.abort();
 }

@@ -1159,6 +1159,7 @@ mod tests {
         .expect("descriptor");
         let context = PrepareContext {
             snapshot: PreparedCallSnapshot {
+                language_settings: None,
                 call_id: "1".to_owned(),
                 deployment_id: "deployment".to_owned(),
                 provider_family: "provider".to_owned(),

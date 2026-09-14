@@ -70,6 +70,23 @@ Media resolver: the remote operation has already consumed its original request,
 and a checkpoint contains neither media descriptors nor authority to reconstruct
 that request.
 
+## Model discovery
+
+Exact-route description returns the committed provider generation, redacted
+endpoint/protocol identity and LanguageProfile together. The invocation router
+and read-only model catalog use the same value. Provider adapters still declare
+only their semantic profile; the router supplies registration identity. Consumers
+can compare the current description with a prepared snapshot without credentials
+or provider I/O, including after a Host restart that reused a numeric generation.
+
+Model discovery is an independent provider operation. Concrete providers own
+bounded model-list URL and JSON translation, returning provider-neutral candidate
+metadata without preparing inference or registering Language routes. The caller
+owns authorization, credential resolution and the request lifetime. Standard RSI
+exposes these helpers through its separately authorized
+[configuration API](../../rsi/configuration-api/README.md). Discovery does not
+establish inference or Tool compatibility; invocation still follows Prepare/Start.
+
 ## Streams and media
 
 Language output is indexed start/delta/end content followed by exactly one

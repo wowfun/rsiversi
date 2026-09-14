@@ -97,6 +97,7 @@ async fn one_provider_generation_publishes_and_withdraws_both_facets() {
         language
             .describe(&language_model)
             .unwrap()
+            .profile()
             .context_window_tokens(),
         200_000
     );

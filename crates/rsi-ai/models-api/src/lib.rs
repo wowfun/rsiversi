@@ -29,6 +29,18 @@ fn operation() -> OperationSpec {
         maximum_response_bytes: 1024 * 1024,
     }
 }
+fn describe_operation() -> OperationSpec {
+    OperationSpec {
+        id: OperationId::new("models", "describe", 1).expect("constant operation"),
+        class: OperationClass::Data,
+        effect: OperationEffect::Read,
+        access: rsi_api_protocol::OperationAccess::Authenticated,
+        encoding: RequestEncoding::Json,
+        maximum_request_bytes: 4096,
+        maximum_response_bytes: 64 * 1024,
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -78,7 +90,9 @@ pub struct ModelsClient {
 impl ModelsClient {
     /// Requires the exact catalog operation before exposing a model enumeration service.
     pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if !api.operations().contains(&operation()) {
+        if !api.operations().contains(&operation())
+            || !api.operations().contains(&describe_operation())
+        {
             return Err(ApiError::Unavailable);
         }
         Ok(Self { api })
@@ -86,6 +100,35 @@ impl ModelsClient {
 }
 #[async_trait]
 impl LanguageModels for ModelsClient {
+    async fn describe_model(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, ModelsError> {
+        model
+            .validate()
+            .map_err(|error| ModelsError::Invalid(error.to_string()))?;
+        let description = call_json::<_, rsi_ai_protocol::LanguageModelDescription, Failure>(
+            self.api.as_ref(),
+            &describe_operation(),
+            model,
+        )
+        .await
+        .map_err(ModelsError::Api)?
+        .map_err(|failure| match failure {
+            Failure::Invalid => {
+                ModelsError::Invalid("model or effort profile is unavailable".into())
+            }
+            Failure::Capacity => ModelsError::Capacity,
+            Failure::ShuttingDown => ModelsError::ShuttingDown,
+        })?;
+        if description.model() != model {
+            return Err(ModelsError::Invalid(
+                "model description changed the requested route".into(),
+            ));
+        }
+        Ok(description)
+    }
+
     async fn list_models(
         &self,
         after: Option<&ModelRef>,
@@ -139,10 +182,32 @@ impl PluginFactory for ModelsApiFactory {
         let registration =
             register_models(registrar.as_ref(), plan.local::<LanguageModelsContract>()?)
                 .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let models = plan.local::<LanguageModelsContract>()?;
+        let description = registrar
+            .register(
+                describe_operation(),
+                json_handler(move |_, model: ModelRef| {
+                    let models = models.clone();
+                    async move {
+                        Ok(match models.describe_model(&model).await {
+                            Ok(profile) => Ok(profile),
+                            Err(ModelsError::Invalid(_)) => Err(Failure::Invalid),
+                            Err(ModelsError::Capacity) => Err(Failure::Capacity),
+                            Err(ModelsError::ShuttingDown) => Err(Failure::ShuttingDown),
+                            Err(ModelsError::Backend(_)) => {
+                                return Err(ApiError::Backend("model description failed".into()));
+                            }
+                            Err(ModelsError::Api(error)) => return Err(error),
+                        })
+                    }
+                }),
+            )
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
             "retire Models API",
             Box::new(move || {
                 Box::pin(async move {
+                    description.close().await;
                     registration.close().await;
                     Ok(())
                 })

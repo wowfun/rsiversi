@@ -60,7 +60,11 @@ async fn real_native_language_image_and_withdrawal_use_normal_routers_and_releas
         .unwrap();
     let model = ModelRef::new("native", "native-text").unwrap();
     assert_eq!(
-        language.describe(&model).unwrap().context_window_tokens(),
+        language
+            .describe(&model)
+            .unwrap()
+            .profile()
+            .context_window_tokens(),
         8192
     );
     let unsupported = LanguageRequest::new(vec![

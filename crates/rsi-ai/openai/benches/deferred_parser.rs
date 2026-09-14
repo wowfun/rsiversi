@@ -282,6 +282,7 @@ fn benchmark_stream() -> String {
 fn context() -> PrepareContext {
     PrepareContext::new(
         PreparedCallSnapshot {
+            language_settings: None,
             call_id: "deferred-benchmark".to_owned(),
             deployment_id: "openai".to_owned(),
             provider_family: "openai".to_owned(),

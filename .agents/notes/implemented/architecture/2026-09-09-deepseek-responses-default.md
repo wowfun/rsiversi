@@ -16,6 +16,10 @@ DeepSeek defaults to Responses with explicit Chat selection. Its ordinary
 provider factory freezes the chosen protocol in the prepared model snapshot;
 it never falls back between protocols. The shared Responses adapter accepts
 typed endpoint options for path, instruction role and stored/stateless state.
+The endpoint owner also supplies its disabled-reasoning alias: DeepSeek's `off`
+maps to Responses `none`, while the semantic profile and prepared snapshot keep
+`off`. A live Responses rejection of `off` and a successful `none` request with
+zero reasoning tokens establish why this mapping belongs at serialization.
 These options leave Images URLs and the default OpenAI behavior unchanged.
 
 Stateless Responses carries plain reasoning in complete request history, emits

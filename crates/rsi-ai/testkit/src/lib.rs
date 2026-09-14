@@ -78,6 +78,7 @@ pub fn language_context(
 ) -> PrepareContext {
     PrepareContext::new(
         PreparedCallSnapshot {
+            language_settings: None,
             call_id: "test-call".into(),
             deployment_id: deployment.into(),
             provider_family: provider_family.into(),

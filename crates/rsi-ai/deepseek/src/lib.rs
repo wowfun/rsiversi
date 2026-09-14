@@ -18,6 +18,14 @@ use rsi_ai_provider::{
 };
 use rsi_ai_transport::HttpTransport;
 use serde::Deserialize;
+/// Lists candidates at this provider's endpoint without registering a route.
+pub async fn discover_models(
+    transport: &dyn HttpTransport,
+    endpoint: &str,
+    secret: &rsi_credentials_protocol::SecretValue,
+) -> Result<Vec<rsi_ai_protocol::DiscoveredModel>, AiError> {
+    rsi_ai_openai::discovery::list(transport, endpoint, "/models", secret).await
+}
 use sha2::{Digest as _, Sha256};
 
 /// Explicit wire selection; no fallback or automatic retry changes protocols.
@@ -56,17 +64,21 @@ impl Default for DeepSeekConfig {
 
 impl DeepSeekConfig {
     /// Overrides the origin for an enterprise gateway or a loopback test server.
+    #[allow(clippy::missing_panics_doc)] // The only expect validates the constant `off` ID.
     pub fn with_endpoint(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let endpoint = endpoint.into();
         let chat = ChatCompletionsConfig::new(endpoint.clone())?
             .with_path("/chat/completions")?
             .with_image_input(false)
+            .with_disabled_reasoning_alias(
+                rsi_ai_protocol::ReasoningEffortId::new("off").expect("static effort ID"),
+            )
             .with_developer_role(DeveloperMessageRole::System);
-        let responses = OpenAiConfig::new(endpoint)?.with_responses_options(
-            "/responses",
-            ResponsesState::Stateless,
-            MessageRole::System,
-        )?;
+        let responses = OpenAiConfig::new(endpoint)?
+            .with_responses_options("/responses", ResponsesState::Stateless, MessageRole::System)?
+            .with_disabled_reasoning_alias(
+                rsi_ai_protocol::ReasoningEffortId::new("off").expect("static effort ID"),
+            );
         Ok(Self {
             chat,
             responses,
@@ -90,6 +102,33 @@ impl DeepSeekConfig {
         let model = model.into();
         self.chat = self.chat.with_model_profile(model.clone(), limits)?;
         self.responses = self.responses.with_model_profile(model, limits)?;
+        Ok(self)
+    }
+    /// Declares exact `DeepSeek` effort choices for a configured model.
+    #[allow(clippy::missing_panics_doc)] // The only expect constructs a fixed, valid error.
+    pub fn with_reasoning_efforts(
+        mut self,
+        model: impl Into<String>,
+        efforts: rsi_ai_protocol::ReasoningEffortProfile,
+    ) -> Result<Self, AiError> {
+        if efforts
+            .supported()
+            .iter()
+            .any(|effort| !matches!(effort.as_str(), "off" | "low" | "high" | "max"))
+        {
+            return Err(AiError::new(
+                rsi_ai_protocol::ErrorKind::Unsupported,
+                rsi_ai_protocol::ErrorPhase::Prepare,
+                rsi_ai_protocol::DispatchStatus::NotStarted,
+                "DeepSeek effort choices are off, low, high or max",
+            )
+            .expect("static error"));
+        }
+        let model = model.into();
+        self.chat = self
+            .chat
+            .with_reasoning_efforts(model.clone(), efforts.clone())?;
+        self.responses = self.responses.with_reasoning_efforts(model, efforts)?;
         Ok(self)
     }
 }
@@ -147,19 +186,18 @@ impl LanguageAdapter for DeepSeekAdapter {
             rsi_ai_protocol::ImageToolResultCapability::No,
             Vec::new(),
         )
-        .expect("validated DeepSeek model limits"))
+        .expect("validated DeepSeek model limits")
+        .with_reasoning_efforts(profile.reasoning_efforts().clone()))
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
-        if self.protocol == DeepSeekProtocol::ChatCompletions
-            && (request.settings().seed().is_some()
-                || request.settings().reasoning_effort().is_some())
+        if self.protocol == DeepSeekProtocol::ChatCompletions && request.settings().seed().is_some()
         {
             return Err(rsi_ai_protocol::AiError::new(
                 rsi_ai_protocol::ErrorKind::Unsupported,
                 rsi_ai_protocol::ErrorPhase::Prepare,
                 rsi_ai_protocol::DispatchStatus::NotStarted,
-                "DeepSeek Chat does not support seed or reasoning_effort controls",
+                "DeepSeek Chat does not support seed controls",
             )
             .expect("static DeepSeek setting error"));
         }
@@ -223,6 +261,8 @@ struct DeepSeekPluginConfig {
     #[serde(default)]
     protocol: DeepSeekProtocol,
     language_models: BTreeMap<String, LanguageModelLimits>,
+    #[serde(default)]
+    reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
 
 #[derive(Debug)]
@@ -281,6 +321,11 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
         for (model, limits) in &config.language_models {
             adapter = adapter
                 .with_model_profile(model, *limits)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
+        for (model, efforts) in &config.reasoning_efforts {
+            adapter = adapter
+                .with_reasoning_efforts(model, efforts.clone())
                 .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         }
         let retained = serde_json::to_vec(desired)

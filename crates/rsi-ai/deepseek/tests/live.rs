@@ -71,7 +71,7 @@ async fn deepseek_streams_a_real_completion() {
         output
             .usage
             .as_ref()
-            .is_some_and(|usage| usage.input_tokens > 0 && usage.output_tokens > 0)
+            .is_some_and(|usage| usage.input_tokens() > 0 && usage.output_tokens() > 0)
     );
     println!("live DeepSeek model={model:?} usage={:?}", output.usage);
 }
@@ -81,4 +81,100 @@ fn required_u32(name: &str) -> u32 {
         .unwrap_or_else(|_| panic!("{name} must be set explicitly"))
         .parse()
         .unwrap_or_else(|_| panic!("{name} must be a u32"))
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit DEEPSEEK_API_KEY; eight requests spend live API quota"]
+async fn deepseek_effort_modes_are_accepted_on_both_protocols() {
+    use rsi_ai_deepseek::DeepSeekProtocol;
+    use rsi_ai_protocol::{ReasoningEffortId, ReasoningEffortProfile};
+    let key = std::env::var("DEEPSEEK_API_KEY").expect("explicit credential");
+    let model = std::env::var("DEEPSEEK_MODEL").expect("explicit model");
+    let limits = LanguageModelLimits::new(
+        required_u32("DEEPSEEK_CONTEXT_WINDOW_TOKENS"),
+        required_u32("DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS"),
+        required_u32("DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS"),
+    )
+    .unwrap();
+    let efforts = ReasoningEffortProfile::new(
+        ["off", "low", "high", "max"]
+            .into_iter()
+            .map(|id| ReasoningEffortId::new(id).unwrap())
+            .collect(),
+        None,
+    )
+    .unwrap();
+    let mut failures = Vec::new();
+    for protocol in [
+        DeepSeekProtocol::Responses,
+        DeepSeekProtocol::ChatCompletions,
+    ] {
+        for effort in ["off", "low", "high", "max"] {
+            let adapter = DeepSeekAdapter::new(
+                DeepSeekConfig::default()
+                    .with_protocol(protocol)
+                    .with_model_profile(model.clone(), limits)
+                    .unwrap()
+                    .with_reasoning_efforts(model.clone(), efforts.clone())
+                    .unwrap(),
+                Arc::new(ReqwestTransport::new().unwrap()),
+            );
+            let request = LanguageRequest::new(vec![
+                Message::user_text("Reply with the exact text LIVE_OK and nothing else.").unwrap(),
+            ])
+            .unwrap()
+            .with_settings(
+                LanguageSettings::default()
+                    .with_max_output_tokens(512)
+                    .unwrap()
+                    .with_reasoning_effort(ReasoningEffortId::new(effort).unwrap()),
+            )
+            .unwrap();
+            let output = tokio::time::timeout(
+                Duration::from_mins(1),
+                complete_language(
+                    &adapter,
+                    language_context(
+                        "deepseek-effort-live",
+                        "deepseek",
+                        &model,
+                        Some(ResolvedCredential {
+                            secret: SecretValue::new(key.clone()).unwrap(),
+                            source: CredentialSource::Environment {
+                                variable: "DEEPSEEK_API_KEY".into(),
+                            },
+                        }),
+                        Arc::new(MissingMediaResolver),
+                        0,
+                    ),
+                    &model,
+                    request,
+                ),
+            )
+            .await;
+            match output {
+                Ok(Ok(output)) => {
+                    println!(
+                        "live protocol={protocol:?} effort={effort} usage={:?}",
+                        output.usage
+                    );
+                    if output.visible_text().trim() != "LIVE_OK"
+                        || output.usage.as_ref().is_none_or(|usage| {
+                            usage.input_tokens() == 0 || usage.output_tokens() == 0
+                        })
+                        || (effort == "off"
+                            && output
+                                .usage
+                                .as_ref()
+                                .and_then(rsi_ai_protocol::TokenUsage::reasoning_tokens)
+                                .is_some_and(|tokens| tokens != 0))
+                    {
+                        failures.push(format!("{protocol:?}/{effort}: unexpected text or usage"));
+                    }
+                }
+                error => failures.push(format!("{protocol:?}/{effort}: {error:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

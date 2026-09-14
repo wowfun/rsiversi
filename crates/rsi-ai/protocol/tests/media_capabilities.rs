@@ -4,13 +4,7 @@ use rsi_ai_protocol::{
 use serde_json::json;
 
 fn usage() -> TokenUsage {
-    TokenUsage {
-        input_tokens: 4,
-        output_tokens: 6,
-        cache_read_tokens: None,
-        cache_write_tokens: None,
-        reasoning_tokens: None,
-    }
+    TokenUsage::new(4, 6, None, None, None).unwrap()
 }
 
 fn image() -> MediaDescriptor {

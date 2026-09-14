@@ -5,13 +5,7 @@ use rsi_ai_protocol::{
 };
 
 fn usage() -> TokenUsage {
-    TokenUsage {
-        input_tokens: 12,
-        output_tokens: 7,
-        cache_read_tokens: Some(3),
-        cache_write_tokens: None,
-        reasoning_tokens: Some(2),
-    }
+    TokenUsage::new(12, 7, Some(3), None, Some(2)).unwrap()
 }
 
 #[test]

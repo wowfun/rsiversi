@@ -7,9 +7,24 @@ descriptors, and prepared-call facts. Exact request JSON shapes live in
 the [product schemas](../../../schemas/rsi-ai/README.md); aggregate and temporal
 invariants remain enforced by this package.
 
+`TokenUsage` totals are inclusive: input includes cache-read/cache-write tokens,
+and output includes reasoning tokens. The disjoint cache buckets cannot exceed
+input together; reasoning cannot exceed output. Constructors and deserialization
+reject impossible or overflowing counters. Missing counters mean unknown, not
+zero. Concrete adapters own wire normalization; semantic consumers never add
+cache or reasoning subsets to the totals.
+
 Exact model-capacity facts are stored in `LanguageModelProfiles`, a bounded
 map shared by concrete adapters. Model identifiers must be explicit; an
 unknown model has no inferred or family-based fallback capacity.
+Reasoning effort uses an adapter-owned ASCII identifier of 1–32 bytes rather
+than a neutral ordinal enum. A generation-pinned `LanguageProfile` declares up
+to 16 unique supported identifiers and an optional declared default. Absence
+means the provider default is unknown; it never implies medium. Prepare rejects
+undeclared choices before I/O. Model discovery is not effort authority. Candidate
+metadata may advertise a maximum output equal to its context window. That is a
+provider limit, not an execution reserve: configured `LanguageModelLimits` still
+require a maximum reserve strictly below the context window to leave input room.
 Remote model catalogs retain connection failures through `ModelsError::Api`.
 Their bounded pages validate count, strict order and exclusive continuation at
 the client boundary without acquiring provider invocation authority.

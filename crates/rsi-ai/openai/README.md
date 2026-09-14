@@ -1,5 +1,14 @@
 # rsi-ai-openai
 
+The model-discovery helper performs one bounded `GET /v1/models` against an
+explicit endpoint and credential snapshot. Its shared OpenAI-list parser accepts
+candidate identifiers and optional capacity metadata; this neither creates a
+Language route nor proves a model supports Responses or Tools.
+Discovery, Responses and Images accept either an API root or its `/v1` base;
+the version prefix is appended only once. Custom gateway prefixes are preserved.
+The shared list parser rejects responses declaring further pages (`has_more`
+or a nonempty `next`/`next_cursor`) rather than presenting an incomplete list.
+
 This package implements the official OpenAI Responses and Images adapters as
 one ordinary deployment plugin. HTTP seams are injectable so default tests use
 local deterministic servers rather than live credentials. The plugin requires
@@ -32,7 +41,13 @@ extension constructor. An identity that cannot fit that durable contract is a
 typed output-validation failure; untrusted terminal events never reach a panic.
 
 Typed Responses endpoint options select its path, instruction-role translation
-and state mode. The default uses OpenAI response identities and deferred
+and state mode. An endpoint owner may declare one disabled-reasoning alias,
+serialized as Responses `none` while preserving the semantic request and
+profile identity. The default uses OpenAI response identities and deferred
 operations. Stateless mode uses inline plain reasoning, emits no response-id
 replay extension, rejects such extensions on input and rejects deferred work.
 These options do not change Images URLs or provider-neutral request identity.
+
+Model-list helpers return typed `AiError` categories for request, transport,
+HTTP status and response failures. Their diagnostics exclude raw upstream bodies
+and transport text; discovery reads do not schedule provider retries.

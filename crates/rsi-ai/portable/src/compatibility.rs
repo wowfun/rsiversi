@@ -8,6 +8,10 @@ use rsi_ai_protocol::{
 pub(crate) fn language(model: &LanguageModel, request: &LanguageRequest) -> Result<(), AiError> {
     let features = &model.features;
     let profile = &model.profile;
+    profile
+        .reasoning_efforts()
+        .resolve(request.settings().reasoning_effort())
+        .map_err(|_| unsupported())?;
     if (!request.hosted_tools().is_empty() && !features.contains(&LanguageFeature::HostedTools))
         || (!matches!(request.response_format(), ResponseFormat::Text)
             && !features.contains(&LanguageFeature::StructuredOutput))
