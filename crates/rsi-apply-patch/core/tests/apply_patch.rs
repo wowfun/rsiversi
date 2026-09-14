@@ -102,6 +102,9 @@ impl PluginFactory for ProcessSupplyFactory {
 struct EmptyProcessOutput;
 
 impl ProcessOutput for EmptyProcessOutput {
+    fn peek_tail(&self, _: usize) -> rsi_process::Result<ProcessRead> {
+        self.read_from(0)
+    }
     fn read_from(&self, offset: u64) -> rsi_process::Result<ProcessRead> {
         Ok(ProcessRead {
             full_output: None,

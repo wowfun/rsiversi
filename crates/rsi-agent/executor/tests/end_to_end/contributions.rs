@@ -588,6 +588,220 @@ pub(super) async fn install(
         .unwrap()
 }
 
+#[derive(Debug)]
+struct SelectionCommandFixture(
+    rsi_agent_composition_protocol::DomainHandle<
+        Option<rsi_agent_session_protocol::ModelSelection>,
+    >,
+);
+#[async_trait]
+impl rsi_agent_composition_protocol::SessionCommand for SelectionCommandFixture {
+    async fn execute(
+        &self,
+        context: &rsi_agent_composition_protocol::SessionCommandContext,
+        arguments: &rsi_agent_session_protocol::CommandArguments,
+        _: CancellationToken,
+    ) -> ContributionResult<Vec<rsi_agent_composition_protocol::ValidatedDomainProposal>> {
+        let selection: rsi_agent_session_protocol::ModelSelection =
+            serde_json::from_value(arguments.value().clone()).unwrap();
+        let state = context
+            .domains
+            .iter()
+            .find(|state| state.snapshot.identity().id() == rsi_agent_model_selection::DOMAIN)
+            .unwrap();
+        Ok(vec![
+            self.0.propose(state.revision, &Some(selection)).unwrap(),
+        ])
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Concurrent command and queued input span a gated safe retry.
+async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input() {
+    use rsi_agent_composition_protocol::{
+        DomainCatalog, DomainDefinition, SessionCommandRegistration,
+    };
+    use rsi_agent_session_protocol::{
+        AgentMessage, AgentMessageContent, AgentMessageSource, CommandArguments, DomainIdentity,
+        DomainRequestId, MessageDelivery, MessageId, MessageOptions, ModelSelection,
+        SessionCommandDescriptor, SessionCommandInvocation,
+    };
+    use rsi_agent_turn_protocol::{SessionCommandsContract, SubmitMessage};
+    let stack = BaseStack::activate().await;
+    let selection = ModelSelection {
+        model: ModelRef::new("test", "before").unwrap(),
+        reasoning_effort: Some(rsi_ai_protocol::ReasoningEffortId::new("low").unwrap()),
+    };
+    let definition = DomainDefinition::new(
+        DomainIdentity::new(rsi_agent_model_selection::DOMAIN, 1).unwrap(),
+        &Some(selection),
+        |_: &Option<ModelSelection>| Ok(()),
+    )
+    .unwrap();
+    let domains = DomainCatalog::new([definition.registration()]).unwrap();
+    let command = Arc::new(SelectionCommandFixture(domains.bind(&definition).unwrap()));
+    *stack.composition.domains.lock().unwrap() = domains;
+    let id = ContributionId::new("fixture.selection").unwrap();
+    let callbacks = install(
+        &stack,
+        vec![ContributionRegistration::new(
+            id.clone(),
+            0,
+            ContributionKind::Command(SessionCommandRegistration::new(
+                SessionCommandDescriptor::new(id.clone(), "selection", "Set selection", true)
+                    .unwrap(),
+                command,
+            )),
+        )],
+    )
+    .await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::GatedError {
+                entered: entered.clone(),
+                release: release.clone(),
+                error: AiError::new(
+                    ErrorKind::RateLimited,
+                    ErrorPhase::Connect,
+                    DispatchStatus::NotDispatched,
+                    "not sent",
+                )
+                .unwrap(),
+            },
+            StartOutcome::Stream(answer_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::new(1, vec![ErrorKind::RateLimited], 1, 1, 0).unwrap(),
+    });
+    let language_fiber = stack
+        .activate_language("test.language", language.clone())
+        .await;
+    let executor = stack.activate_executor("selection-retry").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let commands = stack
+        .runtime
+        .root()
+        .lookup_local::<SessionCommandsContract>()
+        .unwrap();
+    let session_id = SessionId::new("selection-retry").unwrap();
+    let message_id = MessageId::new("initial").unwrap();
+    turns
+        .submit_message(SubmitMessage {
+            session: stack
+                .fresh(header_for_session("selection-retry", TurnBudget::default()))
+                .await,
+            delivery: MessageDelivery::NextTurn,
+            message: AgentMessage {
+                message_id: message_id.clone(),
+                source: AgentMessageSource::Human,
+                content: vec![AgentMessageContent::Text {
+                    text: "first input".into(),
+                }],
+                options: MessageOptions::default(),
+            },
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let turn_id = stack
+        .store
+        .inspect_session(&session_id)
+        .await
+        .unwrap()
+        .active_turn_id
+        .unwrap();
+    let revision = commands
+        .list(turns.prepare_resume(&session_id).await.unwrap())
+        .await
+        .unwrap()
+        .revision();
+    commands.execute(turns.prepare_resume(&session_id).await.unwrap(),SessionCommandInvocation {
+        command:id,request_id:DomainRequestId::new("change-selection").unwrap(),expected_revision:revision,
+        arguments:CommandArguments::new(json!({"model":{"deployment":"test","model":"after"},"reasoning_effort":"high"})).unwrap(),
+    }).await.unwrap();
+    turns
+        .submit_message(SubmitMessage {
+            session: SubmitSession::Resume(turns.prepare_resume(&session_id).await.unwrap()),
+            delivery: MessageDelivery::NextStep,
+            message: AgentMessage {
+                message_id: MessageId::new("queued-step").unwrap(),
+                source: AgentMessageSource::Human,
+                content: vec![AgentMessageContent::Text {
+                    text: "new input after first prepare".into(),
+                }],
+                options: MessageOptions::default(),
+            },
+        })
+        .await
+        .unwrap();
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(outcome) = turns.outcome(&session_id, &turn_id).await.unwrap() {
+                break outcome;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+    {
+        let requests = language.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests.iter().take(2) {
+            assert_eq!(
+                request.settings().reasoning_effort().unwrap().as_str(),
+                "low"
+            );
+            assert!(
+                !serde_json::to_string(request)
+                    .unwrap()
+                    .contains("new input after first prepare")
+            );
+        }
+        assert_eq!(
+            requests[2].settings().reasoning_effort().unwrap().as_str(),
+            "high"
+        );
+        assert!(
+            serde_json::to_string(&requests[2])
+                .unwrap()
+                .contains("new input after first prepare")
+        );
+    }
+    let facts = stack
+        .store
+        .read_facts(&session_id, 0, 128)
+        .await
+        .unwrap()
+        .facts;
+    let models = facts
+        .iter()
+        .filter_map(|fact| {
+            if let SessionFactBody::ModelIntent { snapshot, .. } = fact.body() {
+                Some(snapshot.model.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(models, vec!["before", "before", "after"]);
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language_fiber, executor).await;
+}
+
 #[derive(Debug, Default)]
 struct SampleTime(AtomicUsize);
 #[async_trait]

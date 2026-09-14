@@ -50,6 +50,38 @@ impl<'a> StageRun<'a> {
         })
     }
 
+    async fn before_step(
+        turns: &dyn TurnExecution,
+        claim: &TurnClaim,
+        explicit: Option<&rsi_agent_session_protocol::ModelSelection>,
+        has_callbacks: bool,
+        cancellation: &'a CancellationToken,
+        stop: &'a CancellationToken,
+    ) -> std::result::Result<(rsi_agent_session_protocol::ModelSelection, Option<Self>), DriveFailure>
+    {
+        let run = if explicit.is_none() || has_callbacks {
+            Some(
+                Self::capture(
+                    turns,
+                    claim,
+                    ContributionStage::BeforeStep,
+                    cancellation,
+                    stop,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let domains = run
+            .as_ref()
+            .map_or(&[][..], |run| run.context.domains.as_ref());
+        let selection =
+            rsi_agent_model_selection::resolve_selection(claim.header(), domains, explicit)
+                .map_err(|error| failed("model.selection", error.to_string()))?;
+        Ok((selection, run))
+    }
+
     async fn callback<T>(
         &self,
         producer: &ContributionId,
@@ -69,6 +101,36 @@ impl<'a> StageRun<'a> {
 }
 
 impl Driver {
+    pub(super) async fn before_step(
+        &self,
+        claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        fold: &mut ModelContextState,
+        explicit: Option<&rsi_agent_session_protocol::ModelSelection>,
+        cancellation: &CancellationToken,
+        stop: &CancellationToken,
+    ) -> std::result::Result<rsi_agent_session_protocol::ModelSelection, DriveFailure> {
+        let has_callbacks = composition
+            .contributions()
+            .entries()
+            .iter()
+            .any(|entry| entry.stage() == ContributionStage::BeforeStep);
+        let (selection, run) = StageRun::before_step(
+            self.turns.as_ref(),
+            claim,
+            explicit,
+            has_callbacks,
+            cancellation,
+            stop,
+        )
+        .await?;
+        if let Some(run) = run {
+            self.run_captured_contributions(claim, composition, fold, run, &[])
+                .await?;
+        }
+        Ok(selection)
+    }
+
     #[allow(clippy::too_many_arguments)] // One stage shares the exact claim, fold and two cancellation owners.
     pub(super) async fn run_contributions(
         &self,
@@ -85,6 +147,20 @@ impl Driver {
             return Ok(());
         }
         let run = StageRun::capture(self.turns.as_ref(), claim, stage, cancellation, stop).await?;
+        self.run_captured_contributions(claim, composition, fold, run, settled)
+            .await
+    }
+
+    async fn run_captured_contributions(
+        &self,
+        claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        fold: &mut ModelContextState,
+        run: StageRun<'_>,
+        settled: &[Arc<SessionFact>],
+    ) -> std::result::Result<(), DriveFailure> {
+        let stage = run.stage;
+        let entries = composition.contributions().entries();
         let mut batch = ContributionBatch::default();
         for entry in entries.iter().filter(|entry| entry.stage() == stage) {
             let output = run
@@ -99,6 +175,7 @@ impl Driver {
                                 .await
                         }
                         ContributionKind::ToolPolicy(_)
+                        | ContributionKind::ToolSettlement(_)
                         | ContributionKind::Command(_)
                         | ContributionKind::Projection(_) => {
                             unreachable!("non-execution callbacks use their own dispatch")
@@ -192,5 +269,62 @@ impl Driver {
             }
         }
         Ok((request.require_approval, None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn step_capture_is_skipped_for_overrides_and_bounded_when_required() {
+        let (claim, _) = crate::tests::claim();
+        let explicit =
+            rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
+        let tokens = Arc::new(Mutex::new(Vec::new()));
+        let turns = crate::tests::pending_context(tokens.clone());
+        let cancellation = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let (selection, run) = StageRun::before_step(
+            turns.as_ref(),
+            &claim,
+            Some(&explicit),
+            false,
+            &cancellation,
+            &stop,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection, explicit);
+        assert!(run.is_none());
+        assert!(tokens.lock().unwrap().is_empty());
+        for mode in 0..3 {
+            let cancellation = CancellationToken::new();
+            let stop = CancellationToken::new();
+            let mut pending = Box::pin(StageRun::before_step(
+                turns.as_ref(),
+                &claim,
+                (mode != 0).then_some(&explicit),
+                mode != 0,
+                &cancellation,
+                &stop,
+            ));
+            assert!(futures_util::poll!(pending.as_mut()).is_pending());
+            assert_eq!(tokens.lock().unwrap().len(), mode + 1);
+            match mode {
+                0 => tokio::time::advance(Duration::from_secs(31)).await,
+                1 => cancellation.cancel(),
+                _ => stop.cancel(),
+            }
+            let result = pending.await;
+            assert!(match (mode, result) {
+                (0, Err(DriveFailure::Turn(TurnOutcome::Failed { code, .. }))) =>
+                    code == "contribution.timeout",
+                (1, Err(DriveFailure::Turn(TurnOutcome::Cancelled)))
+                | (2, Err(DriveFailure::Stopped)) => true,
+                _ => false,
+            });
+            assert!(tokens.lock().unwrap().last().unwrap().is_cancelled());
+        }
     }
 }

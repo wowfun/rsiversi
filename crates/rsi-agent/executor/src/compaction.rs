@@ -2,7 +2,7 @@
 
 use super::{
     AgentCompositionPin, CancellationToken, DriveFailure, Driver, ModelAttempt, ModelContextState,
-    ModelRef, TurnClaim, ai_failure, failed, fatal,
+    TurnClaim, ai_failure, failed, fatal,
 };
 use rsi_agent_session_protocol::{CompactionTrigger, ModelPurpose};
 
@@ -13,7 +13,7 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
-        model: &ModelRef,
+        model: &rsi_agent_session_protocol::ModelSelection,
         retry_attempt: u8,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
@@ -21,8 +21,9 @@ impl Driver {
         self.sync_fold(claim, fold).await?;
         let profile = self
             .language
-            .describe(model)
-            .map_err(|error| ai_failure(&error))?;
+            .describe(&model.model)
+            .map_err(|error| ai_failure(&error))?
+            .into_profile();
         if retry_attempt == 0 {
             self.compact(claim, fold, model, &profile, None, cancellation, stop)
                 .await?;
@@ -78,7 +79,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
-        model: &ModelRef,
+        model: &rsi_agent_session_protocol::ModelSelection,
         profile: &rsi_ai_protocol::LanguageProfile,
         force: Option<CompactionTrigger>,
         cancellation: &CancellationToken,
@@ -87,7 +88,7 @@ impl Driver {
         let mut trigger = force;
         for attempt in 0..2 {
             let planned = fold
-                .plan_compaction(model, profile, trigger.clone(), attempt > 0)
+                .plan_compaction(&model.model, profile, trigger.clone(), attempt > 0)
                 .map_err(|error| {
                     let code = if matches!(error, rsi_agent_context::ContextError::TooLarge) {
                         "context.limit"
@@ -120,7 +121,7 @@ impl Driver {
                 )
                 .await?
             {
-                ModelAttempt::Output(_) => {
+                ModelAttempt::Output(_, _) => {
                     // A steering message accepted during the summary must enter
                     // before the resumed ordinary request is prepared.
                     self.turns

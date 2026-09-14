@@ -190,7 +190,7 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
     assert_eq!(draft.composition().contributions().entries().len(), 4);
     assert_eq!(
         view(&draft).await,
-        serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read"]})
+        serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read","todo_write"]})
     );
     for (id, argument, expected) in [
         ("on", "on", true),
@@ -222,6 +222,7 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One draft-to-Kernel policy flow with all constraint assertions.
 async fn actual_draft_state_enters_kernel_and_policy_only_adds_constraints() {
     let fixture = Fixture::new().await;
     let mut draft = fixture.draft().await;
@@ -234,6 +235,7 @@ async fn actual_draft_state_enters_kernel_and_policy_only_adds_constraints() {
     let workers = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: SubmitSession::Fresh(draft.into_fresh()),
             turn_id: TurnId::new("first").unwrap(),
             text: "plan".into(),

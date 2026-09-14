@@ -227,6 +227,7 @@ impl fmt::Debug for AgentKernel {
 struct KernelInner {
     tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
+    evidence_cache: Mutex<evidence::Cache>,
     composition: Arc<dyn AgentComposition>,
     resume_issuer: ResumeAdmissionIssuer,
     claim_issuer: TurnClaimIssuer,
@@ -568,6 +569,9 @@ struct LiveWatermarks {
 }
 
 struct TurnControl {
+    evidence_inline_bytes: usize,
+    tool_source: Option<Arc<tool_origin::ToolSource>>,
+    seen_model_effects: Arc<BTreeSet<EffectId>>,
     elapsed: Arc<elapsed::ElapsedState>,
     accepted_at_ms: u64,
     accepted_seq: u64,
@@ -641,6 +645,7 @@ enum ActiveEffect {
         next_index: u32,
     },
     Tool {
+        source_selection: rsi_agent_session_protocol::ModelSelection,
         effect_id: EffectId,
         identity: rsi_tools_protocol::ToolResultIdentity,
         started: bool,
@@ -651,6 +656,9 @@ enum ActiveEffect {
 impl TurnControl {
     fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            tool_source: None,
+            seen_model_effects: Arc::new(BTreeSet::new()),
+            evidence_inline_bytes: 0,
             elapsed: Arc::new(elapsed::ElapsedState::default()),
             accepted_at_ms,
             accepted_seq,
@@ -794,6 +802,7 @@ mod contributions;
 mod domains;
 mod elapsed;
 mod ending;
+mod evidence;
 mod execution;
 mod finalization;
 mod human_wait;
@@ -804,6 +813,7 @@ mod projection;
 use notifications::{SessionWatch, SessionWatchHub};
 mod observation;
 mod recovery;
+mod tool_origin;
 mod turn_service;
 mod turn_state;
 

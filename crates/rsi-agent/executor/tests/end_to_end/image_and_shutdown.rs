@@ -151,6 +151,7 @@ async fn executor_shutdown_releases_a_claimed_nonterminal_turn_without_reclaimin
         .unwrap();
     turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "remain nonterminal".into(),

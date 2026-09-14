@@ -9,7 +9,8 @@ replays a command callback. No Kernel, Store or UI dependency belongs here.
 
 Configuration is null for defaults or a closed object with `allow_tools`: at
 most 64 unique exact Tool names. Defaults are `ask_user`, `directory_list`,
-`file_read` and `output_read`.
+`file_read`, `output_read` and `todo_write`. The Todo Tool changes planning
+state only; it grants no file or process authority.
 An empty allowlist permits no Tools. Names use the Tool protocol's model-name
 grammar. Configuration is frozen in the Agent generation, independent of the
 typed enabled state; changing it never relaxes an already prepared call's other

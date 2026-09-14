@@ -43,7 +43,11 @@ enter those indexes. Publication, settlement, reporting, and the final read
 release update them under the registry lock; revoking a scope leaves its
 retained records charged until compaction removes them. Admission therefore
 examines only eviction candidates, independently of unrelated retained work.
-Producer start, wait, read, and cancel callbacks are panic-contained. No work
+Preview takes a temporary control snapshot, invokes producers outside the
+registry lock, then revalidates the scope and exact record/control before
+returning output. It does not hold a read lease or prevent reporting/eviction;
+output discarded during the sample remains unavailable.
+Producer start, wait, read, peek, and cancel callbacks are panic-contained. No work
 or output is recovered after process exit. Producer wait failures are projected
 to a bounded failed terminal after NUL removal, so containment never creates a
 value that violates the Jobs protocol it is meant to protect.

@@ -7,6 +7,25 @@ pub(super) struct StatusSource {
     pub(super) scope: JobScopeAuthority,
 }
 impl TurnJobStatusSource for StatusSource {
+    fn peek(
+        &self,
+        request: &rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> std::result::Result<Option<rsi_jobs::JobRead>, TurnError> {
+        self.jobs
+            .peek(
+                &self.scope,
+                &request.job_id,
+                request.effect_id.as_str(),
+                [request.stdout_bytes, request.stderr_bytes],
+            )
+            .map_err(|error| match error {
+                rsi_jobs::JobsError::ScopeClosed | rsi_jobs::JobsError::UnknownJob(_) => {
+                    TurnError::StaleClaim
+                }
+                rsi_jobs::JobsError::ShuttingDown => TurnError::ShuttingDown,
+                other => TurnError::Invalid(bounded(&other.to_string())),
+            })
+    }
     fn is_active(&self) -> bool {
         self.scope.is_active()
     }
@@ -123,6 +142,7 @@ mod tests {
                 JobSubmission {
                     name: "background".into(),
                     producer: "fixture".into(),
+                    origin: None,
                     request: JobRequest::new(()),
                     requires_report: true,
                 },

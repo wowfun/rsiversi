@@ -189,9 +189,37 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult
 pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
         SessionFactBody::ModelIntent {
-            effect_id, purpose, ..
+            effect_id,
+            purpose,
+            snapshot,
+            evidence,
+            ..
         } => {
             ensure_no_active_effect(turn)?;
+            let bytes = turn
+                .evidence_inline_bytes
+                .checked_add(evidence.inline_bytes())
+                .ok_or(TurnError::EvidenceBudget)?;
+            if bytes > rsi_agent_session_protocol::MAXIMUM_REQUEST_EVIDENCE_BYTES {
+                return Err(TurnError::EvidenceBudget);
+            }
+            turn.evidence_inline_bytes = bytes;
+            if !Arc::make_mut(&mut turn.seen_model_effects).insert(effect_id.clone()) {
+                return Err(TurnError::Invalid(
+                    "model effect identity was reused within a Turn".into(),
+                ));
+            }
+            turn.tool_source = if matches!(
+                purpose,
+                rsi_agent_session_protocol::ModelPurpose::Conversation
+            ) {
+                Some(Arc::new(tool_origin::ToolSource::new(
+                    effect_id.clone(),
+                    snapshot,
+                )?))
+            } else {
+                None
+            };
             turn.effects.insert(
                 effect_id.clone(),
                 ActiveEffect::Model {
@@ -222,6 +250,12 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
                     purpose: expected,
                 }) if current == effect_id && expected == purpose => {}
                 _ => return Err(TurnError::Invalid("model event has no exact start".into())),
+            }
+            if let Some(source) = &mut turn.tool_source {
+                tool_origin::ToolSource::observe_shared(source, event)?;
+            }
+            if matches!(event, rsi_ai_protocol::LanguageEvent::Failed { .. }) {
+                turn.tool_source = None;
             }
             if matches!(
                 event,
@@ -285,7 +319,10 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
         SessionFactBody::ToolRejected { .. } => ensure_no_active_effect(turn)?,
         SessionFactBody::ToolIntent {
             effect_id,
+            source_model_effect_id,
             identity,
+            name,
+            arguments,
             parallel_safe,
             ..
         } => {
@@ -305,11 +342,18 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
                     "overlapping Tool intents require parallel-safe definitions".into(),
                 ));
             }
+            let source_selection = turn
+                .tool_source
+                .as_mut()
+                .ok_or_else(|| TurnError::Invalid("ToolIntent has no Conversation source".into()))
+                .map(Arc::make_mut)?
+                .consume(source_model_effect_id, identity.call_id(), name, arguments)?;
             if turn
                 .effects
                 .insert(
                     effect_id.clone(),
                     ActiveEffect::Tool {
+                        source_selection,
                         effect_id: effect_id.clone(),
                         identity: identity.clone(),
                         started: false,
@@ -408,7 +452,7 @@ pub(super) fn enforce_turn_budget(
             record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
         }
     }
-    check_budget_usage(budget, usage)?;
+    check_publication_budget(budget, usage, facts)?;
     Ok(usage)
 }
 
@@ -465,8 +509,36 @@ pub(super) fn enforce_domain_budget(
         record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
     }
     add_generated_usage(&mut usage, 1, control.encoded_len() as u64)?;
-    check_budget_usage(budget, usage)?;
+    check_publication_budget(budget, usage, facts)?;
     Ok(usage)
+}
+
+fn check_publication_budget(
+    budget: &TurnBudget,
+    usage: BudgetUsage,
+    facts: &[SessionFact],
+) -> TurnResult<()> {
+    check_budget_usage(budget, usage).map_err(|error| {
+        if matches!(
+            error,
+            TurnError::BudgetExceeded {
+                dimension: BudgetDimension::GeneratedRecordBytes,
+                ..
+            }
+        ) && facts.iter().any(|fact| {
+            matches!(
+                fact.body(),
+                SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Available { .. },
+                    ..
+                }
+            )
+        }) {
+            TurnError::EvidenceBudget
+        } else {
+            error
+        }
+    })
 }
 
 pub(super) const fn budget_limit(budget: &TurnBudget, dimension: BudgetDimension) -> u64 {
@@ -574,6 +646,9 @@ pub(super) fn record_budget_usage(
 
 pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        tool_source: turn.tool_source.clone(),
+        seen_model_effects: turn.seen_model_effects.clone(),
+        evidence_inline_bytes: turn.evidence_inline_bytes,
         elapsed: Arc::clone(&turn.elapsed),
         accepted_at_ms: turn.accepted_at_ms,
         accepted_seq: turn.accepted_seq,

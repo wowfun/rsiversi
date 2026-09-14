@@ -389,6 +389,11 @@ enum StartOutcome {
         release: Arc<Notify>,
     },
     Error(AiError),
+    GatedError {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        error: AiError,
+    },
 }
 
 fn gated_answer(waiting_after_first: &Arc<Notify>, release: &Arc<Notify>) -> StartOutcome {
@@ -455,6 +460,15 @@ impl PreparedLanguageCall for PreparedScript {
                 },
             ))),
             StartOutcome::Error(error) => Err(error),
+            StartOutcome::GatedError {
+                entered,
+                release,
+                error,
+            } => {
+                entered.notify_one();
+                tokio::select! { () = release.notified() => {}, () = cancellation.cancelled() => {} }
+                Err(error)
+            }
         }
     }
 }
@@ -475,8 +489,11 @@ struct PendingLanguage {
 
 #[async_trait]
 impl LanguageCall for PendingLanguage {
-    fn describe(&self, _model: &ModelRef) -> Result<LanguageProfile, AiError> {
-        Ok(LanguageProfile::new(
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
+        let profile = LanguageProfile::new(
             100_000,
             1_000,
             10_000,
@@ -484,6 +501,16 @@ impl LanguageCall for PendingLanguage {
             true,
             ImageToolResultCapability::No,
             vec![],
+        )
+        .unwrap();
+        Ok(rsi_ai_protocol::LanguageModelDescription::new(
+            model.clone(),
+            profile,
+            1,
+            "fixture",
+            "fixture",
+            "memory",
+            "fixture",
         )
         .unwrap())
     }
@@ -570,6 +597,7 @@ impl ImageCall for ImageFixture {
     ) -> std::result::Result<Box<dyn PreparedImageCall>, AiError> {
         Ok(Box::new(PreparedImageScript {
             snapshot: PreparedCallSnapshot {
+                language_settings: None,
                 call_id: "image-call-1".into(),
                 deployment_id: model.deployment().into(),
                 provider_family: "test".into(),
@@ -659,8 +687,11 @@ impl PluginFactory for ImageMediaFixtureFactory {
 
 #[async_trait]
 impl LanguageCall for LanguageFixture {
-    fn describe(&self, _model: &ModelRef) -> Result<LanguageProfile, AiError> {
-        Ok(LanguageProfile::new(
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
+        let profile = LanguageProfile::new(
             100_000,
             1_000,
             10_000,
@@ -668,6 +699,26 @@ impl LanguageCall for LanguageFixture {
             true,
             ImageToolResultCapability::No,
             vec![],
+        )
+        .unwrap()
+        .with_reasoning_efforts(
+            rsi_ai_protocol::ReasoningEffortProfile::new(
+                vec![
+                    rsi_ai_protocol::ReasoningEffortId::new("low").unwrap(),
+                    rsi_ai_protocol::ReasoningEffortId::new("high").unwrap(),
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+        Ok(rsi_ai_protocol::LanguageModelDescription::new(
+            model.clone(),
+            profile,
+            1,
+            "fixture",
+            "fixture",
+            "memory",
+            "fixture",
         )
         .unwrap())
     }
@@ -677,10 +728,16 @@ impl LanguageCall for LanguageFixture {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        let language_settings = rsi_ai_protocol::PreparedLanguageSettings {
+            requested_reasoning_effort: request.settings().reasoning_effort().cloned(),
+            effective_reasoning_effort: request.settings().reasoning_effort().cloned(),
+            profile: self.describe(&model)?.into_profile(),
+        };
         self.requests.lock().unwrap().push(request);
         let call = self.requests.lock().unwrap().len();
         Ok(Box::new(PreparedScript {
             snapshot: PreparedCallSnapshot {
+                language_settings: Some(language_settings),
                 call_id: format!("model-call-{call}"),
                 deployment_id: model.deployment().into(),
                 provider_family: "test".into(),
@@ -1400,6 +1457,7 @@ impl BaseStack {
             .unwrap();
         let submitted = turns
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: self.fresh(header).await,
                 text: text.into(),
@@ -1442,6 +1500,7 @@ impl BaseStack {
     ) -> SubmittedTurn {
         turns
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: self
                     .fresh(header_for_session(session, TurnBudget::default()))
@@ -1476,6 +1535,7 @@ impl BaseStack {
             .unwrap();
         let submitted = turns
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: SubmitSession::Resume(turns.prepare_resume(&session_id).await.unwrap()),
                 text: text.into(),
@@ -1551,3 +1611,5 @@ mod image_and_shutdown;
 mod pool;
 #[path = "end_to_end/tool_execution.rs"]
 mod tool_execution;
+#[path = "end_to_end/tool_settlement.rs"]
+mod tool_settlement;

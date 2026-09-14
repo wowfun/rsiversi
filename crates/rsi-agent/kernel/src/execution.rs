@@ -197,6 +197,39 @@ impl TurnExecution for AgentKernel {
         self.inner.claim_issuer.agent_caller(claim)
     }
 
+    fn tool_caller(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+    ) -> TurnResult<AgentCallerAuthority> {
+        let state = lock_state(&self.inner);
+        let turn = self.validate_claim(&state, claim)?;
+        let Some(ActiveEffect::Tool {
+            started: true,
+            source_selection,
+            ..
+        }) = turn.effects.get(effect_id)
+        else {
+            return Err(TurnError::Invalid(
+                "Tool caller requires an exact started Tool effect".into(),
+            ));
+        };
+        self.inner
+            .claim_issuer
+            .tool_caller(claim, effect_id.clone(), source_selection.clone())
+    }
+
+    async fn tool_settlement_domains(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+    ) -> TurnResult<Vec<rsi_agent_session_protocol::DomainStateView>> {
+        self.tool_caller(claim, effect_id)?;
+        let domains = self.domain_states(claim.session_id()).await?;
+        self.tool_caller(claim, effect_id)?;
+        Ok(domains)
+    }
+
     async fn read_fork_facts(
         &self,
         claim: &TurnClaim,
@@ -726,6 +759,19 @@ impl TurnExecution for AgentKernel {
                 "Fact publication batch is empty or too large".into(),
             ));
         }
+        {
+            let state = lock_state(&self.inner);
+            self.validate_claim(&state, claim)?;
+        }
+        for body in &bodies {
+            evidence::validate_references(
+                self.inner.store.as_ref(),
+                &self.inner.evidence_cache,
+                claim.session_id(),
+                body,
+            )
+            .await?;
+        }
         let _terminal_drain = if bodies
             .iter()
             .any(|body| matches!(body, SessionFactBody::TurnTerminal { .. }))
@@ -847,6 +893,7 @@ pub(super) fn stage_execution_facts(
     let mut bytes = 0_usize;
     let mut next_seq = base_seq;
     for body in bodies {
+        validate_intent_price(claim.header(), &body)?;
         if body.turn_id() != claim.turn_id() {
             return Err(TurnError::Invalid(
                 "executor Fact changed the claimed turn identity".into(),
@@ -884,6 +931,7 @@ pub(super) fn try_publish_once(
             return Err(TurnError::Flush(error.clone()));
         }
         for body in &bodies {
+            validate_intent_price(&session.header, body)?;
             validate_durable_intent_fence(session, body)?;
         }
         (
@@ -968,4 +1016,22 @@ pub(super) fn try_publish_once(
     }
     publish_live_watermarks(session);
     Ok(PublishAdmission::Complete(PublishAttempt::Published(facts)))
+}
+
+pub(super) fn validate_intent_price(
+    header: &SessionHeader,
+    body: &SessionFactBody,
+) -> TurnResult<()> {
+    if let SessionFactBody::ModelIntent {
+        snapshot,
+        price_quote,
+        ..
+    } = body
+        && price_quote.as_ref() != header.settings().pricing().resolve(snapshot)
+    {
+        return Err(TurnError::Invalid(
+            "model price quote differs from frozen Session pricing".into(),
+        ));
+    }
+    Ok(())
 }

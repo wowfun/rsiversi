@@ -469,6 +469,7 @@ pub async fn assert_mechanical_store_contract(
             4,
             11,
             SessionFactBody::MessageTurnAccepted {
+                reasoning_effort: None,
                 turn_id: message_turn_id.clone(),
                 activation_id: activation_id.clone(),
                 message_ids: vec![message_id.clone()],
@@ -699,6 +700,7 @@ pub async fn assert_mechanical_store_contract(
                     8,
                     13,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: invoking_turn.clone(),
                         text: "invoke a child".into(),
                         model: None,
@@ -774,7 +776,12 @@ pub async fn assert_mechanical_store_contract(
     };
     let first_child_id = SessionId::new("shared-contract-child-one").unwrap();
     let first_child_header = header
-        .forked_child(first_child_id.clone(), 30, child_origin("first-child"))
+        .forked_child(
+            first_child_id.clone(),
+            30,
+            child_origin("first-child"),
+            rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+        )
         .unwrap();
     let first_child_fingerprint = first_child_header.fingerprint().unwrap();
     let child_control = |session_id: &SessionId, message_id: &str| {
@@ -873,6 +880,7 @@ pub async fn assert_mechanical_store_contract(
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             },
+            rsi_agent_session_protocol::ModelSelection::baseline(first_child_header.settings()),
         )
         .unwrap();
     store
@@ -975,7 +983,12 @@ pub async fn assert_mechanical_store_contract(
         .expect("a busy root is excluded from its strict-descendant guard");
     let second_child_id = SessionId::new("shared-contract-child-two").unwrap();
     let second_child_header = header
-        .forked_child(second_child_id.clone(), 31, child_origin("second-child"))
+        .forked_child(
+            second_child_id.clone(),
+            31,
+            child_origin("second-child"),
+            rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+        )
         .unwrap();
     assert!(matches!(
         store
@@ -1002,7 +1015,12 @@ pub async fn assert_mechanical_store_contract(
     let mut duplicate_task_origin = child_origin("first-child");
     duplicate_task_origin.path = AgentPath::new(vec![2]).unwrap();
     let duplicate_task_header = header
-        .forked_child(duplicate_task_id.clone(), 31, duplicate_task_origin)
+        .forked_child(
+            duplicate_task_id.clone(),
+            31,
+            duplicate_task_origin,
+            rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+        )
         .unwrap();
     assert!(matches!(
         store
@@ -1058,7 +1076,12 @@ pub async fn assert_mechanical_store_contract(
     malformed_origin.root_session_id = unrelated_root_id.clone();
     malformed_origin.path = AgentPath::new(vec![3]).unwrap();
     let malformed_child_header = header
-        .forked_child(malformed_child_id.clone(), 33, malformed_origin)
+        .forked_child(
+            malformed_child_id.clone(),
+            33,
+            malformed_origin,
+            rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+        )
         .unwrap();
     assert!(matches!(
         store

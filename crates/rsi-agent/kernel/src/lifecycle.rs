@@ -114,6 +114,7 @@ impl AgentKernel {
             inner: Arc::new(KernelInner {
                 tasks: TaskTracker::new(),
                 store,
+                evidence_cache: Mutex::default(),
                 composition,
                 resume_issuer: ResumeAdmissionIssuer::new(),
                 claim_issuer: TurnClaimIssuer::new(),
@@ -785,7 +786,8 @@ impl AgentKernel {
 
     pub(super) fn validate_agent_caller(&self, caller: &AgentCallerAuthority) -> TurnResult<()> {
         let state = lock_state(&self.inner);
-        self.validate_claim(&state, caller.claim())?;
+        let turn = self.validate_claim(&state, caller.claim())?;
+        tool_origin::validate_caller(turn, caller)?;
         if let Some(error) = &state.sessions[caller.session_id()].permanent_flush_error {
             return Err(TurnError::Flush(error.clone()));
         }

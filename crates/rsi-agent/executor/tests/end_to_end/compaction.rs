@@ -12,10 +12,7 @@ fn long_answer(usage: Option<u64>) -> Vec<LanguageEvent> {
         script.insert(
             3,
             LanguageEvent::Usage {
-                usage: TokenUsage {
-                    input_tokens,
-                    ..Default::default()
-                },
+                usage: TokenUsage::new(input_tokens, 0, None, None, None).unwrap(),
             },
         );
     }
@@ -49,10 +46,7 @@ async fn small_history_with_high_reported_usage_still_reaches_the_next_provider_
     pressured.insert(
         3,
         LanguageEvent::Usage {
-            usage: TokenUsage {
-                input_tokens: 80_000,
-                ..Default::default()
-            },
+            usage: TokenUsage::new(80_000, 0, None, None, None).unwrap(),
         },
     );
     let provider = fixture(
@@ -193,10 +187,7 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
     earlier.insert(
         3,
         LanguageEvent::Usage {
-            usage: TokenUsage {
-                input_tokens: 80_000,
-                ..Default::default()
-            },
+            usage: TokenUsage::new(80_000, 0, None, None, None).unwrap(),
         },
     );
     let mut summary = answer_script();
@@ -365,7 +356,10 @@ struct GateAfterSummary {
 }
 #[async_trait]
 impl LanguageCall for GateAfterSummary {
-    fn describe(&self, model: &ModelRef) -> Result<LanguageProfile, AiError> {
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
         self.inner.describe(model)
     }
     async fn prepare(
@@ -436,6 +430,7 @@ async fn executor_loss_after_summary_finished_interrupts_original_turn_and_expli
         .unwrap();
     let second = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "continue after summary".into(),
@@ -519,6 +514,7 @@ async fn interrupted_summary(finish_on_cancellation: bool) {
         .unwrap();
     let second = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "continue interrupted summary".into(),

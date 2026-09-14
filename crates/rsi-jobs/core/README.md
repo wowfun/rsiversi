@@ -1,5 +1,11 @@
 # rsi-jobs
 
+`peek` samples bounded producer tails without reporting, reader retention,
+waiting, cancellation or scope acquisition. It requires the exact opaque scope,
+job ID and originating invocation ID. Missing/compacted output returns `None`.
+Producers can decline preview; a preview never falls back to consuming `read`.
+`JobOrigin` is a trusted in-process Tool extension, independent of Agent types.
+
 `JobSummary::validate` checks the bounded identifiers, terminal/status agreement
 and reporting invariants before a summary crosses an external read boundary.
 Status-only `list` and `get` never report a terminal job or release its output.

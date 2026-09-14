@@ -17,6 +17,7 @@ impl Source {
                     id: format!("job-{i:03}"),
                     name: "background".into(),
                     producer: "fixture".into(),
+                    origin: None,
                     status: JobStatus::Completed,
                     requires_report: true,
                     reported: false,
@@ -36,6 +37,31 @@ impl Source {
     }
 }
 impl TurnJobStatusSource for Source {
+    fn peek(
+        &self,
+        _: &rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> rsi_agent_turn_protocol::Result<Option<rsi_jobs::JobRead>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.revoke_during_read.load(Ordering::SeqCst) {
+            self.active.store(false, Ordering::SeqCst);
+        }
+        Ok(self.rows.first().map(|row| {
+            let mut job = row.clone();
+            job.origin = Some("effect".into());
+            let stream = || rsi_jobs::JobOutputRead {
+                bytes: vec![0, 255, 10],
+                oldest_offset: 7,
+                next_offset: 10,
+                lossy: true,
+                full_output: None,
+            };
+            rsi_jobs::JobRead {
+                job,
+                stdout: stream(),
+                stderr: stream(),
+            }
+        }))
+    }
     fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
@@ -218,5 +244,145 @@ async fn jobs_source_revocation_and_cancellation_fence_sampled_results() {
             .is_err()
     );
     assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One preview authority is tested before and after every invalidating transition.
+async fn job_preview_rejects_foreign_origins_generations_cancellation_and_mid_read_revocation() {
+    use rsi_agent_turn_protocol::JobPreviewRequest;
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let worker = kernel.start_workers();
+    let submitted = submit(&kernel, "peek-session", "work").await;
+    let _registration = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Source::new(1);
+    let erased: Arc<dyn TurnJobStatusSource> = source.clone();
+    kernel
+        .publish_job_status(&claim, Arc::downgrade(&erased))
+        .unwrap();
+    let header = claim.header().fingerprint().unwrap();
+    let status = kernel
+        .read_jobs(
+            &submitted.session_id,
+            &header,
+            TurnJobsRequest {
+                turn_id: submitted.turn_id.clone(),
+                generation: None,
+                after: None,
+                limit: 1,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let request = JobPreviewRequest {
+        turn_id: submitted.turn_id.clone(),
+        generation: status.generation,
+        job_id: "job-000".into(),
+        effect_id: EffectId::new("effect").unwrap(),
+        stdout_bytes: 32,
+        stderr_bytes: 32,
+    };
+    let page = kernel
+        .peek_job(
+            &submitted.session_id,
+            &header,
+            request.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.preview.unwrap().stdout.bytes(32).unwrap(),
+        vec![0, 255, 10]
+    );
+    let reads = source.reads.load(Ordering::SeqCst);
+    let mut stale = request.clone();
+    stale.generation += 1;
+    assert!(matches!(
+        kernel
+            .peek_job(
+                &submitted.session_id,
+                &header,
+                stale,
+                CancellationToken::new()
+            )
+            .await,
+        Err(TurnError::StaleClaim)
+    ));
+    assert!(
+        kernel
+            .peek_job(
+                &SessionId::new("foreign").unwrap(),
+                &header,
+                request.clone(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        kernel
+            .peek_job(
+                &submitted.session_id,
+                &"0".repeat(64),
+                request.clone(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        kernel
+            .peek_job(&submitted.session_id, &header, request.clone(), cancelled)
+            .await
+            .is_err()
+    );
+    assert_eq!(source.reads.load(Ordering::SeqCst), reads);
+    let mut wrong = request.clone();
+    wrong.effect_id = EffectId::new("wrong-effect").unwrap();
+    assert!(
+        kernel
+            .peek_job(
+                &submitted.session_id,
+                &header,
+                wrong,
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    let mut too_small = request.clone();
+    too_small.stdout_bytes = 1;
+    assert!(
+        kernel
+            .peek_job(
+                &submitted.session_id,
+                &header,
+                too_small,
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    source.revoke_during_read.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        kernel
+            .peek_job(
+                &submitted.session_id,
+                &header,
+                request,
+                CancellationToken::new()
+            )
+            .await,
+        Err(TurnError::StaleClaim)
+    ));
     kernel.shutdown(worker).await.unwrap();
 }

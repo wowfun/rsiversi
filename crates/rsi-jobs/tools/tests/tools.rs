@@ -255,6 +255,7 @@ impl Fixture {
                 JobSubmission {
                     name: "test".into(),
                     producer: "test".into(),
+                    origin: None,
                     request: JobRequest::new(request),
                     requires_report: true,
                 },

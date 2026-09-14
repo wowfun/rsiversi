@@ -20,13 +20,15 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod domain;
+mod evidence;
 pub use domain::{
     StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
     domain_heads_after,
 };
+pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 19;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 20;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.

@@ -358,6 +358,7 @@ impl TurnService for AgentKernel {
             turn_id,
             text,
             model,
+            reasoning_effort,
             sandbox,
         } = request;
         if text.is_empty() || text.len() > MAXIMUM_TURN_TEXT_BYTES {
@@ -379,6 +380,7 @@ impl TurnService for AgentKernel {
             turn_id: turn_id.clone(),
             text,
             model,
+            reasoning_effort,
             sandbox,
             require_approval,
         };
@@ -1125,6 +1127,7 @@ impl AgentKernel {
                 turn_id: request.turn_id.clone(),
                 activation_id: request.activation_id.clone(),
                 message_ids: vec![request.message_id.clone()],
+                reasoning_effort: entry.message.options.reasoning_effort.clone(),
                 model,
                 sandbox,
                 require_approval,
@@ -1167,12 +1170,17 @@ impl AgentKernel {
                 .store
                 .active_activation(parent_session_id)
                 .await
-                .map_err(turn_store_error)?
-                .ok_or_else(|| {
-                    TurnError::Invalid(
-                        "child activation requires its parent activation to remain active".into(),
-                    )
-                })?;
+                .map_err(turn_store_error)?;
+            if active.is_none()
+                && !matches!(
+                    entry.message.source,
+                    AgentMessageSource::Human | AgentMessageSource::Continuation { .. }
+                )
+            {
+                return Err(TurnError::Invalid(
+                    "Agent-sourced child activation requires its parent activation to remain active".into(),
+                ));
+            }
             let pending = self
                 .inner
                 .store
@@ -1189,7 +1197,7 @@ impl AgentKernel {
             {
                 return Err(TurnError::Capacity);
             }
-            Some(active)
+            active
         } else {
             None
         };
@@ -1324,6 +1332,7 @@ impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Child identity, lineage, source admission and initial message form one preparation protocol.
     async fn spawn_agent_prepared(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         self.validate_agent_caller(&request.caller)?;
+        let selection = spawn_selection(&request)?;
         validate_identifier("subagent task name", &request.task_name)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         rsi_agent_session_protocol::validate_turn_text(&request.message)
@@ -1420,6 +1429,7 @@ impl AgentKernel {
                 request.child_session_id.clone(),
                 self.inner.clock.now_ms().max(1),
                 origin,
+                selection,
             )
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let composition = self
@@ -1499,6 +1509,7 @@ impl AgentKernel {
                 request.child_session_id.clone(),
                 header.created_at_ms(),
                 origin.clone(),
+                spawn_selection(request)?,
             )
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if expected != header
@@ -1655,4 +1666,28 @@ impl AgentKernel {
         self.interrupt_descendant(caller, target_session_id, &turn.turn_id, &cancellation)
             .await
     }
+}
+
+fn spawn_selection(
+    request: &SpawnAgentRequest,
+) -> TurnResult<rsi_agent_session_protocol::ModelSelection> {
+    let source = request.caller.source_selection().ok_or_else(|| {
+        TurnError::Invalid("spawn requires an authenticated Tool model origin".into())
+    })?;
+    let selection = match &request.model {
+        Some(model) => rsi_agent_session_protocol::ModelSelection {
+            model: model.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
+        },
+        None if request.reasoning_effort.is_none() => source.clone(),
+        None => {
+            return Err(TurnError::Invalid(
+                "child reasoning effort requires an explicit child model".into(),
+            ));
+        }
+    };
+    selection
+        .validate()
+        .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    Ok(selection)
 }

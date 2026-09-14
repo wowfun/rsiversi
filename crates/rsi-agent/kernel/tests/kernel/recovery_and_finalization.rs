@@ -139,6 +139,7 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             1,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: turn.clone(),
                 text: "hello".into(),
                 model: None,
@@ -151,6 +152,10 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             2,
             2,
             SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: turn.clone(),
                 effect_id: effect.clone(),
@@ -256,6 +261,7 @@ async fn recovery_preserves_a_durable_cancellation_classification() {
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: turn.clone(),
                         text: "hello".into(),
                         model: None,
@@ -747,6 +753,7 @@ async fn partial_recovery_restarts_after_the_last_correlated_terminal_without_re
                 seq,
                 1,
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id,
                     text: "unfinished".into(),
                     model: None,

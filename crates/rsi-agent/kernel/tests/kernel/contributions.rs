@@ -57,6 +57,7 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
         .published();
     assert_eq!(entered.len(), 2);
     let intent = SessionFactBody::ToolIntent {
+        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
         turn_id: submitted.turn_id.clone(),
         effect_id: EffectId::new("tool").unwrap(),
         identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),
@@ -65,6 +66,7 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
         approval: None,
         parallel_safe: false,
     };
+    tool_origin::publish_model_source(&kernel, &claim, "call", "bash", &snapshot()).await;
     let facts = kernel
         .publish(&claim, vec![intent])
         .await
@@ -100,7 +102,11 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
         .read_facts(&submitted.session_id, 0, 16)
         .await
         .unwrap();
-    assert_eq!(page.facts.len(), 4);
+    assert_eq!(
+        page.facts.last().unwrap().seq(),
+        facts.last().unwrap().seq(),
+        "rejected plugin inputs must not append Facts"
+    );
     kernel
         .finish_turn(&claim, &TurnOutcome::Cancelled)
         .await
@@ -206,6 +212,7 @@ async fn contribution_capture_rejects_cancelled_and_budget_ending_turns() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // The same rejected operation is observed and replayed against both Stores.
 async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
     for sqlite in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -221,6 +228,7 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
         let workers = kernel.start_workers();
         let submitted = kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session: fresh(contribution_budget_header()),
                 turn_id: client_turn_id(),
                 text: "work".into(),

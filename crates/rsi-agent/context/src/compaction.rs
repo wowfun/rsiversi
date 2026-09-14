@@ -758,7 +758,7 @@ impl ContextFold {
                     session,
                     model,
                     finished_seq: seq,
-                    input_tokens: usage.input_tokens,
+                    input_tokens: usage.input_tokens(),
                 });
             }
             return Ok(false);

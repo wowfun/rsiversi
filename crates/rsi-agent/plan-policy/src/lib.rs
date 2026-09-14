@@ -35,6 +35,7 @@ impl Default for Config {
                 "directory_list".into(),
                 "file_read".into(),
                 "output_read".into(),
+                "todo_write".into(),
             ],
         }
     }

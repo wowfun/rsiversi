@@ -21,10 +21,12 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     let child_id = SessionId::new("session-delivery-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id.clone(),
@@ -35,6 +37,8 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         })
         .await
         .unwrap();
+    tool_origin::finish_control_tool(&kernel, &root_claim).await;
+    let caller = kernel.agent_caller(&root_claim).unwrap();
     let _child_lease = kernel.register("executor-delivery-child".into()).unwrap();
     let child_claim = kernel
         .claim("executor-delivery-child", CancellationToken::new())
@@ -214,11 +218,13 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     let child_id = SessionId::new("session-activation-child").unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         kernel.spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller,
             child_session_id: child_id.clone(),
@@ -306,8 +312,10 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
     let child_id = SessionId::new("session-terminal-promotion-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(&kernel, &root_claim).await,
             child_session_id: child_id.clone(),
             task_name: "late-child".into(),
             message_id: MessageId::new("message-terminal-promotion-child").unwrap(),
@@ -401,7 +409,7 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     assert!(matches!(
         kernel
             .wait_agent(
@@ -415,6 +423,8 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     let child_id = SessionId::new("session-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id.clone(),
@@ -591,9 +601,11 @@ async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: SessionId::new("session-wait-timeout-child").unwrap(),
@@ -649,9 +661,11 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: SessionId::new("session-wait-cancel-child").unwrap(),
@@ -707,10 +721,12 @@ async fn wait_completion_cause_uses_snapshot_without_control_replay() {
         .await
         .unwrap()
         .unwrap();
-    let root_caller = kernel.agent_caller(&root_claim).unwrap();
+    let root_caller = control_tool_caller(&kernel, &root_claim).await;
     let child_id = SessionId::new("session-long-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: root_caller.clone(),
             child_session_id: child_id.clone(),
@@ -866,7 +882,7 @@ async fn assert_tree_capacity(direct: bool) {
         .await
         .unwrap()
         .unwrap();
-    let root_caller = kernel.agent_caller(&root_claim).unwrap();
+    let root_caller = control_tool_caller(&kernel, &root_claim).await;
 
     let mut child_leases = Vec::new();
     let mut child_claims = Vec::new();
@@ -874,6 +890,8 @@ async fn assert_tree_capacity(direct: bool) {
         let child_id = SessionId::new(format!("session-a-running-child-{index}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 cancellation: CancellationToken::new(),
                 caller: root_caller.clone(),
                 child_session_id: child_id,
@@ -896,6 +914,8 @@ async fn assert_tree_capacity(direct: bool) {
     }
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: root_caller,
             child_session_id: SessionId::new("session-a-blocked-child").unwrap(),
@@ -919,6 +939,7 @@ async fn assert_tree_capacity(direct: bool) {
             .unwrap();
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session: resume(&kernel, child).await,
                 turn_id: TurnId::new("turn-direct-blocked").unwrap(),
                 text: "a direct turn must also wait for tree capacity".into(),
@@ -1075,8 +1096,10 @@ pub(super) async fn active_parent_and_child(
         .unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&parent).unwrap(),
+            caller: control_tool_caller(kernel, &parent).await,
             child_session_id: SessionId::new("session-review-child").unwrap(),
             task_name: "child".into(),
             message_id: MessageId::new("message-review-child").unwrap(),
@@ -1094,6 +1117,99 @@ pub(super) async fn active_parent_and_child(
 }
 
 #[tokio::test]
+async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let worker = kernel.start_workers();
+    let (parent, child, _lease) = active_parent_and_child(&kernel).await;
+    tool_origin::finish_control_tool(&kernel, &parent).await;
+    let caller = kernel.agent_caller(&parent).unwrap();
+    kernel
+        .finish_turn(&child, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.enter_pending_step_messages(&parent).await.unwrap();
+    kernel
+        .finish_turn(&parent, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .active_activation(parent.session_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let facts_before = store.read_facts(child.session_id(), 0, 128).await.unwrap();
+    let request = |session, message_id, suffix: &str| ClaimMessage {
+        session,
+        message_id,
+        activation_id: ActivationId::new(format!("activation-idle-child-{suffix}")).unwrap(),
+        path: AgentPath::new(vec![1]).unwrap(),
+        turn_id: TurnId::new(format!("turn-idle-child-{suffix}")).unwrap(),
+        step_id: StepId::new(format!("step-idle-child-{suffix}")).unwrap(),
+    };
+    assert!(matches!(
+        kernel
+            .send_agent_message(SendAgentMessage {
+                cancellation: CancellationToken::new(),
+                caller,
+                target_session_id: child.session_id().clone(),
+                message_id: MessageId::new("message-idle-child-agent").unwrap(),
+                message: "expired agent follow-up".into(),
+                start_new_turn: true,
+            })
+            .await,
+        Err(TurnError::StaleClaim)
+    ));
+
+    assert_eq!(
+        store
+            .read_facts(child.session_id(), 0, 128)
+            .await
+            .unwrap()
+            .facts,
+        facts_before.facts
+    );
+
+    let message = mailbox_message("message-idle-child-human");
+    kernel
+        .submit_message(SubmitMessage {
+            session: resume(&kernel, child.session_id().clone()).await,
+            message: message.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    kernel
+        .claim_message(request(
+            kernel.prepare_resume(child.session_id()).await.unwrap(),
+            message.message_id,
+            "human",
+        ))
+        .await
+        .unwrap();
+    let activation = store
+        .active_activation(child.session_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        activation.parent_session_id.as_ref(),
+        Some(parent.session_id())
+    );
+    assert!(store.read_controls(child.session_id(), 0, 128).await.unwrap().records.iter().any(|record| matches!(record.body(), AgentControlRecordBody::ActivationStarted { activation_id, root_session_id, path, .. } if activation_id == &activation.activation_id && root_session_id == parent.session_id() && path.segments() == [1])));
+    assert_eq!(
+        store
+            .completion_reservation_count(parent.session_id())
+            .await
+            .unwrap(),
+        1
+    );
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
@@ -1101,7 +1217,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     let waiter = tokio::spawn({
         let kernel = kernel.clone();
-        let caller = kernel.agent_caller(&parent).unwrap();
+        let caller = control_tool_caller(&kernel, &parent).await;
         async move {
             kernel
                 .wait_agent(
@@ -1153,6 +1269,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
                 }
             ))
     );
+    tool_origin::finish_control_tool(&kernel, &parent).await;
     assert_eq!(
         kernel.enter_pending_step_messages(&parent).await.unwrap(),
         1
@@ -1172,6 +1289,7 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: resume(&kernel, parent.session_id().clone()).await,
             turn_id: TurnId::new("turn-review-direct").unwrap(),
             text: "direct work".into(),
@@ -1341,7 +1459,7 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         let cancellation = CancellationToken::new();
         let mut waiter = tokio::spawn({
             let kernel = kernel.clone();
-            let caller = kernel.agent_caller(&parent).unwrap();
+            let caller = control_tool_caller(&kernel, &parent).await;
             let cancellation = cancellation.clone();
             async move {
                 kernel
@@ -1354,8 +1472,10 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         for index in 0..2 {
             kernel
                 .spawn_agent(SpawnAgentRequest {
+                    model: None,
+                    reasoning_effort: None,
                     cancellation: CancellationToken::new(),
-                    caller: kernel.agent_caller(&parent).unwrap(),
+                    caller: control_tool_caller(&kernel, &parent).await,
                     child_session_id: SessionId::new(format!("session-capacity-extra-{index}"))
                         .unwrap(),
                     task_name: format!("extra-{index}"),

@@ -787,7 +787,45 @@ use validation::{
 
 /// Ordinary factory for one exact-root `SQLite` Agent Store.
 #[derive(Clone, Debug, Default)]
-pub struct SqliteStoreFactory;
+pub struct SqliteStoreFactory {
+    startup_failure: Arc<Mutex<Option<SqliteStoreStartupFailure>>>,
+}
+
+/// Safe startup diagnostic for the factory's direct composition owner.
+#[derive(Clone, Debug)]
+pub struct SqliteStoreStartupFailure {
+    /// Configured root; display as an escaped path in a terminal diagnostic.
+    pub root: PathBuf,
+    /// Closed failure category without backend or stored text.
+    pub kind: SqliteStoreStartupFailureKind,
+}
+
+/// Store-open failure facts that may cross a redacted Profile bootstrap boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteStoreStartupFailureKind {
+    /// The database uses an unsupported layout.
+    SchemaMismatch {
+        /// Schema required by this implementation.
+        expected: u32,
+        /// Schema observed on disk.
+        actual: u32,
+    },
+    /// Another process owns the root.
+    WriterLocked,
+    /// Root or filesystem shape is invalid.
+    Invalid,
+    /// Existing metadata violates the current schema.
+    Corrupt,
+    /// A filesystem, database or worker operation failed.
+    Io,
+}
+
+impl SqliteStoreFactory {
+    /// Consumes this factory's latest activation failure, if any.
+    pub fn take_startup_failure(&self) -> Option<SqliteStoreStartupFailure> {
+        self.startup_failure.lock().ok()?.take()
+    }
+}
 
 fn store_config_retained_bytes(config: &SqliteStoreConfig) -> rsi_meta::Result<usize> {
     std::mem::size_of::<SqliteStoreConfig>()
@@ -814,11 +852,31 @@ impl PluginFactory for SqliteStoreFactory {
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
+        self.take_startup_failure();
         let config = plan.take_state::<SqliteStoreConfig>()?;
-        let store = tokio::task::spawn_blocking(move || SqliteStore::open(config.root))
+        let root = config.root;
+        let open_root = root.clone();
+        let store = tokio::task::spawn_blocking(move || SqliteStore::open(open_root))
             .await
-            .map_err(|error| MetaError::Activation(format!("SQLite Store worker failed: {error}")))?
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+            .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
+            .map_err(|error| {
+                let kind = match &error {
+                    StoreError::SchemaMismatch { expected, actual } => {
+                        SqliteStoreStartupFailureKind::SchemaMismatch {
+                            expected: *expected,
+                            actual: *actual,
+                        }
+                    }
+                    StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
+                    StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
+                    StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
+                    _ => SqliteStoreStartupFailureKind::Invalid,
+                };
+                if let Ok(mut diagnostic) = self.startup_failure.lock() {
+                    *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
+                }
+                MetaError::Activation(error.to_string())
+            })?;
         let store: Arc<dyn SessionStore> = Arc::new(store);
         let supply = plan
             .context()

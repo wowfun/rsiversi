@@ -9,7 +9,7 @@ use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, DomainStateView,
-    ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
+    EffectId, ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
     SessionHeader, SessionId, StepId, TurnId, TurnOutcome, validate_identifier,
     validate_safe_diagnostic,
 };
@@ -21,7 +21,11 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 mod command;
+mod job_preview;
 mod jobs;
+pub use job_preview::{
+    JobPreview, JobPreviewPage, JobPreviewRequest, JobPreviewStream, MAXIMUM_JOB_PREVIEW_BYTES,
+};
 pub use jobs::{
     MAXIMUM_TURN_JOBS_BYTES, MAXIMUM_TURN_JOBS_ITEMS, TurnJobStatusSource, TurnJobs,
     TurnJobsContract, TurnJobsPage, TurnJobsRequest,
@@ -187,6 +191,8 @@ pub struct SubmitTurn {
     pub text: String,
     /// Optional exact model override for this turn only.
     pub model: Option<rsi_ai_protocol::ModelRef>,
+    /// Effort for the explicit Turn route; absent requests its default.
+    pub reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     /// Optional sandbox override for this invocation only.
     pub sandbox: Option<rsi_sandbox::SandboxMode>,
 }
@@ -332,6 +338,10 @@ pub struct ClaimMessage {
 /// Exact retries recover the original child and initial message without another write.
 #[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
+    /// Explicit child route; absent inherits the producing request's route and effort.
+    pub model: Option<rsi_ai_protocol::ModelRef>,
+    /// Explicit child effort, allowed only with an explicit child model.
+    pub reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     /// Execution cancellation checked before final source admission.
     pub cancellation: CancellationToken,
     /// Exact live calling Agent authority.
@@ -771,6 +781,7 @@ impl TurnClaim {
     fn agent_caller(&self) -> AgentCallerAuthority {
         AgentCallerAuthority {
             claim: self.clone(),
+            tool_origin: None,
         }
     }
 }
@@ -852,6 +863,18 @@ impl TurnClaimIssuer {
         }
         Ok(claim.agent_caller())
     }
+
+    /// Seals a Tool origin after the issuing Kernel authenticates its active effect.
+    pub fn tool_caller(
+        &self,
+        claim: &TurnClaim,
+        effect_id: EffectId,
+        selection: rsi_agent_session_protocol::ModelSelection,
+    ) -> Result<AgentCallerAuthority> {
+        let mut caller = self.agent_caller(claim)?;
+        caller.tool_origin = Some((effect_id, selection));
+        Ok(caller)
+    }
 }
 
 impl Default for TurnClaimIssuer {
@@ -890,9 +913,20 @@ pub struct ForkFactPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCallerAuthority {
     claim: TurnClaim,
+    tool_origin: Option<(EffectId, rsi_agent_session_protocol::ModelSelection)>,
 }
 
 impl AgentCallerAuthority {
+    /// Returns the exact started Tool effect, absent for internal claim callers.
+    pub fn tool_effect_id(&self) -> Option<&EffectId> {
+        self.tool_origin.as_ref().map(|(effect, _)| effect)
+    }
+
+    /// Returns the authenticated producing request's model and effective effort.
+    pub fn source_selection(&self) -> Option<&rsi_agent_session_protocol::ModelSelection> {
+        self.tool_origin.as_ref().map(|(_, selection)| selection)
+    }
+
     /// Returns the exact calling Agent session.
     pub const fn session_id(&self) -> &SessionId {
         self.claim.session_id()
@@ -1000,6 +1034,13 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
             "this Turn executor does not expose Agent Tool caller authority".into(),
         ))
     }
+    /// Derives authority from an authenticated, started Tool effect.
+    fn tool_caller(&self, claim: &TurnClaim, effect_id: &EffectId) -> Result<AgentCallerAuthority> {
+        let _ = (claim, effect_id);
+        Err(TurnError::Invalid(
+            "this executor does not expose Tool caller authority".into(),
+        ))
+    }
     /// Reads one bounded immutable inherited parent-history page.
     async fn read_fork_facts(
         &self,
@@ -1009,6 +1050,18 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<ForkFactPage>>;
     /// Atomically enters every pending next-Step message at one safe model boundary.
     async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
+    /// Reads current bounded domains for an exact started Tool, including after cancellation.
+    /// This does not open a Step or acquire new execution authority.
+    async fn tool_settlement_domains(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+    ) -> Result<Vec<DomainStateView>> {
+        let _ = (claim, effect_id);
+        Err(TurnError::Invalid(
+            "Tool settlement domain reads are unsupported".into(),
+        ))
+    }
     /// Captures a durable Fact/control horizon and complete domain state at a safe boundary.
     /// Opens a charged Step for a direct Turn when necessary. The reader expires with the
     /// exact claim or supplied stage cancellation; no callback executes under admission.
@@ -1300,6 +1353,9 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// Only optional request evidence exceeds a budget, before any publication.
+    #[error("optional request evidence exceeds the remaining prepublication byte budget")]
+    EvidenceBudget,
     /// The exact live continuation owner or guarded state is no longer available.
     #[error("automatic continuation is disarmed")]
     ContinuationDisarmed,

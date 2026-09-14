@@ -190,6 +190,7 @@ async fn append_session(
             let terminal = closed && remaining == 1;
             let body = if next_seq == 1 {
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id: turn.clone(),
                     text: "benchmark".to_owned(),
                     model: None,
@@ -374,6 +375,7 @@ async fn benchmark_metadata(sessions: usize) {
                             seq,
                             seq,
                             SessionFactBody::TurnAccepted {
+                                reasoning_effort: None,
                                 turn_id: turn.clone(),
                                 text: "mixed write".into(),
                                 model: None,

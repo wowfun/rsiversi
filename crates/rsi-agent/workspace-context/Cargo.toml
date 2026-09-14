@@ -27,6 +27,7 @@ libc.workspace = true
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-agent-composition = { path = "../composition" }
 rsi-agent-context = { path = "../context" }
 rsi-agent-kernel = { path = "../kernel" }

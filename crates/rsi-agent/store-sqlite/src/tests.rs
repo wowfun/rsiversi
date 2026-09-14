@@ -10,6 +10,58 @@ mod selection_work;
 mod ready_metadata;
 
 #[tokio::test]
+async fn factory_retains_only_safe_startup_facts_for_its_owner() {
+    let root = tempfile::tempdir().unwrap();
+    drop(SqliteStore::open(root.path()).unwrap());
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION - 1)
+        .unwrap();
+    drop(connection);
+    let factory = SqliteStoreFactory::default();
+    let runtime = rsi_meta::Runtime::default();
+    let resolved = rsi_meta::ResolvedFactory::linked(
+        "store",
+        "test",
+        rsi_meta::UpdateMode::RestartRequired,
+        Arc::new(factory.clone()),
+    );
+    let handle = runtime
+        .root()
+        .apply(resolved.clone(), serde_json::json!({"root":root.path()}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        handle.snapshot().state,
+        rsi_meta::FiberState::Failed(_)
+    ));
+    let diagnostic = factory.take_startup_failure().unwrap();
+    assert_eq!(diagnostic.root, root.path());
+    assert_eq!(
+        diagnostic.kind,
+        SqliteStoreStartupFailureKind::SchemaMismatch {
+            expected: AGENT_STORE_SCHEMA_VERSION,
+            actual: AGENT_STORE_SCHEMA_VERSION - 1,
+        }
+    );
+    assert!(factory.take_startup_failure().is_none());
+    assert!(
+        SqliteStoreFactory::default()
+            .take_startup_failure()
+            .is_none()
+    );
+    let valid = tempfile::tempdir().unwrap();
+    let active = runtime
+        .root()
+        .apply(resolved, serde_json::json!({"root":valid.path()}))
+        .await
+        .unwrap();
+    assert_eq!(active.snapshot().state, rsi_meta::FiberState::Active);
+    assert!(factory.take_startup_failure().is_none());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 #[ignore = "report-only actual SQLite validation VM and full-scan work"]
 async fn online_validation_sql_work() {
     use rusqlite::{
@@ -214,6 +266,7 @@ fn test_fact(sequence: u64) -> SessionFact {
         sequence,
         sequence,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: TurnId::new(format!("turn-{sequence}")).unwrap(),
             text: "hello".into(),
             model: None,
@@ -1395,6 +1448,7 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
                 requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
                 effective_turns: 0,
             },
+            rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
         )
         .unwrap()
 }

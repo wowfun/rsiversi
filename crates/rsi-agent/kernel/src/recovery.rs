@@ -273,6 +273,8 @@ pub(super) async fn load_control_state(
     session_id: &SessionId,
     budget: &TurnBudget,
 ) -> Result<(u64, BTreeMap<TurnId, TurnControl>, Vec<TurnId>)> {
+    let evidence_cache = Mutex::default();
+    let header = store.header(session_id).await?;
     let mut open_cursor = 0_u64;
     let mut durable_seq = None;
     let mut turns = BTreeMap::new();
@@ -320,6 +322,16 @@ pub(super) async fn load_control_state(
                     ));
                 }
                 for fact in &turn_page.facts {
+                    evidence::validate_references(
+                        store.as_ref(),
+                        &evidence_cache,
+                        session_id,
+                        fact.body(),
+                    )
+                    .await
+                    .map_err(|error| KernelError::Invariant(error.to_string()))?;
+                    super::execution::validate_intent_price(&header, fact.body())
+                        .map_err(|error| KernelError::Invariant(error.to_string()))?;
                     apply_recovered_fact(&mut turns, &mut order, budget, fact)?;
                     turn_cursor = fact.seq();
                 }

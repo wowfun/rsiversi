@@ -29,8 +29,10 @@ async fn waiting_root(
     assert_eq!(root_claim.session_id(), &root);
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(kernel, &root_claim).await,
             child_session_id: SessionId::new(format!("isolated-child-{index:03}")).unwrap(),
             task_name: "child".into(),
             message_id: MessageId::new(format!("isolated-child-message-{index}")).unwrap(),
@@ -193,8 +195,10 @@ async fn transient_ancestor_settlement_failure_is_retried_without_restart() {
     let child_id = SessionId::new("session-settlement-retry-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(&kernel, &root_claim).await,
             child_session_id: child_id.clone(),
             task_name: "child".into(),
             message_id: MessageId::new("message-settlement-retry-child").unwrap(),
@@ -281,8 +285,10 @@ async fn reserved_child_completion_settles_at_full_parent_mailbox_occupancy() {
     let child_id = SessionId::new("session-reserved-completion-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(&kernel, &root_claim).await,
             child_session_id: child_id,
             task_name: "child".into(),
             message_id: MessageId::new("message-reserved-completion-child").unwrap(),
@@ -407,6 +413,7 @@ async fn activation_terminal_accepts_a_turn_submitted_during_preparation() {
 
     let queued = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: TurnId::new("turn-terminal-submission-race-queued").unwrap(),
             session: resume(&kernel, session_id.clone()).await,
             text: "accepted while terminal preparation is paused".into(),

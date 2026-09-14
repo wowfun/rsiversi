@@ -24,9 +24,11 @@ relative to it. Project symlinks are omissions, not alternate authorities, and
 an incomplete observation cannot replace the last-good durable context.
 
 Subagent control authority is process-local and claim-scoped. The executor
-derives `AgentCallerAuthority` from the exact live claim and injects it as a
+derives `AgentCallerAuthority` from the exact live claim and started Tool effect and injects it as a
 typed Tool extension; model arguments carry only requested targets and cannot
-name a root, claim seal, or approval authority. Kernel lineage checks constrain
+name a root, claim seal, model-origin proof, or approval authority. Kernel checks
+the ToolIntent against its completed source Conversation before issuing that
+authority; settling the Tool invalidates it. Kernel lineage checks constrain
 spawn, message, list, wait, and interrupt operations. The standard Session
 adapter routes an approval answer only after validating the explicit owning
 Session within the caller's durable Agent tree, then dispatches the exact

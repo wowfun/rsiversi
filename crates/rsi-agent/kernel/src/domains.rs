@@ -72,6 +72,19 @@ impl AgentKernel {
             ));
         }
         let caller = self.agent_caller(claim)?;
+        for body in &request.facts {
+            evidence::validate_references(
+                self.inner.store.as_ref(),
+                &self.inner.evidence_cache,
+                claim.session_id(),
+                body,
+            )
+            .await?;
+        }
+        let tool_settlement = matches!(
+            request.facts.as_slice(),
+            [SessionFactBody::ToolResult { .. }]
+        );
         let admission = self
             .inner
             .submission_admission
@@ -179,6 +192,7 @@ impl AgentKernel {
             }
             let session = &state.sessions[claim.session_id()];
             for fact in &facts {
+                execution::validate_intent_price(&session.header, fact.body())?;
                 validate_durable_intent_fence(session, fact.body())?;
             }
             clone_turn_control(turn)
@@ -200,7 +214,11 @@ impl AgentKernel {
                 bytes.checked_add(fact.encoded_len())
             })
             .ok_or(TurnError::Capacity)?;
-        let lease = self.admit_agent_mutation(&caller, &CancellationToken::new())?;
+        let lease = self.admit_domain_or_agent_mutation(
+            &caller,
+            &CancellationToken::new(),
+            tool_settlement,
+        )?;
         let candidate = Candidate {
             caller,
             original_fact_seq: live,

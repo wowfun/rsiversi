@@ -51,6 +51,59 @@ impl AgentKernel {
 
 #[async_trait]
 impl TurnJobs for AgentKernel {
+    async fn peek_job(
+        &self,
+        session: &SessionId,
+        header_sha256: &str,
+        request: rsi_agent_turn_protocol::JobPreviewRequest,
+        cancellation: CancellationToken,
+    ) -> TurnResult<rsi_agent_turn_protocol::JobPreviewPage> {
+        use rsi_agent_turn_protocol::{JobPreview, JobPreviewPage, JobPreviewStream};
+        request.validate()?;
+        if cancellation.is_cancelled() {
+            return Err(TurnError::ShuttingDown);
+        }
+        let (generation, source) = self.job_source(session, header_sha256, &request.turn_id)?;
+        if generation != request.generation || !source.is_active() {
+            return Err(TurnError::StaleClaim);
+        }
+        let preview = source
+            .peek(&request)?
+            .map(|read| {
+                if read.job.id != request.job_id
+                    || read.job.origin.as_deref() != Some(request.effect_id.as_str())
+                {
+                    return Err(TurnError::Invalid("job preview origin differs".into()));
+                }
+                read.job
+                    .validate()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?;
+                Ok(JobPreview {
+                    status: read.job.status,
+                    stdout: JobPreviewStream::from_read(read.stdout, request.stdout_bytes)?,
+                    stderr: JobPreviewStream::from_read(read.stderr, request.stderr_bytes)?,
+                })
+            })
+            .transpose()?;
+        let page = JobPreviewPage {
+            session_id: session.clone(),
+            header_sha256: header_sha256.into(),
+            request: request.clone(),
+            preview,
+        };
+        let (current_generation, current_source) =
+            self.job_source(session, header_sha256, &request.turn_id)?;
+        if cancellation.is_cancelled() {
+            return Err(TurnError::ShuttingDown);
+        }
+        if current_generation != generation
+            || !Arc::ptr_eq(&source, &current_source)
+            || !source.is_active()
+        {
+            return Err(TurnError::StaleClaim);
+        }
+        Ok(page)
+    }
     async fn read_jobs(
         &self,
         session: &SessionId,
@@ -100,7 +153,6 @@ impl TurnJobs for AgentKernel {
             page.jobs.pop();
             page.has_more = true;
         }
-        page.validate_for(session, header_sha256, &request)?;
         let (current_generation, current_source) =
             self.job_source(session, header_sha256, &request.turn_id)?;
         if cancellation.is_cancelled() {

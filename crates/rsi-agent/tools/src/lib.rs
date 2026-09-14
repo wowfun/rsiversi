@@ -94,7 +94,9 @@ fn registrations(
                 "properties":{
                     "task_name":{"type":"string","minLength":1,"maxLength":MAXIMUM_AGENT_IDENTIFIER_BYTES},
                     "message":{"type":"string","minLength":1},
-                    "fork_turns":{"type":"string","minLength":1,"maxLength":20}
+                    "fork_turns":{"type":"string","minLength":1,"maxLength":20},
+                    "model":{"type":"object","properties":{"deployment":{"type":"string"},"model":{"type":"string"}},"required":["deployment","model"],"additionalProperties":false,"description":"Explicit child route. Resets inherited effort unless reasoning_effort is supplied."},
+                    "reasoning_effort":{"type":"string","minLength":1,"maxLength":32,"description":"Adapter-declared effort; requires an explicit model."}
                 },
                 "required":["task_name","message"],
                 "additionalProperties":false
@@ -205,6 +207,8 @@ impl NativeExecutor {
         match self
             .turns
             .spawn_agent(SpawnAgentRequest {
+                model: arguments.model,
+                reasoning_effort: arguments.reasoning_effort,
                 cancellation: execution.cancellation.clone(),
                 caller: caller.clone(),
                 child_session_id: deterministic_session(
@@ -443,6 +447,8 @@ impl ToolExecutor for NativeExecutor {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArguments {
+    model: Option<rsi_ai_protocol::ModelRef>,
+    reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     task_name: String,
     message: String,
     fork_turns: Option<String>,

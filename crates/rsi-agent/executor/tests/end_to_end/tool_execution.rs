@@ -1,5 +1,23 @@
 use super::*;
 
+#[derive(Debug)]
+struct AuthenticatedEcho(EchoTool);
+#[async_trait]
+impl ToolExecutor for AuthenticatedEcho {
+    async fn execute(
+        &self,
+        arguments: Value,
+        execution: ToolExecution,
+    ) -> ToolResultType<ToolResult> {
+        let caller = execution
+            .extension::<rsi_agent_turn_protocol::AgentCallerAuthority>()
+            .expect("external Tool execution requires authenticated origin authority");
+        assert!(caller.tool_effect_id().is_some());
+        assert!(caller.source_selection().is_some());
+        self.0.execute(arguments, execution).await
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() {
     let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
@@ -70,10 +88,10 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
-            executor: Arc::new(EchoTool {
+            executor: Arc::new(AuthenticatedEcho(EchoTool {
                 store: stack.store.clone(),
                 calls: tool_calls.clone(),
-            }),
+            })),
         })
         .unwrap();
     let fixture = Arc::new(LanguageFixture {
@@ -786,7 +804,10 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
         .activate_language("test.language.tool-result-budget", fixture)
         .await;
     let executor_fiber = stack.activate_executor("executor-tool-result-budget").await;
-    let budget = TurnBudget::new(1_800_000, 64, 256, 8, 67_108_864).unwrap();
+    // One Step start, Model intent/start, all scripted events, then Tool intent/start.
+    // Admit execution and make the result the first over-budget generated record.
+    let record_limit = u64::try_from(tool_script().len()).unwrap() + 5;
+    let budget = TurnBudget::new(1_800_000, 64, 256, record_limit, 67_108_864).unwrap();
 
     let (submitted, outcome) = stack
         .submit_and_wait_with_header("budget the result", None, header_with_budget(budget))
@@ -796,8 +817,8 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
         outcome,
         TurnOutcome::BudgetExceeded {
             dimension: BudgetDimension::GeneratedRecords,
-            consumed: 9,
-            limit: 8,
+            consumed: record_limit + 1,
+            limit: record_limit,
         }
     );
     let facts = stack

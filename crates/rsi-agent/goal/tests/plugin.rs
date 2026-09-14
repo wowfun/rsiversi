@@ -422,6 +422,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
                 1,
                 1,
                 SessionFactBody::MessageTurnAccepted {
+                    reasoning_effort: None,
                     turn_id: turn.clone(),
                     activation_id: ActivationId::new("activation").unwrap(),
                     message_ids: vec![if fault == "wrong-message" {
@@ -436,7 +437,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
             )
             .unwrap(),
         );
-        let intent = Arc::new(SessionFact::new(2, 1, SessionFactBody::ToolIntent { turn_id: turn.clone(), effect_id: effect.clone(), identity: if fault == "wrong-identity" { ToolResultIdentity::new("other", "invocation", "call", "a".repeat(64)).unwrap() } else { identity.clone() }, name: if fault == "wrong-name" { "bash" } else { "report_goal" }.into(), arguments: if fault == "wrong-args" { serde_json::json!({"goal_id":"goal-task","kind":"blocked","evidence":"different"}) } else { args.clone() }, approval: None, parallel_safe: false }).unwrap());
+        let intent = Arc::new(SessionFact::new(2, 1, SessionFactBody::ToolIntent { source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(), turn_id: turn.clone(), effect_id: effect.clone(), identity: if fault == "wrong-identity" { ToolResultIdentity::new("other", "invocation", "call", "a".repeat(64)).unwrap() } else { identity.clone() }, name: if fault == "wrong-name" { "bash" } else { "report_goal" }.into(), arguments: if fault == "wrong-args" { serde_json::json!({"goal_id":"goal-task","kind":"blocked","evidence":"different"}) } else { args.clone() }, approval: None, parallel_safe: false }).unwrap());
         let settled = Arc::new(
             SessionFact::new(
                 3,

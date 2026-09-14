@@ -1,5 +1,16 @@
 # rsi-agent-turn-protocol
 
+`TurnJobs::peek_job` samples process-local output through the original executor's
+weak Jobs source. The request binds Session/Header, active Turn, nonzero claim
+generation, job ID and durable Tool effect. Kernel revalidates the live source
+after sampling. Each stream is at most 32 KiB; their combined raw budget is
+40 KiB so base64 plus bounded identity metadata fits a 60 KiB page and a 64 KiB
+Session API reply, including its target envelope.
+Kernel validates raw stream lengths, offsets and output references before
+encoding each stream once. Typed local relays trust that result; the Session API
+client validates decoded wire pages before admitting them for presentation.
+Missing retained output is `None`, never scope reacquisition or execution.
+
 Current-Turn Jobs observation is process-local. The Executor publishes a weak
 read-only source under its authenticated claim, retaining the strong source only
 for that claim. The source contains the exact originally acquired Jobs authority;
@@ -119,8 +130,11 @@ capacity. Its caller must end execution and may only settle already admitted
 effects and publish the terminal outcome; it cannot start further effects with
 that wait's released lane. The standard executor maps cancellation/timeout to a
 terminal drive failure. An unforgeable `AgentCallerAuthority` is derived from a live
-claim and transported to trusted Tools through the generic typed extension
-slot, so model arguments cannot invent tree authority. The legacy direct
+claim for internal domain and supervision operations. Trusted Tools receive
+`tool_caller` authority bound to their exact active effect and authenticated
+source request settings; child creation requires that binding. The generic
+typed extension slot carries this private authority, so model arguments cannot
+invent tree authority. The legacy direct
 Language-turn method remains a lower-level test and recovery seam; the standard
 Session product enters Language work through mailbox claim. A next-Step
 completion still pending when its parent's activation Turn ends is durably

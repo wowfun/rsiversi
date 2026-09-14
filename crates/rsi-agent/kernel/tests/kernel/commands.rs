@@ -231,6 +231,7 @@ impl Fixture {
         let session_id = header.session_id().clone();
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session: SubmitSession::Fresh(PreparedFreshSession::new(header, pin).unwrap()),
                 turn_id: TurnId::new("first").unwrap(),
                 text: "fixture".into(),
@@ -647,6 +648,7 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
     fixture
         .kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: SubmitSession::Fresh(frozen),
             turn_id: TurnId::new("first-draft-turn").unwrap(),
             text: "use actual initial state".into(),

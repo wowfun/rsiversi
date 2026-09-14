@@ -31,6 +31,7 @@ async fn submission_without_a_running_write_behind_worker_fails_within_a_bound()
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(61),
         kernel.submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: TurnId::new("turn-no-worker").unwrap(),
             session: fresh(header("session-no-worker")),
             text: "must not wait forever".into(),
@@ -65,6 +66,7 @@ async fn permanent_flush_failure_rejects_later_mailbox_submission() {
     let turn_id = TurnId::new("turn-mailbox-flush-latch").unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             session: fresh(header(session_id.as_str())),
             text: "create a resident session".into(),
@@ -85,6 +87,10 @@ async fn permanent_flush_failure_rejects_later_mailbox_submission() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id,
                 effect_id: EffectId::new("effect-mailbox-flush-latch").unwrap(),
@@ -137,6 +143,7 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: turn_id.clone(),
                         text: "retry body".into(),
                         model: None,
@@ -177,6 +184,7 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
         async move {
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id,
                     session: fresh(header(session_id.as_str())),
                     text: "retry body".into(),
@@ -215,6 +223,7 @@ async fn caller_turn_id_is_idempotent_live_and_after_restart_but_body_changes_co
     let worker = initial.start_workers();
     let turn_id = TurnId::new("caller-retry-turn").unwrap();
     let request = || SubmitTurn {
+        reasoning_effort: None,
         turn_id: turn_id.clone(),
         session: fresh(header("session-idempotent-submit")),
         text: "same canonical body".into(),
@@ -310,6 +319,7 @@ async fn caller_turn_id_retry_after_terminal_pruning_does_not_reexecute() {
     let worker = kernel.start_workers();
     let turn_id = TurnId::new("pruned-retry-turn").unwrap();
     let request = || SubmitTurn {
+        reasoning_effort: None,
         turn_id: turn_id.clone(),
         session: fresh(header("session-pruned-retry")),
         text: "retried body".into(),
@@ -322,6 +332,7 @@ async fn caller_turn_id_retry_after_terminal_pruning_does_not_reexecute() {
     // durable terminal entry is pruned from the in-memory turn index.
     let keeper = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: TurnId::new("resident-keeper-turn").unwrap(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "keeper".into(),
@@ -387,6 +398,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let first_tools = first_pin.tools();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Fresh(
                 PreparedFreshSession::new(first_header, first_pin).unwrap(),
@@ -400,6 +412,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     composition.select_digest('b');
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(&kernel, SessionId::new("session-generation-a").unwrap()).await,
             text: "resident still A".into(),
@@ -416,6 +429,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let second_tools = second_pin.tools();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Fresh(
                 PreparedFreshSession::new(second_header, second_pin).unwrap(),
@@ -475,6 +489,7 @@ async fn shutdown_releases_resident_generation_pins_while_service_handles_escape
 
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "keep the resident generation pinned".into(),
@@ -621,6 +636,7 @@ async fn resume_token_from_another_kernel_is_rejected_and_releases_its_pin() {
 
     let error = target
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "must not cross Kernel authority".into(),
@@ -654,6 +670,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "resident A".into(),
@@ -670,6 +687,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "resident A remains available".into(),
@@ -698,6 +716,7 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
 
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(
                 &kernel,
@@ -741,6 +760,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
         .unwrap();
     let first = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "generation A".into(),
@@ -775,6 +795,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let prepared = kernel.prepare_resume(&first.session_id).await.unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "generation B".into(),
@@ -858,6 +879,10 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect,
@@ -922,6 +947,10 @@ async fn effect_start_requires_its_intent_to_be_durable() {
             &claim,
             vec![
                 SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                    },
+                    price_quote: None,
                     purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                     turn_id: submitted.turn_id.clone(),
                     effect_id: effect.clone(),
@@ -941,6 +970,10 @@ async fn effect_start_requires_its_intent_to_be_durable() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect.clone(),
@@ -1033,6 +1066,7 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
     let first = submit(&kernel, "session-horizon", "FIRST_PRIVATE_PROMPT").await;
     let later = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "LATER_PRIVATE_PROMPT".into(),
@@ -1062,6 +1096,10 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: first.turn_id.clone(),
                 effect_id: effect_id.clone(),
@@ -1091,6 +1129,7 @@ async fn checkpoint_maintenance_reads_the_exact_prefix_including_queued_turns() 
     let first = submit(&kernel, "session-checkpoint-queue", "first").await;
     let queued = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "queued".into(),
@@ -1329,6 +1368,10 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect.clone(),
@@ -1458,6 +1501,10 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: EffectId::new("captured-live-horizon").unwrap(),
@@ -1482,6 +1529,7 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         async move {
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: resume(&kernel, submitted.session_id).await,
                     text: "LATER_PRIVATE_PROMPT".into(),

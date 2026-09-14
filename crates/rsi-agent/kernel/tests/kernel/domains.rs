@@ -52,6 +52,180 @@ struct DomainRun {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One settlement identity spans injected failures and cancellation.
+async fn tool_result_and_domain_settle_together_across_faults_and_cancellation() {
+    for mode in ["before", "after", "unknown", "cancelled"] {
+        let memory = Arc::new(MemoryStore::new());
+        let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let caller = control_tool_caller(&run.kernel, &run.claim).await;
+        let result = SessionFactBody::ToolResult {
+            turn_id: run.claim.turn_id().clone(),
+            effect_id: caller.tool_effect_id().unwrap().clone(),
+            identity: ToolResultIdentity::new(
+                "fixture",
+                "fixture-control-tool",
+                "fixture-call",
+                "a".repeat(64),
+            )
+            .unwrap(),
+            result: rsi_tools_protocol::ToolResult::new(
+                serde_json::json!({"settled":true}),
+                vec![],
+                false,
+            )
+            .unwrap(),
+        };
+        if mode == "cancelled" {
+            run.kernel
+                .cancel(run.claim.session_id(), run.claim.turn_id(), None)
+                .await
+                .unwrap();
+            assert!(
+                run.kernel
+                    .tool_settlement_domains(&run.claim, caller.tool_effect_id().unwrap())
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                run.kernel
+                    .commit_domains(&run.claim, run.mutation("unrelated", 1, true, vec![]))
+                    .await
+                    .is_err()
+            );
+            let mut forged = result.clone();
+            let SessionFactBody::ToolResult { effect_id, .. } = &mut forged else {
+                unreachable!()
+            };
+            *effect_id = EffectId::new("not-an-authenticated-started-tool").unwrap();
+            assert!(
+                run.kernel
+                    .commit_domains(
+                        &run.claim,
+                        run.mutation("forged-settlement", 1, true, vec![forged])
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                run.kernel
+                    .domain_request(
+                        run.claim.session_id(),
+                        &rsi_agent_session_protocol::DomainRequestId::new("forged-settlement")
+                            .unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if mode == "before" {
+            memory.fail_next_appends(1);
+            assert!(matches!(
+                run.kernel
+                    .commit_domains(
+                        &run.claim,
+                        run.mutation("tool-result", 1, true, vec![result.clone()])
+                    )
+                    .await,
+                Err(TurnError::Store(_))
+            ));
+            let state = run
+                .kernel
+                .domain_states(run.claim.session_id())
+                .await
+                .unwrap();
+            assert!(!run.handle.decode(&state[0].snapshot).unwrap());
+            assert!(
+                !memory
+                    .read_facts(run.claim.session_id(), 0, 32)
+                    .await
+                    .unwrap()
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+            );
+        }
+        if mode == "after" || mode == "unknown" {
+            store.fail_domain_after_apply.store(true, Ordering::Release);
+        }
+        if mode == "unknown" {
+            store
+                .fail_domain_lookup_after_apply
+                .store(true, Ordering::Release);
+        }
+        let settled = run
+            .kernel
+            .commit_domains(
+                &run.claim,
+                run.mutation("tool-result", 1, true, vec![result.clone()]),
+            )
+            .await;
+        if mode == "unknown" {
+            assert!(matches!(
+                settled,
+                Err(TurnError::DomainOutcomeUnknown { .. })
+            ));
+            store.domain_lookup_fails.store(false, Ordering::Release);
+        } else {
+            let receipt = settled.unwrap();
+            assert_eq!(
+                run.kernel
+                    .commit_domains(
+                        &run.claim,
+                        run.mutation("tool-result", 1, true, vec![result])
+                    )
+                    .await
+                    .unwrap(),
+                receipt
+            );
+            assert!(
+                run.kernel
+                    .tool_caller(&run.claim, caller.tool_effect_id().unwrap())
+                    .is_err()
+            );
+        }
+        let receipt = run
+            .kernel
+            .domain_request(
+                run.claim.session_id(),
+                &rsi_agent_session_protocol::DomainRequestId::new("tool-result").unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let span = receipt.commit().fact_span().unwrap();
+        assert_eq!(span.count(), 1);
+        let facts = memory
+            .read_facts(run.claim.session_id(), 0, 32)
+            .await
+            .unwrap()
+            .facts;
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+                .count(),
+            1
+        );
+        assert!(facts.iter().any(|fact| fact.seq() == span.first_seq()
+            && matches!(fact.body(), SessionFactBody::ToolResult { .. })));
+        let state = memory
+            .read_domain_states(run.claim.session_id(), None)
+            .await
+            .unwrap();
+        assert_eq!(state.states[0].head.revision, DomainRevision::new(2));
+        assert!(run.handle.decode(&state.states[0].snapshot).unwrap());
+        if mode == "unknown" {
+            drop(run.lease);
+            assert!(run.kernel.shutdown(run.workers).await.is_err());
+        } else {
+            run.stop().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store, TurnBudget::default()).await;
@@ -145,6 +319,7 @@ impl DomainRun {
         let workers = kernel.start_workers();
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session: SubmitSession::Fresh(initial),
                 turn_id: TurnId::new("domain-turn").unwrap(),
                 text: "work".into(),
@@ -369,6 +544,8 @@ async fn unresolvable_domain_commit_closes_execution_but_preserves_queryable_his
     assert!(matches!(
         run.kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 caller,
                 cancellation: CancellationToken::new(),
                 child_session_id: rejected_child.clone(),
@@ -839,6 +1016,7 @@ async fn sqlite_domain_execution_reopens_with_a_new_codec_generation_and_exact_r
     let workers = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: resume(&kernel, session.clone()).await,
             turn_id: TurnId::new("sql-cold-turn").unwrap(),
             text: "continue".into(),
@@ -1038,6 +1216,7 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
         } else {
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Fresh(initial),
                     text: "hello".into(),
@@ -1140,6 +1319,7 @@ async fn first_submission_retries_compare_actual_baselines_on_resident_and_cold_
                 } else {
                     kernel
                         .submit(SubmitTurn {
+                            reasoning_effort: None,
                             turn_id,
                             session: SubmitSession::Fresh(initial),
                             text: "same request".into(),
@@ -1294,9 +1474,12 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
         ("none", ForkTurnSelection::None, false),
     ] {
         let child = SessionId::new(format!("domain-child-{name}")).unwrap();
+        let caller = control_tool_caller(&reopened, &invoking).await;
         let request = || SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: reopened.agent_caller(&invoking).unwrap(),
+            caller: caller.clone(),
             child_session_id: child.clone(),
             task_name: name.into(),
             message_id: MessageId::new(format!("child-{name}")).unwrap(),
@@ -1324,4 +1507,81 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
         .unwrap();
     drop(lease);
     reopened.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn evidence_byte_budget_accounts_for_the_complete_fact_and_domain_batch() {
+    use rsi_agent_session_protocol::{EvidencePart, EvidenceUnavailable, RequestEvidence};
+    for mixed in [false, true] {
+        let store = Arc::new(MemoryStore::new());
+        let mut intent = SessionFactBody::ModelIntent {
+            turn_id: TurnId::new("domain-turn").unwrap(),
+            effect_id: EffectId::new("budget-model").unwrap(),
+            snapshot: snapshot(),
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+            price_quote: None,
+            evidence: RequestEvidence::Available {
+                configuration: EvidencePart::inline("{}".into()),
+                system: EvidencePart::inline("x".repeat(1024)),
+                tools: EvidencePart::inline("[]".into()),
+                manifest: vec![],
+            },
+        };
+        let bytes = SessionFact::new(3, 42, intent.clone())
+            .unwrap()
+            .encoded_len() as u64
+            + 1;
+        let run = DomainRun::start(
+            store.clone(),
+            TurnBudget::new(1_800_000, 64, 256, 65536, bytes).unwrap(),
+        )
+        .await;
+        let before = run
+            .kernel
+            .read_facts(&run.claim, 0, 128)
+            .await
+            .unwrap()
+            .through_seq;
+        let facts = vec![run.step("budget-step"), intent.clone()];
+        let result = if mixed {
+            run.kernel
+                .commit_domains(&run.claim, run.mutation("evidence", 1, true, facts))
+                .await
+                .map(|_| ())
+        } else {
+            run.kernel.publish(&run.claim, facts).await.map(|_| ())
+        };
+        assert!(
+            matches!(result, Err(TurnError::EvidenceBudget)),
+            "mixed={mixed}: {result:?}"
+        );
+        assert_eq!(
+            run.kernel
+                .read_facts(&run.claim, 0, 128)
+                .await
+                .unwrap()
+                .through_seq,
+            before
+        );
+        let SessionFactBody::ModelIntent { evidence, .. } = &mut intent else {
+            unreachable!()
+        };
+        *evidence = RequestEvidence::Unavailable {
+            reason: EvidenceUnavailable::Budget,
+        };
+        let facts = vec![run.step("budget-step"), intent];
+        if mixed {
+            run.kernel
+                .commit_domains(&run.claim, run.mutation("evidence", 1, true, facts))
+                .await
+                .unwrap();
+        } else {
+            run.kernel
+                .publish(&run.claim, facts)
+                .await
+                .unwrap()
+                .published();
+        }
+        run.stop().await;
+    }
 }

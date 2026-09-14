@@ -17,6 +17,9 @@ preset selects that factory through the same addon catalog as custom presets.
 Session command admission and complete projections carry its values to consumers;
 neither Kernel nor a wire adapter recognizes its name as a special execution path.
 
+`todo_write` is included because it updates only the Session task list, without
+file, process or external execution authority.
+
 The mode starts disabled. The approved RSI allowlist adds constraints to prepared
 Tools without relaxing sandbox or approval requirements. Commands propose only
 typed replacements and inherit existing exact retry, revision, draft publication,

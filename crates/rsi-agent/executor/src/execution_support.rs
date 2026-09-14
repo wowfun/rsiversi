@@ -90,27 +90,34 @@ pub(super) async fn publish_nonterminal_with_capacity_retry(
     turns: &dyn TurnExecution,
     config: &ExecutorConfig,
     claim: &TurnClaim,
-    bodies: Vec<SessionFactBody>,
+    mut bodies: Vec<SessionFactBody>,
 ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
-    match turns.publish(claim, bodies).await {
-        Ok(PublishAttempt::Published(facts)) => Ok(facts),
-        Ok(PublishAttempt::FlushRequired { unpublished }) => {
-            let tail = live_tail(turns, claim).await?;
-            if tail == 0 {
+    let mut flushed = false;
+    loop {
+        let fallback = evidence::budget_fallback(&bodies);
+        match turns.publish(claim, bodies).await {
+            Ok(PublishAttempt::Published(facts)) => return Ok(facts),
+            Ok(PublishAttempt::FlushRequired { unpublished }) if !flushed => {
+                let tail = live_tail(turns, claim).await?;
+                if tail == 0 {
+                    return Err(fatal(
+                        "Fact publication requires a nonempty flushable prefix",
+                    ));
+                }
+                flush_execution_prefix(turns, config, claim, tail).await?;
+                flushed = true;
+                bodies = unpublished;
+            }
+            Ok(PublishAttempt::FlushRequired { .. }) => {
                 return Err(fatal(
-                    "Fact publication requires a nonempty flushable prefix",
+                    "Fact publication remained full after its durable flush",
                 ));
             }
-            flush_execution_prefix(turns, config, claim, tail).await?;
-            match turns.publish(claim, unpublished).await {
-                Ok(PublishAttempt::Published(facts)) => Ok(facts),
-                Ok(PublishAttempt::FlushRequired { .. }) => Err(fatal(
-                    "Fact publication remained full after its durable flush",
-                )),
-                Err(error) => Err(turn_failure(error)),
+            Err(TurnError::EvidenceBudget) if fallback.is_some() => {
+                bodies = fallback.expect("available evidence has a bounded replacement");
             }
+            Err(error) => return Err(turn_failure(error)),
         }
-        Err(error) => Err(turn_failure(error)),
     }
 }
 
@@ -467,4 +474,29 @@ pub(super) fn settled_tool_budget(
         },
         failure => failure,
     }
+}
+
+/// Constructs all mandatory effect-bound extensions before any external Tool work.
+pub(super) fn tool_start_extensions(
+    turns: &dyn TurnExecution,
+    claim: &TurnClaim,
+    effect_id: &EffectId,
+) -> std::result::Result<rsi_tools_protocol::ToolExecutionExtensions, TurnError> {
+    let caller = turns.tool_caller(claim, effect_id)?;
+    let budget = claim.header().settings().turn_budget();
+    let evidence_bytes = budget.maximum_generated_record_bytes() / 8 / budget.maximum_tool_calls();
+    let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
+        .with(Arc::new(
+            rsi_jobs::JobOrigin::new(effect_id.as_str().to_owned())
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+        ))
+        .map_err(|error| TurnError::Invalid(error.to_string()))?
+        .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(
+            usize::try_from(evidence_bytes).unwrap_or(usize::MAX),
+        )))
+        .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    extensions = extensions
+        .with(Arc::new(caller))
+        .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    Ok(extensions)
 }

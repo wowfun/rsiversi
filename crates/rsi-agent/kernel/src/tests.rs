@@ -3,6 +3,7 @@ use super::*;
 
 fn tool_intent(turn_id: &TurnId, suffix: &str, parallel_safe: bool) -> SessionFactBody {
     SessionFactBody::ToolIntent {
+        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
         turn_id: turn_id.clone(),
         effect_id: EffectId::new(format!("effect-{suffix}")).unwrap(),
         identity: rsi_tools_protocol::ToolResultIdentity::new(
@@ -26,6 +27,10 @@ fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
     let second = tool_intent(&turn_id, "second", true);
     let exclusive = tool_intent(&turn_id, "exclusive", false);
     let mut turn = TurnControl::new(1, 1);
+    turn.tool_source = Some(Arc::new(tool_origin::tests::source(&[
+        ("call-first", "tool_first"),
+        ("call-second", "tool_second"),
+    ])));
 
     apply_tool_body(&mut turn, &first).unwrap();
     apply_tool_body(&mut turn, &second).unwrap();
@@ -37,6 +42,10 @@ fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
     ));
 
     let mut turn = TurnControl::new(1, 1);
+    turn.tool_source = Some(Arc::new(tool_origin::tests::source(&[(
+        "call-exclusive",
+        "tool_exclusive",
+    )])));
     apply_tool_body(&mut turn, &exclusive).unwrap();
     assert!(matches!(
         apply_tool_body(&mut turn, &first),

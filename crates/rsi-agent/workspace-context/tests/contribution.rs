@@ -259,6 +259,7 @@ impl Fixture {
         };
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session,
                 turn_id: TurnId::new(turn).unwrap(),
                 text: text.into(),
@@ -331,6 +332,7 @@ async fn queued_direct_turns_each_invoke_only_their_own_skill_once() {
         .await;
     let second = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: SubmitSession::Resume(
                 kernel.prepare_resume(first.session_id()).await.unwrap(),
             ),
@@ -652,10 +654,121 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     .unwrap()
     .unwrap()
     .unwrap();
+    // The child must be created by an actual model-produced, started Tool.
+    let model_effect = rsi_agent_session_protocol::EffectId::new("spawn-model").unwrap();
+    let tool_effect = rsi_agent_session_protocol::EffectId::new("spawn-tool").unwrap();
+    let identity = rsi_tools_protocol::ToolResultIdentity::new(
+        "fixture",
+        "spawn-tool",
+        "spawn-call",
+        "a".repeat(64),
+    )
+    .unwrap();
+    let model = parent.header().settings().default_model();
+    let profile = rsi_ai_protocol::LanguageProfile::new(
+        100_000,
+        1_000,
+        10_000,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap();
+    let prepared = rsi_ai_protocol::PreparedCallSnapshot {
+        call_id: "spawn-request".into(),
+        deployment_id: model.deployment().into(),
+        model: model.model().into(),
+        provider_family: "fixture".into(),
+        capability: rsi_ai_protocol::AiCapability::Language,
+        protocol: "fixture".into(),
+        transport: "memory".into(),
+        endpoint_fingerprint: "fixture".into(),
+        config_generation: 1,
+        credential_source: None,
+        retry_policy: rsi_ai_protocol::RetryPolicy::default(),
+        request_sha256: "a".repeat(64),
+        language_settings: Some(
+            rsi_ai_protocol::PreparedLanguageSettings::new(profile, None).unwrap(),
+        ),
+    };
+    let mut batches = vec![
+        vec![SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
+            turn_id: parent.turn_id().clone(),
+            effect_id: model_effect.clone(),
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+            snapshot: prepared,
+        }],
+        vec![SessionFactBody::ModelStarted {
+            turn_id: parent.turn_id().clone(),
+            effect_id: model_effect.clone(),
+        }],
+    ];
+    batches.push(
+        [
+            rsi_ai_protocol::LanguageEvent::ContentStarted {
+                index: 0,
+                content: rsi_ai_protocol::ContentStart::ToolCall {
+                    id: "spawn-call".into(),
+                    name: "fixture_spawn".into(),
+                    kind: rsi_ai_protocol::ToolCallKind::Function,
+                },
+            },
+            rsi_ai_protocol::LanguageEvent::ContentDelta {
+                index: 0,
+                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+            },
+            rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+            rsi_ai_protocol::LanguageEvent::Finished {
+                reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                replay: None,
+            },
+        ]
+        .into_iter()
+        .map(|event| SessionFactBody::ModelEvent {
+            turn_id: parent.turn_id().clone(),
+            effect_id: model_effect.clone(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            event,
+        })
+        .collect(),
+    );
+    batches.push(vec![SessionFactBody::ToolIntent {
+        turn_id: parent.turn_id().clone(),
+        effect_id: tool_effect.clone(),
+        source_model_effect_id: model_effect,
+        identity: identity.clone(),
+        name: "fixture_spawn".into(),
+        arguments: serde_json::json!({}),
+        approval: None,
+        parallel_safe: false,
+    }]);
+    batches.push(vec![SessionFactBody::ToolStarted {
+        turn_id: parent.turn_id().clone(),
+        effect_id: tool_effect.clone(),
+        identity,
+    }]);
+    for batch in batches {
+        let rsi_agent_turn_protocol::PublishAttempt::Published(facts) =
+            kernel.publish(&parent, batch).await.unwrap()
+        else {
+            panic!("bounded fixture publication");
+        };
+        kernel
+            .flush(&parent, facts.last().unwrap().seq())
+            .await
+            .unwrap();
+    }
     let child = kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&parent).unwrap(),
+            caller: kernel.tool_caller(&parent, &tool_effect).unwrap(),
             child_session_id: SessionId::new("child").unwrap(),
             task_name: "child".into(),
             message_id: MessageId::new("child-task").unwrap(),

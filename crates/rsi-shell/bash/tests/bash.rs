@@ -209,7 +209,11 @@ impl Fixture {
                 },
                 sandbox: Arc::clone(&self.sandbox),
                 job_scope: Some(self.scope.clone()),
-                extensions: ToolExecutionExtensions::default(),
+                extensions: ToolExecutionExtensions::default()
+                    .with(Arc::new(
+                        rsi_jobs::JobOrigin::new(format!("invocation-{number}")).unwrap(),
+                    ))
+                    .unwrap(),
             })
             .await
     }
@@ -243,6 +247,100 @@ async fn restricted_bash_fails_closed_without_a_verified_sandbox_backend() {
 
 fn linked(name: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory)
+}
+
+#[tokio::test]
+async fn foreground_preview_reads_bounded_native_output_before_completion_without_reporting() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let fixture = Fixture::activate().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let command = format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{port}; head -c 40000 /dev/zero | tr '\\0' x; printf ready >&3; IFS= read -r -u 3; printf done; printf err >&2"
+    );
+    let call = fixture.call(json!({"command":command,"timeout_ms":10000}));
+    let probe = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut ready = [0; 5];
+        socket.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, b"ready");
+        let job = fixture
+            .jobs
+            .list(&fixture.scope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert!(job.requires_report);
+        let origin = job.origin.as_deref().unwrap();
+        assert!(
+            fixture
+                .jobs
+                .peek(&fixture.scope, &job.id, "another-effect", [32, 32])
+                .is_err()
+        );
+        assert!(
+            fixture
+                .jobs
+                .peek(&fixture.scope, &job.id, origin, [32769, 32])
+                .is_err()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let page = fixture
+                    .jobs
+                    .peek(&fixture.scope, &job.id, origin, [31, 17])
+                    .unwrap()
+                    .unwrap();
+                assert!(page.stdout.bytes.len() <= 31);
+                assert!(page.stderr.bytes.len() <= 17);
+                if page.stdout.next_offset == 40000 {
+                    assert_eq!(page.stdout.bytes, b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+                    assert_eq!(page.stdout.oldest_offset, 39969);
+                    assert!(page.stdout.lossy);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fixture.jobs.get(&fixture.scope, &job.id).unwrap(), job);
+        socket.write_all(b"continue\n").await.unwrap();
+        (job.id, origin.to_owned())
+    };
+    let (result, (id, origin)) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(call, probe)
+    })
+    .await
+    .unwrap();
+    let result = result.unwrap();
+    assert!(!result.is_error);
+    assert!(fixture.jobs.get(&fixture.scope, &id).unwrap().reported);
+    assert!(
+        fixture
+            .jobs
+            .peek(&fixture.scope, &id, &origin, [32, 32])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .jobs
+            .finalize_scope(&fixture.scope)
+            .await
+            .unwrap()
+            .unreported
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .jobs
+            .peek(&fixture.scope, &id, &origin, [32, 32])
+            .is_err()
+    );
+    fixture.shutdown().await;
 }
 
 #[test]

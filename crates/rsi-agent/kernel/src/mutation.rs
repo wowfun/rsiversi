@@ -260,11 +260,23 @@ impl AgentKernel {
         caller: &AgentCallerAuthority,
         cancellation: &CancellationToken,
     ) -> TurnResult<AgentMutationLease> {
+        self.admit_domain_or_agent_mutation(caller, cancellation, false)
+    }
+
+    /// The caller has already staged and authenticated an exact single `ToolResult`
+    /// under Session admission when `tool_settlement` is true.
+    pub(super) fn admit_domain_or_agent_mutation(
+        &self,
+        caller: &AgentCallerAuthority,
+        cancellation: &CancellationToken,
+        tool_settlement: bool,
+    ) -> TurnResult<AgentMutationLease> {
         let state = lock_state(&self.inner);
         if !state.accepting {
             return Err(TurnError::ShuttingDown);
         }
         let turn = self.validate_claim(&state, caller.claim())?;
+        tool_origin::validate_caller(turn, caller)?;
         let gate = &turn
             .claim
             .as_ref()
@@ -272,7 +284,7 @@ impl AgentKernel {
             .mutations;
         let mut admission = gate.lock();
         if admission.admission != MutationAdmission::Open
-            || turn.cancellation.is_cancelled()
+            || (turn.cancellation.is_cancelled() && !tool_settlement)
             || cancellation.is_cancelled()
         {
             return Err(TurnError::StaleClaim);

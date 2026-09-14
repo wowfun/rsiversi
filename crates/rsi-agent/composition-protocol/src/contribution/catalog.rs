@@ -1,6 +1,6 @@
 use super::{
     ContextContributor, ContributionError, ContributionResult, MAXIMUM_AGENT_CONTRIBUTIONS,
-    PostToolContributor, ToolPolicy,
+    PostToolContributor, ToolPolicy, ToolSettlementContributor,
 };
 use rsi_agent_session_protocol::ContributionId;
 use rsi_meta::{
@@ -16,6 +16,8 @@ pub enum ContributionStage {
     BeforeStep,
     /// After source-ordered Tool settlement.
     AfterTools,
+    /// Pure domain changes committed together with one `ToolResult`.
+    ToolSettlement,
     /// Before Tool approval or execution.
     ToolPolicy,
     /// Explicit Session command dispatch, outside the execution loop.
@@ -31,6 +33,8 @@ pub enum ContributionKind {
     Context(Arc<dyn ContextContributor>),
     /// Consumer of a durably settled Tool batch.
     PostTool(Arc<dyn PostToolContributor>),
+    /// Pure prepublication result/domain settlement.
+    ToolSettlement(Arc<dyn ToolSettlementContributor>),
     /// Monotone prepared-Tool policy.
     ToolPolicy(Arc<dyn ToolPolicy>),
     /// Effect-free Session command with bounded discovery metadata.
@@ -69,6 +73,7 @@ impl ContributionRegistration {
         match self.kind {
             ContributionKind::Context(_) => ContributionStage::BeforeStep,
             ContributionKind::PostTool(_) => ContributionStage::AfterTools,
+            ContributionKind::ToolSettlement(_) => ContributionStage::ToolSettlement,
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
             ContributionKind::Command(_) => ContributionStage::Command,
             ContributionKind::Projection(_) => ContributionStage::Projection,

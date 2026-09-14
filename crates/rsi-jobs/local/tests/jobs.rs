@@ -30,6 +30,7 @@ struct TestControl {
     release: CancellationToken,
     cancel_count: AtomicUsize,
     wait_count: AtomicUsize,
+    peek_gate: Option<Arc<(Notify, Mutex<bool>, Condvar)>>,
 }
 
 impl TestControl {
@@ -42,6 +43,7 @@ impl TestControl {
             release: CancellationToken::new(),
             cancel_count: AtomicUsize::new(0),
             wait_count: AtomicUsize::new(0),
+            peek_gate: None,
         })
     }
 
@@ -57,6 +59,27 @@ impl TestControl {
 
 #[async_trait]
 impl JobControl for TestControl {
+    fn peek(&self, stream: JobStream, maximum: usize) -> Result<Option<JobOutputRead>> {
+        if let Some(gate) = &self.peek_gate {
+            gate.0.notify_one();
+            let mut released = gate.1.lock().unwrap();
+            while !*released {
+                released = gate.2.wait(released).unwrap();
+            }
+        }
+        let bytes = match stream {
+            JobStream::Stdout => &self.stdout,
+            JobStream::Stderr => &self.stderr,
+        };
+        let start = bytes.len().saturating_sub(maximum);
+        Ok(Some(JobOutputRead {
+            bytes: bytes[start..].to_vec(),
+            oldest_offset: start as u64,
+            next_offset: bytes.len() as u64,
+            lossy: start > 0,
+            full_output: None,
+        }))
+    }
     fn read(&self, stream: JobStream, offset: u64) -> Result<JobOutputRead> {
         let bytes = match stream {
             JobStream::Stdout => &self.stdout,
@@ -388,6 +411,7 @@ fn submission(producer: &str, name: &str, control: Arc<TestControl>) -> JobSubmi
     JobSubmission {
         name: name.into(),
         producer: producer.into(),
+        origin: None,
         request: JobRequest::new(TestRequest(control)),
         requires_report: true,
     }
@@ -404,6 +428,110 @@ async fn wait_terminal(jobs: &Arc<dyn Jobs>, authority: &rsi_jobs::JobScopeAutho
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn terminal_peek_preserves_unreported_finalization_and_original_scope_generation() {
+    let (_runtime, fiber, jobs) = activated(json!({})).await;
+    let _lease = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    let authority = jobs.acquire_scope(scope("peek")).unwrap();
+    let control = TestControl::new(
+        TestSettlement::Immediate(JobStatus::Completed),
+        b"first and final",
+        b"warning",
+    );
+    let mut input = submission("test", "preview", control.clone());
+    input.origin = Some("effect".into());
+    let id = jobs.submit(&authority, input).unwrap();
+    wait_terminal(&jobs, &authority, &id).await;
+    let original = jobs.get(&authority, &id).unwrap();
+    let waits = control.wait_count.load(Ordering::Acquire);
+    for _ in 0..20 {
+        let page = jobs
+            .peek(&authority, &id, "effect", [5, 3])
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.job, original);
+        assert_eq!(page.stdout.bytes, b"final");
+        assert_eq!(page.stderr.bytes, b"ing");
+        assert_eq!(page.stdout.oldest_offset, 10);
+        assert!(!page.job.reported);
+    }
+    assert_eq!(control.wait_count.load(Ordering::Acquire), waits);
+    assert_eq!(control.cancel_count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        jobs.finalize_scope(&authority)
+            .await
+            .unwrap()
+            .unreported
+            .len(),
+        1
+    );
+    let replacement = jobs.acquire_scope(scope("peek")).unwrap();
+    assert!(!replacement.same_generation(&authority));
+    assert!(matches!(
+        jobs.peek(&authority, &id, "effect", [5, 3]),
+        Err(JobsError::ScopeClosed)
+    ));
+    assert!(matches!(
+        jobs.peek(&replacement, &id, "effect", [5, 3]),
+        Err(JobsError::UnknownJob(_))
+    ));
+    drop(jobs);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_preview_does_not_block_registry_and_rechecks_revoked_scope() {
+    let (_runtime, fiber, jobs) = activated(json!({})).await;
+    let _lease = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    let authority = jobs.acquire_scope(scope("blocked-preview")).unwrap();
+    let gate = Arc::new((Notify::new(), Mutex::new(false), Condvar::new()));
+    let mut control = TestControl::new(
+        TestSettlement::Immediate(JobStatus::Completed),
+        b"output",
+        b"",
+    );
+    Arc::get_mut(&mut control).unwrap().peek_gate = Some(gate.clone());
+    let mut input = submission("test", "preview", control);
+    input.origin = Some("effect".into());
+    let id = jobs.submit(&authority, input).unwrap();
+    wait_terminal(&jobs, &authority, &id).await;
+    let sampling = tokio::task::spawn_blocking({
+        let jobs = jobs.clone();
+        let authority = authority.clone();
+        move || jobs.peek(&authority, &id, "effect", [32, 32])
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.0.notified())
+        .await
+        .unwrap();
+    let reading = tokio::task::spawn_blocking({
+        let jobs = jobs.clone();
+        let authority = authority.clone();
+        move || jobs.list(&authority)
+    });
+    let mut reading = Box::pin(reading);
+    let independent = tokio::time::timeout(Duration::from_millis(500), &mut reading).await;
+    if independent.is_ok() {
+        jobs.finalize_scope(&authority).await.unwrap();
+    }
+    *gate.1.lock().unwrap() = true;
+    gate.2.notify_all();
+    let sampled = sampling.await.unwrap();
+    if independent.is_err() {
+        reading.await.unwrap().unwrap();
+    }
+    assert!(
+        independent.is_ok(),
+        "a pending producer preview held the Jobs registry lock"
+    );
+    assert!(matches!(sampled, Err(JobsError::ScopeClosed)));
+    drop(jobs);
+    assert!(fiber.dispose().await.is_clean());
 }
 
 #[tokio::test]
@@ -556,6 +684,7 @@ async fn read_racing_settlement_returns_one_coherent_active_or_terminal_snapshot
             JobSubmission {
                 name: "racing-read".into(),
                 producer: "test".into(),
+                origin: None,
                 request: JobRequest::new(control),
                 requires_report: true,
             },
@@ -598,6 +727,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
             JobSubmission {
                 name: "racing-eviction".into(),
                 producer: "test".into(),
+                origin: None,
                 request: JobRequest::new(control_for_request),
                 requires_report: false,
             },
@@ -614,6 +744,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
     let replacement = || JobSubmission {
         name: "replacement".into(),
         producer: "test".into(),
+        origin: None,
         request: JobRequest::new(
             TestControl::new(TestSettlement::OnCancel, b"", b"") as Arc<dyn JobControl>
         ),
@@ -650,6 +781,7 @@ async fn concurrent_terminal_read_wins_over_the_scope_finalization_snapshot() {
             JobSubmission {
                 name: "report-race".into(),
                 producer: "test".into(),
+                origin: None,
                 request: JobRequest::new(control_for_request),
                 requires_report: true,
             },
@@ -701,6 +833,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
             JobSubmission {
                 name: "panic-read".into(),
                 producer: "test".into(),
+                origin: None,
                 request: JobRequest::new(read_control),
                 requires_report: true,
             },
@@ -724,6 +857,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
             JobSubmission {
                 name: "panic-cancel".into(),
                 producer: "test".into(),
+                origin: None,
                 request: JobRequest::new(cancel_control),
                 requires_report: true,
             },
@@ -1139,6 +1273,7 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
             JobSubmission {
                 name: "racing".into(),
                 producer: "blocking".into(),
+                origin: None,
                 request: JobRequest::new(()),
                 requires_report: true,
             },
@@ -1178,6 +1313,7 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
             JobSubmission {
                 name: "next".into(),
                 producer: "blocking".into(),
+                origin: None,
                 request: JobRequest::new(()),
                 requires_report: false,
             },

@@ -186,8 +186,10 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
     let child_id = SessionId::new("session-cold-tree-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: initial.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(&initial, &root_claim).await,
             child_session_id: child_id.clone(),
             task_name: "cold-child".into(),
             message_id: MessageId::new("message-cold-tree-child").unwrap(),
@@ -206,6 +208,7 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
         .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
         .unwrap();
+    tool_origin::finish_control_tool(&initial, &root_claim).await;
     assert_eq!(
         initial
             .enter_pending_step_messages(&root_claim)
@@ -249,11 +252,13 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .await
         .unwrap()
         .unwrap();
-    let root_caller = kernel.agent_caller(&root_claim).unwrap();
+    let root_caller = control_tool_caller(&kernel, &root_claim).await;
 
     let child_id = SessionId::new("session-interrupt-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: root_caller.clone(),
             child_session_id: child_id.clone(),
@@ -270,11 +275,13 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .await
         .unwrap()
         .unwrap();
-    let child_caller = kernel.agent_caller(&child_claim).unwrap();
+    let child_caller = control_tool_caller(&kernel, &child_claim).await;
 
     let grandchild_id = SessionId::new("session-interrupt-grandchild").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: child_caller.clone(),
             child_session_id: grandchild_id.clone(),
@@ -293,11 +300,13 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .await
         .unwrap()
         .unwrap();
-    let grandchild_caller = kernel.agent_caller(&grandchild_claim).unwrap();
+    let grandchild_caller = control_tool_caller(&kernel, &grandchild_claim).await;
 
     let leaf_id = SessionId::new("session-interrupt-leaf").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: grandchild_caller.clone(),
             child_session_id: leaf_id.clone(),
@@ -323,10 +332,12 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .await
         .unwrap()
         .unwrap();
-    let leaf_caller = kernel.agent_caller(&leaf_claim).unwrap();
+    let leaf_caller = control_tool_caller(&kernel, &leaf_claim).await;
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 cancellation: CancellationToken::new(),
                 caller: leaf_caller,
                 child_session_id: SessionId::new("session-too-deep").unwrap(),
@@ -340,6 +351,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     ));
     let queued = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: resume(&kernel, leaf_id.clone()).await,
             turn_id: TurnId::new("turn-interrupt-queued").unwrap(),
             text: "queued work remains accepted".into(),
@@ -388,7 +400,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
     let parent_header = root_claim.header().clone();
     let parent_fingerprint = parent_header.fingerprint().unwrap();
     let empty_fact_prefix = fact_prefix_sha256(std::iter::empty::<&SessionFact>()).unwrap();
@@ -411,7 +423,12 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                 effective_turns: 0,
             };
             let child_header = parent_header
-                .forked_child(child_id.clone(), 50, origin)
+                .forked_child(
+                    child_id.clone(),
+                    50,
+                    origin,
+                    rsi_agent_session_protocol::ModelSelection::baseline(parent_header.settings()),
+                )
                 .unwrap();
             rsi_agent_store_protocol::AtomicSessionAppend {
                 session_id: child_id.clone(),
@@ -461,6 +478,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 cancellation: CancellationToken::new(),
                 caller,
                 child_session_id: SessionId::new("session-tree-capacity-overflow").unwrap(),

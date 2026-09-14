@@ -1,5 +1,18 @@
 # rsi-agent-composition-protocol
 
+Tool settlement contributions are synchronous and effect-free. They receive
+the exact ToolIntent, its retained result, the immutable Header and bounded
+current domain snapshots, and return only typed domain proposals. They receive
+no historical reader, mutation or I/O authority. Executor invokes them before
+result publication and commits their proposals and that ToolResult atomically.
+PostTool contributors continue to consume already durable source-ordered results.
+
+Each domain definition freezes a fork policy. `Inherit` overlays validated
+historical state and is the default; `ResetToInitial` retains the target
+definition's initial state. Inherited payloads are validated even when reset.
+Kernel applies this generic policy while constructing the child baseline,
+before admission; plugins do not clear state after the first request.
+
 Internal reserve callbacks receive the authenticated continuation input in their
 captured command context, alongside the invocation's request identity, and must
 compare them with the reservation they propose.

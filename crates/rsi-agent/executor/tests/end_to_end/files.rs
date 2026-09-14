@@ -237,6 +237,7 @@ async fn scenario(
         .unwrap();
     let submitted = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session,
             text: "read workspace".into(),

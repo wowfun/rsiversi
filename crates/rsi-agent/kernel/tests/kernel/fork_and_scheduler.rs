@@ -24,8 +24,10 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     let child_id = SessionId::new("session-fork-page-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root_claim).unwrap(),
+            caller: control_tool_caller(&kernel, &root_claim).await,
             child_session_id: child_id.clone(),
             task_name: "paged-child".into(),
             message_id: MessageId::new("message-fork-page-child").unwrap(),
@@ -99,7 +101,7 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
         .await
         .unwrap()
         .unwrap();
-    let caller = kernel.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
 
     kernel
         .submit_message(SubmitMessage {
@@ -112,6 +114,8 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
     let child_id = SessionId::new("session-z-idle-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller,
             child_session_id: child_id.clone(),
@@ -242,10 +246,12 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
             .await
             .unwrap()
             .unwrap();
-        let caller = kernel.agent_caller(&root_claim).unwrap();
+        let caller = control_tool_caller(&kernel, &root_claim).await;
         let child_id = SessionId::new(format!("session-cascade-child-{label}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 cancellation: CancellationToken::new(),
                 caller: caller.clone(),
                 child_session_id: child_id.clone(),
@@ -270,6 +276,7 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
         let child_cancellation = kernel.cancellation(&child_claim).unwrap();
         let queued = kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 session: resume(&kernel, child_id.clone()).await,
                 turn_id: TurnId::new(format!("turn-queued-child-{label}")).unwrap(),
                 text: "already accepted behind the running child".into(),
@@ -458,10 +465,12 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
         .await
         .unwrap()
         .unwrap();
-    let caller = initial.agent_caller(&root_claim).unwrap();
+    let caller = control_tool_caller(&initial, &root_claim).await;
     let child_id = SessionId::new("session-parked-recovery-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id,
@@ -617,6 +626,7 @@ async fn activation_terminal_requeues_the_next_oldest_turn() {
         .unwrap();
     let queued = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: resume(&kernel, session_id.clone()).await,
             turn_id: TurnId::new("turn-after-activation").unwrap(),
             text: "queued behind activation".into(),
@@ -722,6 +732,7 @@ async fn fresh_message_cannot_publish_over_an_unflushed_fresh_turn_header() {
         async move {
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     session: fresh(header(session_id.as_str())),
                     turn_id: TurnId::new("turn-fresh-message-race").unwrap(),
                     text: "first fresh submission".into(),
@@ -772,6 +783,10 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
                 effect_id: EffectId::new("effect-message-flush-race").unwrap(),

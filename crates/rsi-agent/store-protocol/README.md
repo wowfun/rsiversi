@@ -1,5 +1,17 @@
 # rsi-agent-store-protocol
 
+Evidence originals are resolved by exact Session and Fact sequence. The shared
+resolver accepts only a ModelIntent's original inline section with matching
+section, digest and byte length; reference chains are rejected. Consumers may
+cache the resulting digest descriptors within the owning Store lifetime, bounded
+independently of history size. Descriptors retain no evidence text. Fact decoding
+still validates the original bytes at the durable boundary.
+
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (20). Schema 19
+and earlier versions are rejected before recovery or writes; there is no implicit
+migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
+owns database preflight and file-preservation guarantees.
+
 ## Domain mutations
 
 Domain state is canonical only in `DomainStateCommitted` controls. One record

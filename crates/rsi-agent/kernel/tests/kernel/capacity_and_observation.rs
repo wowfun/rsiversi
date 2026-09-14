@@ -88,6 +88,7 @@ async fn persistent_store_failure_eventually_latches_a_flush_error() {
     assert!(matches!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: resume(&kernel, submitted.session_id.clone()).await,
                 text: "must not wedge behind the permanent failure".into(),
@@ -117,6 +118,10 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: first.turn_id.clone(),
                 effect_id: effect.clone(),
@@ -206,6 +211,10 @@ async fn shutdown_timeout_retains_the_store_until_background_drain_finishes() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id,
                 effect_id: EffectId::new("shutdown-pending").unwrap(),
@@ -305,6 +314,10 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect_id.clone(),
@@ -368,6 +381,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "leader".into(),
@@ -385,6 +399,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "follower".into(),
@@ -424,6 +439,7 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
     let first = submit(&kernel, "session-queue", "first").await;
     let second = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "second".into(),
@@ -502,6 +518,7 @@ async fn conflicting_retry_does_not_replace_the_original_turn_control_state() {
     let turn_id = TurnId::new("caller-stable-turn").unwrap();
     let first = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             session: fresh(header("session-conflicting-retry")),
             text: "original".into(),
@@ -513,6 +530,7 @@ async fn conflicting_retry_does_not_replace_the_original_turn_control_state() {
     assert!(matches!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: turn_id.clone(),
                 session: fresh(header("session-conflicting-retry")),
                 text: "changed".into(),
@@ -542,6 +560,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
         1,
         42,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             text: "hello".into(),
             model: None,
@@ -551,6 +570,10 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
     )
     .unwrap();
     let intent = SessionFactBody::ModelIntent {
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+        price_quote: None,
         purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id: effect_id.clone(),
@@ -610,6 +633,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
     let worker = kernel.start_workers();
     let _submitted = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             session: fresh(header("session-process-publish")),
             text: "hello".into(),
@@ -681,6 +705,10 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
 async fn publication_larger_than_an_empty_process_budget_is_invalid() {
     let turn_id = TurnId::new("turn-oversized-publication").unwrap();
     let intent = SessionFactBody::ModelIntent {
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+        price_quote: None,
         purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id: EffectId::new("effect-oversized-publication").unwrap(),
@@ -690,6 +718,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
         1,
         42,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             text: "hello".into(),
             model: None,
@@ -720,6 +749,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
     let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             session: fresh(header("session-oversized-publication")),
             text: "hello".into(),
@@ -761,6 +791,10 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect_id.clone(),
@@ -850,12 +884,20 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     let first_turn = TurnId::new("turn-process-pressure-a").unwrap();
     let second_turn = TurnId::new("turn-process-pressure-b").unwrap();
     let first_body = SessionFactBody::ModelIntent {
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+        price_quote: None,
         purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: first_turn.clone(),
         effect_id: EffectId::new("effect-process-pressure-a").unwrap(),
         snapshot: snapshot(),
     };
     let second_body = SessionFactBody::ModelIntent {
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+        price_quote: None,
         purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: second_turn.clone(),
         effect_id: EffectId::new("effect-process-pressure-b").unwrap(),
@@ -866,6 +908,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
             1,
             42,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: first_turn.clone(),
                 text: "first".into(),
                 model: None,
@@ -882,6 +925,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
             1,
             42,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: second_turn.clone(),
                 text: "second".into(),
                 model: None,
@@ -914,6 +958,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     let worker = kernel.start_workers();
     let first = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: first_turn,
             session: fresh(header("session-process-pressure-a")),
             text: "first".into(),
@@ -924,6 +969,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
         .unwrap();
     let second = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: second_turn,
             session: fresh(header("session-process-pressure-b")),
             text: "second".into(),
@@ -1038,6 +1084,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
     let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: target_turn.clone(),
             session: fresh(header(target_session.as_str())),
             text: "target".into(),
@@ -1048,6 +1095,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: blocker_turn.clone(),
             session: fresh(header(blocker_session.as_str())),
             text: "blocker".into(),
@@ -1077,6 +1125,10 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
             .publish(
                 claim,
                 vec![SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                    },
+                    price_quote: None,
                     purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                     turn_id: turn_id.clone(),
                     effect_id: effect_id.clone(),
@@ -1144,6 +1196,7 @@ async fn live_session_working_set_has_an_exact_global_bound() {
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: fresh(header("session-bound-overflow")),
                 text: "overflow".into(),
@@ -1205,6 +1258,10 @@ async fn observation_reports_durability_that_advanced_while_unpolled() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id,
                 effect_id: EffectId::new("effect-observed").unwrap(),
@@ -1253,6 +1310,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
                         1,
                         1,
                         SessionFactBody::TurnAccepted {
+                            reasoning_effort: None,
                             turn_id: turn_id.clone(),
                             text: "done".into(),
                             model: None,
@@ -1294,6 +1352,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
 
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: fresh(header("capacity-remains-free")),
             text: "new".into(),
@@ -1323,6 +1382,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
                         1,
                         1,
                         SessionFactBody::TurnAccepted {
+                            reasoning_effort: None,
                             turn_id: turn_id.clone(),
                             text: "done".into(),
                             model: None,
@@ -1356,6 +1416,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
         assert!(matches!(
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: resume(&kernel, session_id).await,
                     text: oversized.clone(),
@@ -1370,6 +1431,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
     let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: fresh(header("capacity-after-invalid-resumes")),
             text: "new".into(),
@@ -1404,6 +1466,7 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
         assert!(matches!(
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: resume(
                         &kernel,
@@ -1423,6 +1486,7 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
     assert!(matches!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: fresh(header("capacity-after-failed-admissions")),
                 text: "cannot fit either".into(),
@@ -1542,6 +1606,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "first".into(),
@@ -1559,6 +1624,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "second".into(),
@@ -1603,6 +1669,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "first".into(),
@@ -1621,6 +1688,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "second".into(),
@@ -1668,6 +1736,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         async move {
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Fresh(
                         PreparedFreshSession::new(session_header, pin).unwrap(),
@@ -1699,6 +1768,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
 
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: fresh(header("session-cancelled-fresh")),
             text: "retry".into(),
@@ -1742,6 +1812,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: SubmitSession::Fresh(
                     PreparedFreshSession::new(session_header, pin).unwrap(),
@@ -1775,6 +1846,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "leader".into(),
@@ -1792,6 +1864,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "follower".into(),
@@ -1815,6 +1888,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
     let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: resume(
                 &kernel,
@@ -1849,6 +1923,7 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                reasoning_effort: None,
                 turn_id: client_turn_id(),
                 session: resume(
                     &kernel,
@@ -1874,6 +1949,7 @@ async fn retained_history(store: &MemoryStore, name: &str) -> usize {
     let turn = TurnId::new("retained-turn").unwrap();
     let bodies = vec![
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn.clone(),
             text: "accepted".into(),
             model: None,
@@ -2220,6 +2296,7 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
         1,
         1,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn.clone(),
             text: "accepted".into(),
             model: None,
@@ -2421,6 +2498,7 @@ async fn tree_membership_requeries_a_write_behind_creation_with_a_lost_acknowled
         .store(true, Ordering::Release);
     let result = kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: fresh(header(id.as_str())),
             text: "create through append".into(),

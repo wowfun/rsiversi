@@ -315,6 +315,8 @@ pub struct JobSummary {
     pub name: String,
     /// Exact named producer.
     pub producer: String,
+    /// Trusted producer caller's optional opaque invocation identity.
+    pub origin: Option<String>,
     /// Latest status.
     pub status: JobStatus,
     /// Whether terminal observation is required before turn completion.
@@ -330,6 +332,9 @@ pub struct JobSummary {
 impl JobSummary {
     /// Validates one bounded status snapshot without reporting the job.
     pub fn validate(&self) -> Result<()> {
+        if let Some(origin) = &self.origin {
+            validate_job_identifier("job origin", origin)?;
+        }
         for (kind, value) in [
             ("job id", &self.id),
             ("job name", &self.name),
@@ -376,6 +381,21 @@ pub struct JobFinalization {
     pub unreported: Vec<JobSummary>,
 }
 
+/// Trusted in-process Tool extension binding spawned jobs to one invocation.
+#[derive(Clone, Debug)]
+pub struct JobOrigin(String);
+impl JobOrigin {
+    /// Constructs a bounded opaque invocation identity.
+    pub fn new(value: String) -> Result<Self> {
+        validate_job_identifier("job origin", &value)?;
+        Ok(Self(value))
+    }
+    /// Returns the originating invocation identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One admitted producer request.
 #[derive(Clone, Debug)]
 pub struct JobSubmission {
@@ -383,6 +403,8 @@ pub struct JobSubmission {
     pub name: String,
     /// Exact registered producer name.
     pub producer: String,
+    /// Trusted caller's invocation identity, never derived from tool arguments.
+    pub origin: Option<String>,
     /// Producer-specific trusted request.
     pub request: JobRequest,
     /// Whether completion must be reported before a turn may complete.
@@ -394,6 +416,10 @@ pub struct JobSubmission {
 pub trait JobControl: fmt::Debug + Send + Sync + 'static {
     /// Reads raw retained producer output at one whole-stream offset.
     fn read(&self, stream: JobStream, offset: u64) -> Result<JobOutputRead>;
+    /// Bounded non-consuming tail; `None` means this producer has no preview.
+    fn peek(&self, _stream: JobStream, _maximum: usize) -> Result<Option<JobOutputRead>> {
+        Ok(None)
+    }
     /// Requests idempotent cancellation.
     fn cancel(&self);
     /// Waits for terminal facts. Multiple callers must observe the same value.
@@ -491,6 +517,14 @@ pub trait Jobs: fmt::Debug + Send + Sync + 'static {
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>>;
     /// Gets one exact-scope record.
     fn get(&self, scope: &JobScopeAuthority, id: &str) -> Result<JobSummary>;
+    /// Samples tails without reporting or retention; each limit is 1..=32768.
+    fn peek(
+        &self,
+        scope: &JobScopeAuthority,
+        id: &str,
+        origin: &str,
+        limits: [usize; 2],
+    ) -> Result<Option<JobRead>>;
     /// Atomically reads both streams. A terminal read also reports the job.
     fn read(
         &self,

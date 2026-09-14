@@ -79,6 +79,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
         async move {
             let submitted = turns
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: fresh,
                     text: "delay the tool".into(),
@@ -191,6 +192,7 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         .unwrap();
     let submitted = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack.fresh(header_with_budget(budget)).await,
             text: "recover the pending tool".into(),
@@ -306,6 +308,7 @@ async fn successfully_recovered_tool_releases_its_tracking_pin_after_commit() {
         .unwrap();
     let submitted = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "recover and finish the pending tool".into(),
@@ -396,6 +399,7 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
         async move {
             let submitted = turns
                 .submit(SubmitTurn {
+                    reasoning_effort: None,
                     turn_id: client_turn_id(),
                     session: fresh,
                     text: "delay the tool".into(),
@@ -510,6 +514,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let first = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "first".into(),
@@ -520,6 +525,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let second = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "second private".into(),
@@ -530,6 +536,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let third = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "third private".into(),

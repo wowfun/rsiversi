@@ -40,8 +40,10 @@ async fn mutation_fixture(
     let child = SessionId::new("mutation-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&claim).unwrap(),
+            caller: control_tool_caller(&kernel, &claim).await,
             child_session_id: child.clone(),
             task_name: "child".into(),
             message_id: MessageId::new("mutation-child-message").unwrap(),
@@ -224,6 +226,10 @@ async fn publication_staging_releases_global_state_but_keeps_session_admission()
     let effect = EffectId::new("publication-effect").unwrap();
     for body in [
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: first.turn_id().clone(),
             effect_id: effect.clone(),
@@ -434,8 +440,10 @@ async fn cancelled_terminal_drain_reopens_only_after_the_last_mutation_finishes(
 async fn cancelled_spawn_commit_is_recoverable_by_exact_retry() {
     let (kernel, workers, observed, memory, _lease, claim, _) = mutation_fixture(false).await;
     let mut request = SpawnAgentRequest {
+        model: None,
+        reasoning_effort: None,
         cancellation: CancellationToken::new(),
-        caller: kernel.agent_caller(&claim).unwrap(),
+        caller: control_tool_caller(&kernel, &claim).await,
         child_session_id: SessionId::new("spawn-retry-child").unwrap(),
         task_name: "retry-child".into(),
         message_id: MessageId::new("spawn-retry-message").unwrap(),

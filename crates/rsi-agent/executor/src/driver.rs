@@ -251,7 +251,10 @@ impl Driver {
         })?;
         let model = state
             .model
-            .unwrap_or_else(|| claim.header().settings().default_model().clone());
+            .map(|model| rsi_agent_session_protocol::ModelSelection {
+                model,
+                reasoning_effort: state.reasoning_effort,
+            });
         self.run_language(
             claim,
             composition,
@@ -271,11 +274,13 @@ impl Driver {
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         fold: &mut ModelContextState,
-        model: ModelRef,
+        explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
+        let mut selection =
+            rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
         loop {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -284,34 +289,34 @@ impl Driver {
             if cancellation.is_cancelled() {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
-            if self
-                .turns
-                .enter_pending_step_messages(claim)
-                .await
-                .map_err(fatal)?
-                > 0
+            if retry_attempt == 0
+                && self
+                    .turns
+                    .enter_pending_step_messages(claim)
+                    .await
+                    .map_err(fatal)?
+                    > 0
             {
                 self.sync_fold(claim, fold).await?;
-                retry_attempt = 0;
             }
             if retry_attempt == 0 {
-                self.run_contributions(
-                    claim,
-                    composition,
-                    fold,
-                    rsi_agent_composition_protocol::ContributionStage::BeforeStep,
-                    &[],
-                    &cancellation,
-                    stop,
-                )
-                .await?;
+                selection = self
+                    .before_step(
+                        claim,
+                        composition,
+                        fold,
+                        explicit_selection.as_ref(),
+                        &cancellation,
+                        stop,
+                    )
+                    .await?;
             }
-            let output = match self
+            let (source_model_effect_id, output) = match self
                 .run_model_attempt(
                     claim,
                     composition,
                     fold,
-                    &model,
+                    &selection,
                     retry_attempt,
                     &cancellation,
                     stop,
@@ -328,7 +333,7 @@ impl Driver {
                     retry_attempt = retry_attempt.saturating_add(1);
                     continue;
                 }
-                ModelAttempt::Output(output) => *output,
+                ModelAttempt::Output(effect_id, output) => (effect_id, *output),
             };
             if cancellation.is_cancelled()
                 || matches!(output.finish_reason, FinishReason::Cancelled)
@@ -397,6 +402,7 @@ impl Driver {
                     ToolScheduling::Exclusive | ToolScheduling::ExclusiveFinal => {
                         settled.push(
                             self.run_tool(
+                                &source_model_effect_id,
                                 claim,
                                 composition,
                                 job_scope,
@@ -423,6 +429,7 @@ impl Driver {
                         }
                         settled.extend(
                             self.run_parallel_tools(
+                                &source_model_effect_id,
                                 claim,
                                 composition,
                                 job_scope,
@@ -479,11 +486,11 @@ impl Driver {
                     }));
                 }
                 ResumeEffect::Tool {
-                    effect_id,
-                    identity,
+                    intent,
                     started: true,
+                    ..
                 } => {
-                    self.recover_tool(claim, composition, fold, effect_id, identity, stop)
+                    self.recover_tool(claim, composition, fold, intent, stop)
                         .await?;
                 }
             }
@@ -659,19 +666,33 @@ impl Driver {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // One attempt binds the resident generation to its durable fold, model, retry ordinal, and cancellation fences.
+    #[allow(clippy::too_many_arguments)]
+    // One attempt binds the resident generation to its durable fold, model, retry ordinal, and cancellation fences.
+    #[allow(clippy::too_many_lines)] // Prepared settings, optional evidence fallback and dispatch share one effect transaction.
     pub(super) async fn run_model_effect(
         &self,
         claim: &TurnClaim,
         request: rsi_ai_protocol::LanguageRequest,
         purpose: rsi_agent_session_protocol::ModelPurpose,
         fold: &mut ModelContextState,
-        model: &ModelRef,
+        selection: &rsi_agent_session_protocol::ModelSelection,
         retry_attempt: u8,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        let prepared = match self.language.prepare(model.clone(), request).await {
+        let settings = request
+            .settings()
+            .clone()
+            .with_optional_reasoning_effort(selection.reasoning_effort.clone());
+        let request = request
+            .with_settings(settings)
+            .map_err(|error| failed("model.settings", error.to_string()))?;
+        let capture = evidence::Capture::new(&request)?;
+        let prepared = match self
+            .language
+            .prepare(selection.model.clone(), request)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(error)
                 if error.kind() == ErrorKind::ContextLimit
@@ -683,11 +704,24 @@ impl Driver {
         };
         let snapshot = prepared.snapshot().clone();
         let effect_id = next_effect_id().map_err(fatal)?;
+        let mut evidence = capture.finish(&snapshot)?;
+        self.warm_evidence(claim).await?;
+        self.evidence
+            .lock()
+            .map_err(|_| fatal("evidence cache lock poisoned"))?
+            .deduplicate(claim.session_id(), &mut evidence);
         let intent = self
             .publish_apply(
                 claim,
                 fold,
                 vec![SessionFactBody::ModelIntent {
+                    evidence,
+                    price_quote: claim
+                        .header()
+                        .settings()
+                        .pricing()
+                        .resolve(&snapshot)
+                        .cloned(),
                     purpose: purpose.clone(),
                     turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
@@ -696,6 +730,12 @@ impl Driver {
             )
             .await?;
         self.flush_last(claim, &intent).await?;
+        for fact in &intent {
+            self.evidence
+                .lock()
+                .map_err(|_| fatal("evidence cache lock poisoned"))?
+                .observe(claim.session_id(), fact);
+        }
         let started = self
             .publish_apply(
                 claim,
@@ -746,7 +786,7 @@ impl Driver {
             )
             .await?;
         if let rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) = purpose
-            && let ModelAttempt::Output(output) = &result
+            && let ModelAttempt::Output(_, output) = &result
         {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -832,7 +872,7 @@ impl Driver {
             if terminal {
                 combined.cancel();
                 return match assembler.finish() {
-                    Ok(output) => Ok(ModelAttempt::Output(Box::new(output))),
+                    Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
                     Err(LanguageAssemblyError::Provider { error, .. }) => {
                         self.retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
                             .await
@@ -869,6 +909,7 @@ impl Driver {
     #[allow(clippy::too_many_arguments)] // Keep durable claim/fold, live Jobs authority, policy, and both cancellation owners explicit.
     pub(super) async fn run_tool(
         &self,
+        source_model_effect_id: &EffectId,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
@@ -881,6 +922,7 @@ impl Driver {
     ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
         let pending = self
             .prepare_tool_call(
+                source_model_effect_id,
                 claim,
                 composition,
                 fold,
@@ -897,6 +939,7 @@ impl Driver {
         let identity = prepared.identity.clone();
         let result = match self
             .start_tool(
+                &prepared.effect_id,
                 prepared.prepared,
                 &identity,
                 composition,
@@ -920,20 +963,14 @@ impl Driver {
                 return Err(failure);
             }
         };
-        self.publish_tool_result(
-            claim,
-            composition,
-            fold,
-            prepared.effect_id,
-            identity,
-            result,
-        )
-        .await
+        self.publish_tool_result(claim, composition, fold, prepared.intent, result)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)] // The batch shares the exact turn policy and live turn-scoped authorities.
     pub(super) async fn run_parallel_tools(
         &self,
+        source_model_effect_id: &EffectId,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
@@ -947,6 +984,7 @@ impl Driver {
         for call in calls {
             pending.push(
                 self.prepare_tool_call(
+                    source_model_effect_id,
                     claim,
                     composition,
                     fold,
@@ -969,6 +1007,7 @@ impl Driver {
             let identity = effect.identity;
             let result = self
                 .start_tool(
+                    &effect_id,
                     effect.prepared,
                     &identity,
                     composition,
@@ -980,17 +1019,17 @@ impl Driver {
                     stop,
                 )
                 .await;
-            (effect_id, identity, result)
+            (effect.intent, identity, result)
         }))
         .await;
 
         let mut first_failure = None;
         let mut settled = Vec::new();
-        for (effect_id, identity, result) in outcomes {
+        for (intent, identity, result) in outcomes {
             match result {
                 Ok(result) => {
                     match self
-                        .publish_tool_result(claim, composition, fold, effect_id, identity, result)
+                        .publish_tool_result(claim, composition, fold, intent, result)
                         .await
                     {
                         Ok(fact) => settled.push(fact),
@@ -1018,8 +1057,10 @@ impl Driver {
     }
 
     #[allow(clippy::too_many_arguments)] // Preparation binds one model call to its exact policy and cancellation authorities.
+    #[allow(clippy::too_many_lines)] // Admission preserves producing request proof and exact Tool policy through preparation.
     pub(super) async fn prepare_tool_call(
         &self,
+        source_model_effect_id: &EffectId,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
@@ -1119,6 +1160,7 @@ impl Driver {
             None
         };
         Ok(PendingToolEffect {
+            source_model_effect_id: source_model_effect_id.clone(),
             effect_id,
             identity,
             name,
@@ -1137,6 +1179,7 @@ impl Driver {
         pending: PendingToolEffect,
     ) -> std::result::Result<PreparedToolEffect, DriveFailure> {
         let PendingToolEffect {
+            source_model_effect_id,
             effect_id,
             identity,
             name,
@@ -1150,6 +1193,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ToolIntent {
+                    source_model_effect_id,
                     turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
@@ -1175,6 +1219,7 @@ impl Driver {
         self.flush_last(claim, &started).await?;
         self.track_tool(claim, composition.clone(), identity.clone());
         Ok(PreparedToolEffect {
+            intent: intent.into_iter().next().expect("one Tool intent"),
             effect_id,
             identity,
             prepared,
@@ -1192,6 +1237,7 @@ impl Driver {
         let mut prepared = Vec::with_capacity(pending.len());
         for effect in pending {
             let PendingToolEffect {
+                source_model_effect_id,
                 effect_id,
                 identity,
                 name,
@@ -1201,6 +1247,7 @@ impl Driver {
                 prepared: prepared_call,
             } = effect;
             intents.push(SessionFactBody::ToolIntent {
+                source_model_effect_id,
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
                 identity: identity.clone(),
@@ -1209,15 +1256,23 @@ impl Driver {
                 approval,
                 parallel_safe,
             });
-            prepared.push(PreparedToolEffect {
-                effect_id,
-                identity,
-                prepared: prepared_call,
-            });
+            prepared.push((effect_id, identity, prepared_call));
         }
 
         let intents = self.publish_apply(claim, fold, intents).await?;
         self.flush_last(claim, &intents).await?;
+        let prepared: Vec<_> = prepared
+            .into_iter()
+            .zip(intents)
+            .map(
+                |((effect_id, identity, prepared), intent)| PreparedToolEffect {
+                    intent,
+                    effect_id,
+                    identity,
+                    prepared,
+                },
+            )
+            .collect();
         let starts = prepared
             .iter()
             .map(|effect| SessionFactBody::ToolStarted {
@@ -1239,30 +1294,71 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
-        effect_id: EffectId,
-        identity: ToolResultIdentity,
+        intent: Arc<SessionFact>,
         result: ToolResult,
     ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
-        let returned = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ToolResult {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id,
-                    identity: identity.clone(),
-                    result,
-                }],
-            )
-            .await
-            .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
-        self.flush_last(claim, &returned).await?;
+        let SessionFactBody::ToolIntent {
+            effect_id,
+            identity,
+            ..
+        } = intent.body()
+        else {
+            return Err(fatal("settlement lacks a ToolIntent"));
+        };
+        let proposals = self
+            .tool_settlement_proposals(claim, composition, &intent, &result)
+            .await?;
+        let body = SessionFactBody::ToolResult {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect_id.clone(),
+            identity: identity.clone(),
+            result,
+        };
+        let returned = if proposals.is_empty() {
+            let facts = self
+                .publish_apply(claim, fold, vec![body])
+                .await
+                .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
+            self.flush_last(claim, &facts).await?;
+            facts.into_iter().next().expect("one Tool result")
+        } else {
+            let request_id = rsi_agent_session_protocol::DomainRequestId::new(effect_id.as_str())
+                .map_err(fatal)?;
+            let receipt = self
+                .turns
+                .commit_domains(
+                    claim,
+                    rsi_agent_turn_protocol::DomainMutation {
+                        request_id,
+                        proposals,
+                        facts: vec![body],
+                    },
+                )
+                .await
+                .map_err(crate::execution_support::turn_failure)
+                .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
+            let span = receipt
+                .commit()
+                .fact_span()
+                .filter(|span| span.count() == 1)
+                .ok_or_else(|| fatal("Tool settlement receipt lacks its exact result span"))?;
+            let page = self
+                .turns
+                .read_facts(claim, span.first_seq() - 1, 1)
+                .await
+                .map_err(fatal)?;
+            let fact = page.facts.into_iter().next().filter(|fact| fact.seq() == span.first_seq()
+                && matches!(fact.body(), SessionFactBody::ToolResult { effect_id: actual, identity: exact, .. } if actual == effect_id && exact == identity))
+                .ok_or_else(|| fatal("Tool settlement receipt does not resolve to its exact result"))?;
+            self.sync_fold(claim, fold).await?;
+            fact
+        };
         composition
             .tools()
-            .commit(&identity)
+            .commit(identity)
             .map_err(|error| tool_failure(&error))?;
-        self.clear_tracked_tool(claim, &identity);
-        Ok(returned.into_iter().next().expect("one Tool result"))
+        self.clear_tracked_tool(claim, identity);
+        Ok(returned)
     }
 
     pub(super) fn track_tool(
@@ -1358,6 +1454,7 @@ impl Driver {
     #[allow(clippy::too_many_arguments)] // Start binds one prepared effect to its durable identity and exact turn-scoped authorities.
     pub(super) async fn start_tool(
         &self,
+        effect_id: &EffectId,
         prepared: Box<dyn PreparedToolCall>,
         identity: &ToolResultIdentity,
         composition: &AgentCompositionPin,
@@ -1370,19 +1467,9 @@ impl Driver {
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let combined = combine_cancellation(cancellation, stop);
         let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
-        let budget = claim.header().settings().turn_budget();
-        let evidence_bytes =
-            budget.maximum_generated_record_bytes() / 8 / budget.maximum_tool_calls();
-        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
-            .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(
-                usize::try_from(evidence_bytes).unwrap_or(usize::MAX),
-            )))
-            .map_err(|error| fatal(error.to_string()))?;
-        if let Ok(caller) = self.turns.agent_caller(claim) {
-            extensions = extensions
-                .with(Arc::new(caller))
-                .map_err(|error| fatal(error.to_string()))?;
-        }
+        let mut extensions =
+            crate::execution_support::tool_start_extensions(self.turns.as_ref(), claim, effect_id)
+                .map_err(fatal)?;
         if scheduling == ToolScheduling::ExclusiveFinal
             && let Ok(parking) = EXECUTOR_LANE_PARKING.try_with(Clone::clone)
         {
@@ -1483,36 +1570,22 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
-        effect_id: EffectId,
-        identity: ToolResultIdentity,
+        intent: Arc<SessionFact>,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
+        let SessionFactBody::ToolIntent { identity, .. } = intent.body() else {
+            return Err(fatal("retained settlement lacks a ToolIntent"));
+        };
         let tools = composition.tools();
         self.track_tool(claim, composition.clone(), identity.clone());
-        let retained = tools.wait(&identity, stop.clone()).await;
+        let retained = tools.wait(identity, stop.clone()).await;
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
         }
         match retained.map_err(|error| tool_failure(&error))? {
             RetainedToolResult::Returned(result) => {
-                let facts = self
-                    .publish_apply(
-                        claim,
-                        fold,
-                        vec![SessionFactBody::ToolResult {
-                            turn_id: claim.turn_id().clone(),
-                            effect_id: effect_id.clone(),
-                            identity: identity.clone(),
-                            result,
-                        }],
-                    )
-                    .await
-                    .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
-                self.flush_last(claim, &facts).await?;
-                tools
-                    .commit(&identity)
-                    .map_err(|error| tool_failure(&error))?;
-                self.clear_tracked_tool(claim, &identity);
+                self.publish_tool_result(claim, composition, fold, intent, result)
+                    .await?;
                 Ok(())
             }
             RetainedToolResult::Failed(failure) => {
@@ -1539,7 +1612,10 @@ impl Driver {
                         }
                     }
                 };
-                Err(DriveFailure::SettledTool { outcome, identity })
+                Err(DriveFailure::SettledTool {
+                    outcome,
+                    identity: identity.clone(),
+                })
             }
             RetainedToolResult::Absent => Err(DriveFailure::Turn(TurnOutcome::Interrupted {
                 effect: Some(EffectKind::Tool),

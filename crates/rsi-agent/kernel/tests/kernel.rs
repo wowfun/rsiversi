@@ -1262,6 +1262,22 @@ fn header(session_id: &str) -> SessionHeader {
 
 fn snapshot() -> PreparedCallSnapshot {
     PreparedCallSnapshot {
+        language_settings: Some(
+            rsi_ai_protocol::PreparedLanguageSettings::new(
+                rsi_ai_protocol::LanguageProfile::new(
+                    100_000,
+                    1_000,
+                    10_000,
+                    rsi_ai_protocol::ToolDialect::Responses,
+                    true,
+                    rsi_ai_protocol::ImageToolResultCapability::No,
+                    vec![],
+                )
+                .unwrap(),
+                None,
+            )
+            .unwrap(),
+        ),
         call_id: "call-1".into(),
         deployment_id: "deployment".into(),
         provider_family: "test".into(),
@@ -1282,6 +1298,7 @@ fn accepted_fact(seq: u64, turn_id: &TurnId) -> SessionFact {
         seq,
         seq,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             text: "hello".into(),
             model: None,
@@ -1297,6 +1314,10 @@ fn model_intent_fact(seq: u64, turn_id: &TurnId, effect_id: &EffectId) -> Sessio
         seq,
         seq,
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn_id.clone(),
             effect_id: effect_id.clone(),
@@ -1373,6 +1394,7 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
                 accepted_seq,
                 1,
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id: turn_id.clone(),
                     text: "done".into(),
                     model: None,
@@ -1418,6 +1440,7 @@ async fn submit(
 ) -> rsi_agent_turn_protocol::SubmittedTurn {
     kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: fresh(header(session_id)),
             text: text.into(),
@@ -1485,3 +1508,9 @@ mod steering;
 
 #[path = "kernel/human_wait.rs"]
 mod human_wait;
+
+#[path = "kernel/request_evidence.rs"]
+mod request_evidence;
+#[path = "kernel/tool_origin.rs"]
+mod tool_origin;
+use tool_origin::control_tool_caller;

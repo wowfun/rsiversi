@@ -215,6 +215,33 @@ impl Tail {
 
 #[cfg(unix)]
 impl ProcessOutput for Tail {
+    fn peek_tail(&self, maximum: usize) -> Result<ProcessRead> {
+        if !(1..=32 * 1024).contains(&maximum) {
+            return Err(ProcessError::InvalidInput(
+                "invalid process peek bound".into(),
+            ));
+        }
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let length = inner.bytes.len().min(maximum);
+        Ok(ProcessRead {
+            bytes: inner
+                .bytes
+                .iter()
+                .skip(inner.bytes.len() - length)
+                .copied()
+                .collect(),
+            oldest_offset: inner.total - length as u64,
+            next_offset: inner.total,
+            lossy: inner.total > length as u64,
+            full_output: self
+                .capture
+                .as_ref()
+                .and_then(output_cache::Capture::reference),
+        })
+    }
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
         let inner = self
             .inner

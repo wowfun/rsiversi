@@ -1,5 +1,11 @@
 # rsi-shell-bash
 
+When Tool execution supplies a Jobs scope, foreground Bash also uses the named
+Bash producer. Foreground waits and cancellation retain their existing result
+classification; the submitted origin comes from the executor's `JobOrigin`
+extension. UI previews use the producer's bounded Process tail peek. Calls
+without a scope execute directly and have no live Jobs preview.
+
 This package is the ordinary Linux Bash capability plugin. It has two explicit
 owners:
 
@@ -7,7 +13,8 @@ owners:
   process-local Jobs and delegates every admitted process to Process.
 - `BashToolFactory` registers only the model-facing `bash` definition through
   `ToolRegistrarContract`. It submits background work to that stable producer
-  and runs foreground work through Process.
+  and submits scoped foreground work to the same producer. Both retain output
+  until their owning tool reports it; standalone foreground calls use Process.
 
 The factories intentionally have separate leases and activation dependencies.
 Compositions may therefore publish the producer before beginning a Tool

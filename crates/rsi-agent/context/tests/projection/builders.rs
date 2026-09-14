@@ -113,6 +113,7 @@ fn complete_facts() -> Vec<Arc<SessionFact>> {
     let turn = TurnId::new("turn-builder").unwrap();
     facts(vec![
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn.clone(),
             text: "retained input".into(),
             model: None,

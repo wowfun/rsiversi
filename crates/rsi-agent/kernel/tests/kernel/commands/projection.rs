@@ -39,6 +39,7 @@ async fn failed_cold_capture_yields_to_a_concurrently_published_resident_pin() {
     fixture
         .kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: SubmitSession::Resume(prepared),
             turn_id: TurnId::new("concurrent-resident").unwrap(),
             text: "resident".into(),
@@ -326,6 +327,7 @@ async fn resident_projection_keeps_the_original_pin_when_current_generation_is_u
     fixture
         .kernel
         .submit(SubmitTurn {
+            reasoning_effort: None,
             session: SubmitSession::Resume(
                 fixture
                     .kernel

@@ -1,5 +1,16 @@
 # rsi-agent-kernel
 
+Evidence reference admission retains at most 1,024 original digest descriptors
+per Kernel, keyed by Session and Fact sequence. Cache misses read the immutable
+original through the Store protocol resolver. Recovery uses a separate bounded
+cache while loading unfinished Turns; eviction only causes another validated read.
+
+Generated-byte admission charges the whole staged Fact batch and, for mixed
+domain commits, its control record. A generated-byte rejection of a batch with
+available request evidence returns prepublication `EvidenceBudget`; replacing
+that optional evidence is still subject to every ordinary budget. Other budget
+dimensions retain their own errors. Rejection publishes no part of the batch.
+
 The current-Turn Jobs read port relays an Executor-published weak status source.
 It authenticates publication against the exact claim and validates the active
 Session/Header/Turn before and after sampling outside Kernel locks. The Kernel
@@ -60,6 +71,11 @@ budget, and commits both streams atomically under retained source and Session
 admission. Generated-record limits charge generated Facts and Turn domain
 controls using their complete canonical envelope bytes. A receipt binds the
 source, replacements and accompanying Fact bodies; same-ID changes conflict.
+An exact single ToolResult may accompany settlement proposals after cancellation
+while the claim's mutation gate remains open. Kernel still validates the active
+started Tool identity and every proposal; this exception cannot start effects,
+reopen ending admission or bypass generated-record budgets. Its bounded domain
+capture does not open a Step or acquire execution authority.
 Result-unknown reconciliation queries that canonical request before releasing
 ownership or permitting a new mutation. Domain-only work is still charged and
 elapsed-limited. Protocol-constrained budget and terminal records retain their
@@ -76,6 +92,19 @@ check. That check, under the short Kernel state lock, verifies the exact claim,
 executor registration, open mutation gate, and execution cancellation. An
 accepted mutation holds a move-only source lease through its owned commit task,
 Store retries, and resident installation even when the caller stops waiting.
+Tool callers additionally bind an active, started Tool effect. Its ToolIntent
+names a completed Conversation model effect in the same Turn and must match
+that response's exact call identity, name and arguments. Kernel retains only
+that latest response's Tool proofs: at most 256 calls, 32 MiB aggregate source
+arguments and 4 MiB per call, with shared 64 KiB fragments during assembly.
+Completed arguments retain only a SHA-256 fingerprint of typed JSON equality;
+these fingerprints are recomputed during recovery and never persisted.
+Model effect IDs cannot be reused within a Turn. Their bounded set is charged
+by the existing maximum-provider-attempt count and rebuilt during recovery.
+The caller captures the source request's actual model and effective effort.
+Spawn requires this Tool authority and freezes its selection in the child
+Header; an explicit child model resets inherited effort. Claim-only callers
+remain available to internal domain and supervision operations.
 Spawn retries serialize on the child identity and return the existing initial
 message receipt only when the parent, invoking Turn, fork selection, task, Header
 and message match. Cancellation stops the waiter; an admitted creation remains
@@ -314,3 +343,16 @@ fields are sampled independently; this snapshot is not an atomic ownership graph
 and cannot authorize new work. Completed teardown, including retained idle
 consumer handles, must return the current observer counts to the prior baseline.
 Observation payload bytes remain charged until their last delivered clone drops.
+
+Human submissions and admitted Goal continuations can reactivate a durable child
+Session after its parent activation has settled. Its frozen tree lineage, shared
+root admission and bounded parent-completion reservation remain unchanged. Agent
+messages still require an active parent; an existing parent activation is guarded
+atomically for every source. Attaching or inspecting a child never creates an
+activation. This admission rule does not create a new durable record shape.
+
+Speculative Turn copies share Tool source metadata. Ordinary text/reasoning
+events do not copy it. Argument chunks expose an immutable prefix length per
+snapshot and append under their own short lock outside the global Kernel mutex.
+A divergent speculative append copies only that partial tail; ordinary streaming
+appends retain the same bounded chunk. No snapshot observes an unpublished suffix.

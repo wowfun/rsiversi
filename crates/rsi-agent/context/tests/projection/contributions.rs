@@ -7,6 +7,7 @@ fn contribution_history() -> Vec<SessionFact> {
     let step = StepId::new("step").unwrap();
     let mut bodies = vec![
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn.clone(),
             text: "work".into(),
             model: None,
@@ -28,6 +29,10 @@ fn contribution_history() -> Vec<SessionFact> {
             }],
         },
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: model.clone(),

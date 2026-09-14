@@ -10,6 +10,10 @@ cleaning CAS staging. Rejected-version database bytes and staging contents stay
 unchanged. A current WAL is read in that preflight snapshot before ordinary
 writer recovery. Open validates root ownership and the exact schema without
 scanning dormant session history. Header and recent-session reads validate only bounded immutable metadata.
+The factory retains one startup failure category and its configured root for its
+direct owner. Schema diagnostics include expected and actual versions; other
+categories omit backend text and stored content. Taking the diagnostic consumes
+it. Generic Profile diagnostics remain redacted.
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
 A bounded cache retains 256 Session proofs across a recent FIFO and a reused
@@ -137,7 +141,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 19 admits only the current mandatory Agent-preset
+The exact schema version 20 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

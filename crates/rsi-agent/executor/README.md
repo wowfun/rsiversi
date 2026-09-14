@@ -1,5 +1,35 @@
 # rsi-agent-executor
 
+Request evidence is extracted from the single semantic LanguageRequest supplied
+to Prepare and the actual returned snapshot. Deduplication retains at most 64
+metadata entries across its sessions, never section bodies. Eviction leaves
+unmatched sections inline; later published evidence repopulates their metadata.
+Capture derives digests from its owned
+text and builds a sorted manifest from validated LanguageRequest values; the
+request-content count bound is checked against the manifest limit at compile time.
+Fact construction remains the publication validation boundary. Only Kernel's explicit prepublication
+evidence-budget rejection permits replacing the entire package with Unavailable
+while retaining the same effect and prepared call. A successful capacity flush
+commits only the preceding prefix and leaves the returned batch unpublished.
+That batch may still use the same explicit budget fallback; publication errors
+and failed or uncertain flushes never permit fallback or another Prepare.
+
+Normal, parallel and retained Tool results share one settlement path. Pure
+ToolSettlement contributors receive the exact durable intent and result plus
+bounded current domain states. Their typed proposals and the result enter one
+Kernel DomainMutation; the retained Tool identity is retired only after durable
+publication. Domain capture is a snapshot, not a revision lock: if another
+writer changes a proposed domain before settlement admission, the complete
+mixed mutation fails with a revision conflict. No result-only publication or
+callback retry can bypass this atomic boundary; retained Tool identity remains
+available for diagnosis and cleanup. A lost acknowledgement uses the same canonical request receipt,
+never another Tool invocation or callback execution. Goal and repeat-tool
+PostTool contributions remain after durable batch settlement.
+The domain-capture wait has a 30-second ceiling within the complete claim drive.
+Executor shutdown or the elapsed deadline cancels that outer drive and drops a
+pending capture without waiting for its local ceiling. This does not assert that
+already-admitted Store work or a synchronous callback can be forcibly interrupted.
+
 A post-Tool domain revision conflict discards that entire stale contribution
 batch; the already retained Tool result remains evidence and execution continues.
 Callbacks are not replayed. Other mutation failures, including unknown outcomes,
@@ -37,7 +67,9 @@ Tool retained past the main driver future carries a clone of the generation
 pin, so teardown cannot destroy the catalog or its hidden Scope while delayed
 work is settling. Every provider or Tool attempt is
 prepared, recorded, flushed, marked started, flushed again, and only then
-invoked. Image outputs enter Media and each ref is durably flushed before the
+invoked. Immediately before Tool start, the executor must obtain the Kernel's
+authority for that exact started effect; rejection prevents external execution.
+Image outputs enter Media and each ref is durably flushed before the
 stream advances; later failure preserves those refs in `partial_failed`.
 
 The claim's selected builder opens the execution cursor. Checkpoint requests
@@ -165,3 +197,14 @@ new key is declined without evicting another Session. Checkpoints remain an
 optional cache and never replace Fact durability. Executor shutdown first
 settles every claim lane, then closes checkpoint admission and drains already
 accepted requests within the executor's existing absolute shutdown deadline.
+
+Before a new Step request, Executor captures the complete model/effort selection
+from explicit Turn override, current selection domain or Header baseline, in that
+order. Retries retain this capture and do not admit newly queued Step input.
+Selection and BeforeStep callbacks share one captured context and its 30-second
+stage deadline. An explicit selection needs no context capture when the stage has
+no callbacks. Stage capture is cancelled by either Turn cancellation or Host stop.
+After that attempt finishes, pending Step input enters normally and the next
+request captures the newest selection. Only `NotStarted`/`NotDispatched` errors
+allowed by the frozen retry policy can retry; a dispatched HTTP rejection is not
+made retryable by changing Session settings.

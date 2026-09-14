@@ -1,5 +1,21 @@
 # rsi-agent-session-protocol
 
+ModelIntent request evidence is an atomic Available or Unavailable package.
+Configuration, system and tools sections hold UTF-8 inline bytes or an exact
+earlier same-Session inline section reference (sequence, section, digest, length).
+References never chain. Decoded section bytes total at most 16 MiB; ordinary
+content is represented only by a bounded typed count/byte manifest. The Kernel
+separately admits at most 16 MiB new inline bytes per Turn, within its existing
+generated-byte budget. Fact construction validates evidence with its final sequence
+in one pass; earlier direct-reference targets are checked by Kernel and grouped
+by source sequence, so shared originals are read once. Optional evidence cannot trigger a second provider Prepare.
+
+`FrozenAgentSettings.pricing` captures at most 256 exact deployment/endpoint/model
+quotes, 64 KiB encoded and eight currencies. Rates are unsigned integer currency
+billionths per token. Optional cache rates replace that input subset and require
+its measured count. ModelIntent freezes the matching quote; Kernel validates it
+against the immutable Header. Empty pricing means cost is not configured.
+
 `FrozenAgentSettings::validate_policy` validates the non-routing fields for
 configuration owners that have not selected a model yet. It does not construct
 durable settings. Constructors and deserialization still require a validated
@@ -26,8 +42,8 @@ arguments and expected revision. Its request identity must equal the control's
 request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
-Kernel service; serialized identities alone confer no authority. Header format
-12 includes model-effect purpose and continuation provenance. The
+Kernel service; serialized identities alone confer no authority. Only Header
+format 13 is accepted; format 12 and all earlier formats are unsupported. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 
@@ -67,7 +83,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 12), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 13), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.

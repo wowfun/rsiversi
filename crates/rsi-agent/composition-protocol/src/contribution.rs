@@ -125,6 +125,32 @@ pub trait PostToolContributor: fmt::Debug + Send + Sync + 'static {
     ) -> ContributionResult<ContributionOutput>;
 }
 
+/// Read-only inputs for one prepublication Tool result settlement.
+#[derive(Debug)]
+pub struct ToolSettlementContext<'a> {
+    /// Immutable Session settings and trust policy.
+    pub header: &'a SessionHeader,
+    /// Exact durable intent of the started Tool.
+    pub intent: &'a SessionFact,
+    /// Its already settled retained result; no callback can rerun the Tool.
+    pub result: &'a rsi_tools_protocol::ToolResult,
+    /// Complete bounded current domain set; revisions fence the atomic commit.
+    pub domains: &'a [DomainStateView],
+}
+
+/// Pure typed state proposals committed atomically with one `ToolResult`.
+pub trait ToolSettlementContributor: fmt::Debug + Send + Sync + 'static {
+    /// Has no external effects and returns only validated domain replacements.
+    ///
+    /// # Errors
+    /// Returns an error when the matching Tool result or current domain state
+    /// cannot produce a valid replacement.
+    fn settle(
+        &self,
+        context: &ToolSettlementContext<'_>,
+    ) -> ContributionResult<Vec<ValidatedDomainProposal>>;
+}
+
 /// Exact prepared Tool call and already-resolved constraints.
 #[derive(Debug)]
 pub struct ToolPolicyRequest<'a> {

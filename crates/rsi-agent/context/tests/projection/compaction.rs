@@ -274,6 +274,10 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
     let mut bodies = vec![
         accepted("interrupted", "Keep incomplete tools"),
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             snapshot: snapshot(),
@@ -598,6 +602,7 @@ fn append(
 }
 fn accepted(id: &str, text: &str) -> SessionFactBody {
     SessionFactBody::TurnAccepted {
+        reasoning_effort: None,
         turn_id: TurnId::new(id).unwrap(),
         text: text.into(),
         model: None,
@@ -618,6 +623,10 @@ fn model_bodies(
     let effect = EffectId::new(effect).unwrap();
     let mut bodies = vec![
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             snapshot: snapshot(),
@@ -641,10 +650,7 @@ fn model_bodies(
     ];
     if let Some(input_tokens) = usage {
         events.push(LanguageEvent::Usage {
-            usage: TokenUsage {
-                input_tokens,
-                ..Default::default()
-            },
+            usage: TokenUsage::new(input_tokens, 0, None, None, None).unwrap(),
         });
     }
     events.push(LanguageEvent::Finished {
@@ -878,7 +884,12 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             ForkTurnSelection::Last(1)
         };
         let child_header = parent_header
-            .forked_child(SessionId::new("fork").unwrap(), 3, origin)
+            .forked_child(
+                SessionId::new("fork").unwrap(),
+                3,
+                origin,
+                rsi_agent_session_protocol::ModelSelection::baseline(parent_header.settings()),
+            )
             .unwrap();
         let mut child = ModelContextState::open(
             Arc::new(DefaultContextBuilder::default()),
@@ -1181,7 +1192,14 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             ForkTurnSelection::Last(1)
         };
         let child_header = header("instructions")
-            .forked_child(SessionId::new("chain-fork").unwrap(), 3, origin)
+            .forked_child(
+                SessionId::new("chain-fork").unwrap(),
+                3,
+                origin,
+                rsi_agent_session_protocol::ModelSelection::baseline(
+                    header("instructions").settings(),
+                ),
+            )
             .unwrap();
         let mut child = ModelContextState::open(
             Arc::new(DefaultContextBuilder::default()),

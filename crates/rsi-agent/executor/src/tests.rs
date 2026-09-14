@@ -220,14 +220,43 @@ async fn completed_drive_wins_when_the_elapsed_deadline_is_also_ready() {
     assert!(!elapsed_deadline_wins(true, &drive));
 }
 
-#[derive(Debug)]
+#[tokio::test(start_paused = true)]
+async fn host_stop_drops_pending_drive_work_before_its_local_timeout() {
+    let stop = CancellationToken::new();
+    let claim_stop = stop.child_token();
+    let released = CancellationToken::new();
+    let started = tokio::time::Instant::now();
+    let mut drive = Box::pin(select_drive_or_stop(&claim_stop, async {
+        let _capture = released.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(30), std::future::pending::<()>())
+            .await
+            .expect("host stop must drop this wait before its timeout");
+        Ok(())
+    }));
+    assert!(futures_util::poll!(drive.as_mut()).is_pending());
+    assert!(!released.is_cancelled());
+
+    stop.cancel();
+
+    assert!(matches!(
+        futures_util::poll!(drive.as_mut()),
+        std::task::Poll::Ready(Err(DriveFailure::Stopped))
+    ));
+    assert!(released.is_cancelled());
+    assert_eq!(tokio::time::Instant::now(), started);
+}
+
+#[derive(Debug, Default)]
 struct FullBeforePublish {
+    first_publish_error: Option<fn() -> TurnError>,
+    second_publish_error: Option<fn() -> TurnError>,
     facts: Vec<Arc<SessionFact>>,
     required_flush_seq: u64,
     durable_seq: AtomicU64,
     publish_calls: AtomicUsize,
     flushes: Mutex<Vec<u64>>,
     shutdown_on_publish: bool,
+    capture_tokens: Option<Arc<Mutex<Vec<CancellationToken>>>>,
 }
 
 #[derive(Debug)]
@@ -391,6 +420,20 @@ impl TurnExecution for CheckpointFixture {
 
 #[async_trait]
 impl TurnExecution for FullBeforePublish {
+    async fn contribution_context(
+        &self,
+        _: &TurnClaim,
+        cancellation: CancellationToken,
+    ) -> rsi_agent_turn_protocol::Result<rsi_agent_composition_protocol::ContributionContext> {
+        self.capture_tokens
+            .as_ref()
+            .expect("pending capture fixture")
+            .lock()
+            .unwrap()
+            .push(cancellation);
+        std::future::pending().await
+    }
+
     async fn park_human_wait(
         &self,
         _claim: &TurnClaim,
@@ -495,7 +538,16 @@ impl TurnExecution for FullBeforePublish {
         if self.shutdown_on_publish {
             return Err(TurnError::ShuttingDown);
         }
-        if self.publish_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        let call = self.publish_calls.fetch_add(1, Ordering::SeqCst);
+        if call == 1
+            && let Some(error) = self.second_publish_error
+        {
+            return Err(error());
+        }
+        if call == 0 {
+            if let Some(error) = self.first_publish_error {
+                return Err(error());
+            }
             return Ok(PublishAttempt::FlushRequired {
                 unpublished: bodies,
             });
@@ -536,7 +588,7 @@ impl TurnExecution for FullBeforePublish {
     }
 }
 
-fn claim() -> (TurnClaim, SessionFact) {
+pub(super) fn claim() -> (TurnClaim, SessionFact) {
     let session_id = SessionId::new("session-terminal-retry").unwrap();
     let turn_id = TurnId::new("turn-terminal-retry").unwrap();
     let header = SessionHeader::new(
@@ -558,6 +610,7 @@ fn claim() -> (TurnClaim, SessionFact) {
         1,
         1,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: turn_id.clone(),
             text: "task".into(),
             model: None,
@@ -588,6 +641,7 @@ fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
                 1,
                 1,
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id: turn_id.clone(),
                     text: text.into(),
                     model: None,
@@ -661,12 +715,15 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
 async fn terminal_publication_delegates_durable_ending_to_kernel() {
     let (claim, accepted) = claim();
     let turns = FullBeforePublish {
+        first_publish_error: None,
+        second_publish_error: None,
         facts: vec![Arc::new(accepted)],
         required_flush_seq: 1,
         durable_seq: AtomicU64::new(0),
         publish_calls: AtomicUsize::new(0),
         flushes: Mutex::new(Vec::new()),
         shutdown_on_publish: false,
+        capture_tokens: None,
     };
     let config = ExecutorConfig {
         executor_id: "executor".into(),
@@ -689,12 +746,15 @@ async fn terminal_publication_delegates_durable_ending_to_kernel() {
 async fn terminal_publication_treats_kernel_shutdown_as_driver_stop() {
     let (claim, accepted) = claim();
     let turns = FullBeforePublish {
+        first_publish_error: None,
+        second_publish_error: None,
         facts: vec![Arc::new(accepted)],
         required_flush_seq: 1,
         durable_seq: AtomicU64::new(0),
         publish_calls: AtomicUsize::new(0),
         flushes: Mutex::new(Vec::new()),
         shutdown_on_publish: true,
+        capture_tokens: None,
     };
     let config = ExecutorConfig {
         executor_id: "executor".into(),
@@ -725,12 +785,15 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
     )
     .unwrap();
     let turns = FullBeforePublish {
+        first_publish_error: None,
+        second_publish_error: None,
         facts: vec![Arc::new(accepted), Arc::new(later)],
         required_flush_seq: 2,
         durable_seq: AtomicU64::new(0),
         publish_calls: AtomicUsize::new(0),
         flushes: Mutex::new(Vec::new()),
         shutdown_on_publish: false,
+        capture_tokens: None,
     };
     let config = ExecutorConfig {
         executor_id: "executor".into(),
@@ -759,6 +822,87 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
 }
 
 #[tokio::test]
+async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection() {
+    use rsi_agent_session_protocol::{EvidencePart, EvidenceUnavailable, RequestEvidence};
+    for mode in ["budget", "flush_error", "flushed_budget"] {
+        let budget = mode == "budget";
+        let after_flush = mode == "flushed_budget";
+        let (claim, accepted) = claim();
+        let turns = FullBeforePublish {
+            first_publish_error: if after_flush {
+                None
+            } else {
+                Some(if budget {
+                    || TurnError::EvidenceBudget
+                } else {
+                    || TurnError::Flush("uncertain durable write".into())
+                })
+            },
+            second_publish_error: after_flush.then_some(|| TurnError::EvidenceBudget),
+            facts: vec![Arc::new(accepted)],
+            required_flush_seq: 0,
+            durable_seq: AtomicU64::new(0),
+            publish_calls: AtomicUsize::new(0),
+            flushes: Mutex::new(vec![]),
+            shutdown_on_publish: false,
+            capture_tokens: None,
+        };
+        let config: ExecutorConfig =
+            serde_json::from_value(serde_json::json!({"executor_id":"fixture"})).unwrap();
+        let effect = EffectId::new("same-prepared-effect").unwrap();
+        let intent = SessionFactBody::ModelIntent {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect.clone(),
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+            price_quote: None,
+            evidence: RequestEvidence::Available {
+                configuration: EvidencePart::inline("{}".into()),
+                system: EvidencePart::inline("system".into()),
+                tools: EvidencePart::inline("[]".into()),
+                manifest: vec![],
+            },
+            snapshot: PreparedCallSnapshot {
+                language_settings: None,
+                call_id: "one-prepare".into(),
+                deployment_id: "test".into(),
+                provider_family: "test".into(),
+                capability: rsi_ai_protocol::AiCapability::Language,
+                model: "model".into(),
+                protocol: "test".into(),
+                transport: "memory".into(),
+                endpoint_fingerprint: "endpoint".into(),
+                config_generation: 1,
+                credential_source: None,
+                retry_policy: rsi_ai_protocol::RetryPolicy::default(),
+                request_sha256: "a".repeat(64),
+            },
+        };
+        let result =
+            publish_nonterminal_with_capacity_retry(&turns, &config, &claim, vec![intent]).await;
+        if budget || after_flush {
+            let result = result.unwrap();
+            assert!(
+                matches!(result[0].body(),SessionFactBody::ModelIntent {effect_id,snapshot,evidence:RequestEvidence::Unavailable {reason:EvidenceUnavailable::Budget},..} if effect_id==&effect && snapshot.call_id=="one-prepare")
+            );
+            assert_eq!(
+                turns.publish_calls.load(Ordering::SeqCst),
+                if after_flush { 3 } else { 2 }
+            );
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                turns.publish_calls.load(Ordering::SeqCst),
+                if after_flush { 2 } else { 1 }
+            );
+        }
+        assert_eq!(
+            *turns.flushes.lock().unwrap(),
+            if after_flush { vec![1] } else { vec![] }
+        );
+    }
+}
+
+#[tokio::test]
 async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     let (claim, accepted) = claim();
     let queued_turn = TurnId::new("turn-queued").unwrap();
@@ -781,6 +925,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
                     3,
                     3,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: queued_turn,
                         text: "queued task".into(),
                         model: None,
@@ -888,10 +1033,15 @@ fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
             2,
             2,
             SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                price_quote: None,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
                 snapshot: PreparedCallSnapshot {
+                    language_settings: None,
                     call_id: "call-1".into(),
                     deployment_id: "test".into(),
                     provider_family: "test".into(),
@@ -1015,4 +1165,33 @@ pub(super) fn context_pin() -> AgentCompositionPin {
         Arc::new(()),
     )
     .unwrap()
+}
+
+#[test]
+fn a_rejected_tool_origin_cannot_construct_external_execution_authority() {
+    let (claim, accepted) = claim();
+    let turns = FullBeforePublish {
+        first_publish_error: None,
+        second_publish_error: None,
+        facts: vec![Arc::new(accepted)],
+        required_flush_seq: 0,
+        durable_seq: AtomicU64::new(0),
+        publish_calls: AtomicUsize::new(0),
+        flushes: Mutex::new(vec![]),
+        shutdown_on_publish: false,
+        capture_tokens: None,
+    };
+    let effect = EffectId::new("unauthenticated-tool").unwrap();
+    assert!(turns.tool_caller(&claim, &effect).is_err());
+    assert!(crate::execution_support::tool_start_extensions(&turns, &claim, &effect).is_err());
+    assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+pub(super) fn pending_context(
+    tokens: Arc<Mutex<Vec<CancellationToken>>>,
+) -> Arc<dyn TurnExecution> {
+    Arc::new(FullBeforePublish {
+        capture_tokens: Some(tokens),
+        ..Default::default()
+    })
 }

@@ -262,6 +262,7 @@ struct JobRecord {
     scope: JobScopeAuthority,
     name: String,
     producer: String,
+    origin: Option<String>,
     producer_generation: u64,
     status: JobStatus,
     control: Option<Arc<dyn JobControl>>,
@@ -279,6 +280,7 @@ impl JobRecord {
             id: id.to_owned(),
             name: self.name.clone(),
             producer: self.producer.clone(),
+            origin: self.origin.clone(),
             status: self.status,
             requires_report: self.requires_report,
             reported: self.reported,
@@ -368,6 +370,9 @@ impl Jobs for Service {
     fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String> {
         validate_job_identifier("job name", &submission.name)?;
         validate_job_identifier("job producer name", &submission.producer)?;
+        if let Some(origin) = &submission.origin {
+            validate_job_identifier("job origin", origin)?;
+        }
         let executor = tokio::runtime::Handle::try_current()
             .map_err(|_| JobsError::Execution("Tokio runtime is unavailable".into()))?;
 
@@ -432,6 +437,7 @@ impl Jobs for Service {
                             scope: scope.clone(),
                             name: submission.name,
                             producer: submission.producer,
+                            origin: submission.origin,
                             producer_generation,
                             status: JobStatus::Running,
                             control: Some(control.clone()),
@@ -496,6 +502,71 @@ impl Jobs for Service {
         self.validate_scope(&registry, scope)?;
         let record = visible_record(&registry, scope, id)?;
         Ok(record.summary(id))
+    }
+
+    fn peek(
+        &self,
+        scope: &JobScopeAuthority,
+        id: &str,
+        origin: &str,
+        limits: [usize; 2],
+    ) -> Result<Option<JobRead>> {
+        validate_job_identifier("job identity", id)?;
+        validate_job_identifier("job origin", origin)?;
+        if limits.iter().any(|limit| !(1..=32 * 1024).contains(limit)) {
+            return Err(JobsError::InvalidInput("invalid peek bound".into()));
+        }
+        let (control, sequence) = {
+            let registry = lock(&self.registry);
+            self.validate_scope(&registry, scope)?;
+            let record = visible_record(&registry, scope, id)?;
+            if record.origin.as_deref() != Some(origin) {
+                return Err(JobsError::UnknownJob(id.into()));
+            }
+            let Some(control) = &record.control else {
+                return Ok(None);
+            };
+            (Arc::clone(control), record.sequence)
+        };
+        let sample = |stream, maximum| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| control.peek(stream, maximum)))
+                .map_err(|_| JobsError::Execution("job preview panicked".into()))?
+        };
+        let (Some(stdout), Some(stderr)) = (
+            sample(JobStream::Stdout, limits[0])?,
+            sample(JobStream::Stderr, limits[1])?,
+        ) else {
+            return Ok(None);
+        };
+        for (read, limit) in [(&stdout, limits[0]), (&stderr, limits[1])] {
+            if read.bytes.len() > limit
+                || read.oldest_offset.checked_add(read.bytes.len() as u64) != Some(read.next_offset)
+                || read
+                    .full_output
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 256)
+            {
+                return Err(JobsError::Execution("invalid job preview".into()));
+            }
+        }
+        let registry = lock(&self.registry);
+        self.validate_scope(&registry, scope)?;
+        let record = visible_record(&registry, scope, id)?;
+        if record.sequence != sequence || record.origin.as_deref() != Some(origin) {
+            return Err(JobsError::UnknownJob(id.into()));
+        }
+        if !record
+            .control
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &control))
+        {
+            return Ok(None);
+        }
+        Ok(Some(JobRead {
+            job: record.summary(id),
+            stdout,
+            stderr,
+        }))
     }
 
     fn read(
@@ -1221,6 +1292,7 @@ mod tests {
             scope: JobScopeAuthority::provider_owned(scope, 1, generation),
             name: "fixture".into(),
             producer: "fixture".into(),
+            origin: None,
             producer_generation: 1,
             status: JobStatus::Running,
             control: None,

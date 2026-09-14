@@ -16,7 +16,12 @@ Kernel. Model prompt projection and compaction belong to
 The [Goal domain](../goal/README.md) composes pure allocation, reporting and
 settlement callbacks over these contracts. Its scheduling owner belongs to the
 standard Host; Kernel authenticates the separate continuation lease, reservation
-receipt and mailbox input. Kernel's read-only Jobs port consumes public Jobs
+receipt and mailbox input. The [model selection domain](../model-selection/README.md)
+owns durable Session model/effort changes; each new execution Step captures that
+selection. The [Todo domain](../todo/README.md) owns the bounded task list committed
+atomically with its Tool result. Both are Agent-only contributions over the
+existing domain catalog, not new scheduling or storage owners.
+Kernel's read-only Jobs port consumes public Jobs
 status types and validates an executor-published source against the live claim;
 it cannot create or own the underlying Jobs scope.
 

@@ -32,6 +32,7 @@ fn fact(seq: u64) -> SessionFact {
         seq,
         seq,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
             text: "text".into(),
             model: None,
@@ -192,7 +193,7 @@ async fn memory_store_fact_pages_stop_before_the_aggregate_byte_bound() {
 #[tokio::test]
 async fn memory_store_passes_the_shared_mechanical_contract() {
     let turn = TurnId::new("turn-1").unwrap();
-    assert_mechanical_store_contract(
+    Box::pin(assert_mechanical_store_contract(
         &MemoryStore::new(),
         header(),
         fact(1),
@@ -214,7 +215,7 @@ async fn memory_store_passes_the_shared_mechanical_contract() {
             },
         )
         .unwrap(),
-    )
+    ))
     .await;
 }
 

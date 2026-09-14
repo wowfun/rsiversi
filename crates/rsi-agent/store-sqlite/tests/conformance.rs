@@ -44,6 +44,7 @@ fn fact(seq: u64) -> SessionFact {
         seq,
         seq,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
             text: format!("text-{seq}"),
             model: None,
@@ -315,6 +316,7 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
                     5,
                     5,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: invoking.clone(),
                         text: "spawn".into(),
                         model: None,
@@ -551,6 +553,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
                 },
+                rsi_agent_session_protocol::ModelSelection::baseline(root_header.settings()),
             )
             .unwrap()
     };
@@ -674,7 +677,7 @@ async fn ready_index_schema_rejects_nonwaking_next_step_rows() {
 async fn sqlite_store_passes_the_shared_mechanical_contract() {
     let root = tempfile::tempdir().unwrap();
     let turn = TurnId::new("turn-1").unwrap();
-    assert_mechanical_store_contract(
+    Box::pin(assert_mechanical_store_contract(
         &SqliteStore::open(root.path()).unwrap(),
         header("shared-contract"),
         fact(1),
@@ -696,7 +699,7 @@ async fn sqlite_store_passes_the_shared_mechanical_contract() {
             },
         )
         .unwrap(),
-    )
+    ))
     .await;
     SqliteStore::verify(root.path()).unwrap();
 }

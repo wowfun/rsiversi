@@ -18,7 +18,14 @@ use thiserror::Error;
 
 mod compaction;
 mod continuation;
+mod pricing;
+pub use pricing::{PriceError, PriceQuote, PriceTable};
+mod evidence;
 pub use continuation::{ContinuationInput, ContinuationProvenance, ContinuationSource};
+pub use evidence::{
+    EvidenceContentCount, EvidenceContentKind, EvidencePart, EvidenceSection, EvidenceUnavailable,
+    MAXIMUM_EVIDENCE_CONTENT_COUNT, MAXIMUM_REQUEST_EVIDENCE_BYTES, RequestEvidence,
+};
 mod contribution;
 pub use compaction::{
     CompactionBuilder, CompactionPrior, CompactionSelection, CompactionSource, CompactionTrigger,
@@ -44,7 +51,7 @@ pub use projection::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 12;
+pub const SESSION_FORMAT_VERSION: u32 = 13;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -478,6 +485,8 @@ impl MessageDelivery {
 pub struct MessageOptions {
     /// Optional exact invocation route.
     pub model: Option<ModelRef>,
+    /// Explicit effort requires an explicit model override.
+    pub reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     /// Optional sandbox override.
     pub sandbox: Option<SandboxMode>,
 }
@@ -519,6 +528,11 @@ impl AgentMessage {
             MAXIMUM_AGENT_MESSAGE_BYTES
         };
         validate_message_content(&self.content, text_limit)?;
+        if self.options.reasoning_effort.is_some() && self.options.model.is_none() {
+            return Err(SessionError::Invalid(
+                "effort override requires an explicit model".into(),
+            ));
+        }
         if let Some(model) = &self.options.model {
             model
                 .validate()
@@ -1171,9 +1185,11 @@ pub struct FrozenAgentSettings {
     settings_id: String,
     system_prompt: String,
     default_model: ModelRef,
+    default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     sandbox: SandboxMode,
     require_approval: bool,
     turn_budget: TurnBudget,
+    pricing: PriceTable,
 }
 
 impl<'de> Deserialize<'de> for FrozenAgentSettings {
@@ -1187,9 +1203,12 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
             settings_id: String,
             system_prompt: String,
             default_model: ModelRef,
+            default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
             sandbox: SandboxMode,
             require_approval: bool,
             turn_budget: TurnBudget,
+            #[serde(default)]
+            pricing: PriceTable,
         }
 
         let wire = WireSettings::deserialize(deserializer)?;
@@ -1201,6 +1220,11 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
             wire.require_approval,
             wire.turn_budget,
         )
+        .map(|mut settings| {
+            settings.default_reasoning_effort = wire.default_reasoning_effort;
+            settings.pricing = wire.pricing;
+            settings
+        })
         .map_err(serde::de::Error::custom)
     }
 }
@@ -1237,6 +1261,8 @@ impl FrozenAgentSettings {
             settings_id: settings_id.into(),
             system_prompt: system_prompt.into(),
             default_model,
+            default_reasoning_effort: None,
+            pricing: PriceTable::default(),
             sandbox,
             require_approval,
             turn_budget,
@@ -1254,6 +1280,7 @@ impl FrozenAgentSettings {
             self.require_approval,
             &self.turn_budget,
         )?;
+        self.pricing.validate()?;
         self.default_model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))
@@ -1298,6 +1325,31 @@ impl FrozenAgentSettings {
     /// Returns the creation-time exact default route.
     pub const fn default_model(&self) -> &ModelRef {
         &self.default_model
+    }
+
+    /// Returns the creation-time requested effort; absent means provider default.
+    pub fn default_reasoning_effort(&self) -> Option<&rsi_ai_protocol::ReasoningEffortId> {
+        self.default_reasoning_effort.as_ref()
+    }
+
+    /// Configured prices captured for this Session's lifetime.
+    pub fn pricing(&self) -> &PriceTable {
+        &self.pricing
+    }
+
+    /// Captures a validated price table without changing existing routing policy.
+    #[must_use]
+    pub fn with_pricing(mut self, pricing: PriceTable) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
+    /// Freezes a complete validated selection without changing execution policy.
+    pub fn with_model_selection(mut self, selection: ModelSelection) -> Result<Self> {
+        selection.validate()?;
+        self.default_model = selection.model;
+        self.default_reasoning_effort = selection.reasoning_effort;
+        Ok(self)
     }
 
     /// Returns the creation-time sandbox default.
@@ -1508,12 +1560,13 @@ impl SessionHeader {
         Ok(self)
     }
 
-    /// Derives a fresh child Header while preserving the parent's exact route and policy.
+    /// Derives a child Header with authenticated invocation selection and parent policy.
     pub fn forked_child(
         &self,
         session_id: SessionId,
         created_at_ms: u64,
         origin: ForkOrigin,
+        selection: ModelSelection,
     ) -> Result<Self> {
         if origin.parent_session_id != self.session_id {
             return Err(SessionError::Invalid(
@@ -1525,7 +1578,7 @@ impl SessionHeader {
             created_at_ms,
             self.canonical_cwd.clone(),
             self.agent_preset_id.clone(),
-            self.settings.clone(),
+            self.settings.clone().with_model_selection(selection)?,
         )?
         .with_workspace_trust(self.workspace_trust)?
         .with_fork_origin(origin)
@@ -1653,6 +1706,7 @@ impl TurnOutcome {
 /// Append-only semantic body of one durable or speculative Fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)] // Fact pages bound both count and bytes; keep owned semantic payloads inline.
 pub enum SessionFactBody {
     /// One user turn entered the session log.
     TurnAccepted {
@@ -1662,6 +1716,8 @@ pub enum SessionFactBody {
         text: String,
         /// Invocation-scoped model override, if present.
         model: Option<ModelRef>,
+        /// Requested effort for the explicit route; absent means its default.
+        reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
         /// Exact resolved sandbox mode for this turn.
         sandbox: SandboxMode,
         /// Whether every Tool effect requires a live one-shot approval.
@@ -1677,6 +1733,8 @@ pub enum SessionFactBody {
         message_ids: Vec<MessageId>,
         /// Invocation-scoped model override, if present.
         model: Option<ModelRef>,
+        /// Requested effort for the explicit route; absent means its default.
+        reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
         /// Exact resolved sandbox mode for this Turn.
         sandbox: SandboxMode,
         /// Whether every Tool effect requires a live one-shot approval.
@@ -1757,6 +1815,10 @@ pub enum SessionFactBody {
         snapshot: PreparedCallSnapshot,
         /// Frozen interpretation and installation authority for this model effect.
         purpose: ModelPurpose,
+        /// Exact Header-configured tariff selected by the prepared endpoint/route.
+        price_quote: Option<PriceQuote>,
+        /// Optional exact request inspection evidence, atomic with this intent.
+        evidence: RequestEvidence,
     },
     /// The prepared Language call was authorized to start after intent durability.
     ModelStarted {
@@ -1809,6 +1871,8 @@ pub enum SessionFactBody {
         turn_id: TurnId,
         /// Exact effect identity.
         effect_id: EffectId,
+        /// Completed Conversation model effect that produced this exact call.
+        source_model_effect_id: EffectId,
         /// Exact retained-result identity.
         identity: ToolResultIdentity,
         /// Exact registered Tool name.
@@ -1867,6 +1931,11 @@ pub enum SessionFactBody {
 impl SessionFactBody {
     /// Revalidates all bounded semantic fields.
     pub fn validate(&self) -> Result<()> {
+        self.validate_at(None)
+    }
+
+    #[allow(clippy::too_many_lines)] // One exhaustive owning boundary for each semantic Fact variant.
+    fn validate_at(&self, seq: Option<u64>) -> Result<()> {
         match self {
             Self::TurnAccepted {
                 text,
@@ -1874,19 +1943,27 @@ impl SessionFactBody {
                 turn_id: _,
                 sandbox,
                 require_approval,
-            } => validate_turn_acceptance(text, model.as_ref(), *sandbox, *require_approval),
+                reasoning_effort,
+            } => {
+                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
+                validate_turn_acceptance(text, model.as_ref(), *sandbox, *require_approval)
+            }
             Self::MessageTurnAccepted {
                 message_ids,
                 model,
                 sandbox,
                 require_approval,
+                reasoning_effort,
                 ..
-            } => validate_message_turn_acceptance(
-                message_ids,
-                model.as_ref(),
-                *sandbox,
-                *require_approval,
-            ),
+            } => {
+                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
+                validate_message_turn_acceptance(
+                    message_ids,
+                    model.as_ref(),
+                    *sandbox,
+                    *require_approval,
+                )
+            }
             Self::StepStarted { .. } => Ok(()),
             Self::InputMessageEntered {
                 source, content, ..
@@ -1919,8 +1996,24 @@ impl SessionFactBody {
                 ..
             } => validate_budget_exhaustion(*dimension, *consumed, *limit),
             Self::ModelIntent {
-                snapshot, purpose, ..
-            } => purpose.validate_snapshot(snapshot),
+                snapshot,
+                purpose,
+                price_quote,
+                evidence,
+                ..
+            } => {
+                evidence.validate(seq)?;
+                purpose.validate_snapshot(snapshot)?;
+                if let Some(quote) = price_quote {
+                    quote.validate()?;
+                    if !quote.matches(snapshot) {
+                        return Err(SessionError::Invalid(
+                            "price quote differs from prepared route".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            }
             Self::ImageIntent { snapshot, .. } => validate_snapshot_capability(
                 snapshot,
                 AiCapability::Image,
@@ -2169,7 +2262,7 @@ impl SessionFact {
                 "Fact sequence and timestamp must be nonzero".into(),
             ));
         }
-        body.validate()?;
+        body.validate_at(Some(seq))?;
         let mut fact = Self {
             seq,
             timestamp_ms,
@@ -2467,6 +2560,21 @@ fn validate_canonical_path(value: &str) -> Result<()> {
     if !rsi_workspace_path::is_absolute(value) {
         return Err(SessionError::Invalid(
             "workspace path must be absolute and lexically normalized".into(),
+        ));
+    }
+    Ok(())
+}
+
+mod model_selection;
+pub use model_selection::ModelSelection;
+
+fn validate_effort_override(
+    model: Option<&ModelRef>,
+    effort: Option<&rsi_ai_protocol::ReasoningEffortId>,
+) -> Result<()> {
+    if effort.is_some() && model.is_none() {
+        return Err(SessionError::Invalid(
+            "effort override requires an explicit model".into(),
         ));
     }
     Ok(())

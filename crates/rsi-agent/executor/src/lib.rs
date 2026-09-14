@@ -231,6 +231,7 @@ impl ExecutorConfig {
 
 #[derive(Debug)]
 struct Driver {
+    evidence: Mutex<evidence::EvidenceCache>,
     turns: Arc<dyn TurnExecution>,
     finalization: Arc<dyn TurnFinalization>,
     language: Arc<dyn LanguageCall>,
@@ -251,12 +252,14 @@ struct TrackedTool {
 }
 
 struct PreparedToolEffect {
+    intent: Arc<SessionFact>,
     effect_id: EffectId,
     identity: ToolResultIdentity,
     prepared: Box<dyn PreparedToolCall>,
 }
 
 struct PendingToolEffect {
+    source_model_effect_id: EffectId,
     effect_id: EffectId,
     identity: ToolResultIdentity,
     name: String,
@@ -286,7 +289,9 @@ const fn elapsed_deadline_wins(
 
 mod contributions;
 mod driver;
+mod evidence;
 mod execution_support;
+mod tool_settlement;
 
 use execution_support::{
     CombinedCancellation, DriveFailure, ai_failure, apply_finalization_failure, bounded,
@@ -298,7 +303,7 @@ use execution_support::{
 
 #[derive(Debug)]
 enum ModelAttempt {
-    Output(Box<rsi_ai_protocol::LanguageOutput>),
+    Output(EffectId, Box<rsi_ai_protocol::LanguageOutput>),
     Retry,
     ContextLimit,
 }
@@ -325,6 +330,7 @@ struct ImageStreamContext<'a> {
 #[derive(Debug, Default)]
 struct ScannedTurn {
     model: Option<ModelRef>,
+    reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     image: Option<(ModelRef, ImageRequest)>,
     terminal: bool,
     completed_model_without_successor: bool,
@@ -350,6 +356,7 @@ enum ResumeEffect {
         started: bool,
     },
     Tool {
+        intent: Arc<SessionFact>,
         effect_id: EffectId,
         identity: ToolResultIdentity,
         started: bool,
@@ -367,11 +374,13 @@ fn scan_turn(
             SessionFactBody::TurnAccepted {
                 turn_id,
                 model,
+                reasoning_effort,
                 sandbox,
                 require_approval,
                 ..
             } if turn_id == claim.turn_id() => {
                 state.model.clone_from(model);
+                state.reasoning_effort.clone_from(reasoning_effort);
                 state.turn_policy = Some(ResolvedTurnPolicy {
                     sandbox: *sandbox,
                     require_approval: *require_approval,
@@ -380,11 +389,13 @@ fn scan_turn(
             SessionFactBody::MessageTurnAccepted {
                 turn_id,
                 model,
+                reasoning_effort,
                 sandbox,
                 require_approval,
                 ..
             } if turn_id == claim.turn_id() => {
                 state.model.clone_from(model);
+                state.reasoning_effort.clone_from(reasoning_effort);
                 state.turn_policy = Some(ResolvedTurnPolicy {
                     sandbox: *sandbox,
                     require_approval: *require_approval,
@@ -460,6 +471,7 @@ fn scan_turn(
             } if turn_id == claim.turn_id() => {
                 state.completed_model_without_successor = false;
                 state.effects.push(ResumeEffect::Tool {
+                    intent: Arc::clone(fact),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
                     started: false,
@@ -587,6 +599,7 @@ impl PluginFactory for ExecutorFactory {
         let checkpoint_turns = Arc::clone(&turns);
         let checkpoints = Arc::new(CheckpointScheduler::new());
         let driver = Arc::new(Driver {
+            evidence: Mutex::new(evidence::EvidenceCache::default()),
             turns,
             finalization,
             language,

@@ -404,19 +404,13 @@ mod linux {
                     "background Bash does not accept timeout_ms; use job_output or job_kill",
                 );
             }
-            let scope = if arguments.run_in_background {
-                match execution.job_scope() {
-                    Some(scope) => Some(scope.clone()),
-                    None => {
-                        return error_result(
-                            "missing_job_scope",
-                            "background Bash requires live turn-scoped Jobs authority",
-                        );
-                    }
-                }
-            } else {
-                None
-            };
+            let scope = execution.job_scope().cloned();
+            if arguments.run_in_background && scope.is_none() {
+                return error_result(
+                    "missing_job_scope",
+                    "background Bash requires live turn-scoped Jobs authority",
+                );
+            }
             let confined = execution
                 .confine(
                     self.services.bash.clone(),
@@ -440,17 +434,58 @@ mod linux {
                 let submission = JobSubmission {
                     name: "bash".into(),
                     producer: BASH_PRODUCER.into(),
+                    origin: execution
+                        .extension::<rsi_jobs::JobOrigin>()
+                        .map(|origin| origin.as_str().to_owned()),
                     request: JobRequest::new(BashJobRequest { spec }),
                     requires_report: true,
                 };
-                return match self.services.jobs.submit(&scope, submission) {
-                    Ok(id) => result_with_text(
+                let id = match self.services.jobs.submit(&scope, submission) {
+                    Ok(id) => id,
+                    Err(error) => return jobs_error_result(&error),
+                };
+                if arguments.run_in_background {
+                    return result_with_text(
                         json!({"job_id":id,"status":"running"}),
                         format!("Started background Bash job {id}."),
                         false,
-                    ),
-                    Err(error) => jobs_error_result(&error),
+                    );
+                }
+                let timeout = arguments.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
+                let (status, read) = tokio::select! {
+                    biased;
+                    read = self.services.jobs.wait(&scope, &id, 0, 0) => ("exited", read),
+                    () = execution.cancellation.cancelled() => {
+                        let _settled = self.services.jobs.kill(&scope, &id).await;
+                        return Err(ToolError::Cancelled);
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(timeout)) =>
+                        ("timed_out", self.services.jobs.kill(&scope, &id).await),
                 };
+                let read = match read {
+                    Ok(read) => read,
+                    Err(error) => return jobs_error_result(&error),
+                };
+                let terminal = read.job.terminal.as_ref().ok_or_else(|| {
+                    ToolError::Execution("foreground Bash lacks terminal status".into())
+                })?;
+                let outcome = ProcessOutcome {
+                    exit_code: terminal.exit_code,
+                    signal: terminal.signal,
+                };
+                let process_read = |read: rsi_jobs::JobOutputRead| ProcessRead {
+                    bytes: read.bytes,
+                    oldest_offset: read.oldest_offset,
+                    next_offset: read.next_offset,
+                    lossy: read.lossy,
+                    full_output: read.full_output,
+                };
+                return foreground_output(
+                    status,
+                    &process_read(read.stdout),
+                    &process_read(read.stderr),
+                    &outcome,
+                );
             }
 
             let timeout = arguments.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
@@ -516,6 +551,24 @@ mod linux {
 
     #[async_trait]
     impl JobControl for BashJobControl {
+        fn peek(
+            &self,
+            stream: JobStream,
+            maximum: usize,
+        ) -> rsi_jobs::Result<Option<JobOutputRead>> {
+            let reader = match stream {
+                JobStream::Stdout => self.process.stdout(),
+                JobStream::Stderr => self.process.stderr(),
+            };
+            let read = reader.peek_tail(maximum).map_err(map_process)?;
+            Ok(Some(JobOutputRead {
+                full_output: read.full_output,
+                bytes: read.bytes,
+                oldest_offset: read.oldest_offset,
+                next_offset: read.next_offset,
+                lossy: read.lossy,
+            }))
+        }
         fn read(&self, stream: JobStream, offset: u64) -> rsi_jobs::Result<JobOutputRead> {
             let read = match stream {
                 JobStream::Stdout => self.process.stdout().read_from(offset),
@@ -584,17 +637,26 @@ mod linux {
             .stderr()
             .read_from(0)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
+        foreground_output(status, &stdout, &stderr, outcome)
+    }
+
+    fn foreground_output(
+        status: &str,
+        stdout: &ProcessRead,
+        stderr: &ProcessRead,
+        outcome: &ProcessOutcome,
+    ) -> rsi_tools_protocol::Result<ToolResult> {
         result_with_text(
             json!({
                 "status":status,
                 "exit_code":outcome.exit_code,
                 "signal":outcome.signal,
-                "stdout":process_stream_value(&stdout),
-                "stderr":process_stream_value(&stderr)
+                "stdout":process_stream_value(stdout),
+                "stderr":process_stream_value(stderr)
             }),
             format!(
                 "{}\n[status: {status}; exit code: {}; signal: {}]",
-                render_stream_text(&stdout, &stderr, status),
+                render_stream_text(stdout, stderr, status),
                 outcome
                     .exit_code
                     .map_or_else(|| "none".into(), |code| code.to_string()),

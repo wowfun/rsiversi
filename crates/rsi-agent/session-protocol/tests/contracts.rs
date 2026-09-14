@@ -17,6 +17,10 @@ fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
         6,
         1,
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             turn_id: TurnId::new("current").unwrap(),
             effect_id: EffectId::new("summary").unwrap(),
             snapshot: snapshot(AiCapability::Language),
@@ -186,6 +190,7 @@ fn settings() -> FrozenAgentSettings {
 
 fn snapshot(capability: AiCapability) -> PreparedCallSnapshot {
     PreparedCallSnapshot {
+        language_settings: None,
         call_id: "call-1".into(),
         deployment_id: "openai".into(),
         provider_family: "openai".into(),
@@ -240,6 +245,15 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
     assert_eq!(
         serde_json::from_slice::<SessionHeader>(&bytes).unwrap(),
         header
+    );
+
+    let mut previous = serde_json::to_value(&header).unwrap();
+    previous["format_version"] = json!(12);
+    assert!(
+        serde_json::from_value::<SessionHeader>(previous)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported session format version 12")
     );
 
     let mut value = serde_json::to_value(&header).unwrap();
@@ -477,6 +491,10 @@ fn unconfined_settings_require_live_approval() {
 fn decoded_identifiers_and_nested_model_snapshot_cannot_bypass_validation() {
     assert!(serde_json::from_str::<SessionId>(r#""bad id""#).is_err());
     let body = SessionFactBody::ModelIntent {
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+        price_quote: None,
         purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: TurnId::new("turn-1").unwrap(),
         effect_id: EffectId::new("effect-1").unwrap(),
@@ -489,6 +507,7 @@ fn decoded_identifiers_and_nested_model_snapshot_cannot_bypass_validation() {
             1,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new("turn-1").unwrap(),
                 text: "hello".into(),
                 model: None,
@@ -622,6 +641,7 @@ fn fact_pages_are_exactly_contiguous_and_bounded() {
             seq,
             seq,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
                 text: "hello".into(),
                 model: None,
@@ -893,6 +913,7 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
 
     let with_options = AgentMessage {
         options: MessageOptions {
+            reasoning_effort: None,
             model: Some(ModelRef::new("openai", "gpt-test").unwrap()),
             sandbox: None,
         },

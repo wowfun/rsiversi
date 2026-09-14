@@ -1,6 +1,64 @@
 use rsi_agent_composition_protocol::{
     DomainCatalog, DomainCatalogBuilder, DomainDefinition, DomainError,
 };
+
+#[test]
+fn fork_resets_only_declared_domains_and_still_validates_parent_payloads() {
+    use rsi_agent_composition_protocol::{DomainBaseline, DomainForkPolicy};
+    use rsi_agent_session_protocol::{DomainSnapshot, DomainStateValue};
+    let inherited =
+        DomainDefinition::new(DomainIdentity::new("inherited", 1).unwrap(), &false, |_| {
+            Ok(())
+        })
+        .unwrap();
+    let independent = DomainDefinition::new(
+        DomainIdentity::new("independent", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+    )
+    .unwrap()
+    .with_fork_policy(DomainForkPolicy::ResetToInitial);
+    let catalog =
+        DomainCatalog::new([inherited.registration(), independent.registration()]).unwrap();
+    let mut baseline = DomainBaseline::new(catalog).unwrap();
+    let make = |id: &str, value: serde_json::Value| {
+        DomainSnapshot::new(
+            DomainIdentity::new(id, 1).unwrap(),
+            DomainStateValue::new(value).unwrap(),
+        )
+    };
+    baseline
+        .inherit(&[
+            make("inherited", serde_json::json!(true)),
+            make("independent", serde_json::json!(true)),
+        ])
+        .unwrap();
+    let snapshots = baseline.initial_states();
+    assert_eq!(
+        snapshots
+            .iter()
+            .find(|s| s.identity().id() == "inherited")
+            .unwrap()
+            .state()
+            .value(),
+        &serde_json::json!(true)
+    );
+    assert_eq!(
+        snapshots
+            .iter()
+            .find(|s| s.identity().id() == "independent")
+            .unwrap()
+            .state()
+            .value(),
+        &serde_json::json!(false)
+    );
+    assert!(
+        baseline
+            .inherit(&[make("independent", serde_json::json!("invalid"))])
+            .is_err()
+    );
+    assert_eq!(baseline.initial_states(), snapshots);
+}
 use rsi_agent_session_protocol::{DomainIdentity, DomainRevision};
 use serde::{Deserialize, Serialize};
 

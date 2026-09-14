@@ -737,9 +737,12 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
             .unwrap()
             .unwrap();
         let busy_id = SessionId::new("busy-child").unwrap();
+        let caller = control_tool_caller(kernel, &root).await;
         let spawn = |id: SessionId, name: &str| SpawnAgentRequest {
+            model: None,
+            reasoning_effort: None,
             cancellation: CancellationToken::new(),
-            caller: kernel.agent_caller(&root).unwrap(),
+            caller: caller.clone(),
             child_session_id: id,
             task_name: name.into(),
             message_id: MessageId::new(format!("start-{name}")).unwrap(),

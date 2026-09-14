@@ -47,7 +47,18 @@ pub enum DomainError {
 
 type Result<T> = std::result::Result<T, DomainError>;
 
+/// Initial-state behavior selected by an immutable domain definition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DomainForkPolicy {
+    /// Overlay validated parent state on the target's initial state.
+    #[default]
+    Inherit,
+    /// Retain this definition's initial state independently of parent history.
+    ResetToInitial,
+}
+
 trait Codec: fmt::Debug + Send + Sync {
+    fn fork_policy(&self) -> DomainForkPolicy;
     fn identity(&self) -> &DomainIdentity;
     fn initial(&self) -> &DomainSnapshot;
     fn validate(&self, state: &DomainStateValue) -> Result<()>;
@@ -55,6 +66,7 @@ trait Codec: fmt::Debug + Send + Sync {
 
 struct TypedCodec<T> {
     initial: DomainSnapshot,
+    fork_policy: DomainForkPolicy,
     validate: fn(&T) -> std::result::Result<(), String>,
     marker: PhantomData<T>,
 }
@@ -81,6 +93,9 @@ impl<T: DeserializeOwned + Send + Sync> TypedCodec<T> {
 }
 
 impl<T: DeserializeOwned + Send + Sync> Codec for TypedCodec<T> {
+    fn fork_policy(&self) -> DomainForkPolicy {
+        self.fork_policy
+    }
     fn identity(&self) -> &DomainIdentity {
         self.initial.identity()
     }
@@ -125,12 +140,25 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainDefinition<T
         let state = encode(&identity, initial)?;
         let codec = Arc::new(TypedCodec {
             initial: DomainSnapshot::new(identity, state),
+            fork_policy: DomainForkPolicy::Inherit,
             validate,
             marker: PhantomData,
         });
         // Validate the serialized representation as well: linked serializers may differ from T.
         codec.validate(codec.initial.state())?;
         Ok(Self { codec })
+    }
+    /// Creates a definition with an explicit generation-frozen fork policy.
+    #[must_use]
+    pub fn with_fork_policy(self, policy: DomainForkPolicy) -> Self {
+        Self {
+            codec: Arc::new(TypedCodec {
+                initial: self.codec.initial.clone(),
+                fork_policy: policy,
+                validate: self.codec.validate,
+                marker: PhantomData,
+            }),
+        }
     }
     /// Returns the durable codec identity.
     pub fn identity(&self) -> &DomainIdentity {
@@ -504,7 +532,13 @@ impl DomainBaseline {
             let index = snapshots
                 .binary_search_by(|current| current.identity().id().cmp(snapshot.identity().id()))
                 .map_err(|_| DomainError::Unsupported(snapshot.identity().clone()))?;
-            snapshots[index] = snapshot.clone();
+            if self.catalog.inner.definitions[snapshot.identity().id()]
+                .codec
+                .fork_policy()
+                == DomainForkPolicy::Inherit
+            {
+                snapshots[index] = snapshot.clone();
+            }
         }
         let next = baseline_commit(snapshots)?;
         self.commit = next;

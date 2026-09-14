@@ -1,5 +1,9 @@
 # rsi-process
 
+`ProcessOutput::peek_tail` copies only the requested newest raw bytes, within
+1..=32 KiB, under the capture lock. It preserves whole-stream offsets and the
+best-effort completed-output identity without waiting or changing process state.
+
 The Process contract accepts an already confined invocation plus explicit
 stdin bytes, a complete child environment, per-stream capture reservations,
 and termination grace. Spawn either fails before publishing a process identity

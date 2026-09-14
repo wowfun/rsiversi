@@ -768,8 +768,10 @@ async fn human_wait_releases_tree_admission_and_cancelled_resume_does_not_retain
     for index in 0..2 {
         kernel
             .spawn_agent(SpawnAgentRequest {
+                model: None,
+                reasoning_effort: None,
                 cancellation: CancellationToken::new(),
-                caller: kernel.agent_caller(&parent).unwrap(),
+                caller: control_tool_caller(&kernel, &parent).await,
                 child_session_id: SessionId::new(format!("human-extra-{index}")).unwrap(),
                 task_name: format!("extra-{index}"),
                 message_id: MessageId::new(format!("human-extra-{index}")).unwrap(),

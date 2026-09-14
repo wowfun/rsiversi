@@ -363,6 +363,7 @@ async fn single_lane_configuration_keeps_independent_sessions_serial() {
         .unwrap();
     let first = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack
                 .fresh(header_for_session(
@@ -381,6 +382,7 @@ async fn single_lane_configuration_keeps_independent_sessions_serial() {
         .expect("first session did not enter its provider stream");
     let second = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack
                 .fresh(header_for_session(
@@ -452,6 +454,7 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
         .unwrap();
     let first = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "first".into(),
@@ -468,6 +471,7 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
     .expect("executor did not publish the first streamed event");
     let second = turns
         .submit(SubmitTurn {
+            reasoning_effort: None,
             turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "second".into(),
@@ -697,6 +701,10 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
     .unwrap()
     .unwrap()
     .unwrap();
+    execution
+        .close_current_step(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
     let PublishAttempt::Published(facts) = execution
         .publish(
             &claim,

@@ -11,6 +11,10 @@ generation than the Session's execution policy.
 
 ## Decision
 
+The [request evidence decision](2026-09-14-request-evidence.md) observes the single
+built LanguageRequest in Executor. It adds no second build, historical reader or
+evidence fields to this Context builder's checkpoint format.
+
 The existing deep Context module owns the context interface, cache envelope and
 default provider. The selected Agent Profile publishes an ordinary Local
 ModelContextBuilder capability. Composition isolates that capability, requires

@@ -281,6 +281,8 @@ impl LocalContract for ProcessOutputCacheContract {
 pub trait ProcessOutput: fmt::Debug + Send + Sync + 'static {
     /// Reads retained bytes using whole-stream byte coordinates.
     fn read_from(&self, offset: u64) -> Result<ProcessRead>;
+    /// Copies at most 1..=32768 newest bytes without waiting or changing state.
+    fn peek_tail(&self, maximum: usize) -> Result<ProcessRead>;
 }
 
 /// Direct-child exit facts without caller-owned timeout classification.

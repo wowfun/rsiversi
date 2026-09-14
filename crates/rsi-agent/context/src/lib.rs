@@ -758,6 +758,8 @@ impl ContextFold {
                 self.insert_turn(turn_id, message)?;
             }
             SessionFactBody::ModelIntent {
+                evidence: _,
+                price_quote: _,
                 turn_id,
                 effect_id,
                 purpose,

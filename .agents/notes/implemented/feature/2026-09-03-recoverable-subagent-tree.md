@@ -25,6 +25,13 @@ arguments also cannot be trusted to name the calling Session, Turn, or tree.
 
 ## Decision
 
+The [Tool model origin decision](../architecture/2026-09-14-tool-model-origin.md)
+supersedes only frozen-route inheritance and claim-only spawn authority: children
+freeze the actual request that produced their authenticated Tool call. The
+[human child continuation decision](../architecture/2026-09-14-human-child-session-continuation.md)
+permits explicit human and admitted Goal input after the parent becomes idle.
+Lineage, tree lanes, completion reservations and Agent supervision remain here.
+
 Every spawned child is a new durable, continuable Session. Its immutable Header
 records the exact parent and root Sessions, bounded tree path, sibling-unique task
 name, invoking Turn, parent Header fingerprint, requested fork selection, resolved
