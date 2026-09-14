@@ -15,6 +15,13 @@ pub const MAX_TEXT: usize = 4 * 1024 * 1024;
 pub const MAX_METADATA: usize = 8 * 1024 * 1024;
 pub const WINDOW: usize = 256 * 1024;
 
+fn request_key(
+    turn: &rsi_agent_session_protocol::TurnId,
+    effect: &rsi_agent_session_protocol::EffectId,
+) -> String {
+    serde_json::to_string(&("request", turn, effect)).expect("typed identifiers")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
@@ -117,11 +124,51 @@ impl Piece {
         let offset = run
             .display
             .checked_add(anchor.offset.saturating_sub(run.source))?;
-        (offset <= self.text.len() && self.text.is_char_boundary(offset)).then_some(offset)
+        (offset <= self.text.len()
+            && self.text.is_char_boundary(offset)
+            && self.anchor(offset) == anchor)
+            .then_some(offset)
     }
 
     fn metadata(&self) -> usize {
         self.mapping.capacity() * std::mem::size_of::<Mapping>()
+    }
+}
+
+fn user_time(timestamp_ms: u64) -> String {
+    let minutes = timestamp_ms / 60_000;
+    format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
+}
+
+pub(crate) fn tool_title(tool: &ToolState, interrupted: bool) -> String {
+    use rsi_conversation::{ToolOutcome, ToolPhase};
+    let name = tool.name.as_deref().unwrap_or("Tool");
+    let (prepared, running, settled, subject) = match (name, tool.argument_summary.as_deref()) {
+        ("bash", Some(command)) => ("Run", "Running", "Ran", command.to_owned()),
+        ("directory_list", Some(path)) => ("List", "Listing", "Listed", path.to_owned()),
+        ("file_read", Some(path)) => ("Read", "Reading", "Read", path.to_owned()),
+        (_, summary) => (
+            "Call",
+            "Calling",
+            "Called",
+            summary.map_or_else(|| name.into(), |text| format!("{name}({text})")),
+        ),
+    };
+    let title = if interrupted {
+        format!("Interrupted: {} {subject}", prepared.to_lowercase())
+    } else {
+        match tool.phase {
+            ToolPhase::Prepared => format!("{prepared} {subject}"),
+            ToolPhase::Running => format!("{running} {subject}"),
+            ToolPhase::Settled(ToolOutcome::Completed) => format!("{settled} {subject}"),
+            ToolPhase::Settled(_) => format!("Failed to {} {subject}", prepared.to_lowercase()),
+            ToolPhase::Rejected => format!("Rejected: {} {subject}", prepared.to_lowercase()),
+        }
+    };
+    if !tool.intent_present && tool.phase != ToolPhase::Rejected {
+        format!("{title} (intent not loaded)")
+    } else {
+        title
     }
 }
 
@@ -132,10 +179,59 @@ pub enum Role {
     Reasoning,
     Tool,
     Status,
+    Metadata,
+    /// Local presentation annotation, with no durable source or model content.
+    Notice,
+    /// Local error annotation with the same source-free lifetime as a notice.
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProcessOutcome {
+    Success,
+    Failed,
+    Interrupted,
+}
+
+impl ProcessOutcome {
+    fn from_model(event: &LanguageEvent) -> Option<Self> {
+        match event {
+            LanguageEvent::Finished { reason, .. } => Some(match reason {
+                rsi_ai_protocol::FinishReason::Stop | rsi_ai_protocol::FinishReason::ToolCalls => {
+                    Self::Success
+                }
+                rsi_ai_protocol::FinishReason::Cancelled
+                | rsi_ai_protocol::FinishReason::MaxTokens
+                | rsi_ai_protocol::FinishReason::ContentFilter => Self::Interrupted,
+            }),
+            LanguageEvent::Failed { error, .. } => {
+                Some(if error.kind() == rsi_ai_protocol::ErrorKind::Cancelled {
+                    Self::Interrupted
+                } else {
+                    Self::Failed
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn from_tool(phase: rsi_conversation::ToolPhase) -> Option<Self> {
+        use rsi_conversation::{ToolOutcome, ToolPhase};
+        match phase {
+            ToolPhase::Settled(ToolOutcome::Completed) => Some(Self::Success),
+            ToolPhase::Settled(ToolOutcome::ToolFailed | ToolOutcome::ProcessFailed)
+            | ToolPhase::Rejected => Some(Self::Failed),
+            ToolPhase::Prepared | ToolPhase::Running => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent presentation flags; folds do not change lifecycle or retention.
 pub struct Block {
+    pub(crate) clock: ProcessClock,
+    pub(crate) outcome: Option<ProcessOutcome>,
     pub key: String,
     pub layout_revision: std::sync::Arc<()>,
     pub title: String,
@@ -143,12 +239,42 @@ pub struct Block {
     pub pieces: VecDeque<Piece>,
     sources: SourceIndex,
     pub collapsed: bool,
+    pub completed: bool,
+    pub(crate) concise: bool,
+    pub(crate) fold: Option<viewport::FoldWindow>,
     pub outputs: [Option<String>; 2],
     pub first: u64,
+    last: u64,
+    request_key: Option<String>,
     pub discarded: bool,
     text_bytes: usize,
     map_bytes: usize,
     pub tool: Option<ToolState>,
+    request: Option<rsi_conversation::RequestPresentation>,
+    time_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProcessClock {
+    turn: Option<rsi_agent_session_protocol::TurnId>,
+    started: Option<u64>,
+    ended: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub running: bool,
+}
+impl ProcessClock {
+    pub fn display(&self, activity: Option<&crate::Activity>) -> (Option<u64>, bool) {
+        let Some(started) = self.started else {
+            return (self.elapsed_ms, self.running);
+        };
+        if let Some(ended) = self.ended {
+            return (ended.checked_sub(started), false);
+        }
+        match activity.filter(|activity| self.turn.as_ref() == Some(&activity.turn_id)) {
+            Some(activity) => (activity.now_ms.checked_sub(started), true),
+            None => (None, false),
+        }
+    }
 }
 
 /// One per-render index; source lookup does not rescan all streamed pieces per cell.
@@ -166,6 +292,26 @@ impl AnchorIndex<'_> {
 }
 
 impl Block {
+    fn settle_process(&mut self, outcome: ProcessOutcome, timestamp_ms: u64) {
+        self.outcome = Some(outcome);
+        self.completed = true;
+        self.clock.ended.get_or_insert(timestamp_ms);
+    }
+
+    fn order(&self) -> (u64, u8) {
+        let metadata = self.role == Role::Metadata;
+        (
+            if metadata { self.last } else { self.first },
+            if matches!(self.role, Role::Notice | Role::Error) {
+                2
+            } else {
+                u8::from(metadata)
+            },
+        )
+    }
+    pub(crate) fn summary_only(&self) -> bool {
+        self.collapsed && ((self.role == Role::Reasoning && self.completed) || self.concise)
+    }
     fn evict_piece(&mut self, back: bool) -> bool {
         let Some(last) = self.pieces.len().checked_sub(1) else {
             return false;
@@ -195,6 +341,11 @@ impl Block {
     pub fn sources(&self) -> &SourceIndex {
         &self.sources
     }
+    pub fn request_seq(&self) -> Option<u64> {
+        self.request
+            .as_ref()
+            .and_then(rsi_conversation::RequestPresentation::intent_seq)
+    }
     pub fn text(&self) -> String {
         self.pieces
             .iter()
@@ -206,8 +357,13 @@ impl Block {
     }
     fn metadata(&self) -> usize {
         self.key.capacity()
+            + self.request_key.as_ref().map_or(0, String::capacity)
             + self.sources.owned_bytes()
             + self.tool.as_ref().map_or(0, ToolState::owned_bytes)
+            + self
+                .request
+                .as_ref()
+                .map_or(0, rsi_conversation::RequestPresentation::owned_bytes)
             + self.title.capacity()
             + self.pieces.capacity() * std::mem::size_of::<Piece>()
             + self.map_bytes
@@ -248,11 +404,54 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /// Adds bounded local display text without creating a Fact or source anchor.
+    #[allow(clippy::missing_panics_doc)] // The checked positive notice count proves its first index exists.
+    pub fn push_notice(&mut self, id: u64, text: &str) {
+        let seq = self
+            .blocks
+            .iter()
+            .map(|block| block.last)
+            .max()
+            .unwrap_or(0);
+        let mut text = crate::terminal_text(&text.chars().take(2048).collect::<String>());
+        text.truncate(text.floor_char_boundary(4096));
+        self.block_index(format!("local-notice-{id}"), &text, Role::Notice, seq);
+        while self
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.role, Role::Notice | Role::Error))
+            .count()
+            > 32
+        {
+            let first = self
+                .blocks
+                .iter()
+                .position(|block| matches!(block.role, Role::Notice | Role::Error))
+                .unwrap();
+            self.blocks.remove(first);
+        }
+        self.blocks.sort_by_key(Block::order);
+        self.trim(false);
+    }
+    pub fn push_error(&mut self, id: u64, text: &str) {
+        self.push_notice(id, text);
+        if let Some(block) = self
+            .blocks
+            .iter_mut()
+            .find(|block| block.key == format!("local-notice-{id}"))
+        {
+            block.role = Role::Error;
+        }
+    }
     pub(crate) fn reuse_layout_revisions(&mut self, previous: &Self) {
+        let previous: std::collections::BTreeMap<_, _> = previous
+            .blocks
+            .iter()
+            .map(|block| (block.key.as_str(), block))
+            .collect();
         for block in &mut self.blocks {
-            if let Some(old) = previous.blocks.iter().find(|old| {
-                old.key == block.key
-                    && old.role == block.role
+            if let Some(old) = previous.get(block.key.as_str()).filter(|old| {
+                old.role == block.role
                     && old.collapsed == block.collapsed
                     && old.pieces == block.pieces
             }) {
@@ -263,15 +462,15 @@ impl Transcript {
 
     pub fn apply(&mut self, fact: &SessionFact) {
         self.project(fact);
-        if !self.blocks.is_sorted_by_key(|block| block.first) {
-            self.blocks.sort_by_key(|block| block.first);
+        if !self.blocks.is_sorted_by_key(Block::order) {
+            self.blocks.sort_by_key(Block::order);
         }
         self.trim(false);
     }
 
     pub fn apply_history(&mut self, fact: &SessionFact) {
         self.project(fact);
-        self.blocks.sort_by_key(|block| block.first);
+        self.blocks.sort_by_key(Block::order);
         self.trim(true);
     }
 
@@ -285,9 +484,28 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One exhaustive projection owns the supported Fact payload fields.
     fn project(&mut self, fact: &SessionFact) {
+        self.project_request(fact);
         if BlockIdentity::tool(fact).is_some() {
             self.project_tool(fact);
             return;
+        }
+        if let SessionFactBody::ModelEvent {
+            turn_id,
+            effect_id,
+            event: LanguageEvent::ContentFinished { index },
+            ..
+        } = fact.body()
+        {
+            let key = BlockIdentity::Model {
+                turn: turn_id,
+                effect: effect_id,
+                index: *index,
+            }
+            .key();
+            if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                block.completed = true;
+                block.clock.ended = Some(fact.timestamp_ms());
+            }
         }
         let seq = fact.seq();
         let mut add = |key: String, title: String, role, field, text: &str| {
@@ -297,7 +515,7 @@ impl Transcript {
         match fact.body() {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => add(
                 BlockIdentity::TurnInput { turn: turn_id }.key(),
-                "You".into(),
+                user_time(fact.timestamp_ms()),
                 Role::User,
                 FactField::TurnInput,
                 text,
@@ -305,22 +523,24 @@ impl Transcript {
             SessionFactBody::InputMessageEntered {
                 source, content, ..
             } => {
+                let time = user_time(fact.timestamp_ms());
+                let agent_title = match source {
+                    InputMessageSource::Agent {
+                        source_session_id, ..
+                    } => format!("Message from {source_session_id}"),
+                    InputMessageSource::Completion {
+                        child_session_id, ..
+                    } => format!("Completion from {child_session_id}"),
+                    _ => String::new(),
+                };
                 let (key, title, role) = match source {
                     InputMessageSource::Human { message_id } => (
                         BlockIdentity::Message {
                             message: message_id,
                         }
                         .key(),
-                        "You",
+                        time.as_str(),
                         Role::User,
-                    ),
-                    InputMessageSource::Continuation { message_id, .. } => (
-                        BlockIdentity::Message {
-                            message: message_id,
-                        }
-                        .key(),
-                        "Goal continuation",
-                        Role::Status,
                     ),
                     InputMessageSource::Agent { message_id, .. }
                     | InputMessageSource::Completion { message_id, .. } => (
@@ -328,7 +548,7 @@ impl Transcript {
                             message: message_id,
                         }
                         .key(),
-                        "Agent message",
+                        agent_title.as_str(),
                         Role::Status,
                     ),
                     _ => return,
@@ -398,12 +618,9 @@ impl Transcript {
                     ContentDelta::Text(text) => {
                         (Role::Assistant, "Assistant", text, FactField::ModelText)
                     }
-                    ContentDelta::Reasoning(text) => (
-                        Role::Reasoning,
-                        "Reasoning",
-                        text,
-                        FactField::ModelReasoning,
-                    ),
+                    ContentDelta::Reasoning(text) => {
+                        (Role::Reasoning, "Thinking", text, FactField::ModelReasoning)
+                    }
                     ContentDelta::ToolArguments(_) => return,
                 };
                 let (role, title) = if *purpose
@@ -425,8 +642,28 @@ impl Transcript {
                     field,
                     text,
                 );
+                if role == Role::Reasoning {
+                    let key = BlockIdentity::Model {
+                        turn: turn_id,
+                        effect: effect_id,
+                        index: *index,
+                    }
+                    .key();
+                    if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                        block.clock.turn = Some(turn_id.clone());
+                        block.clock.started = Some(
+                            block
+                                .clock
+                                .started
+                                .map_or(fact.timestamp_ms(), |old| old.min(fact.timestamp_ms())),
+                        );
+                    }
+                }
             }
             SessionFactBody::TurnTerminal { turn_id, outcome } => {
+                if matches!(outcome, rsi_agent_session_protocol::TurnOutcome::Completed) {
+                    return;
+                }
                 self.add(
                     BlockIdentity::Terminal { turn: turn_id }.key(),
                     "Turn result",
@@ -455,12 +692,198 @@ impl Transcript {
             }
             _ => {}
         }
+        let content = match fact.body() {
+            SessionFactBody::ModelEvent {
+                turn_id,
+                effect_id,
+                event: LanguageEvent::ContentDelta { index, .. },
+                ..
+            } => Some((
+                BlockIdentity::Model {
+                    turn: turn_id,
+                    effect: effect_id,
+                    index: *index,
+                }
+                .key(),
+                turn_id,
+                effect_id,
+            )),
+            SessionFactBody::ImageOutput {
+                turn_id,
+                effect_id,
+                index,
+                ..
+            } => Some((
+                BlockIdentity::Image {
+                    turn: turn_id,
+                    effect: effect_id,
+                    index: *index,
+                }
+                .key(),
+                turn_id,
+                effect_id,
+            )),
+            _ => None,
+        };
+        if let Some((key, turn, effect)) = content {
+            let request_key = request_key(turn, effect);
+            let completion = self
+                .blocks
+                .iter()
+                .find(|block| block.key == request_key)
+                .and_then(|block| block.outcome.zip(block.clock.ended));
+            let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) else {
+                return;
+            };
+            let answer = block.role == Role::Assistant;
+            block.request_key.get_or_insert_with(|| request_key.clone());
+            if block.role == Role::Reasoning
+                && let Some((outcome, timestamp)) = completion
+            {
+                block.settle_process(outcome, timestamp);
+            }
+            if answer
+                && let Some(metadata) = self
+                    .blocks
+                    .iter_mut()
+                    .find(|block| block.key == request_key)
+            {
+                metadata.completed = metadata.time_ms.is_some() && !metadata.concise;
+            }
+        }
+    }
+
+    fn project_request(&mut self, fact: &SessionFact) {
+        let (SessionFactBody::ModelIntent {
+            turn_id: turn,
+            effect_id: effect,
+            ..
+        }
+        | SessionFactBody::ModelStarted {
+            turn_id: turn,
+            effect_id: effect,
+        }
+        | SessionFactBody::ToolIntent {
+            turn_id: turn,
+            source_model_effect_id: effect,
+            ..
+        }
+        | SessionFactBody::ImageOutput {
+            turn_id: turn,
+            effect_id: effect,
+            ..
+        }
+        | SessionFactBody::ModelEvent {
+            turn_id: turn,
+            effect_id: effect,
+            ..
+        }) = fact.body()
+        else {
+            return;
+        };
+        let key = request_key(turn, effect);
+        if !matches!(
+            fact.body(),
+            SessionFactBody::ModelIntent { .. }
+                | SessionFactBody::ModelStarted { .. }
+                | SessionFactBody::ModelEvent {
+                    event: LanguageEvent::Usage { .. }
+                        | LanguageEvent::Finished { .. }
+                        | LanguageEvent::Failed { .. },
+                    ..
+                }
+        ) && !self.blocks.iter().any(|block| block.key == key)
+        {
+            return;
+        }
+        let last = self
+            .blocks
+            .iter()
+            .filter(|block| block.request_key.as_ref() == Some(&key))
+            .map(|block| block.last)
+            .max()
+            .unwrap_or(0)
+            .max(fact.seq());
+        let has_tools = self
+            .blocks
+            .iter()
+            .any(|block| block.role == Role::Tool && block.request_key.as_ref() == Some(&key));
+        let has_answer = self
+            .blocks
+            .iter()
+            .any(|block| block.role == Role::Assistant && block.request_key.as_ref() == Some(&key));
+        let index = self.block_index(key.clone(), "Request", Role::Metadata, fact.seq());
+        let block = &mut self.blocks[index];
+        if let SessionFactBody::ModelEvent { event, .. } = fact.body()
+            && let Some(outcome) = ProcessOutcome::from_model(event)
+        {
+            block.outcome = Some(outcome);
+            block.clock.ended = Some(fact.timestamp_ms());
+        }
+        let request = block.request.get_or_insert_with(Default::default);
+        request.observe(fact);
+        block.concise |= has_tools;
+        if let SessionFactBody::ModelEvent {
+            event: LanguageEvent::Finished { reason, .. },
+            purpose,
+            ..
+        } = fact.body()
+        {
+            block.concise |= *reason == rsi_ai_protocol::FinishReason::ToolCalls;
+            block.completed = has_answer
+                && !block.concise
+                && *purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation;
+            if *purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation {
+                block.time_ms = Some(fact.timestamp_ms());
+            }
+        }
+        block.title = crate::terminal_text(&block.time_ms.map_or_else(
+            || request.title(),
+            |time| format!("{} · {}", user_time(time), request.title()),
+        ));
+        block.first = block.first.min(fact.seq());
+        block.last = block.last.max(last);
+        if let Some((outcome, timestamp)) = block.outcome.zip(block.clock.ended) {
+            for content in &mut self.blocks {
+                if content.role == Role::Reasoning && content.request_key.as_ref() == Some(&key) {
+                    content.settle_process(outcome, timestamp);
+                }
+            }
+        }
     }
 
     fn project_tool(&mut self, fact: &SessionFact) {
+        if let SessionFactBody::ToolIntent {
+            turn_id,
+            source_model_effect_id,
+            ..
+        } = fact.body()
+        {
+            let key = request_key(turn_id, source_model_effect_id);
+            if let Some(metadata) = self.blocks.iter_mut().find(|block| block.key == key) {
+                metadata.concise = true;
+                metadata.completed = false;
+            }
+        }
         let key = BlockIdentity::tool(fact).expect("Tool Fact").key();
         let index = self.block_index(key.clone(), "Tool", Role::Tool, fact.seq());
         let block = &mut self.blocks[index];
+        match fact.body() {
+            SessionFactBody::ToolStarted { turn_id, .. } => {
+                block.clock.turn = Some(turn_id.clone());
+                block.clock.started = Some(fact.timestamp_ms());
+            }
+            SessionFactBody::ToolResult { .. } => block.clock.ended = Some(fact.timestamp_ms()),
+            _ => {}
+        }
+        if let SessionFactBody::ToolIntent {
+            turn_id,
+            source_model_effect_id,
+            ..
+        } = fact.body()
+        {
+            block.request_key = Some(request_key(turn_id, source_model_effect_id));
+        }
         let tool = if let Some(tool) = &mut block.tool {
             tool.observe(fact);
             tool
@@ -469,16 +892,14 @@ impl Transcript {
                 .tool
                 .insert(ToolState::from_fact(fact).expect("Tool Fact"))
         };
-        let title = crate::terminal_text(&format!(
-            "{}{}",
-            tool.title(),
-            if !tool.intent_present && tool.phase != rsi_conversation::ToolPhase::Rejected {
-                " · intent not loaded"
-            } else {
-                ""
-            }
-        ));
+        let title = crate::terminal_text(&tool_title(tool, false));
         block.title.clone_from(&title);
+        block.concise = tool.argument_summary.is_some();
+        block.completed = matches!(
+            tool.phase,
+            rsi_conversation::ToolPhase::Settled(_) | rsi_conversation::ToolPhase::Rejected
+        );
+        block.outcome = ProcessOutcome::from_tool(tool.phase);
         block.first = block.first.min(fact.seq());
         block.outputs = tool
             .outputs
@@ -488,14 +909,26 @@ impl Transcript {
             seq: fact.seq(),
             field,
         };
+        if let Some(command) = rsi_conversation::select_field(fact, source(FactField::ToolCommand))
+        {
+            let window = command.window(0, WINDOW).expect("bounded command window");
+            self.add(
+                key.clone(),
+                &title,
+                Role::Tool,
+                Piece::from_window(source(FactField::ToolCommand), &window),
+            );
+        }
         match fact.body() {
             SessionFactBody::ToolIntent { arguments, .. } => {
-                self.add(
-                    key,
-                    &title,
-                    Role::Tool,
-                    Piece::json(source(FactField::ToolArguments), arguments, 0),
-                );
+                if !self.blocks[index].concise {
+                    self.add(
+                        key,
+                        &title,
+                        Role::Tool,
+                        Piece::json(source(FactField::ToolArguments), arguments, 0),
+                    );
+                }
             }
             SessionFactBody::ToolRejected {
                 arguments,
@@ -577,6 +1010,8 @@ impl Transcript {
         let position = self.blocks.iter().position(|block| block.key == key);
         position.unwrap_or_else(|| {
             self.blocks.push(Block {
+                clock: ProcessClock::default(),
+                outcome: None,
                 key,
                 layout_revision: std::sync::Arc::new(()),
                 title: crate::terminal_text(title),
@@ -584,9 +1019,16 @@ impl Transcript {
                 pieces: VecDeque::new(),
                 sources: SourceIndex::default(),
                 collapsed: matches!(role, Role::Tool | Role::Reasoning),
+                completed: false,
+                concise: false,
+                fold: None,
                 outputs: [None, None],
                 first: seq,
+                last: seq,
+                request_key: None,
                 tool: None,
+                request: None,
+                time_ms: None,
                 discarded: false,
                 text_bytes: 0,
                 map_bytes: 0,
@@ -614,6 +1056,7 @@ impl Transcript {
         block.text_bytes += piece.text.capacity();
         block.map_bytes += piece.metadata();
         block.first = block.first.min(piece.source.seq);
+        block.last = block.last.max(piece.source.seq);
         let SourceAdmission::Inserted(position) = block
             .sources
             .insert(piece.source)
@@ -650,6 +1093,19 @@ impl Transcript {
                 self.blocks.shrink_to_fit();
             }
         }
+    }
+
+    /// Validates a frame against one source index, preserving exact gap/UTF-8 checks.
+    pub fn contains_anchors(&self, anchors: impl IntoIterator<Item = Anchor>) -> bool {
+        let mut pieces: Vec<_> = self.blocks.iter().flat_map(|block| &block.pieces).collect();
+        pieces.sort_unstable_by_key(|piece| piece.source);
+        anchors.into_iter().all(|anchor| {
+            let from = pieces.partition_point(|piece| piece.source < anchor.source);
+            pieces[from..]
+                .iter()
+                .take_while(|piece| piece.source == anchor.source)
+                .any(|piece| piece.display_offset(anchor).is_some())
+        })
     }
 
     pub fn locate(&self, anchor: Anchor) -> Option<(usize, usize)> {
@@ -714,6 +1170,186 @@ pub fn json_window(value: &impl serde::Serialize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process_model_fact(seq: u64, effect: &str, event: LanguageEvent) -> SessionFact {
+        use rsi_agent_session_protocol::{EffectId, TurnId};
+        SessionFact::new(
+            seq,
+            seq * 1000,
+            SessionFactBody::ModelEvent {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new(effect).unwrap(),
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                event,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reasoning_outcomes_follow_their_request_in_live_and_reverse_history() {
+        use rsi_ai_protocol::{AiError, DispatchStatus, ErrorKind, ErrorPhase, FinishReason};
+        let finished = |reason| LanguageEvent::Finished {
+            reason,
+            replay: None,
+        };
+        let failed = |kind| LanguageEvent::Failed {
+            error: AiError::new(
+                kind,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "fixture",
+            )
+            .unwrap(),
+            replay: None,
+        };
+        for (terminal, expected) in [
+            (None, None),
+            (
+                Some(finished(FinishReason::Stop)),
+                Some(ProcessOutcome::Success),
+            ),
+            (
+                Some(finished(FinishReason::ToolCalls)),
+                Some(ProcessOutcome::Success),
+            ),
+            (
+                Some(finished(FinishReason::Cancelled)),
+                Some(ProcessOutcome::Interrupted),
+            ),
+            (
+                Some(finished(FinishReason::MaxTokens)),
+                Some(ProcessOutcome::Interrupted),
+            ),
+            (
+                Some(finished(FinishReason::ContentFilter)),
+                Some(ProcessOutcome::Interrupted),
+            ),
+            (
+                Some(failed(ErrorKind::Server)),
+                Some(ProcessOutcome::Failed),
+            ),
+            (
+                Some(failed(ErrorKind::Cancelled)),
+                Some(ProcessOutcome::Interrupted),
+            ),
+        ] {
+            let reasoning = || LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Reasoning("Private reasoning".into()),
+            };
+            let mut facts = vec![
+                process_model_fact(1, "subject", reasoning()),
+                process_model_fact(2, "subject", LanguageEvent::ContentFinished { index: 0 }),
+            ];
+            if let Some(terminal) = terminal {
+                facts.push(process_model_fact(3, "subject", terminal));
+            }
+            facts.extend([
+                process_model_fact(4, "other", reasoning()),
+                process_model_fact(5, "other", finished(FinishReason::Stop)),
+            ]);
+            for reverse in [false, true] {
+                let mut transcript = Transcript::default();
+                let order: Vec<_> = if reverse {
+                    facts.iter().rev().collect()
+                } else {
+                    facts.iter().collect()
+                };
+                for fact in order {
+                    transcript.apply_history(fact);
+                }
+                let processes: Vec<_> = transcript
+                    .blocks
+                    .iter()
+                    .filter(|block| block.role == Role::Reasoning)
+                    .collect();
+                assert_eq!(processes.len(), 2);
+                assert_eq!(processes[0].outcome, expected);
+                assert_eq!(processes[1].outcome, Some(ProcessOutcome::Success));
+                let restored = Viewport::capture(&transcript, None, 80, 24)
+                    .0
+                    .restore()
+                    .unwrap();
+                let outcomes: Vec<_> = restored
+                    .blocks
+                    .iter()
+                    .filter(|block| block.role == Role::Reasoning)
+                    .map(|block| block.outcome)
+                    .collect();
+                assert_eq!(outcomes, [expected, Some(ProcessOutcome::Success)]);
+            }
+        }
+    }
+
+    #[test]
+    fn tool_marker_outcomes_use_result_semantics_and_rejections() {
+        use rsi_agent_session_protocol::{EffectId, TurnId};
+        use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
+        let identity = ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap();
+        for (value, is_error, expected) in [
+            (
+                serde_json::json!({"exit_code":0}),
+                false,
+                ProcessOutcome::Success,
+            ),
+            (
+                serde_json::json!({"exit_code":7}),
+                false,
+                ProcessOutcome::Failed,
+            ),
+            (
+                serde_json::json!({"signal":15}),
+                false,
+                ProcessOutcome::Failed,
+            ),
+            (
+                serde_json::json!({"exit_code":0}),
+                true,
+                ProcessOutcome::Failed,
+            ),
+        ] {
+            let mut transcript = Transcript::default();
+            transcript.apply(
+                &SessionFact::new(
+                    1,
+                    1,
+                    SessionFactBody::ToolResult {
+                        turn_id: TurnId::new("turn").unwrap(),
+                        effect_id: EffectId::new("effect").unwrap(),
+                        identity: identity.clone(),
+                        result: ToolResult::new(value, vec![], is_error).unwrap(),
+                    },
+                )
+                .unwrap(),
+            );
+            assert_eq!(transcript.blocks[0].outcome, Some(expected));
+        }
+        let mut transcript = Transcript::default();
+        transcript.apply(
+            &SessionFact::new(
+                1,
+                1,
+                SessionFactBody::ToolRejected {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity,
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command":"denied"}),
+                    rejection: rsi_agent_session_protocol::ToolRejection::PolicyDenied {
+                        contribution_id: rsi_agent_session_protocol::ContributionId::new(
+                            "fixture.policy",
+                        )
+                        .unwrap(),
+                        reason: "denied".into(),
+                    },
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(transcript.blocks[0].outcome, Some(ProcessOutcome::Failed));
+    }
+
     #[test]
     fn viewport_capture_does_not_report_resident_eviction_when_scrolling() {
         let mut transcript = Transcript::default();
@@ -726,7 +1362,8 @@ mod tests {
             );
         }
         let top = transcript.blocks[0].anchor(11).unwrap();
-        let window = Viewport::capture(&transcript, Some(top), 24)
+        let window = Viewport::capture(&transcript, Some(top), 80, 24)
+            .0
             .restore()
             .unwrap();
         assert!(window.blocks[0].pieces.len() < transcript.blocks[0].pieces.len());
@@ -753,7 +1390,8 @@ mod tests {
             },
             offset: 0,
         };
-        let window = Viewport::capture(&transcript, Some(stale), 24)
+        let window = Viewport::capture(&transcript, Some(stale), 80, 24)
+            .0
             .restore()
             .unwrap();
         assert_eq!(window.blocks[0].key, transcript.blocks[0].key);
@@ -925,6 +1563,128 @@ mod tests {
     }
 
     #[test]
+    fn tool_only_request_metadata_follows_its_explicit_source_effect_in_both_read_orders() {
+        use rsi_agent_session_protocol::{EffectId, TurnId};
+        let turn = TurnId::new("turn").unwrap();
+        let source = EffectId::new("source").unwrap();
+        let model = SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ModelStarted {
+                turn_id: turn.clone(),
+                effect_id: source.clone(),
+            },
+        )
+        .unwrap();
+        let unrelated = SessionFact::new(
+            2,
+            2,
+            SessionFactBody::ModelStarted {
+                turn_id: turn.clone(),
+                effect_id: EffectId::new("unrelated").unwrap(),
+            },
+        )
+        .unwrap();
+        let intent = SessionFact::new(
+            3,
+            3,
+            SessionFactBody::ToolIntent {
+                turn_id: turn.clone(),
+                effect_id: EffectId::new("tool").unwrap(),
+                source_model_effect_id: source.clone(),
+                identity: rsi_tools_protocol::ToolResultIdentity::new(
+                    "owner",
+                    "invoke",
+                    "call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command":"true"}),
+                approval: None,
+                parallel_safe: false,
+            },
+        )
+        .unwrap();
+        let finished = SessionFact::new(
+            4,
+            4,
+            SessionFactBody::ModelEvent {
+                turn_id: turn.clone(),
+                effect_id: source.clone(),
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                event: LanguageEvent::Finished {
+                    reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                    replay: None,
+                },
+            },
+        )
+        .unwrap();
+        for reverse in [false, true] {
+            let mut transcript = Transcript::default();
+            let mut facts = vec![&model, &unrelated, &intent, &finished];
+            if reverse {
+                facts.reverse();
+            }
+            for fact in facts {
+                transcript.apply_history(fact);
+            }
+            assert_eq!(
+                transcript
+                    .blocks
+                    .iter()
+                    .map(|block| block.role)
+                    .collect::<Vec<_>>(),
+                vec![Role::Metadata, Role::Tool, Role::Metadata]
+            );
+            assert_eq!(transcript.blocks[2].key, request_key(&turn, &source));
+            assert!(
+                transcript
+                    .blocks
+                    .iter()
+                    .filter(|block| block.role == Role::Metadata)
+                    .all(|block| !block.completed)
+            );
+            assert_eq!(
+                transcript.blocks[0].key,
+                request_key(&turn, &EffectId::new("unrelated").unwrap())
+            );
+        }
+    }
+
+    fn assert_tool_action_titles(mut preview: ToolState) {
+        for (name, argument, running, completed) in [
+            (
+                "bash",
+                "pwd && ls -la",
+                "Running pwd && ls -la",
+                "Ran pwd && ls -la",
+            ),
+            ("directory_list", ".", "Listing .", "Listed ."),
+            (
+                "file_read",
+                "src/main.rs",
+                "Reading src/main.rs",
+                "Read src/main.rs",
+            ),
+            (
+                "spawn_agent",
+                "review",
+                "Calling spawn_agent(review)",
+                "Called spawn_agent(review)",
+            ),
+        ] {
+            preview.name = Some(name.into());
+            preview.argument_summary = Some(argument.into());
+            preview.phase = rsi_conversation::ToolPhase::Running;
+            assert_eq!(tool_title(&preview, false), running);
+            preview.phase =
+                rsi_conversation::ToolPhase::Settled(rsi_conversation::ToolOutcome::Completed);
+            assert_eq!(tool_title(&preview, false), completed);
+        }
+    }
+
+    #[test]
     fn tool_backfill_keeps_result_status_and_exact_source_without_pairing_another_owner() {
         use rsi_agent_session_protocol::{EffectId, TurnId};
         use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
@@ -935,6 +1695,7 @@ mod tests {
             4,
             1,
             SessionFactBody::ToolIntent {
+                source_model_effect_id: EffectId::new("source-model").unwrap(),
                 turn_id: turn_id.clone(),
                 effect_id: effect_id.clone(),
                 identity: identity.clone(),
@@ -971,17 +1732,28 @@ mod tests {
         let result = SessionFact::new(6, 1, result_body(identity)).unwrap();
         let mut live = Transcript::default();
         live.apply(&intent);
-        assert_eq!(live.blocks[0].title, "bash · prepared");
+        assert_eq!(live.blocks[0].title, "Run exit 7");
+        assert_tool_action_titles(live.blocks[0].tool.clone().unwrap());
         live.apply(&started);
-        assert_eq!(live.blocks[0].title, "bash · running");
+        assert_eq!(live.blocks[0].title, "Running exit 7");
         live.apply(&result);
-        assert_eq!(live.blocks[0].title, "bash · command failed");
+        assert_eq!(live.blocks[0].outcome, Some(ProcessOutcome::Failed));
+        assert_eq!(live.blocks[0].title, "Failed to run exit 7");
+        assert!(
+            !live.blocks[0].text().contains("command"),
+            "typed summary replaces duplicate JSON arguments"
+        );
+        assert_eq!(
+            live.blocks[0].tool.as_ref().unwrap().arguments.unwrap().seq,
+            4
+        );
         let mut history = Transcript::default();
         history.apply(&result);
         history.apply_history(&intent);
         history.apply_history(&started);
         history.apply_history(&intent);
         assert_eq!(history.blocks[0].title, live.blocks[0].title);
+        assert_eq!(history.blocks[0].outcome, live.blocks[0].outcome);
         assert_eq!(history.blocks[0].text(), live.blocks[0].text());
         assert_eq!(history.blocks[0].first, 4);
         assert!(history.blocks[0].outputs[0].is_none());
@@ -991,7 +1763,7 @@ mod tests {
         assert_eq!(history.blocks.len(), 2);
         assert_eq!(
             history.blocks[1].title,
-            "Tool · command failed · intent not loaded"
+            "Failed to call Tool (intent not loaded)"
         );
         assert!(history.blocks[1].tool.as_ref().unwrap().arguments.is_none());
         assert!(history.budgets().1 < MAX_METADATA);
@@ -1101,175 +1873,7 @@ mod tests {
 #[path = "transcript_media_tests.rs"]
 mod media_tests;
 
-/// A portable viewport keeps source coordinates while discarding controller metadata.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Viewport {
-    blocks: Vec<WindowBlock>,
-}
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WindowBlock {
-    key: String,
-    title: String,
-    role: Role,
-    collapsed: bool,
-    discarded: bool,
-    pieces: Vec<WindowPiece>,
-}
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WindowPiece {
-    source: Source,
-    text: String,
-    start: usize,
-    omitted: bool,
-    truncated_after: bool,
-    mapping: Vec<(usize, usize)>,
-}
-impl Viewport {
-    pub const MAXIMUM_TEXT: usize = 512 * 1024;
-    pub fn capture(transcript: &Transcript, top: Option<Anchor>, height: u16) -> Self {
-        let position = top.map(|top| transcript.locate(top).unwrap_or((0, 0)));
-        let mut remaining = Self::MAXIMUM_TEXT;
-        let mut blocks = Vec::new();
-        let count = (usize::from(height) * 2).clamp(1, MAX_BLOCKS);
-        let range: Box<dyn Iterator<Item = usize>> = match position {
-            Some((index, _)) => Box::new(index..transcript.blocks.len()),
-            None => Box::new((0..transcript.blocks.len()).rev()),
-        };
-        for index in range.take(count) {
-            let block = &transcript.blocks[index];
-            let mut pieces = Vec::new();
-            let mut skipped = 0;
-            let indexes: Box<dyn Iterator<Item = usize>> = if position.is_some() {
-                Box::new(0..block.pieces.len())
-            } else {
-                Box::new((0..block.pieces.len()).rev())
-            };
-            for i in indexes {
-                let piece = &block.pieces[i];
-                let end = skipped + piece.text.len();
-                if position.is_some_and(|(at, offset)| at == index && end < offset) {
-                    skipped = end;
-                    continue;
-                }
-                if piece.text.len() > remaining {
-                    break;
-                }
-                remaining -= piece.text.len();
-                pieces.push(WindowPiece {
-                    source: piece.source,
-                    text: piece.text.clone(),
-                    start: piece.start,
-                    omitted: piece.omitted,
-                    truncated_after: piece.truncated_after,
-                    mapping: piece
-                        .mapping
-                        .iter()
-                        .map(|run| (run.display, run.source))
-                        .collect(),
-                });
-                skipped = end;
-            }
-            if position.is_none() {
-                pieces.reverse();
-            }
-            if pieces.is_empty() && !block.pieces.is_empty() {
-                break;
-            }
-            blocks.push(WindowBlock {
-                key: block.key.clone(),
-                title: block.title.clone(),
-                role: block.role,
-                collapsed: block.collapsed,
-                discarded: block.discarded,
-                pieces,
-            });
-            if remaining == 0 {
-                break;
-            }
-        }
-        if position.is_none() {
-            blocks.reverse();
-        }
-        Self { blocks }
-    }
-    pub fn restore(self) -> Result<Transcript, &'static str> {
-        if self.blocks.len() > MAX_BLOCKS {
-            return Err("viewport block bound");
-        }
-        let mut result = Transcript::default();
-        let mut text_bytes = 0usize;
-        let mut map_bytes = 0usize;
-        let mut keys = std::collections::BTreeSet::new();
-        for block in self.blocks {
-            if block.key.len() > 4096
-                || block.title.len() > 4096
-                || block.pieces.len() > MAXIMUM_BLOCK_SOURCES
-                || !keys.insert(block.key.clone())
-                || crate::terminal_text(&block.title) != block.title
-            {
-                return Err("invalid viewport block");
-            }
-            let index = result.block_index(block.key, &block.title, block.role, 1);
-            let target = &mut result.blocks[index];
-            target.collapsed = block.collapsed;
-            target.discarded = block.discarded;
-            for piece in block.pieces {
-                text_bytes = text_bytes
-                    .checked_add(piece.text.len())
-                    .ok_or("viewport overflow")?;
-                map_bytes = map_bytes
-                    .checked_add(piece.mapping.len() * size_of::<Mapping>())
-                    .ok_or("viewport overflow")?;
-                if text_bytes > Self::MAXIMUM_TEXT
-                    || map_bytes > MAX_METADATA
-                    || piece.source.seq == 0
-                    || piece.mapping.first().copied() != Some((0, piece.start))
-                    || crate::terminal_text(&piece.text) != piece.text
-                {
-                    return Err("invalid viewport piece");
-                }
-                let mut previous = None;
-                for &(display, source) in &piece.mapping {
-                    if !piece.text.is_char_boundary(display)
-                        || source < piece.start
-                        || source.checked_add(piece.text.len()).is_none()
-                        || previous.is_some_and(|(d, s)| display <= d || source < s)
-                    {
-                        return Err("invalid source mapping");
-                    }
-                    previous = Some((display, source));
-                }
-                if !matches!(
-                    target
-                        .sources
-                        .insert(piece.source)
-                        .map_err(|_| "invalid source index")?,
-                    SourceAdmission::Inserted(_)
-                ) {
-                    return Err("duplicate viewport source");
-                }
-                let mapping = piece
-                    .mapping
-                    .into_iter()
-                    .map(|(display, source)| Mapping { display, source })
-                    .collect();
-                let piece = Piece {
-                    source: piece.source,
-                    text: piece.text,
-                    start: piece.start,
-                    omitted: piece.omitted,
-                    truncated_after: piece.truncated_after,
-                    mapping,
-                };
-                target.text_bytes += piece.text.capacity();
-                target.map_bytes += piece.metadata();
-                target.first = target.first.min(piece.source.seq);
-                target.pieces.push_back(piece);
-            }
-        }
-        Ok(result)
-    }
-}
+#[path = "viewport.rs"]
+mod viewport;
+pub(crate) use viewport::FoldCache;
+pub use viewport::Viewport;

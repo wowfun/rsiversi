@@ -1,10 +1,16 @@
 //! Fullscreen presentation over Session. The Kernel remains the execution authority.
 mod clipboard;
 mod commands;
+mod home;
+mod setup;
+mod slash;
 use rsi_terminal_ui::editor;
 mod input;
+mod job_preview;
 mod prompts;
 mod render;
+mod request_details;
+mod retention;
 mod state;
 mod terminal;
 #[cfg(test)]
@@ -52,7 +58,15 @@ pub(super) async fn run(
     application_work: ApplicationWork,
     context: rsi_meta::Context,
 ) -> u8 {
-    match run_inner(presentation, services, command, application_work, context).await {
+    match Box::pin(run_inner(
+        presentation,
+        services,
+        command,
+        application_work,
+        context,
+    ))
+    .await
+    {
         Ok(()) => 0,
         Err(error) => report_error(&error),
     }
@@ -95,9 +109,14 @@ struct Attachment {
     header: SessionHeader,
     inspection: Option<StoreSessionInspection>,
     page: Option<rsi_session_protocol::SessionHistoryPage>,
+    live_page: Option<rsi_session_protocol::SessionHistoryPage>,
 }
 
-async fn attachment(handle: Arc<dyn SessionHandle>, durable: bool) -> Result<Attachment> {
+async fn attachment(
+    handle: Arc<dyn SessionHandle>,
+    durable: bool,
+    top: Option<transcript::Anchor>,
+) -> Result<Attachment> {
     let header = handle
         .header()
         .await
@@ -109,33 +128,57 @@ async fn attachment(handle: Arc<dyn SessionHandle>, durable: bool) -> Result<Att
     };
     let page = match &inspection {
         Some(snapshot) => Some(
-            read(|| handle.history_before(snapshot.durable_fact_seq.checked_add(1), 128)).await?,
+            read(|| {
+                handle.history_before(
+                    top.map_or(snapshot.durable_fact_seq, |anchor| anchor.source.seq)
+                        .checked_add(1),
+                    128,
+                )
+            })
+            .await?,
         ),
         None => None,
+    };
+    let live_page = match (&inspection, top) {
+        (Some(snapshot), Some(anchor)) if anchor.source.seq < snapshot.durable_fact_seq => Some(
+            read(|| handle.history_before(snapshot.durable_fact_seq.checked_add(1), 128)).await?,
+        ),
+        _ => None,
     };
     Ok(Attachment {
         handle,
         header,
         inspection,
         page,
+        live_page,
     })
 }
 
+fn live_window(page: rsi_session_protocol::SessionHistoryPage) -> transcript::Transcript {
+    let mut transcript = transcript::Transcript::default();
+    for fact in page.facts {
+        transcript.apply(&fact);
+    }
+    transcript.earlier = page.has_more;
+    transcript
+}
+
 enum Update {
-    Completions {
-        prefix: String,
-        names: Result<Vec<String>>,
-    },
     Ui(rsi_ui::BoundView),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
     Inspect(Box<StoreSessionInspection>),
+    Metrics(Box<rsi_session_protocol::Result<rsi_session_protocol::MetricsRead>>),
+    TreeMetrics(rsi_session_protocol::TreeMetricsRead),
+    Evidence(rsi_session_protocol::EvidencePage),
+    Manifest(String),
+    Preview(rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage>),
     Menu(Menu),
     Recent(rsi_session_protocol::RecentSessionPage),
-    Models(rsi_ai_protocol::LanguageModelPage),
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_process::OutputPage),
     Notice(String),
+    ModelSelected(rsi_agent_session_protocol::ModelSelection),
     Copy(clipboard::Delivery),
     Submitted(rsi_session_protocol::Result<rsi_agent_turn_protocol::MessageReceipt>),
     Command(rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt>),
@@ -200,6 +243,10 @@ struct SavedSession {
     command: Arc<rsi_client::CommandSubmission>,
     editor: editor::Editor,
     model: Option<ModelRef>,
+    reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
+    top: Option<transcript::Anchor>,
+    folds: std::collections::VecDeque<(String, bool)>,
+    last_used: u64,
     owned: BTreeSet<MessageId>,
 }
 
@@ -209,12 +256,13 @@ enum Durability {
     Durable,
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent asynchronous request lanes have separate pending flags.
 struct Client {
+    setup_command: Option<setup::Command>,
     prompts: prompts::Prompts,
     ui: ui::Bindings,
     application: Arc<dyn SessionService>,
     output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
-    model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     handle: Arc<dyn SessionHandle>,
     controller: Arc<rsi_client::SessionController>,
@@ -235,12 +283,41 @@ struct Client {
     history: History,
     live_transcript: Option<transcript::Transcript>,
     inspecting: bool,
+    metrics_loading: bool,
     drafts: BTreeMap<SessionId, SavedSession>,
     recent: Option<rsi_session_protocol::RecentSessionCursor>,
-    models: Option<ModelRef>,
 }
 
 impl Client {
+    fn toggle_fold_at(&mut self, view: &render::View, x: u16, y: u16) -> bool {
+        if view.0.choice_revision != self.state.view_revision {
+            return false;
+        }
+        let Some(index) =
+            view.0
+                .fold_at(self.state.header.session_id(), &self.state.transcript, x, y)
+        else {
+            return false;
+        };
+        self.state.selection = None;
+        self.retain_visible_top(view);
+        if let Some(anchor) = self.state.transcript.blocks[index].anchor(0) {
+            self.state.top.get_or_insert(anchor);
+            self.state.fold_focus = Some((anchor, y.saturating_sub(view.0.area.y)));
+        }
+        self.state.focused = index;
+        self.state.toggle_fold();
+        true
+    }
+
+    fn retain_visible_top(&mut self, view: &render::View) {
+        if self.state.top.is_none()
+            && let Some((block, offset)) = view.location(&self.state, 0)
+        {
+            self.state.top = self.state.transcript.blocks[block].anchor(offset);
+        }
+    }
+
     fn new(
         services: Services,
         attached: Attachment,
@@ -250,13 +327,14 @@ impl Client {
         let Services {
             application,
             output_cache,
-            model_catalog,
+            model_catalog: _,
             workspace,
             lifetime,
             ui,
             ui_target,
         } = services;
         let mut client = Self {
+            setup_command: None,
             prompts: prompts::Prompts::default(),
             ui: ui::Bindings {
                 registry: ui,
@@ -265,7 +343,6 @@ impl Client {
             },
             application,
             output_cache,
-            model_catalog,
             workspace,
             handle: attached.handle,
             controller,
@@ -290,20 +367,24 @@ impl Client {
             projections: None,
             projection_notice: String::new(),
             extension_view: None,
-            live_transcript: None,
+            live_transcript: attached.live_page.map(live_window),
             history: History {
                 backfill: attached.page.is_some(),
                 ..History::default()
             },
             inspecting: false,
+            metrics_loading: false,
             drafts: BTreeMap::new(),
             recent: None,
-            models: None,
         };
         client.state.active = client
             .inspection
             .as_ref()
             .is_some_and(|snapshot| snapshot.active_turn_id.is_some());
+        client.state.live_turn = client
+            .inspection
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_turn_id.clone());
         if let Some(page) = attached.page {
             client.page(page);
         }
@@ -370,6 +451,15 @@ impl Client {
         });
     }
 
+    fn refresh_metrics(&mut self) {
+        if self.metrics_loading || self.tasks.len() >= 8 {
+            return;
+        }
+        self.metrics_loading = true;
+        let handle = self.handle.clone();
+        self.spawn(async move { Ok(Update::Metrics(Box::new(handle.metrics().await))) });
+    }
+
     fn history(&mut self, manual: bool) {
         if self.history.loading || self.tasks.len() >= 8 {
             return;
@@ -388,7 +478,6 @@ impl Client {
         }
         let Some(before) = self.history.before else {
             self.history.backfill = false;
-            self.state.notice("Beginning of retained history");
             return;
         };
         if manual {
@@ -438,6 +527,7 @@ impl Client {
             }
         }
         self.state.transcript.earlier |= page.has_more;
+        self.state.apply_folds();
         if boundary
             || self.history.pages >= 8
             || self.history.bytes >= 16 * 1024 * 1024
@@ -447,7 +537,28 @@ impl Client {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Application grammar precedes the existing durable submission state machine.
     fn submit(&mut self, delivery: MessageDelivery, retry: bool) {
+        if !retry
+            && !slash::literal(self.state.editor.text())
+            && self.state.editor.text().split_whitespace().next() == Some("/model-selection")
+        {
+            self.state
+                .notice("Unknown command /model-selection. Use /model or /effort.");
+            return;
+        }
+        if !retry && let Some(command) = setup::command(self.state.editor.text()) {
+            if self.state.editor.cursor() != self.state.editor.text().len()
+                || matches!(command, setup::Command::Invalid)
+            {
+                self.state.notice("Invalid application command or cursor not at end. Draft retained; /help lists usage.");
+                return;
+            }
+            self.state.editor.take();
+            self.setup_command = Some(command);
+            return;
+        }
+
         if let Some(pending) = self.command.view().pending {
             self.state.notice(format!(
                 "Command {} is unresolved; use Actions → Session command result",
@@ -494,22 +605,19 @@ impl Client {
                 }
             };
             self.submission.request = Some(SubmitInput {
+                reasoning_effort: None,
                 delivery,
                 message_id,
                 content: vec![MessageInput::Text {
                     text: self.state.editor.take(),
                 }],
-                model: if delivery == MessageDelivery::NextTurn {
-                    self.state.model.clone()
-                } else {
-                    None
-                },
+                model: None,
                 sandbox: None,
             });
             self.remember_prompt();
         }
         let Some(request) = self.submission.request.clone() else {
-            self.state.notice("No unresolved submission");
+            self.state.info("No unresolved submission");
             return;
         };
         self.owned.insert(request.message_id.clone());
@@ -518,10 +626,11 @@ impl Client {
         self.submission.busy = true;
         let was_rejected = self.submission.rejected;
         self.submission.rejected = false;
-        self.state
-            .notice(format!("Submitting {}", request.message_id));
         self.submission.busy = self.spawn_as(WorkKind::Submit, async move {
-            if !retry && let [MessageInput::Text { text }] = request.content.as_slice() {
+            if !retry
+                && let [MessageInput::Text { text }] = request.content.as_slice()
+                && !slash::literal(text)
+            {
                 let id = rsi_agent_session_protocol::DomainRequestId::new(format!(
                     "command-{}",
                     request.message_id
@@ -550,7 +659,7 @@ impl Client {
         }
         let handle = self.handle.clone();
         let owned = self.owned.clone();
-        self.state.notice("Cancellation requested; drafts retained");
+        self.state.info("Cancelling…");
         self.cancelling = self.spawn_as(WorkKind::Cancel, async move {
             let snapshot = read(|| handle.inspect()).await?;
             let mut count = 0;
@@ -575,18 +684,21 @@ impl Client {
                 }
             }
             Ok(Update::Notice(format!(
-                "Cancellation accepted for {count} targets; draft retained"
+                "Cancellation accepted for {count} targets"
             )))
         });
         self.cancellation_queued = !self.cancelling;
     }
 
     fn scroll(&mut self, view: &render::View, up: bool) {
+        if self.state.has_dialog() && view.0.dialog.is_none() {
+            return;
+        }
         if let Some(answer) = &mut self.state.answer {
             answer.scroll = if up {
                 answer.scroll.saturating_sub(3)
             } else {
-                answer.scroll.saturating_add(3)
+                answer.scroll.saturating_add(3).min(view.0.scroll_max)
             };
             return;
         }
@@ -594,7 +706,10 @@ impl Client {
             self.state.detail_offset = if up {
                 self.state.detail_offset.saturating_sub(3)
             } else {
-                self.state.detail_offset.saturating_add(3)
+                self.state
+                    .detail_offset
+                    .saturating_add(3)
+                    .min(view.0.scroll_max)
             };
             return;
         }
@@ -602,32 +717,26 @@ impl Client {
             return;
         }
         if view.is_empty() {
-            self.history(true);
-            return;
-        }
-        let Some((first_block, first_offset)) = view.location(&self.state, 0) else {
-            return;
-        };
-        if up {
-            let block = &self.state.transcript.blocks[first_block];
-            let text = block.text();
-            let offset = text[..first_offset]
-                .char_indices()
-                .rev()
-                .nth(usize::from(view.area.width).saturating_mul(3))
-                .map_or(0, |(i, _)| i);
-            let (index, offset) = if first_offset == 0 && first_block > 0 {
-                (first_block - 1, 0)
-            } else {
-                (first_block, offset)
-            };
-            self.state.top = self.state.transcript.blocks[index].anchor(offset);
-            if index == 0 && offset == 0 {
+            if up {
                 self.history(true);
             }
-        } else if let Some((index, offset)) = view.location(&self.state, 3) {
-            self.state.top = self.state.transcript.blocks[index].anchor(offset);
-        } else {
+            return;
+        }
+        if !view.sources_belong_to(self.state.header.session_id(), &self.state.transcript) {
+            return;
+        }
+        if !up && view.at_bottom() {
+            return;
+        }
+        self.state.fold_focus = None;
+        if let Some(anchor) =
+            view.scroll_anchor(self.state.header.session_id(), &self.state.transcript, up)
+        {
+            self.state.top = Some(anchor);
+            if up && self.state.transcript.locate(anchor) == Some((0, 0)) {
+                self.history(true);
+            }
+        } else if !up {
             self.follow_live();
         }
     }
@@ -656,8 +765,10 @@ impl Client {
     }
 
     fn follow_live(&mut self) {
+        self.state.fold_focus = None;
         if let Some(live) = self.live_transcript.take() {
             self.state.transcript = live;
+            self.state.apply_folds();
             self.state.selection = None;
             self.state.focused = 0;
         }
@@ -672,9 +783,19 @@ impl Client {
         self.history.before = None;
     }
 
-    fn copy(&mut self) {
+    fn copy(&mut self, view: &render::View) {
         if self.tasks.len() >= 8 {
             self.state.notice("Copy queue is busy");
+            return;
+        }
+        if let Some(menu) = &self.state.menu {
+            if let Some((_, Action::Attach(id))) = menu.items.get(menu.selected) {
+                let text = id.to_string();
+                self.spawn(async move { Ok(Update::Copy(clipboard::copy(text).await)) });
+            }
+            return;
+        }
+        if self.state.ui_edit.is_some() || self.state.answer.is_some() {
             return;
         }
         if let Some(detail) = &self.state.detail {
@@ -687,17 +808,43 @@ impl Client {
             return;
         }
         let Some((a, b)) = self.state.selection else {
-            self.state.notice("Select transcript text first");
             return;
         };
-        match self.state.transcript.selected(a, b) {
+        if !view.belongs_to(&self.state) || view.0.choice_revision != self.state.view_revision {
+            self.state
+                .info("Copy will be available after the current frame is displayed");
+            return;
+        }
+        match view.0.selected_source(&self.state.transcript, a, b) {
             Ok(text) => self.spawn(async move { Ok(Update::Copy(clipboard::copy(text).await)) }),
             Err(message) => self.state.notice(message),
         }
     }
 
     #[allow(clippy::too_many_lines)] // Central dispatch keeps the finite UI actions and authority checks visible together.
+    fn select_model(&mut self, selection: rsi_agent_session_protocol::ModelSelection) {
+        let controller = self.controller.clone();
+        let command = self.command.clone();
+        self.spawn(async move {
+            let id = rsi_agent_session_protocol::DomainRequestId::new(
+                rsi_ui::fresh_identity("model-selection").map_err(error)?,
+            )
+            .map_err(error)?;
+            let arguments = rsi_agent_session_protocol::CommandArguments::new(
+                serde_json::to_value(&selection).map_err(error)?,
+            )
+            .map_err(error)?;
+            command
+                .execute(&controller, "model-selection", arguments, id)
+                .await
+                .map_err(error)?;
+            Ok(Update::ModelSelected(selection))
+        });
+    }
+
+    #[allow(clippy::too_many_lines)] // Exhaustive controller actions share the same attachment and outcome guards.
     fn action(&mut self, action: Action) -> bool {
+        self.state.clear_info();
         if self.tasks.len() >= 8 && !matches!(action, Action::Exit | Action::Retry) {
             self.state
                 .notice("Client requests are busy; try again shortly");
@@ -713,8 +860,17 @@ impl Client {
         self.state.invalidate_detail();
         self.extension_view = None;
         match action {
+            Action::Help => self.state.slash.open_help(),
+            Action::Jobs(request) => self.job_menu(request),
+            Action::Preview(request) => {
+                self.state
+                    .open_detail("Reading live command output…".into());
+                self.state.preview = Some(job_preview::Preview::new(request));
+                self.poll_preview(tokio::time::Instant::now());
+            }
+            Action::Login => self.setup_command = Some(setup::Command::Login(None)),
+            Action::SetupModels => self.setup_command = Some(setup::Command::Models),
             Action::RecallPrompt(id) => self.recall_prompt(id),
-            Action::CompleteCommand(prefix, name) => self.insert_completion(&prefix, &name),
             Action::UiSurface(reference) => self.ui_surface(&reference),
             Action::UiCard => self.ui_card(),
             Action::UiEdit(..) | Action::UiInvoke(..) => {
@@ -762,7 +918,7 @@ impl Client {
                         items,
                     });
                 } else {
-                    self.state.notice("No unresolved submission");
+                    self.state.info("No unresolved submission");
                 }
             }
             Action::DiscardRejected => {
@@ -770,8 +926,6 @@ impl Client {
                     self.submission.request = None;
                     self.submission.rejected = false;
                     self.state.escape();
-                    self.state
-                        .notice("Rejected input discarded; editor draft retained");
                 }
             }
             Action::New | Action::Attach(_) if self.submission.request.is_some() => self
@@ -804,16 +958,231 @@ impl Client {
                         })
                         .await
                         .map_err(|failure| error(format!("Session creation failed: {failure}")))?;
-                    attachment(handle, false)
+                    attachment(handle, false, None)
                         .await
                         .map(|attached| Update::Attached(Box::new(attached)))
                 });
             }
-            Action::Attach(id) => self.spawn(async move {
-                attachment(read(|| application.attach(&id)).await?, true)
-                    .await
-                    .map(|attached| Update::Attached(Box::new(attached)))
-            }),
+            Action::Attach(id) => {
+                let top = self.drafts.get(&id).and_then(|saved| saved.top);
+                self.spawn(async move {
+                    attachment(read(|| application.attach(&id)).await?, true, top)
+                        .await
+                        .map(|attached| Update::Attached(Box::new(attached)))
+                });
+            }
+            Action::Parent => {
+                if let Some(origin) = self.state.header.fork_origin() {
+                    return self.action(Action::Attach(origin.parent_session_id.clone()));
+                }
+                self.state.info("This is the root session");
+            }
+            Action::Todos => {
+                let text = self.state.todos.as_ref().map_or_else(
+                    || "Task list is not available yet".into(),
+                    |list| {
+                        if list.items().is_empty() {
+                            return "No tasks".into();
+                        }
+                        list.items()
+                            .iter()
+                            .map(|item| {
+                                format!(
+                                    "{} {}",
+                                    match item.status() {
+                                        rsi_agent_todo::TodoStatus::Pending => "[ ]",
+                                        rsi_agent_todo::TodoStatus::InProgress => "[>]",
+                                        rsi_agent_todo::TodoStatus::Completed => "[x]",
+                                    },
+                                    item.content()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    },
+                );
+                self.state.open_detail(text);
+            }
+            Action::Metrics => {
+                let text = self.state.metrics.as_ref().map_or_else(
+                    || "Usage is not available yet".into(),
+                    |metrics| {
+                        request_details::metrics_text(
+                            metrics,
+                            !self.state.header.settings().pricing().is_empty(),
+                        )
+                    },
+                );
+                self.state.open_detail(text);
+            }
+            Action::TreeMetrics(refresh) => {
+                self.spawn_detail(async move {
+                    Ok(Update::TreeMetrics(
+                        handle.tree_metrics(refresh).await.map_err(error)?,
+                    ))
+                });
+            }
+            Action::Requests(before) => {
+                let handle = self.handle.clone();
+                self.spawn_detail(async move {
+                    let page = handle.history_before(before, 128).await.map_err(error)?;
+                    let mut items = page
+                        .facts
+                        .iter()
+                        .rev()
+                        .filter_map(|fact| {
+                            let SessionFactBody::ModelIntent { snapshot, .. } = fact.body() else {
+                                return None;
+                            };
+                            let effort = snapshot
+                                .language_settings
+                                .as_ref()
+                                .and_then(|settings| settings.effective_reasoning_effort.as_ref())
+                                .map_or_else(String::new, |effort| format!(" / {effort}"));
+                            Some((
+                                format!("{}{} · request {}", snapshot.model, effort, fact.seq()),
+                                Action::RequestSections(fact.seq()),
+                            ))
+                        })
+                        .collect::<Vec<_>>();
+                    if page.has_more
+                        && let Some(first) = page.facts.first()
+                    {
+                        items.push((
+                            "Earlier requests".into(),
+                            Action::Requests(Some(first.seq())),
+                        ));
+                    }
+                    Ok(Update::Menu(Menu {
+                        title: if items.is_empty() {
+                            "No requests in this history page".into()
+                        } else {
+                            "Inspect request".into()
+                        },
+                        items,
+                        selected: 0,
+                    }))
+                });
+            }
+            Action::RequestSections(seq) => {
+                use rsi_agent_session_protocol::EvidenceSection;
+                self.state.menu = Some(Menu {
+                    title: format!("Request {seq}"),
+                    selected: 0,
+                    items: [
+                        ("Configuration", EvidenceSection::Configuration),
+                        ("System instructions", EvidenceSection::System),
+                        ("Tools", EvidenceSection::Tools),
+                    ]
+                    .into_iter()
+                    .map(|(name, section)| {
+                        (
+                            name.into(),
+                            Action::Evidence(rsi_session_protocol::EvidenceRead {
+                                intent_seq: seq,
+                                section,
+                                offset: 0,
+                                maximum_bytes: u32::try_from(transcript::WINDOW)
+                                    .expect("source page fits u32"),
+                            }),
+                        )
+                    })
+                    .collect(),
+                });
+                self.state
+                    .menu
+                    .as_mut()
+                    .expect("request sections")
+                    .items
+                    .push((
+                        "Content types and sizes".into(),
+                        Action::RequestManifest(seq),
+                    ));
+            }
+            Action::RequestManifest(seq) => {
+                self.spawn_detail(async move {
+                    let page = handle
+                        .history_before(seq.checked_add(1), 1)
+                        .await
+                        .map_err(error)?;
+                    let fact = page
+                        .facts
+                        .first()
+                        .filter(|fact| fact.seq() == seq)
+                        .ok_or_else(|| error("Request source is unavailable"))?;
+                    let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
+                        return Err(error("Source is not a model request"));
+                    };
+                    let text = match evidence {
+                        rsi_agent_session_protocol::RequestEvidence::Available {
+                            manifest, ..
+                        } => format!(
+                            "Request {seq} · ordinary content\n{}",
+                            manifest
+                                .iter()
+                                .map(|item| format!(
+                                    "{:?}: {} items · {} bytes",
+                                    item.kind, item.count, item.bytes
+                                ))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ),
+                        rsi_agent_session_protocol::RequestEvidence::Unavailable { reason } => {
+                            format!("Request evidence unavailable: {reason:?}")
+                        }
+                    };
+                    Ok(Update::Manifest(text))
+                });
+            }
+            Action::Evidence(request) => {
+                let handle = self.handle.clone();
+                self.spawn_detail(async move {
+                    Ok(Update::Evidence(
+                        handle.evidence(request).await.map_err(error)?,
+                    ))
+                });
+            }
+            Action::Agents => {
+                let handle = self.handle.clone();
+                self.spawn(async move {
+                    let snapshot = read(|| handle.inspect()).await?;
+                    let items = snapshot
+                        .tree
+                        .descendants
+                        .into_iter()
+                        .map(|child| {
+                            let phase = if child.status.has_open_turn {
+                                "working"
+                            } else if child.status.has_active_activation
+                                || child.status.has_waking_message
+                            {
+                                "waiting"
+                            } else {
+                                "idle"
+                            };
+                            (
+                                format!(
+                                    "{} · {} · {phase}",
+                                    child
+                                        .path
+                                        .segments()
+                                        .iter()
+                                        .map(u16::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join("."),
+                                    child.task_name
+                                ),
+                                Action::Attach(child.status.session_id),
+                            )
+                        })
+                        .collect();
+                    Ok(Update::Menu(Menu {
+                        title: "Subagent sessions".into(),
+                        items,
+                        selected: 0,
+                    }))
+                });
+            }
             Action::Recent | Action::MoreRecent => {
                 if matches!(action, Action::Recent) {
                     self.recent = None;
@@ -823,25 +1192,6 @@ impl Client {
                     let page = read(|| application.list_recent(cursor.as_ref(), 64)).await?;
                     Ok(Update::Recent(page))
                 });
-            }
-            Action::Models | Action::MoreModels => {
-                if matches!(action, Action::Models) {
-                    self.models = None;
-                }
-                let after = self.models.clone();
-                let model_catalog = self.model_catalog.clone();
-                self.spawn(async move {
-                    model_catalog
-                        .list_models(after.as_ref(), 64)
-                        .await
-                        .map(Update::Models)
-                        .map_err(error)
-                });
-            }
-            Action::Model(model) => {
-                self.state.model = model;
-                self.state
-                    .notice("Model selected for explicit NextTurn inputs");
             }
             Action::Queue => self.spawn(async move {
                 let snapshot = read(|| handle.inspect()).await?;
@@ -992,9 +1342,11 @@ impl Client {
                             .answer_approval(&owner, &request.id, decision)
                             .await
                             .map_err(error)?;
-                        Ok(Update::Notice(format!(
-                            "Approval response accepted: {accepted}"
-                        )))
+                        Ok(Update::Notice(if accepted {
+                            String::new()
+                        } else {
+                            "Approval is no longer live; reopen approvals".into()
+                        }))
                     });
                 } else {
                     self.state
@@ -1002,6 +1354,15 @@ impl Client {
                 }
             }
             Action::Detail => {
+                if let Some(block) = self.state.transcript.blocks.get(self.state.focused)
+                    && block.role == transcript::Role::Metadata
+                {
+                    return self.action(
+                        block
+                            .request_seq()
+                            .map_or(Action::Requests(None), Action::RequestSections),
+                    );
+                }
                 if let Some(block) = self.state.transcript.blocks.get(self.state.focused) {
                     let mut items = block
                         .pieces
@@ -1019,6 +1380,9 @@ impl Client {
                         })
                         .collect::<Vec<_>>();
                     if let Some(tool) = &block.tool {
+                        if !block.completed {
+                            items.push(("Live command output".into(), Action::Jobs(None)));
+                        }
                         for (label, source) in [
                             ("Arguments", tool.arguments),
                             ("Result value", tool.result),
@@ -1129,7 +1493,11 @@ impl Client {
                     .answer_question(&request.id, reply)
                     .await
                     .map_err(error)?;
-                Ok(Update::Notice(format!("Answer accepted: {accepted}")))
+                Ok(Update::Notice(if accepted {
+                    String::new()
+                } else {
+                    "Question is no longer live; reopen questions".into()
+                }))
             });
         }
     }
@@ -1152,17 +1520,7 @@ async fn run_inner(
         workspace,
         lifetime: mode,
     } = services;
-    let preferences = if let Some(settings) =
-        context.lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
-    {
-        tokio::select! { biased;
-            () = application_work.stop.cancelled() => return Ok(()),
-            result = rsi_client_preferences::Preferences::load(settings.as_ref()) => result.map_err(error)?,
-        }
-    } else {
-        rsi_client_preferences::Preferences::default()
-    };
-    let resumed = command.resume.is_some();
+
     let selection = match command.resume {
         Some(session_id) => SessionSelection::Resume {
             session_id,
@@ -1182,18 +1540,38 @@ async fn run_inner(
             },
         },
     };
-    let attached = tokio::select! { biased;
-        () = application_work.stop.cancelled() => return Ok(()),
-        attached = async {
-            attachment(resolve_application_handle(&application, &workspace, selection).await?, resumed).await
-        } => attached?,
-    };
     let mut presentation = crate::presentation::Owner::start(&context, presentation).await?;
     let mut presentation_changes = presentation.changes();
     let mut terminate = Box::pin(termination().map_err(error)?);
     let mut terminal = terminal::Terminal::enter(&application_work.tasks).map_err(error)?;
     let stopped = application_work.stop.child_token();
     let mut input = input::spawn(stopped.clone(), &application_work.tasks).map_err(error)?;
+    let mut setup = setup::Ui::new(
+        context.lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
+        model_catalog.clone(),
+    );
+    let startup = home::run(
+        &context,
+        &application,
+        &workspace,
+        selection,
+        &mut setup,
+        &mut terminal,
+        &mut presentation,
+        &mut input,
+        &stopped,
+        &mut terminate,
+        model_catalog.as_ref(),
+    )
+    .await;
+    let (attached, draft) = match startup {
+        Ok(Some(attached)) => attached,
+        outcome => {
+            stopped.cancel();
+            let cleanup = close_rendering(terminal.close(), presentation.close()).await;
+            return outcome.map(|_| ()).and(cleanup);
+        }
+    };
     let (events, mut receiver) = mpsc::channel(super::CLI_RENDER_CHANNEL_CAPACITY);
     let surfaces = crate::surfaces::TerminalSurfaces::start(&context, &events).await?;
     let mut observer = Some(
@@ -1235,11 +1613,21 @@ async fn run_inner(
             .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
     let mut ui_changes = client.ui.registry.membership_changes();
-    client.state.input_preferences = preferences.tui;
+    client.state.editor = draft;
+    client.refresh_metrics();
     let mut dimensions = terminal::size();
     let mut view = render::View::default();
-    let mut frame_revision = 0_u64;
-    let mut presentation_epoch = 1_u64;
+    let mut scene_capture = rsi_terminal_ui::scene::SceneCapture::default();
+    let mut frame_revision = terminal
+        .frames
+        .borrow()
+        .as_ref()
+        .map_or(0, |frame| frame.revision);
+    let mut presentation_epoch = terminal
+        .frames
+        .borrow()
+        .as_ref()
+        .map_or(1, |frame| frame.presentation + 1);
     let mut rendering: Option<RenderJob> = None;
     let mut rendering_stop = stopped.child_token();
     let mut tick = tokio::time::interval(Duration::from_millis(33));
@@ -1250,11 +1638,21 @@ async fn run_inner(
     let mut recovery = render::Recovery::default();
     let result: Result<()> = async {
         loop {
-            client.state.busy = client.submission.busy || !client.tasks.is_empty();
+            client.enforce_fold_budget();
+            if let Some(command) = client.setup_command.take() {
+                match command { setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, command => setup.open(command, true) }
+                dirty = true;
+            }
+            if client.state.menu.is_some() || client.state.answer.is_some() || client.state.ui_edit.is_some() || client.state.detail.is_some() || setup.active {client.state.slash.hide();}
+            else {client.state.slash.update(&client.state.editor, Some(&client.controller));}
+            if let Some(selection) = setup.chosen.take() { client.select_model(selection); dirty = true; }
+            client.state.busy = client.submission.busy;
             client.state.editor.set_retention_limit((4 * 1024 * 1024usize).saturating_sub(client.drafts.values().map(|saved| saved.editor.retained_bytes()).sum()));
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
+                () = setup.next() => { if !setup.active {client.state.notice(setup.notice());} dirty = true; },
+                () = client.state.slash.next() => { if !client.state.slash.diagnostic.is_empty() {client.state.notice(client.state.slash.diagnostic.clone());} dirty = true; },
                 change = presentation_changes.changed() => {
                     change.map_err(error)?;
                     rendering_stop.cancel(); rendering.take();
@@ -1293,10 +1691,11 @@ async fn run_inner(
                         } else {
                             render::View::default()
                         };
+                        client.state.slash.presented(&view);
                     }
                 },
                 incoming = input.recv() => {
-                    if terminal.presented.borrow().as_ref().is_none_or(|frame| frame.generation != client.generation || frame.presentation != presentation_epoch) {
+                    if terminal.presented.borrow().as_ref().is_none_or(|frame| frame.generation != client.generation || frame.presentation != presentation_epoch || (frame.buffer.area.width,frame.buffer.area.height)!=terminal::size()) {
                         view = render::View::default();
                     }
                     dirty = true;
@@ -1304,17 +1703,25 @@ async fn run_inner(
                         input::Input::Closed => break,
                         input::Input::Rejected(message) => client.state.notice(message),
                         input::Input::Terminal(termina::Event::Paste(text)) => {
+                            client.state.clear_info();
+                            if setup.active { setup.paste(text); continue; }
+                            if client.state.slash.paste(&text) {continue;}
+                            if client.state.menu.is_some() { continue; }
                             if client.state.ui_paste(&text) { continue; }
+                            if client.state.detail.is_some() { continue; }
                             if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).insert(&text) { client.state.notice(message); }
                         },
                         input::Input::Terminal(termina::Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                            client.state.clear_info();
+                            if setup.active { setup.key(key); if !setup.active { client.state.notice(setup.notice()); } continue; }
                             let control = key.modifiers.contains(Modifiers::CONTROL);
-                            if control && key.code == KeyCode::Char('c') { client.cancel(); continue; }
-                            if control && key.code == KeyCode::Char('y') { client.copy(); continue; }
+                            if client.state.menu.is_none() && client.state.answer.is_none() && client.state.ui_edit.is_none() && client.state.detail.is_none() && client.state.slash.key(key, &mut client.state.editor) { continue; }
+                            if control && key.code == KeyCode::Char('c') { if client.state.has_dialog() { client.state.escape(); } else { client.cancel(); } continue; }
+                            if control && key.code == KeyCode::Char('y') { client.copy(&view); continue; }
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
                             if control && key.code == KeyCode::Char('p') { client.action_menu(); continue; }
-                            if control && key.code == KeyCode::Char('r') && client.state.ui_edit.is_none() && client.state.answer.is_none() && client.state.detail.is_none() { client.prompt_menu(); continue; }
-                            if control && key.code == KeyCode::Char('d') && client.state.editor.text().is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
+                            if control && key.code == KeyCode::Char('r') && !client.state.has_dialog() { client.prompt_menu(); continue; }
+                            if control && key.code == KeyCode::Char('d') && client.state.editor.text().is_empty() && client.state.answer.is_none() && client.state.ui_edit.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
                                     KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
@@ -1325,33 +1732,34 @@ async fn run_inner(
                             } else if client.state.ui_key(key) {}
                             else if key.code == KeyCode::PageUp { client.scroll(&view, true); }
                             else if key.code == KeyCode::PageDown { client.scroll(&view, false); }
-                            else if key.code == KeyCode::End && !control { client.follow_live(); }
+                            else if key.code == KeyCode::End && !control && !client.state.has_dialog() { client.follow_live(); }
+                            else if key.code == KeyCode::End && client.state.detail.is_some() { client.state.detail_offset = view.0.scroll_max; }
                             else if client.state.detail.is_some() && matches!(key.code, KeyCode::Up | KeyCode::Down) { client.scroll(&view, key.code == KeyCode::Up); }
                             else if client.state.detail.is_some() && key.code == KeyCode::Enter { client.state.menu.clone_from(&client.state.detail_actions); }
                             else if client.state.detail.is_some() && matches!(key.code, KeyCode::Right | KeyCode::Left) {
                                 let action = if key.code == KeyCode::Right { client.state.detail_next.clone() } else { client.state.detail_previous.clone() };
                                 if let Some(action) = action { client.action(action); }
                             }
-                            else if key.code == KeyCode::Tab && client.state.detail.is_none() && client.state.answer.is_none() && client.complete_command() {}
-                            else if key.code == KeyCode::Tab { client.state.focused = (client.state.focused+1) % client.state.transcript.blocks.len().max(1); if let Some(block) = client.state.transcript.blocks.get_mut(client.state.focused) { block.collapsed = !block.collapsed; client.state.top = block.anchor(0); } }
+                            else if client.state.detail.is_some() { }
+                            else if key.code == KeyCode::Tab && client.state.answer.is_none() { client.state.fold_focus = None; client.retain_visible_top(&view); client.state.focus_next_source(); }
                             else if key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT) {
                                 if client.state.answer.is_some() { client.answer(); }
-                                else if client.state.input_preferences.enter_submit || control { client.submit(MessageDelivery::NextTurn, false); }
-                                else if let Err(message) = client.state.editor.insert("\n") { client.state.notice(message); }
+                                else { client.submit(MessageDelivery::NextTurn, false); }
                             } else if control && key.code == KeyCode::Char('s') && client.state.answer.is_none() { client.submit(MessageDelivery::NextTurn, false);
-                            } else if control && key.code == KeyCode::Char('o') { client.submit(MessageDelivery::Steer, false); }
+                            } else if control && key.code == KeyCode::Char('o') && client.state.answer.is_none() { client.submit(MessageDelivery::Steer, false); }
                             else if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).key(key) { client.state.notice(message); }
                         },
+                        input::Input::Terminal(termina::Event::Mouse(mouse)) if setup.active => {setup.mouse(mouse,&view.0);},
+                        input::Input::Terminal(termina::Event::Mouse(mouse)) if client.state.slash.mouse(mouse, &view.0) => {},
                         input::Input::Terminal(termina::Event::Mouse(mouse)) => match mouse.kind {
-                            _ if client.state.menu.is_some() || client.state.answer.is_some() || client.state.detail.is_some() => {
+                            _ if client.state.has_dialog() => {
+                                if view.0.dialog.is_none_or(|area| !area.contains((mouse.column, mouse.row).into())) { continue; }
                                 if let Some(menu) = &mut client.state.menu {
                                     match mouse.kind {
                                         MouseEventKind::ScrollUp => menu.selected = menu.selected.saturating_sub(1),
                                         MouseEventKind::ScrollDown => menu.selected = (menu.selected+1).min(menu.items.len().saturating_sub(1)),
-                                        MouseEventKind::Down(MouseButton::Left) if mouse.row >= 4 => {
-                                            let from = menu.selected.saturating_sub(usize::from(terminal::size().1.saturating_sub(6))/2);
-                                            let index = from + usize::from(mouse.row-4);
-                                            if index < menu.items.len() { menu.selected = index; }
+                                        MouseEventKind::Down(MouseButton::Left) if view.0.choice_revision == client.state.view_revision => {
+                                            if let Some(index) = view.0.choice_at(mouse.column, mouse.row) && index < menu.items.len() { menu.selected = index; }
                                         },
                                         _ => {},
                                     }
@@ -1359,10 +1767,15 @@ async fn run_inner(
                             },
                             MouseEventKind::ScrollUp => client.scroll(&view, true), MouseEventKind::ScrollDown => client.scroll(&view, false),
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if view.belongs_to(&client.state) && let Some(anchor) = view.hit(mouse.column, mouse.row, false) { client.state.selection = Some((anchor,anchor)); client.state.focused = client.state.transcript.locate(anchor).map_or(0, |(index,_)| index); }
+                                if view.belongs_to(&client.state) && let Some((_, action)) = view.0.footer.iter().find(|(area, _)| mouse.column >= area.x && mouse.column < area.right() && mouse.row == area.y) {
+                                    match action { rsi_terminal_ui::render::FooterAction::Parent => { client.action(Action::Parent); }, rsi_terminal_ui::render::FooterAction::Model => setup.open(setup::Command::Models, true) }
+                                    continue;
+                                }
+                                if client.toggle_fold_at(&view, mouse.column, mouse.row) { continue; }
+                                if view.belongs_to(&client.state) && let Some(anchor) = view.hit(mouse.column, mouse.row, false) { client.state.fold_focus = None; client.state.top = view.0.location(client.state.header.session_id(), &client.state.transcript, 0).and_then(|(index, offset)| client.state.transcript.blocks[index].anchor(offset)); client.state.selection = Some((anchor,anchor)); client.state.focused = client.state.transcript.locate(anchor).map_or(0, |(index,_)| index); }
                             },
                             MouseEventKind::Drag(MouseButton::Left) => if view.belongs_to(&client.state) && let Some(anchor) = view.hit(mouse.column, mouse.row, true) && let Some((_,end)) = &mut client.state.selection { *end = anchor; },
-                            MouseEventKind::Up(MouseButton::Left) => client.copy(), _ => {},
+                            MouseEventKind::Up(MouseButton::Left) => client.copy(&view), _ => {},
                         },
                         input::Input::Terminal(_) => {},
                     }
@@ -1376,19 +1789,23 @@ async fn run_inner(
                         WorkKind::Cancel => client.cancelling = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Completions { .. } | Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
-                        Ok(Update::Completions { prefix, names }) => client.command_completions(&prefix, names),
                         Ok(Update::Ui(view)) => client.show_ui(view),
-                        Ok(Update::Command(result)) => client.command_finished(result),
+                        Ok(Update::Command(result)) => { client.command_finished(result); client.state.slash.invalidate(); },
                         Err(problem) => {
                             if matches!(work.kind, WorkKind::Detail) { client.ui_failed(); }
                             if matches!(work.kind, WorkKind::History) { client.history.backfill = false; }
                             client.state.notice(problem.to_string());
                         },
-                        Ok(Update::Notice(message)) => client.state.notice(message),
+                        Ok(Update::Notice(message)) => client.state.info(message),
+                        Ok(Update::ModelSelected(selection)) => {
+                            client.state.info(format!("Switched to {} · {}", selection.model.model(), selection.reasoning_effort.as_ref().map_or("default", |effort| effort.as_str())));
+                            client.refresh_metrics();
+                        },
                         Ok(Update::Copy(delivery)) => {
-                            client.state.notice(delivery.status);
+                            if delivery.failed { client.state.notice(delivery.status); }
+                            else if !delivery.status.is_empty() { client.state.info(delivery.status); }
                             if let Some(osc) = delivery.osc && terminal.commands.try_send(osc).is_err() { client.state.notice("Copy failed: terminal command queue is busy"); }
                         },
                         Ok(Update::Menu(menu)) => client.state.menu = Some(menu),
@@ -1397,13 +1814,6 @@ async fn run_inner(
                             let mut items = page.sessions.into_iter().map(|summary| (format!("{} · {}", summary.header.session_id(), summary.header.canonical_cwd()), Action::Attach(summary.header.session_id().clone()))).collect::<Vec<_>>();
                             if page.has_more { items.push(("More sessions…".into(), Action::MoreRecent)); }
                             client.state.menu = Some(Menu { title: "Recent sessions".into(), selected: 0, items });
-                        },
-                        Ok(Update::Models(page)) => {
-                            client.models = page.models.last().cloned();
-                            let mut items = vec![("Session default".into(), Action::Model(None))];
-                            items.extend(page.models.into_iter().map(|model| (format!("{}/{}", model.deployment(), model.model()), Action::Model(Some(model)))));
-                            if page.has_more { items.push(("More models…".into(), Action::MoreModels)); }
-                            client.state.menu = Some(Menu { title: "Model for explicit NextTurn".into(), selected: 0, items });
                         },
                         Ok(Update::Message(message)) => {
                             client.message_detail(message);
@@ -1421,20 +1831,34 @@ async fn run_inner(
                             client.state.detail_next = (next > piece.start && piece.truncated_after).then_some(Action::Window(source, next));
                             client.state.notice(format!("Fact {} field {} · bytes {}..{next} · ←/→ source windows · Ctrl+Y copies this window", source.seq, source.field, piece.start));
                         },
+                        Ok(Update::Evidence(page)) => { request_details::show_evidence(&mut client.state,page); },
+                        Ok(Update::Manifest(text)) => client.state.open_detail(text),
+                        Ok(Update::TreeMetrics(read)) => request_details::show_tree_metrics(&mut client.state,&read),
+                        Ok(Update::Preview(page)) => { job_preview::show(&mut client.state,page); },
                         Ok(Update::Inspect(snapshot)) => {
-                            client.inspecting = false; client.state.active = snapshot.active_turn_id.is_some();
+                            client.inspecting = false; client.state.active = snapshot.active_turn_id.is_some(); client.state.live_turn.clone_from(&snapshot.active_turn_id);
                             let pending: BTreeSet<_> = snapshot.pending.iter().map(|message| message.message_id.clone()).collect();
                             client.owned.retain(|id| pending.contains(id) || client.submission.request.as_ref().is_some_and(|request| request.message_id == *id));
                             client.inspection = Some(*snapshot);
+                            client.refresh_metrics();
+                        },
+                        Ok(Update::Metrics(result)) => {
+                            let result = *result;
+                            client.metrics_loading = false;
+                            if let Ok(metrics) = result {
+                                let complete = metrics.complete;
+                                client.state.metrics = Some(metrics);
+                                if !complete { client.refresh_metrics(); }
+                            } else { client.state.metrics = None; }
                         },
                         Ok(Update::History(page)) => client.page(page),
                         Ok(Update::Submitted(receipt)) => {
                             client.submission.busy = false;
                             match receipt {
-                                Ok(receipt) => {
-                                    client.state.notice(format!("Accepted {} · {:?}", receipt.message_id, receipt.state));
+                                Ok(_receipt) => {
+                                    client.state.clear_info();
                                     client.submission.request = None;
-                                    client.durability = Durability::Durable;
+                                    client.durability = Durability::Durable; client.state.slash.invalidate();
                                     if client.submission.cancel_when_accepted { client.submission.cancel_when_accepted = false; client.cancel(); }
                                     client.inspect();
                                 },
@@ -1452,12 +1876,14 @@ async fn run_inner(
                             }
                         },
                         Ok(Update::Attached(attached)) => {
-                            if client.submission.request.is_some() { client.state.notice("Session switch deferred until submission is resolved"); continue; }
+                            if client.submission.request.is_some() { client.state.notice("Resolve the outstanding submission before changing sessions"); continue; }
                             let next = match surfaces.open(attached.header.session_id(), attached.inspection.as_ref().map(|snapshot| ObservationCursor { fact_seq: snapshot.durable_fact_seq, control_seq: snapshot.durable_control_seq }), client.generation + 1).await {
                                 Ok(next) => next,
                                 Err(problem) => { client.state.notice(format!("Session observation failed: {problem}")); continue; },
                             };
                             if let Some(observer) = observer.take() { observer.stop().await?; }
+                            let setup_was_active=setup.active;
+                            setup.attachment_changed();
                             client.controller = next.controller.clone();
                             client.ui.surface = next.ui_target.clone().ok_or_else(|| error("TUI surface target is unavailable"))?;
                             client.projections = None; client.projection_notice.clear(); client.extension_view = None;
@@ -1467,14 +1893,18 @@ async fn run_inner(
                             let draft = std::mem::take(&mut client.state.editor); let model = client.state.model.take();
                             let owned = std::mem::take(&mut client.owned);
                             let command = std::mem::take(&mut client.command);
-                            if !draft.text().is_empty() || draft.has_edits() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
+                            let top = client.state.top;
+                            let folds = std::mem::take(&mut client.state.folds);
+                            let reasoning_effort = client.state.reasoning_effort.clone();
+                            client.drafts.insert(old, SavedSession { editor: draft, model, reasoning_effort, top, folds, last_used: client.generation, owned, command });
                             client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
-                            client.state.input_preferences = preferences.tui;
-                            if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; client.command = saved.command; }
-                            client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = None;
-                            client.state.active = client.inspection.as_ref().is_some_and(|snapshot| snapshot.active_turn_id.is_some());
-                            client.history.loading = false; client.inspecting = false; client.history.pages = 0; client.history.bytes = 0; client.history.backfill = true;
+                            if setup_was_active {client.state.notice(format!("Session changed. {}",setup.notice()));}
+                            if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.state.reasoning_effort = saved.reasoning_effort; client.state.top = saved.top; client.state.folds = saved.folds; client.owned = saved.owned; client.command = saved.command; }
+                            client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = attached.live_page.map(live_window);
+                            client.state.active = client.inspection.as_ref().is_some_and(|snapshot| snapshot.active_turn_id.is_some()); client.state.live_turn = client.inspection.as_ref().and_then(|snapshot| snapshot.active_turn_id.clone());
+                            client.history.loading = false; client.inspecting = false; client.metrics_loading = false; client.history.pages = 0; client.history.bytes = 0; client.history.backfill = true;
                             if let Some(page) = attached.page { client.page(page); }
+                            client.refresh_metrics();
                         },
                     }
                 },
@@ -1488,10 +1918,17 @@ async fn run_inner(
                     match event {
                         CliRenderMessage::Event(CliEvent::Fact { fact, .. }) => {
                             client.state.model_fact(&fact);
-                            match fact.body() { SessionFactBody::TurnAccepted {..} | SessionFactBody::MessageTurnAccepted {..} => client.state.active = true, SessionFactBody::TurnTerminal {..} => { client.state.active = false; client.inspect(); }, _ => {} }
+                            match fact.body() { SessionFactBody::TurnAccepted {turn_id,..} | SessionFactBody::MessageTurnAccepted {turn_id,..} => { client.state.active = true; client.state.live_turn = Some(turn_id.clone()); }, SessionFactBody::TurnTerminal {..} => { client.state.active = false; client.state.live_turn = None; client.inspect(); }, _ => {} }
                             client.live_fact(&fact);
                         },
                         CliRenderMessage::Event(CliEvent::Projections { snapshot }) => {
+                            if let Some(value) = snapshot.snapshot().entries().iter().find(|entry| entry.producer().as_str() == "rsi.model-selection.view").and_then(|entry| entry.view())
+                                && let Ok(selection) = serde_json::from_value::<rsi_agent_session_protocol::ModelSelection>(value.value().clone()) {
+                                    client.state.model = Some(selection.model);
+                                    client.state.reasoning_effort = selection.reasoning_effort;
+                            }
+                            client.state.todos = snapshot.snapshot().entries().iter().find(|entry| entry.producer().as_str() == rsi_agent_todo::VIEW)
+                                .and_then(|entry| entry.view()).and_then(|value| serde_json::from_value(value.value().clone()).ok());
                             client.projections = Some(snapshot); client.projection_notice.clear();
                             client.refresh_extensions();
                         },
@@ -1500,11 +1937,10 @@ async fn run_inner(
                             if client.state.answer.as_ref().is_some_and(|answer| !snapshot.questions().contains(&answer.request)) { client.state.answer = None; client.state.notice("Question settled or withdrawn; answer draft closed"); }
                             client.interactions = Some(snapshot);
                         },
-                        CliRenderMessage::Event(CliEvent::Control { record, .. }) => match record.body() {
-                            AgentControlRecordBody::MessageAccepted { message, delivery, target, .. } if client.owned.contains(&message.message_id) => client.state.notice(format!("Accepted {} · {delivery:?} → {target:?}", message.message_id)),
-                            AgentControlRecordBody::MessagePromoted { message_id } if client.owned.contains(message_id) => client.state.notice(format!("{message_id} promoted to NextTurn; Session default applies to Steer")),
+                        CliRenderMessage::Event(CliEvent::Control { record, .. }) => { client.state.slash.invalidate(); match record.body() {
+                            AgentControlRecordBody::MessagePromoted { message_id } if client.owned.contains(message_id) => client.state.info("Queued input will start the next turn"),
                             _ => {},
-                        },
+                        } },
                         CliRenderMessage::Event(CliEvent::Notice { kind, value }) => {
                             let notice = format!("{kind}: {}", transcript::json_window(&value));
                             if matches!(kind, "projection_reconnecting" | "projection_stopped") { client.projection_notice.clone_from(&notice); client.refresh_extensions(); }
@@ -1518,13 +1954,16 @@ async fn run_inner(
                 },
                 _ = inspect_tick.tick(), if observer.is_some() && client.durability == Durability::Durable => client.inspect(),
                 _ = tick.tick() => {
+                    let now_ms = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(u64::MAX);
+                    dirty |= client.state.tick_activity(now_ms);
+                    client.poll_preview(tokio::time::Instant::now());
                     if client.cancellation_queued && !client.cancelling && client.tasks.len() < 12 { client.cancel(); }
                     if terminal.failed() { return Err(error("Terminal writer stopped")); }
                     let (width,height) = terminal::size();
                     if dimensions != (width,height) { dimensions=(width,height); dirty=true; }
                     if dirty && recovery.ready() && rendering.is_none() {
                         frame_revision = frame_revision.checked_add(1).ok_or_else(|| error("Terminal frame revision exhausted"))?;
-                        let scene = match rsi_terminal_ui::scene::Scene::capture(&render::input(&client.state),height).and_then(|scene|scene.encode()) {
+                        let scene = match scene_capture.capture(&render::input(&client.state),width,height).and_then(|scene| { if setup.active { scene.with_dialog(setup.scene()?) } else if client.state.slash.help { scene.with_dialog(client.state.slash.scene()?) } else { Ok(scene) } }) {
                             Ok(scene) => scene,
                             Err(problem) => {
                                 client.state.notice(problem); recovery.failed();
@@ -1534,9 +1973,8 @@ async fn run_inner(
                                 continue;
                             }
                         };
-                        let request = rsi_terminal_ui::wire::Request {identity:rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision},width,height,bytes:scene.len()};
-                        let work=presentation.render(rsi_terminal_ui::wire::Request{identity:request.identity,width,height,bytes:scene.len()},scene,rendering_stop.clone());
-                        rendering=Some(Box::pin(async move {(request,work.await)}));
+                        let request = rsi_terminal_ui::wire::Request {identity:rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision},width,height,bytes:0};
+                        rendering=Some(presentation.render(request,scene,rendering_stop.clone()));
                         dirty=false;
                     }
                     if client.history.backfill && !client.history.loading { client.history(false); }

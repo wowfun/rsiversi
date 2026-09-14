@@ -203,7 +203,7 @@ try:
     if not secret:
         script(r'const e=document.querySelector("select[aria-label=Provider]");e.value="openai-compatible";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
     button('Check credential')
-    until(lambda: script(r'return document.body.textContent.includes("configured · read only")'))
+    until(lambda: script(r'return document.querySelector(".credential-status")?.textContent.startsWith("configured")'))
     fill('[aria-label="Deployment name"]', 'desktop-provider')
     fill('[aria-label="Provider endpoint"]', 'https://api.deepseek.com' if secret else f'http://127.0.0.1:{provider.server_port}')
     if secret:

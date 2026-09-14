@@ -635,7 +635,8 @@ async fn run(
                     return Ok(false);
                 }
                 notice(renderer, "submitting", json!({"session_id":controller.session_id(),"message_id":id})).await?;
-                let receipt = controller.submit_cancellable(SubmitInput { delivery, message_id: id.clone(), content: vec![MessageInput::Text { text }], model: None, sandbox: None }, work.submissions.clone()).await.map_err(session_error)?;
+                let receipt = controller.submit_cancellable(SubmitInput {
+ reasoning_effort: None, delivery, message_id: id.clone(), content: vec![MessageInput::Text { text }], model: None, sandbox: None }, work.submissions.clone()).await.map_err(session_error)?;
                 durable = true;
                 owned.insert(id);
                 renderer.send(CliRenderMessage::Event(CliEvent::Message { session_id: receipt.session_id, message_id: receipt.message_id, accepted_control_seq: receipt.accepted_control_seq })).await.map_err(session_error)?;

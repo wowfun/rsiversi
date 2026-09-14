@@ -21,7 +21,7 @@ impl View {
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &State) -> View {
     use rsi_terminal_ui::{scene::Scene, wire};
     let area = frame.area();
-    let source = Scene::capture(&input(state), area.height)
+    let source = Scene::capture(&input(state), area.width, area.height)
         .unwrap()
         .encode()
         .unwrap();
@@ -47,11 +47,23 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &State) -> View {
 }
 pub(super) fn input(state: &State) -> rsi_terminal_ui::Input<'_> {
     rsi_terminal_ui::Input {
+        fold_focus: state.fold_focus,
+        activity: state.activity.clone(),
         header: &state.header,
+        workspace_label: &state.workspace_label,
         transcript: &state.transcript,
         editor: &state.editor,
         model: state.model.as_ref(),
-        enter_submit: state.input_preferences.enter_submit,
+        reasoning_effort: state.display_effort(),
+        menu_revision: state.view_revision,
+        todos: state.todos.as_ref(),
+        metrics: state.metrics.as_ref().map(|metrics| &metrics.summary),
+        metrics_complete: state
+            .metrics
+            .as_ref()
+            .is_some_and(|metrics| metrics.complete),
+        model_unavailable: state.model_unavailable(),
+        completion: state.slash.popup.as_ref(),
         menu: state.menu.as_ref().map(|menu| rsi_terminal_ui::Menu {
             title: &menu.title,
             items: menu.items.iter().map(|(label, _)| label.as_str()).collect(),
@@ -71,7 +83,11 @@ pub(super) fn input(state: &State) -> rsi_terminal_ui::Input<'_> {
         detail_offset: state.detail_offset,
         selection: state.selection,
         top: state.top,
-        status: &state.status,
+        status: if state.has_dialog() {
+            &state.status
+        } else {
+            ""
+        },
         actual_model: state.actual_model.as_deref(),
         active: state.active,
         busy: state.busy,

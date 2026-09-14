@@ -392,11 +392,32 @@ impl SessionCommand {
     }
 }
 
+// Keep domain failures typed until an application has decided whether to show
+// setup or convert the failure to the established process exit classification.
+#[derive(Debug)]
+pub(crate) enum HandleError {
+    Session(SessionError),
+    Application(RsiError),
+}
+impl From<RsiError> for HandleError {
+    fn from(error: RsiError) -> Self {
+        Self::Application(error)
+    }
+}
+impl From<HandleError> for RsiError {
+    fn from(error: HandleError) -> Self {
+        match error {
+            HandleError::Session(error) => Self::Boot(error.to_string()),
+            HandleError::Application(error) => error,
+        }
+    }
+}
+
 pub(crate) async fn resolve_application_handle(
     application: &Arc<dyn SessionService>,
     workspace: &Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     session: SessionSelection,
-) -> Result<Arc<dyn SessionHandle>> {
+) -> Result<Arc<dyn SessionHandle>, HandleError> {
     match session {
         SessionSelection::Fresh {
             cwd,
@@ -419,13 +440,13 @@ pub(crate) async fn resolve_application_handle(
                     workspace_trust,
                 })
                 .await
-                .map_err(|error| RsiError::Boot(error.to_string()))
+                .map_err(HandleError::Session)
         }
         SessionSelection::Resume { session_id, cwd } => {
             let handle = application
                 .attach(&session_id)
                 .await
-                .map_err(|error| RsiError::Boot(error.to_string()))?;
+                .map_err(HandleError::Session)?;
             if let Some(cwd) = cwd {
                 let canonical = tokio::fs::canonicalize(cwd)
                     .await
@@ -437,7 +458,8 @@ pub(crate) async fn resolve_application_handle(
                 if canonical.to_str() != Some(header.canonical_cwd()) {
                     return Err(RsiError::Boot(
                         "--cwd does not match the durable Session workspace".into(),
-                    ));
+                    )
+                    .into());
                 }
             }
             Ok(handle)
@@ -733,7 +755,7 @@ pub(crate) async fn run_headless_application(
         let handle =
             match resolve_application_handle(&application, &workspace, options.session).await {
                 Ok(handle) => handle,
-                Err(error) => return report_error(&error),
+                Err(error) => return report_error(&error.into()),
             };
         if let Some(extension) = &command.extension {
             let exit =
@@ -766,6 +788,7 @@ pub(crate) async fn run_headless_application(
             tokio_util::task::AbortOnDropHandle::new(work.tasks.spawn(drive_application_turn(
                 handle,
                 SubmitInput {
+                    reasoning_effort: None,
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                     message_id,
                     content,

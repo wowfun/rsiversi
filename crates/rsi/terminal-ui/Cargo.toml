@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-ui-protocol = { path = "../ui-protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
@@ -14,7 +15,7 @@ rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 rsi-conversation = { path = "../conversation" }
-ratatui = { version = "0.30.2", default-features = false, features = ["serde"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["serde", "unstable-rendered-line-info"] }
 pulldown-cmark.workspace = true
 serde.workspace = true
 serde_json.workspace = true

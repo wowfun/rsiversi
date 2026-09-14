@@ -87,6 +87,8 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .message.tool .message-text { font: .73rem/1.6 Consolas,"Liberation Mono",monospace; }
 .message.reasoning .message-text { color:var(--muted); font-size:.8rem; }
 .message.status { color:var(--muted); font-size:.75rem; }
+.message.metadata { color:var(--muted); padding-block:4px; }
+.message.metadata .message-title { font-weight:400; margin:0; }
 .omitted { font-size:.74rem; color:#82602b; padding:9px 0; }
 .pending { display:flex; flex-direction:column; gap:5px; padding:0 18px; max-height:150px; overflow:auto; }
 .pending:empty { display:none; }

@@ -9,39 +9,102 @@ use std::{
 const MAX_ENTRIES: usize = 512;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 
+pub(crate) const FOLD_HEAD_ROWS: usize = 2;
+pub(crate) const FOLD_TAIL_ROWS: usize = 3;
+pub(crate) fn fold_rows(total: usize) -> Option<std::ops::Range<usize>> {
+    (total > FOLD_HEAD_ROWS + FOLD_TAIL_ROWS).then(|| FOLD_HEAD_ROWS..total - FOLD_TAIL_ROWS)
+}
+
 #[derive(Debug)]
 pub struct Layout {
     pub text: String,
     pub styles: MarkdownStyles,
     ends: Vec<u32>,
+    command_row: Option<usize>,
 }
 impl Layout {
     fn new(block: &Block, width: u16) -> Self {
+        let width = width.saturating_sub(if block.role == Role::User { 2 } else { 0 });
         let text = block.text();
+        let command_end: usize = block
+            .pieces
+            .iter()
+            .take_while(|piece| piece.source.field == rsi_conversation::FactField::ToolCommand)
+            .map(|piece| piece.text.len())
+            .sum();
+        let command_end = (command_end > 0 && command_end < text.len()).then_some(command_end);
         let mut ends = Vec::new();
-        each_row(&text, usize::from(width).max(1), |_, end| {
-            ends.push(u32::try_from(end).expect("bounded projected block"));
-            true
-        });
+        let mut command_row = None;
+        let split = command_end.unwrap_or(text.len());
+        for (start, end) in [(0, split), (split, text.len())] {
+            if start == end {
+                continue;
+            }
+            each_row(&text[start..end], usize::from(width).max(1), |_, offset| {
+                ends.push(u32::try_from(start + offset).expect("bounded projected block"));
+                true
+            });
+            if Some(end) == command_end {
+                if text[..end].ends_with('\n') {
+                    ends.pop();
+                } else {
+                    command_row = Some(ends.len());
+                }
+            }
+        }
+        if ends.is_empty() {
+            ends.push(0);
+        }
         let styles = if block.role == Role::Assistant {
             markdown_styles(&text)
         } else {
             Vec::new()
         };
-        Self { text, styles, ends }
+        Self {
+            text,
+            styles,
+            ends,
+            command_row,
+        }
     }
-    pub fn rows(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
-        self.ends.iter().enumerate().map(move |(index, end)| {
-            let previous = index.checked_sub(1).map(|index| self.ends[index] as usize);
-            let start = previous.map_or(0, |end| {
-                end + usize::from(self.text.as_bytes().get(end) == Some(&b'\n'))
-            });
-            let end = *end as usize;
-            (start, end)
+    fn row_start(&self, index: usize) -> usize {
+        index.checked_sub(1).map_or(0, |previous| {
+            let end = self.ends[previous] as usize;
+            end + usize::from(
+                Some(index) != self.command_row && self.text.as_bytes().get(end) == Some(&b'\n'),
+            )
         })
     }
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + DoubleEndedIterator + '_ {
+        self.ends
+            .iter()
+            .enumerate()
+            .map(move |(index, end)| (self.row_start(index), *end as usize))
+    }
     pub fn first_row(&self, offset: usize) -> usize {
-        self.ends.partition_point(|end| (*end as usize) < offset)
+        // Search starts so wrapping and the display-only command/result break
+        // preserve their distinct rows, even beside empty source lines.
+        let mut from = 0;
+        let mut to = self.ends.len();
+        while from < to {
+            let middle = from + (to - from) / 2;
+            if self.row_start(middle) <= offset {
+                from = middle + 1;
+            } else {
+                to = middle;
+            }
+        }
+        from.saturating_sub(1)
+    }
+    pub(crate) fn hidden_range(&self, block: &Block) -> Option<(usize, usize)> {
+        if !block.collapsed || matches!(block.role, Role::User | Role::Assistant | Role::Metadata) {
+            return None;
+        }
+        if block.summary_only() {
+            return Some((0, self.text.len()));
+        }
+        fold_rows(self.rows().len())
+            .map(|rows| (self.row_start(rows.start), self.row_start(rows.end)))
     }
     fn bytes(&self) -> usize {
         self.text.capacity()
@@ -69,6 +132,8 @@ pub struct LayoutCache {
     bytes: usize,
     #[cfg(test)]
     pub builds: usize,
+    #[cfg(test)]
+    pub enumerated_rows: usize,
 }
 impl LayoutCache {
     pub fn retain(&mut self, transcript: &Transcript) {
@@ -133,6 +198,7 @@ mod tests {
                 1,
                 1,
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id: TurnId::new("turn").unwrap(),
                     text: text.into(),
                     model: None,
@@ -145,6 +211,95 @@ mod tests {
         transcript
     }
     #[test]
+    fn command_result_break_preserves_source_newlines_and_row_anchors() {
+        use rsi_agent_session_protocol::EffectId;
+        use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
+        for (command, result, expected) in [
+            ("cmd", "out", vec!["cmd", "out"]),
+            ("cmd\n", "out", vec!["cmd", "out"]),
+            ("cmd", "\nout", vec!["cmd", "", "out"]),
+            ("cmd\n", "\nout", vec!["cmd", "", "out"]),
+        ] {
+            let mut transcript = Transcript::default();
+            let turn_id = TurnId::new("turn").unwrap();
+            let effect_id = EffectId::new("tool").unwrap();
+            let identity =
+                ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap();
+            transcript.apply(
+                &SessionFact::new(
+                    1,
+                    1,
+                    SessionFactBody::ToolIntent {
+                        turn_id: turn_id.clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                        source_model_effect_id: EffectId::new("model").unwrap(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command":command}),
+                        approval: None,
+                        parallel_safe: false,
+                    },
+                )
+                .unwrap(),
+            );
+            transcript.apply(
+                &SessionFact::new(
+                    2,
+                    2,
+                    SessionFactBody::ToolResult {
+                        turn_id,
+                        effect_id,
+                        identity,
+                        result: ToolResult::new(
+                            serde_json::json!({"exit_code":0}),
+                            vec![ToolContent::Text {
+                                text: result.into(),
+                            }],
+                            false,
+                        )
+                        .unwrap(),
+                    },
+                )
+                .unwrap(),
+            );
+            let block = &transcript.blocks[0];
+            let layout = Layout::new(block, 80);
+            assert_eq!(
+                layout.text,
+                format!("{command}{result}"),
+                "display breaks do not mutate source"
+            );
+            assert_eq!(
+                layout
+                    .rows()
+                    .map(|(from, to)| &layout.text[from..to])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for (row, (start, _)) in layout.rows().enumerate() {
+                assert_eq!(layout.first_row(start), row);
+                let anchor = block.anchor(start).unwrap();
+                assert_eq!(block.offset(anchor), Some(start));
+            }
+        }
+    }
+    #[test]
+    fn row_starts_round_trip_across_wraps_newlines_and_graphemes() {
+        for text in [
+            "abcde\nfghij",
+            "abcdefghij",
+            "界界界\nabc",
+            "\n\n",
+            "a\tbcdef",
+        ] {
+            let transcript = transcript(text);
+            let layout = Layout::new(&transcript.blocks[0], 6);
+            for (index, (start, _)) in layout.rows().enumerate() {
+                assert_eq!(layout.first_row(start), index, "{text:?}: {start}");
+            }
+        }
+    }
+    #[test]
     fn compact_rows_preserve_newlines_tabs_and_grapheme_boundaries() {
         for (text, expected) in [
             ("ab\nc\t界", vec![(0, 2), (3, 5), (5, 8)]),
@@ -152,7 +307,7 @@ mod tests {
             ("e\u{301}界", vec![(0, 6)]),
         ] {
             let transcript = transcript(text);
-            let layout = Layout::new(&transcript.blocks[0], 4);
+            let layout = Layout::new(&transcript.blocks[0], 6);
             assert_eq!(layout.rows().collect::<Vec<_>>(), expected);
         }
     }

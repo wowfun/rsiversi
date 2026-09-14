@@ -13,6 +13,12 @@ state machine or retain an unbounded copy of durable history.
 
 ## Decision
 
+The [Session selection decision](../architecture/2026-09-14-session-model-selection.md)
+supersedes only the client-local model-choice clause below: ordinary UI messages
+now use durable per-Step model/effort selection. The [layout decision](2026-09-14-terminal-information-layout.md)
+refines visible information and source-copy behavior; this note retains application,
+Host, controller and terminal ownership.
+
 The independent rsi-terminal package exports an ordinary fullscreen application
 factory selected by the `tui` Application Profile. Its input framing, state transitions, historical projection,
 layout, and terminal writer have distinct internal ownership. Product behavior

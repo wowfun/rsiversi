@@ -139,6 +139,9 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
         return hit?{top:box.top,bottom:box.bottom,left:box.left,right:box.right,hit}:null;
     '''))
     screenshot('tasks-inline.png')
+    # The independent Goal scenario starts after the patch Turn's terminal
+    # control marker, not merely its last streamed assistant text.
+    until(lambda: text('.pane-status') == 'Completed')
     button('Goal')
     fill('[aria-label="Goal objective"]', 'Native Goal hold for control evidence')
     fill('[aria-label="Maximum automatic rounds"]', '3')

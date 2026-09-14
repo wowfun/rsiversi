@@ -239,6 +239,7 @@ async fn contributed_form_survives_menu_edit_discard_and_action_failure() {
         screen.contains("first 中 文"),
         "the card popup hides the field editor: {screen}"
     );
+    assert!(screen.contains("Enter save · Esc discard"));
     client.state.ui_key(enter());
     let preserved = "first 中文\x1b[31m";
     assert!(!client.state.detail.as_ref().unwrap().contains('\x1b'));

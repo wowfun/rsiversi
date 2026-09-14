@@ -159,6 +159,22 @@ try {
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
       await verifyImages(page, right, service, report, name);
       await verifyTree(page, right, service, report, name);
+      const effort = right.getByRole("combobox", { name: "Compare reasoning effort", exact: true });
+      await effort.waitFor();
+      assert.deepEqual(await effort.locator("option").evaluateAll(options => options.map(option => option.value)), ["", "low", "high"]);
+      const beforeEffort = service.provider.requests.length;
+      await effort.selectOption("high");
+      await right.locator('[data-producer="rsi.model-selection.view"] pre').filter({ hasText: '"reasoning_effort": "high"' }).waitFor({ state: "attached" });
+      assert.equal(service.provider.requests.length, beforeEffort, "changing effort must not submit a message");
+      await right.getByRole("textbox", { name: "Compare message" }).fill("Verify the declared high effort choice");
+      await right.getByRole("button", { name: "Send ↗" }).click();
+      await right.locator(".message-text").filter({ hasText: "Reviewed: Verify the declared high effort choice" }).waitFor();
+      assert.equal(service.provider.requests.at(-1).reasoning_effort, "high");
+      await page.screenshot({ path: join(report, `${name}-model-effort.png`) });
+      await effort.selectOption("");
+      await right.locator('[data-producer="rsi.model-selection.view"] pre').filter({ hasText: '"reasoning_effort": null' }).waitFor({ state: "attached" });
+      assert.equal(service.provider.requests.length, beforeEffort + 1);
+
       await page.locator("#pane-tab-main").click();
       await left.getByRole("textbox", { name: "Main message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
@@ -337,7 +353,7 @@ try {
       await page.locator(".advanced-settings summary").click();
       await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
       await page.getByRole("button", { name: "rsi.client", exact: true }).click();
-      await page.locator("#detail .hint").filter({ hasText: "Reconnect Web or restart TUI" }).waitFor();
+      await page.locator("#detail .hint").filter({ hasText: "Reconnect Web to apply composer Enter behavior" }).waitFor();
       const preferenceEditor = page.getByRole("textbox", { name: "Settings JSON" });
       const preferences = JSON.parse(await preferenceEditor.inputValue());
       preferences.web.enter_submit = true;

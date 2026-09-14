@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 pub(super) struct Delivery {
     pub(super) status: String,
     pub(super) osc: Option<String>,
+    pub(super) failed: bool,
 }
 
 pub(super) async fn copy(text: String) -> Delivery {
@@ -33,8 +34,9 @@ pub(super) async fn copy(text: String) -> Delivery {
         .await;
         if result.is_ok() {
             return Delivery {
-                status: format!("Copied and verified via {program}"),
+                status: String::new(),
                 osc: None,
+                failed: false,
             };
         }
     }
@@ -43,11 +45,12 @@ pub(super) async fn copy(text: String) -> Delivery {
 
 fn osc52(text: &str) -> Delivery {
     if text.len().div_ceil(3) * 4 > 32 * 1024 {
-        return Delivery { status: "Copy failed: native clipboard unavailable; selection exceeds OSC52's 32 KiB encoded limit".into(), osc: None };
+        return Delivery { status: "Copy failed: native clipboard unavailable; selection exceeds OSC52's 32 KiB encoded limit".into(), osc: None, failed: true };
     }
     Delivery {
-        status: "OSC52 copy requested; terminal delivery is unverified".into(),
+        status: String::new(),
         osc: Some(format!("\x1b]52;c;{}\x07", STANDARD.encode(text))),
+        failed: false,
     }
 }
 
@@ -110,7 +113,7 @@ mod tests {
     fn osc52_is_bounded_and_never_claims_confirmed_delivery() {
         let text = "x".repeat(24 * 1024);
         let delivery = osc52(&text);
-        assert!(delivery.status.contains("unverified"));
+        assert!(delivery.status.is_empty());
         let osc = delivery.osc.unwrap();
         let encoded = osc
             .strip_prefix("\x1b]52;c;")

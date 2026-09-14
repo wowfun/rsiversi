@@ -115,7 +115,6 @@ impl State {
                 form.fields.insert(edit.name, edit.editor.take());
             }
             self.refresh_ui();
-            self.notice("Field updated · Enter opens card actions");
         } else if !edit.multiline
             && (key.code == KeyCode::Enter
                 || (key.code == KeyCode::Char('j') && key.modifiers.contains(Modifiers::CONTROL)))
@@ -144,6 +143,20 @@ impl Client {
             self.state.invalidate_detail();
         }
         let mut menu = Menu::actions();
+        if self
+            .state
+            .todos
+            .as_ref()
+            .is_none_or(|list| list.items().is_empty())
+        {
+            menu.items
+                .retain(|(_, action)| !matches!(action, Action::Todos));
+        }
+        if self.state.header.fork_origin().is_none() {
+            menu.items
+                .retain(|(_, action)| !matches!(action, Action::Parent));
+        }
+
         if self.ui.registry.has_block_renderers(&self.ui.surface) {
             menu.items.push(("Card details".into(), Action::UiCard));
         }
@@ -188,7 +201,7 @@ impl Client {
     }
     pub(super) fn ui_card(&mut self) {
         let Some(block) = self.state.transcript.blocks.get(self.state.focused) else {
-            self.state.notice("No focused card");
+            self.state.info("No focused card");
             return;
         };
         let full = block.text();
@@ -205,9 +218,7 @@ impl Client {
         );
         match result {
             Ok(Some(view)) => self.show_ui(view),
-            Ok(None) => self
-                .state
-                .notice("No active contribution renders this card"),
+            Ok(None) => self.state.info("No active contribution renders this card"),
             Err(problem) => self.state.notice(problem.to_string()),
         }
     }
@@ -254,8 +265,6 @@ impl Client {
                     editor,
                     multiline,
                 });
-                self.state
-                    .notice("Edit field · Enter accepts · Esc discards this edit");
             }
             Action::UiInvoke(reference, value, revision)
                 if revision == self.state.view_revision =>

@@ -37,7 +37,7 @@ impl LocalContract for FrameRendererContract {
 #[derive(Clone, Debug, Default)]
 pub struct LinkedPresentationFactory;
 #[derive(Debug)]
-struct Linked(std::sync::Mutex<rsi_terminal_ui::scene::Renderer>);
+struct Linked(Arc<std::sync::Mutex<rsi_terminal_ui::scene::Renderer>>);
 impl FrameRenderer for Linked {
     fn render(
         &self,
@@ -45,28 +45,39 @@ impl FrameRenderer for Linked {
         scene: Vec<u8>,
         stop: CancellationToken,
     ) -> BoxFuture<'static, Result<Frame, String>> {
-        let result = if stop.is_cancelled() {
-            Err("presentation stopped".into())
-        } else {
-            request
-                .validate()
-                .and({
-                    if scene.len() == request.bytes {
-                        Ok(())
-                    } else {
-                        Err("scene source length mismatch")
-                    }
-                })
-                .and_then(|()| Scene::decode(&scene))
-                .and_then(|scene| {
-                    self.0
-                        .lock()
-                        .map_err(|_| "linked presentation poisoned")?
-                        .render(scene, request.width, request.height)
-                })
-                .map_err(str::to_owned)
-        };
+        let renderer = self.0.clone();
         Box::pin(async move {
+            if stop.is_cancelled() {
+                return Err("presentation stopped".into());
+            }
+            let worker_stop = stop.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                if worker_stop.is_cancelled() {
+                    return Err("presentation stopped".into());
+                }
+                request
+                    .validate()
+                    .and({
+                        if scene.len() == request.bytes {
+                            Ok(())
+                        } else {
+                            Err("scene source length mismatch")
+                        }
+                    })
+                    .and_then(|()| Scene::decode(&scene))
+                    .and_then(|scene| {
+                        let mut renderer = renderer
+                            .lock()
+                            .map_err(|_| "linked presentation poisoned")?;
+                        if worker_stop.is_cancelled() {
+                            return Err("presentation stopped");
+                        }
+                        renderer.render(scene, request.width, request.height)
+                    })
+                    .map_err(str::to_owned)
+            })
+            .await
+            .map_err(|error| format!("presentation worker failed: {error}"))?;
             if stop.is_cancelled() {
                 return Err("presentation stopped".into());
             }
@@ -84,9 +95,7 @@ impl PluginFactory for LinkedPresentationFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         plan.context()
-            .provide_local::<FrameRendererContract>(Arc::new(
-                Linked(std::sync::Mutex::default()),
-            ))?;
+            .provide_local::<FrameRendererContract>(Arc::new(Linked(Arc::default())))?;
         Ok(())
     }
 }
@@ -241,14 +250,38 @@ impl Owner {
     }
     pub fn render(
         &self,
-        request: Request,
-        scene: Vec<u8>,
+        mut request: Request,
+        scene: Scene,
         stop: CancellationToken,
-    ) -> BoxFuture<'static, Result<Frame, String>> {
-        match self.renderer() {
-            Some(renderer) => renderer.render(request, scene, stop),
-            None => Box::pin(async { Err("terminal presentation renderer unavailable".into()) }),
-        }
+    ) -> BoxFuture<'static, (Request, Result<Frame, String>)> {
+        let renderer = self.renderer();
+        Box::pin(async move {
+            let result = async {
+                let renderer = renderer.ok_or("terminal presentation renderer unavailable")?;
+                if stop.is_cancelled() {
+                    return Err("presentation stopped".into());
+                }
+                let source = tokio::task::spawn_blocking(move || scene.encode())
+                    .await
+                    .map_err(|error| format!("scene worker failed: {error}"))?
+                    .map_err(str::to_owned)?;
+                request.bytes = source.len();
+                renderer
+                    .render(
+                        Request {
+                            identity: request.identity,
+                            width: request.width,
+                            height: request.height,
+                            bytes: request.bytes,
+                        },
+                        source,
+                        stop,
+                    )
+                    .await
+            }
+            .await;
+            (request, result)
+        })
     }
     pub fn changes(&self) -> tokio::sync::watch::Receiver<rsi_host::ProfileStatus> {
         self.profile.subscribe_profile()
@@ -281,6 +314,40 @@ fn failure(error: impl std::fmt::Display) -> crate::RsiError {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn linked_render_creation_does_not_wait_for_the_renderer() {
+        let renderer = Arc::new(Linked(Arc::default()));
+        let held_renderer = renderer.clone();
+        let (held, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = held_renderer.0.lock().unwrap();
+            held.send(()).unwrap();
+            let _ = released.recv();
+        });
+        ready.recv().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let other = renderer.clone();
+        let (request, source) = scene();
+        let worker = std::thread::spawn(move || {
+            let future = other.render(request, source, CancellationToken::new());
+            let _ = sent.send(future);
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), received).await;
+        if result.is_err() {
+            release.send(()).unwrap();
+            holder.join().unwrap();
+            worker.join().unwrap();
+            panic!("render creation blocked on CPU work");
+        }
+        worker.join().unwrap();
+        let mut future = result.unwrap().unwrap();
+        assert!(futures_util::poll!(&mut future).is_pending());
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(future.await.is_ok());
+    }
+
     fn scene() -> (Request, Vec<u8>) {
         scene_with(&rsi_terminal_ui::transcript::Transcript::default())
     }
@@ -305,11 +372,20 @@ mod tests {
         .unwrap();
         Scene::capture(
             &rsi_terminal_ui::Input {
+                fold_focus: None,
+                activity: None,
                 header: &header,
+                workspace_label: header.canonical_cwd(),
                 transcript,
                 editor: &rsi_terminal_ui::editor::Editor::with_text("retained draft".into(), 1024),
                 model: None,
-                enter_submit: false,
+                reasoning_effort: None,
+                menu_revision: 0,
+                metrics: None,
+                metrics_complete: false,
+                model_unavailable: false,
+                todos: None,
+                completion: None,
                 menu: None,
                 answer: None,
                 ui_edit: None,
@@ -325,6 +401,7 @@ mod tests {
                 questions: 0,
                 approvals: 0,
             },
+            80,
             24,
         )
         .unwrap()
@@ -357,6 +434,7 @@ mod tests {
                     seq,
                     seq,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
                         text: "word ".repeat(50_000),
                         model: None,
@@ -401,7 +479,7 @@ mod tests {
     }
     #[tokio::test]
     async fn poisoned_linked_renderer_returns_a_recoverable_failure() {
-        let renderer = Arc::new(Linked(std::sync::Mutex::default()));
+        let renderer = Arc::new(Linked(Arc::default()));
         let poison = renderer.clone();
         assert!(
             std::thread::spawn(move || {
@@ -453,8 +531,13 @@ mod tests {
         let (request, source) = scene();
         assert_eq!(
             owner
-                .render(request, source.clone(), CancellationToken::new())
+                .render(
+                    request,
+                    Scene::decode(&source).unwrap(),
+                    CancellationToken::new()
+                )
                 .await
+                .1
                 .unwrap_err(),
             "terminal presentation renderer unavailable"
         );
@@ -472,8 +555,13 @@ mod tests {
             .unwrap();
         let (request, _) = scene();
         let (frame, _) = owner
-            .render(request, source, CancellationToken::new())
+            .render(
+                request,
+                Scene::decode(&source).unwrap(),
+                CancellationToken::new(),
+            )
             .await
+            .1
             .unwrap();
         let text: String = frame
             .content

@@ -7,12 +7,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-todo = { path = "../../rsi-agent/todo" }
+rsi-workbench-ui = { path = "../workbench-ui" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-configuration-api = { path = "../configuration-api" }
 rsi-terminal-ui = { path = "../terminal-ui" }
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
-rsi-client-preferences = { path = "../client-preferences" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-session-files = { path = "../session-files" }
 rsi-session-files-ui = { path = "../session-files-ui" }

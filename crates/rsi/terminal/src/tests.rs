@@ -106,6 +106,9 @@ pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) pending_question:
         std::sync::Mutex<Option<rsi_user_questions_protocol::QuestionRequest>>,
     pub(crate) history_error: Option<SessionError>,
+    pub(crate) history_facts:
+        std::sync::Mutex<Option<Vec<rsi_agent_session_protocol::SessionFact>>>,
+    pub(crate) history_requests: std::sync::Mutex<Vec<Option<u64>>>,
     pub(crate) read_gate: Option<Arc<tokio::sync::Semaphore>>,
     pub(crate) read_active: std::sync::atomic::AtomicUsize,
 }
@@ -129,6 +132,23 @@ impl UnknownThenAcceptedHandle {
 
 #[async_trait::async_trait]
 impl SessionHandle for UnknownThenAcceptedHandle {
+    async fn tree_metrics(
+        &self,
+        _: bool,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::TreeMetricsRead> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture tree metrics".into(),
+        ))
+    }
+    async fn peek_job(
+        &self,
+        _: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        self.wait_read().await;
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture preview".into(),
+        ))
+    }
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
@@ -201,6 +221,19 @@ impl SessionHandle for UnknownThenAcceptedHandle {
             futures_util::stream::once(async move { Ok(snapshot) }),
             futures_util::stream::pending(),
         )))
+    }
+    async fn evidence(
+        &self,
+        _: rsi_session_protocol::EvidenceRead,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::EvidencePage> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture request evidence".into(),
+        ))
+    }
+    async fn metrics(&self) -> rsi_session_protocol::Result<rsi_session_protocol::MetricsRead> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture metrics".into(),
+        ))
     }
     async fn inspect(
         &self,
@@ -338,12 +371,35 @@ impl SessionHandle for UnknownThenAcceptedHandle {
 
     async fn history_before(
         &self,
-        _exclusive_before_seq: Option<u64>,
-        _limit: usize,
+        exclusive_before_seq: Option<u64>,
+        limit: usize,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionHistoryPage> {
         self.wait_read().await;
         if let Some(error) = &self.history_error {
             return Err(error.clone());
+        }
+        if let Some(facts) = self.history_facts.lock().unwrap().as_ref() {
+            self.history_requests
+                .lock()
+                .unwrap()
+                .push(exclusive_before_seq);
+            let eligible = facts
+                .iter()
+                .filter(|fact| exclusive_before_seq.is_none_or(|before| fact.seq() < before))
+                .collect::<Vec<_>>();
+            return Ok(rsi_session_protocol::SessionHistoryPage {
+                before_seq: exclusive_before_seq
+                    .unwrap_or_else(|| facts.last().map_or(1, |fact| fact.seq() + 1)),
+                durable_seq: facts
+                    .last()
+                    .map_or(0, rsi_agent_session_protocol::SessionFact::seq),
+                has_more: eligible.len() > limit,
+                facts: eligible
+                    .iter()
+                    .skip(eligible.len().saturating_sub(limit))
+                    .map(|fact| (*fact).clone())
+                    .collect(),
+            });
         }
         unreachable!("not used")
     }
@@ -477,6 +533,7 @@ async fn unknown_message_outcome_retries_the_same_identity_once() {
     let receipt = submit_with_reconciliation(
         handle.as_ref(),
         SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
             content: vec![MessageInput::Text {
@@ -737,6 +794,7 @@ async fn interrupt_that_loses_message_claim_race_still_cancels_the_claimed_turn(
     drive_application_turn(
         concrete.clone(),
         SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
@@ -772,6 +830,7 @@ async fn unknown_message_outcome_queries_before_resending_input() {
     let receipt = submit_with_reconciliation(
         handle.as_ref(),
         SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
@@ -809,6 +868,7 @@ async fn interaction_refresh_cannot_deadlock_a_suspended_observation_read() {
     let task = tokio::spawn(drive_application_turn(
         concrete,
         SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
@@ -899,6 +959,16 @@ impl rsi_process::ProcessOutputCache for UnknownThenAcceptedHandle {
 
 #[async_trait::async_trait]
 impl rsi_ai_protocol::LanguageModels for UnknownThenAcceptedHandle {
+    async fn describe_model(
+        &self,
+        _: &rsi_ai_protocol::ModelRef,
+    ) -> std::result::Result<rsi_ai_protocol::LanguageModelDescription, rsi_ai_protocol::ModelsError>
+    {
+        Err(rsi_ai_protocol::ModelsError::Invalid(
+            "test catalog has no model profile".into(),
+        ))
+    }
+
     async fn list_models(
         &self,
         _: Option<&ModelRef>,

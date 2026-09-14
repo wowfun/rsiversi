@@ -319,19 +319,12 @@ fn desktop_addons(
         .register_local_contract_at::<rsi_gui::GuiApplicationContract>(scope)
         .map_err(error)?;
     addon
-        .register_local_contract_at::<rsi_workbench_ui::SetupFeatureContract>(scope)
-        .map_err(error)?;
-    addon
         .register_local_contract_at::<rsi_workbench_ui::NavigationFeatureContract>(scope)
         .map_err(error)?;
     for (name, factory) in [
         (
             "rsi.application.gui",
             Arc::new(rsi_gui::GuiApplicationFactory) as Arc<dyn PluginFactory>,
-        ),
-        (
-            "rsi.workbench.setup",
-            Arc::new(rsi_workbench_ui::SetupFeatureFactory),
         ),
         (
             "rsi.workbench.navigation",
@@ -420,5 +413,32 @@ fn handle_event(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_addons_compose_with_the_shared_application_setup_catalog() {
+        // Catalog construction is pure; these paths are never created or opened.
+        let root = std::env::temp_dir().join("rsi-desktop-catalog-contract");
+        let service = rsi::StandardComposition::new(
+            rsi_host::HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
+                .unwrap(),
+            std::collections::BTreeMap::new(),
+            None,
+        );
+        let extras = desktop_addons(
+            &Owner::default(),
+            &Arc::new(ApplicationLifetime::default()),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        let composition = rsi::ApplicationComposition::new(service, extras).unwrap();
+        let (host, _) = rsi::standard_application_host(composition, vec![])
+            .expect("desktop and standard catalogs must have disjoint registrations");
+        assert!(host.has_local_contract::<rsi_workbench_ui::SetupFeatureContract>());
     }
 }

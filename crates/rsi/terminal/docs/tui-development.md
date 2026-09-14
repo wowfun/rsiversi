@@ -6,8 +6,8 @@ repository root in Bash on Linux or WSL2. Use a real terminal for interactive
 commands. Native Windows input is unsupported; macOS terminal behavior needs
 separate verification.
 
-The [Terminal application contract](../../README.md#terminal-application)
-owns user behavior and resource limits. The [Session contract](../../session-protocol/README.md)
+The [interaction design](tui-design.md) owns user behavior; the
+[terminal contract](../README.md) owns controller and resource limits. The [Session contract](../../session-protocol/README.md)
 owns Session operations. Workspace registration, Models and completed Process
 output are injected independently into the terminal application. Use the [debugging reference](tui-debugging.md)
 when a result differs from the expected behavior.
@@ -197,8 +197,7 @@ Git evidence.
 
 ## 3. Reproduce the lifecycle you are changing
 
-With no owner, the command above starts an embedded Host. Read the exit
-consequence in the header before closing an active task. To reproduce a client
+With no owner, the command above starts an embedded Host. To reproduce a client
 detach while execution continues, first exit the embedded client, then start
 the isolated daemon:
 
@@ -269,7 +268,8 @@ layout and selection behavior, then capture the same interaction in a real
 terminal or PTY for visual review.
 
 Resize the same running client, open a menu, scroll a long reply, and verify
-that the header, editor, and action hint stay visible. Try CJK text, combining
+the Composer and footer stay anchored. In dialogs, verify the focused input and
+exit controls remain visible and only dialog content scrolls. Try CJK text, combining
 marks, emoji sequences, and tabs. Test color with NO_COLOR absent as well as
 with it set; terminal font shaping and color policy are separate from the
 stored cell evidence. Exercise ordinary exit and signal/cleanup paths in a
@@ -306,3 +306,6 @@ Include affected AI packages when changing model contracts. Documentation-only
 changes require the documentation gate. Run broader suites when the changed
 surface or the task calls for them, and report only the platforms and live
 integrations actually exercised.
+
+The [interaction design](tui-design.md) defines the user-facing contract exercised
+by geometry, source-copy, controller and live-provider verification.

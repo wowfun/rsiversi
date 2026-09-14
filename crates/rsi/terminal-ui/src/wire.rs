@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 pub const CONTRACT: &str = "rsi.terminal.render";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 12;
 pub const SERVICE: &str = "rsi.terminal.render";
 pub const MAXIMUM_FRAGMENT: usize = 64 * 1024;
 pub const MAXIMUM_FRAME: usize = 32 * 1024 * 1024;
@@ -252,7 +252,7 @@ pub fn request_header(request: &Request) -> Result<Vec<u8>, &'static str> {
         renderer: "rsi.terminal.cells".into(),
         schema: rsi_ui_protocol::ModelSchema {
             name: "rsi.terminal.scene".into(),
-            version: 1,
+            version: u16::try_from(VERSION).map_err(|_| "scene version")?,
         },
         data: serde_json::to_value(request).map_err(|_| "render metadata")?,
         actions: vec![],
@@ -275,7 +275,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<Request, &'static str> {
     model.validate().map_err(|_| "render model")?;
     if model.renderer != "rsi.terminal.cells"
         || model.schema.name != "rsi.terminal.scene"
-        || model.schema.version != 1
+        || u32::from(model.schema.version) != VERSION
         || !model.actions.is_empty()
         || model.sources.len() != 1
         || model.sources[0].name != "scene"

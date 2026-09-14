@@ -92,6 +92,7 @@ fn scene() -> Vec<u8> {
             1,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new("turn").unwrap(),
                 text: "Unicode 中 e\u{301} 👩🏽‍💻".repeat(8),
                 model: None,
@@ -104,11 +105,20 @@ fn scene() -> Vec<u8> {
     let editor = Editor::with_text("Unsubmitted draft stays resident".into(), 1024);
     Scene::capture(
         &Input {
+            fold_focus: None,
+            activity: None,
+            todos: None,
             header: &header,
+            workspace_label: header.canonical_cwd(),
             transcript: &transcript,
             editor: &editor,
             model: None,
-            enter_submit: true,
+            reasoning_effort: None,
+            menu_revision: 0,
+            metrics: None,
+            metrics_complete: false,
+            model_unavailable: false,
+            completion: None,
             menu: None,
             answer: None,
             ui_edit: None,
@@ -124,6 +134,7 @@ fn scene() -> Vec<u8> {
             questions: 0,
             approvals: 0,
         },
+        80,
         24,
     )
     .unwrap()
@@ -171,6 +182,7 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
     assert_ne!(cells[(0, 0)].symbol(), "B");
     assert!(!map.hits.is_empty());
     assert_linked_parity(&runtime, &old, &source, &cells).await;
+    assert_application_parity(&runtime, &old).await;
     let replacement = host(&loader, &b);
     let updater = profile.updater();
     let ticket = updater
@@ -378,4 +390,36 @@ async fn stalled_portable_frame_has_a_local_deadline_and_releases_its_call() {
     assert!(profile.shutdown().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
+}
+
+async fn assert_application_parity(
+    runtime: &Runtime,
+    old: &Arc<dyn rsi_terminal::presentation::FrameRenderer>,
+) {
+    let home = Scene::from(rsi_terminal_ui::scene::ApplicationScene {
+        title: "RSI · No session attached".into(),
+        explanation: "/login or /model".into(),
+        items: vec!["Choose provider".into()],
+        selected: 0,
+        input: rsi_terminal_ui::scene::Draft {
+            text: "••••".into(),
+            cursor: 12,
+        },
+        status: "Credential is masked".into(),
+        field: Some("Input".into()),
+        hint: "Enter selects · Esc back".into(),
+        ..rsi_terminal_ui::scene::ApplicationScene::default()
+    })
+    .encode()
+    .unwrap();
+    let (home_cells, home_map) = old
+        .render(
+            request(2, home.len()),
+            home.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(home_map.hits.is_empty());
+    assert_linked_parity(runtime, old, &home, &home_cells).await;
 }

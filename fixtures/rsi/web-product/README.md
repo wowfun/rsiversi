@@ -117,8 +117,8 @@ service. Concurrent Cargo builds cannot change that owner's executable gate.
 Agent tree cases create an actual child through the model Tool path, inspect its
 recorded parent and history through authenticated HTTP, and close the shared
 detail slot while preserving both main panes. No synthetic tree enters the UI.
-Only explicit non-secret build variables reach the test application, and an
-absent private D-Bus address prevents access to the operator's native keyring.
+Only explicit non-secret build variables reach the test application. Isolated
+Host paths keep credential files separate from operator state.
 `RSI_WEB_BROWSER=chromium` or `firefox` selects a diagnostic subset.
 
 Screenshots and scenario results identify the browser version and viewport.
@@ -198,3 +198,8 @@ also reports post-scene JS heap and DOM counters; Firefox has no equivalent CDP
 sample. Time, heap and native process-family PSS are report-only. The assertions
 cover actual typed input, concurrent single-block updates, usable input geometry,
 and an error-free document. Document scenes do not measure Rust frame caching.
+
+Model/effort acceptance reads the adapter-declared choices, changes the durable
+Session selection without submitting, verifies the next actual provider request,
+and restores the declared default. These controls use the same Worker and HTTP
+path as ordinary messages; synthetic selector changes alone are not evidence.

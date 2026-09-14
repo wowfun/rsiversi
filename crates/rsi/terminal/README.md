@@ -1,5 +1,87 @@
 # rsi-terminal
 
+The resident input loop captures a bounded scene snapshot. JSON encoding and
+linked decoding, source validation, layout and cell rendering run on blocking
+workers. Home and attached Sessions use the same render job. Each loop admits
+one job at a time; cancellation and attachment/presentation/revision checks keep
+obsolete results from replacing the acknowledged frame. Blocking work already
+running may finish after cancellation, but cannot publish its result.
+
+The [interaction design](docs/tui-design.md) owns attached layout, transcript,
+model selection, navigation and information visibility contracts.
+
+TUI owns terminal input and configuration screens before a Session is attached.
+Absent defaults or unavailable default routes leave an editable home screen with
+history and exit actions. Catalog read failures also keep this screen available,
+with an explicit diagnostic and setup refresh action. One catalog scan reads at
+most 4,096 routes; exceeding this bound fails explicitly. The setup controller
+retains the complete menu and projects a 256-row window around selection into
+each scene, so maximal route names plus provider actions fit the display budget.
+Resume uses the durable
+Session's frozen settings. Home Ctrl+C exits, including when a draft is present.
+If configuration disappears after the startup check, a typed `SetupRequired`
+from Session creation also returns to home. Other creation and resume errors keep
+their error classifications.
+Application commands are `/help`, `/login [deepseek|openai|openai-compatible]`,
+`/model`, `/effort`, `/new`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
+bypass message submission, prompt recall and Session command receipts, and shadow
+same-name Session commands. Recognition requires raw single-line input and a
+cursor at the end; invalid arguments retain the draft. Multi-line input starting
+with a reserved name and `//` input are literal Human text in both dispatch layers.
+Editing and submission keys follow the [interaction design](docs/tui-design.md).
+Exit has no confirmation; current and retained process-local drafts and undo
+history are discarded. Session switching retains them.
+
+The input-driven command popup is independent from actions. It ranks exact,
+prefix, then substring matches and names, shows descriptions, and offers login
+provider arguments. The unfiltered popup keeps application actions in their
+curated order and hides the exit alias; typing it still completes and executes it. Up/Down select, Tab replaces only the current token, Escape
+hides until another edit or Tab. Enter completes and executes application commands;
+a partial Session command is completed only. Fully typed Session commands retain
+the shared invocation-time predecessor checks. Session descriptors are bounded
+display snapshots: fetch on each popup/help opening, coalesce invalidation during
+control progress, command completion and publication, and reject obsolete results.
+Read failures clear Session candidates while retaining application commands.
+Help has a filterable list and paged details, bounded to 64 KiB overall, 256-byte
+previews and 8 KiB detail pages. Recent Session IDs can be copied with Ctrl+Y.
+
+Login proceeds through provider, existing connection (when present), compatible
+endpoint (when needed), credential status, searchable models and missing limits.
+Official endpoints and default names need no confirmation; connection settings
+remain editable. Known name conflicts are resolved before credentials. The final
+provider write retains its CAS check. Catalog failures do not block login.
+Credential status distinguishes saved, environment, missing and unavailable,
+and exposes editability. Only editable credentials show a masked input. An
+unavailable store shows recovery guidance and Enter retries status without a
+write. File failures display a safe category and recovery instructions. Saved
+and environment credentials permit masked replacement; empty Enter reuses the
+confirmed source without copying it to disk. The page shows the connected Host
+store location. Environment changes require restarting the owning Host.
+Keys use a dedicated zeroizing 64 KiB allocation with a fixed mask; they never
+enter scenes, ordinary editor journals, clipboard operations or diagnostics.
+Paste trims surrounding whitespace and rejects internal control characters;
+Ctrl+U clears the key. Escape goes back, root Escape closes, Ctrl+C closes only
+setup even during a running turn. Leaving secret input erases unsaved bytes.
+Validation precedes advancing; field errors clear on editing and transitions,
+while save receipts remain independent. Discovery offers retry, key/connection
+repair and manual entry. Changing connection inputs retires prior reads.
+
+The shared [setup owner](../workbench-ui/README.md) persists through Host APIs.
+Known capacities complete selection immediately; missing capacities are editable
+in both directions and validated together. Attached Enter changes subsequent
+Step selection; Ctrl+S also saves startup default. Home selection saves the
+default and starts a Session, preserving the draft until explicit submission.
+The application retains at most one pending setup operation independently of the
+visible wizard. Closing cancels reads but retains an admitted write waiter; its
+completion after close records results without initiating discovery, selection or
+attachment. Changing the attachment closes setup and prevents its model selection
+from reaching the successor Session. Reopening cannot overwrite or replay it.
+Refresh reconciles conflicts
+and unknown outcomes. This pending state is process-local; restart reads the real
+configuration. Rendering uses the shared application/Session scene protocol.
+
+
+
 The machine-readable JSONL envelope is version 5. It retains internal model
 events with their authenticated purpose tags. Plain answer output excludes
 context-compaction text; the TUI renders it as an internal status block.
@@ -141,8 +223,8 @@ the independent [Files browser](../session-files-ui/README.md) state plugin. Its
 Local mapping and snapshot belong to that same surface. The generic action menu
 renders the contribution's directory, text and hex pages without another observer.
 
-The product [terminal contract](../README.md#terminal-application) owns user-visible
-behavior and presentation bounds. Input against an older rendered frame resolves
+The [interaction design](docs/tui-design.md) owns visible behavior. The
+[presentation contract](../terminal-ui/README.md) owns scene and cache bounds. Input against an older rendered frame resolves
 its Session identity and source anchors in the current projection; removed
 sources are inert until redraw. Accepted-message detail uses a bounded JSON
 window with an explicit truncation marker.
@@ -200,3 +282,75 @@ It admits one frame at a time (caller-selected maximum, at most 4 MiB), retains
 its lease through a dropped write waiter, and restores descriptor flags before
 tracked completion. Closing or dropping the writer cancels delivery; explicit
 close joins work. The caller owns text sanitization and the document format.
+
+## Controller lifecycle and retained state
+
+Both stdin and stdout must be terminals; rejection precedes Host bootstrap.
+Native input currently requires Unix. The terminal application owns input,
+rendering, signals and cleanup. An attached Session has one durable observer and
+one live-interaction observer. Child browsing uses finite reads and does not
+acquire execution. Switching rejects unresolved sends and fences prior results.
+At most 12 client requests are outstanding, with reserved submission and
+cancellation capacity. The client owns at most 1,024 pending message identities.
+Renderer failure preserves the Session and editor, displays a resident diagnostic
+without source authority, and retries at most once every 250 ms.
+
+Each draft contains at most 1 MiB UTF-8. Draft and undo/redo buffers share a 4 MiB
+budget across the current Session and at most 64 saved Sessions; insertion that
+would exceed a bound leaves the prior draft intact. Each editor retains at most
+128 changes and 1 MiB of inserted/removed text. Old changes yield first; an edit
+larger than the journal resets it without rejecting otherwise valid input.
+Submission clears that editor's journal. Saved Sessions retain their own editor,
+model/effort display choice, receipts, source anchor and fold preferences.
+Recomputable folds have at most 512 entries per Session, 4,096 across current and
+saved Sessions, and 1 MiB including key and container allocation capacity. Old
+saved preferences yield before current ones; eviction never discards a draft or
+receipt.
+
+Prompt recall keeps at most 100 inputs and 1 MiB across Sessions. It stores exact
+frozen local request text, including failed and unresolved requests, and skips
+consecutive duplicates within a Session. It is memory-only, restores no image
+attachments, and selecting an input creates one undoable edit without submission.
+
+Initial history reads 128-Fact pages at a captured watermark, stopping at the
+latest Turn start or after eight pages / 1,024 Facts / 16 MiB of returned encoded
+bytes. This threshold stops further prefetch, not an already returned page.
+Historical Session restoration starts from its saved source anchor. The live
+projection retains 512 blocks, 4 MiB of text and 8 MiB of metadata including
+container capacity. Each block has a 256 KiB text window. Backward browsing owns
+one separate projection with the same bounds and evicts newer blocks; observation
+continues into the live projection. End restores that projection and fences older
+history reads. Legal large Facts and transport pages are transient allocations;
+these retention budgets are not RSS limits. Fact leases drop after projection.
+
+Dynamic text replaces controls other than newline/Tab, and Unicode bidi controls,
+with U+FFFD before rendering or copying. Layout expands tabs and uses narrow
+ambiguous-character width. Text never becomes terminal escape instructions. A
+single writer owns output, including OSC52, and restores terminal modes before
+ordinary diagnostics. Panic cleanup is best effort and cannot cover SIGKILL.
+SIGINT requests cancellation; SIGTERM and SIGHUP exit. Oversized bracketed pastes
+are rejected as a whole and discarded through their terminator. Native clipboard
+helpers use bounded process operations; OSC52 has a separate 32 KiB encoded limit.
+Delivery is reported as confirmed, unverified or failed. Completed output can only
+be read through its issued best-effort cache identity.
+
+Clipboard work remains outside input handling, including the unattached home
+screen; closing that screen cancels its pending clipboard operation. Setup mouse
+hits bind to the exact menu contents as well as the current filter and selection.
+
+Contributed cards share the closed text/field/form/button contract with Web.
+Opening another detail cancels its reads. Menu open/close retains the visible
+card and its field draft; selecting another view replaces it. Contribution or
+surface retirement rejects new actions and drains admitted work. The ordinary
+[tree inspector](../session-tree-ui/README.md) supplies finite read-only tree and
+conversation details. Full attachment uses the Session navigation behavior in the
+interaction design. Remote exit detaches; embedded exit shuts down its owned Host.
+
+When discovery advertises output capacity equal to the context window, setup
+asks for a smaller execution output limit before saving. Discovery preserves the
+advertised fact; setup never silently selects a reserve that leaves no input room.
+
+Idle slash completion retains its menu until the editor or command catalog changes.
+Fold-budget eviction scans retained keys a bounded number of times, removes an
+oldest Session's excess entries as one batch, and shrinks each visited allocation
+once. Draft text and pending submission identities survive fold-cache eviction.

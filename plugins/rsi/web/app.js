@@ -349,7 +349,15 @@ class Pane {
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
     const bar = element("div", "composer-bar");
     this.model = element("select"); this.model.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} model`);
-    this.model.addEventListener("change", () => perform(() => this.action("model", { model: JSON.parse(this.model.value) })));
+    this.model.addEventListener("change", () => perform(() => this.action("model", { model: JSON.parse(this.model.value), reasoning_effort: null })));
+    this.model.addEventListener("focus", () => perform(() => this.action("model_refresh")));
+    this.effort = element("select");
+    this.effort.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} reasoning effort`);
+    this.effort.addEventListener("change", () => perform(() => this.action("model", {
+      model: JSON.parse(this.model.value), reasoning_effort: this.effort.value || null,
+    })));
+    this.modelReceipt = button("Check model change", () => this.action("model_refresh"), "quiet");
+    this.modelReceipt.hidden = true;
     const actions = element("div", "actions");
     this.imageInput = element("input"); this.imageInput.type = "file"; this.imageInput.accept = "image/*"; this.imageInput.multiple = true;
     this.imageInput.hidden = true; this.imageInput.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} image files`);
@@ -366,7 +374,7 @@ class Pane {
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
-    actions.append(this.attach, this.cancel, this.steer, this.send); bar.append(this.model, actions);
+    actions.append(this.attach, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
     this.composer.append(this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.recovery, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
@@ -689,7 +697,11 @@ class Pane {
     this.status.textContent = data?.historical ? "History" : (data?.transcript.status || "Ready");
     this.history.disabled = !data || (!data.history_more && data.historical);
     this.live.hidden = !data?.historical;
-    this.model.disabled = !data || this.switching;
+    const modelPending = !!data?.model_command?.pending;
+    this.model.disabled = !data || this.switching || modelPending;
+    this.modelReceipt.hidden = !modelPending;
+    this.effort.hidden = !data?.effort_profile?.supported?.length;
+    this.effort.disabled = !data || this.switching || modelPending;
     this.cancel.disabled = !data;
     this.renderCommands(data);
     this.renderImages(data);
@@ -714,6 +726,17 @@ class Pane {
       }));
     }
     this.model.value = JSON.stringify(data.model);
+    const effortKey = JSON.stringify([data.effort_profile, data.reasoning_effort]);
+    if (effortKey !== this.effortKey) {
+      this.effortKey = effortKey;
+      const profile = data.effort_profile;
+      const defaultChoice = element("option", "", profile?.default ? `Default (${profile.default})` : "Provider default");
+      defaultChoice.value = "";
+      this.effort.replaceChildren(defaultChoice, ...(profile?.supported ?? []).map(value => {
+        const option = element("option", "", value); option.value = value; return option;
+      }));
+      this.effort.value = data.reasoning_effort ?? "";
+    }
     this.renderTranscript(data.transcript, changed);
     this.renderInline(data.inline);
     this.scheduleVisible();

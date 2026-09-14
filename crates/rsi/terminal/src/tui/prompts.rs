@@ -85,83 +85,12 @@ impl Client {
             .iter()
             .find(|entry| entry.id == id && entry.session == *self.state.header.session_id());
         if let Some(entry) = entry {
-            match self.state.editor.replace_text(&entry.text) {
-                Ok(()) => self
-                    .state
-                    .notice("Input recalled · edit before sending · Ctrl+Z restores the draft"),
-                Err(problem) => self.state.notice(problem),
+            if let Err(problem) = self.state.editor.replace_text(&entry.text) {
+                self.state.notice(problem);
             }
         } else {
             self.state
                 .notice("This history entry is no longer available");
-        }
-    }
-    pub(super) fn complete_command(&mut self) -> bool {
-        let text = self.state.editor.text();
-        if self.state.editor.cursor() != text.len()
-            || !text.starts_with('/')
-            || text.len() > 256
-            || text.contains(char::is_whitespace)
-        {
-            return false;
-        }
-        let prefix = text.to_owned();
-        let controller = self.controller.clone();
-        self.spawn(async move {
-            let names = controller.commands().await.map_err(error).map(|commands| {
-                commands
-                    .commands()
-                    .iter()
-                    .filter(|entry| entry.name().starts_with(&prefix[1..]))
-                    .map(|entry| entry.name().to_owned())
-                    .collect()
-            });
-            Ok(Update::Completions { prefix, names })
-        });
-        true
-    }
-    pub(super) fn command_completions(&mut self, prefix: &str, names: Result<Vec<String>>) {
-        if self.state.editor.text() != prefix || self.state.editor.cursor() != prefix.len() {
-            return;
-        }
-        let names = match names {
-            Ok(names) => names,
-            Err(problem) => {
-                self.state.notice(problem.to_string());
-                return;
-            }
-        };
-        match names.as_slice() {
-            [] => self
-                .state
-                .notice("No registered Session command matches this prefix"),
-            [name] => self.insert_completion(prefix, name),
-            _ => {
-                self.state.menu = Some(Menu {
-                    title: "Complete Session command".into(),
-                    selected: 0,
-                    items: names
-                        .into_iter()
-                        .map(|name| {
-                            (
-                                format!("/{name}"),
-                                Action::CompleteCommand(prefix.to_owned(), name),
-                            )
-                        })
-                        .collect(),
-                });
-            }
-        }
-    }
-    pub(super) fn insert_completion(&mut self, prefix: &str, name: &str) {
-        if self.state.editor.text() != prefix || self.state.editor.cursor() != prefix.len() {
-            return;
-        }
-        match self.state.editor.replace_text(&format!("/{name} ")) {
-            Ok(()) => self
-                .state
-                .notice("Command completed · add arguments before sending"),
-            Err(problem) => self.state.notice(problem),
         }
     }
 }

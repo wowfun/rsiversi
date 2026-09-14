@@ -56,7 +56,7 @@ async function startProvider(onRequest) {
         assert.equal(bytes.subarray(1, 4).toString(), "PNG");
         return { sha256: createHash("sha256").update(bytes).digest("hex"), width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
       });
-      requests.push({ prompt, completedTool, model: body.model, images });
+      requests.push({ prompt, completedTool, model: body.model, reasoning_effort: body.reasoning_effort ?? null, images });
       onRequest?.(body);
       response.writeHead(200, { "content-type": "text/event-stream" });
       if (prompt.includes("UI Goal hold") || (prompt.includes("observe background job") && completedTool)) {
@@ -151,7 +151,7 @@ export async function startService({ binary, assets, report, configure, onReques
     const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/web");
     await mkdir(host, { recursive: true }); await mkdir(application, { recursive: true });
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
-    await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n`);
+    await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n[steps.config.reasoning_efforts.fixture-model]\nsupported = ["low", "high"]\ndefault = "low"\n`);
     await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "assets"\nplugin = "rsi.web.assets"\nconfig = { directory = ${JSON.stringify(assets)} }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve-web"\n`);
     await configure?.({ config, workspace, run, provider });
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");

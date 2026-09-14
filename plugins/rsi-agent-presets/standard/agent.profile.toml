@@ -17,6 +17,16 @@ plugin = "rsi.agent.time-context"
 
 [[steps]]
 kind = "plugin"
+id = "todo"
+plugin = "rsi.agent.todo"
+
+[[steps]]
+kind = "plugin"
+id = "model-selection"
+plugin = "rsi.agent.model-selection"
+
+[[steps]]
+kind = "plugin"
 id = "plan-policy"
 plugin = "rsi.agent.plan-policy"
 

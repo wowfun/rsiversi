@@ -90,6 +90,7 @@ impl Client {
                 items: commands
                     .commands()
                     .iter()
+                    .filter(|entry| slash::visible_session_command(entry.name()))
                     .map(|entry| {
                         (
                             format!("/{} · {}", entry.name(), entry.description()),
@@ -119,7 +120,7 @@ impl Client {
             self.state
                 .open_detail(serde_json::to_string_pretty(&receipt).expect("receipt serializes"));
         } else {
-            self.state.notice("No Session command result");
+            self.state.info("No Session command result");
         }
     }
     pub(super) fn command_finished(
@@ -138,11 +139,7 @@ impl Client {
         }
         self.submission.rejected = false;
         match result {
-            Ok(receipt) => self.state.notice(format!(
-                "Command {} · {:?}",
-                receipt.request_id(),
-                receipt.outcome()
-            )),
+            Ok(_) => self.state.info(""),
             Err(error) => self.state.notice(error.to_string()),
         }
     }
