@@ -46,6 +46,7 @@ async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replace
             9,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new("turn").unwrap(),
                 text: text.clone(),
                 model: None,

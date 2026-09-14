@@ -123,7 +123,7 @@ fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 
         ),
         (
             "rsi.managed-providers",
-            std::sync::Arc::new(rsi_managed_providers::ManagedProvidersFactory),
+            std::sync::Arc::new(rsi_managed_providers::ManagedProvidersFactory::default()),
         ),
         (
             "rsi.navigation",

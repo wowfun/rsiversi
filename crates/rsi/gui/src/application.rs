@@ -100,6 +100,11 @@ pub(crate) enum Command {
         pane: crate::SurfaceId,
         generation: String,
         model: rsi_ai_protocol::ModelRef,
+        reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
+    },
+    ModelRefresh {
+        pane: crate::SurfaceId,
+        generation: String,
     },
     Cancel {
         pane: crate::SurfaceId,
@@ -174,6 +179,7 @@ impl Command {
             Self::Open { pane, .. }
             | Self::Create { pane, .. }
             | Self::Model { pane, .. }
+            | Self::ModelRefresh { pane, .. }
             | Self::Cancel { pane, .. }
             | Self::History { pane, .. }
             | Self::Commands { pane, .. }

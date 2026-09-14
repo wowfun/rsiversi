@@ -26,6 +26,7 @@ pub(crate) struct Block {
     pub text: String,
     pub clipped: bool,
     pub tool: Option<ToolState>,
+    request: Option<rsi_conversation::RequestPresentation>,
     tool_start_seq: Option<u64>,
     tool_argument_bytes: usize,
     sources: SourceIndex,
@@ -163,6 +164,7 @@ impl Transcript {
                 text: String::new(),
                 clipped: false,
                 tool: None,
+                request: None,
                 tool_start_seq: None,
                 tool_argument_bytes: 0,
                 sources: SourceIndex::default(),
@@ -224,6 +226,10 @@ impl Transcript {
                         block.key.capacity()
                             + block.title.capacity()
                             + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
+                            + block
+                                .request
+                                .as_ref()
+                                .map_or(0, rsi_conversation::RequestPresentation::owned_bytes)
                             + block.sources.owned_bytes()
                             + block.source_bytes.capacity() * std::mem::size_of::<usize>()
                     })
@@ -386,6 +392,7 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
     pub fn fact(&mut self, fact: &SessionFact) {
+        self.project_request(fact);
         if BlockIdentity::tool(fact).is_some() {
             self.seq = self.seq.max(fact.seq());
             self.project_tool(fact);
@@ -420,6 +427,15 @@ impl Transcript {
             SessionFactBody::InputMessageEntered {
                 source, content, ..
             } => {
+                let agent_title = match source {
+                    InputMessageSource::Agent {
+                        source_session_id, ..
+                    } => format!("Message from {source_session_id}"),
+                    InputMessageSource::Completion {
+                        child_session_id, ..
+                    } => format!("Completion from {child_session_id}"),
+                    _ => String::new(),
+                };
                 let (id, role, title) = match source {
                     InputMessageSource::Human { message_id } => (message_id, "user", "You"),
                     InputMessageSource::Continuation { message_id, .. } => {
@@ -427,7 +443,7 @@ impl Transcript {
                     }
                     InputMessageSource::Agent { message_id, .. }
                     | InputMessageSource::Completion { message_id, .. } => {
-                        (message_id, "status", "Agent message")
+                        (message_id, "status", agent_title.as_str())
                     }
                     _ => return,
                 };
@@ -543,6 +559,55 @@ pub(crate) fn short(text: &str, maximum: usize) -> &str {
     &text[..end]
 }
 
+impl Transcript {
+    fn project_request(&mut self, fact: &SessionFact) {
+        let (SessionFactBody::ModelIntent {
+            turn_id: turn,
+            effect_id: effect,
+            ..
+        }
+        | SessionFactBody::ModelStarted {
+            turn_id: turn,
+            effect_id: effect,
+        }
+        | SessionFactBody::ModelEvent {
+            turn_id: turn,
+            effect_id: effect,
+            event:
+                LanguageEvent::Usage { .. }
+                | LanguageEvent::Finished { .. }
+                | LanguageEvent::Failed { .. },
+            ..
+        }) = fact.body()
+        else {
+            return;
+        };
+        let key = serde_json::to_string(&("request", turn, effect)).expect("typed identities");
+        let existing = self.blocks.iter().any(|block| block.key == key);
+        if !existing {
+            self.add(key.clone(), "metadata", "Request", "", false);
+        }
+        if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+            let request = block.request.get_or_insert_with(Default::default);
+            request.observe(fact);
+            let title = request.title();
+            if block.title != title {
+                block.title = title;
+                block.revision = std::sync::Arc::new(());
+            }
+            block.first_seq = if !existing || block.first_seq == 0 {
+                fact.seq()
+            } else {
+                block.first_seq.min(fact.seq())
+            };
+        }
+        self.blocks
+            .make_contiguous()
+            .sort_by_key(|block| block.first_seq);
+        self.trim();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +632,7 @@ mod tests {
                 10,
                 1,
                 SessionFactBody::ToolIntent {
+                    source_model_effect_id: EffectId::new("source-model").unwrap(),
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
                     identity: identity.clone(),
@@ -614,7 +680,11 @@ mod tests {
                 &prepared_revision,
                 &transcript.blocks[0].revision
             ));
-            assert_eq!(transcript.blocks[0].title, "bash · running");
+            assert!(
+                transcript.blocks[0]
+                    .title
+                    .starts_with("bash · running · cargo test")
+            );
             assert_eq!(transcript.blocks[0].text, prepared_text);
             let running_revision = transcript.blocks[0].revision.clone();
             transcript.fact(&started);
@@ -631,7 +701,11 @@ mod tests {
             ));
             let block = &transcript.blocks[0];
             assert_eq!(transcript.blocks.len(), 1);
-            assert_eq!(block.title, format!("bash · {expected_status}"));
+            assert!(
+                block
+                    .title
+                    .starts_with(&format!("bash · {expected_status} · cargo test"))
+            );
             assert!(block.text.contains("cargo test"));
             assert!(block.text.contains("test output"));
             assert!(block.text.len() <= MAX_BLOCK_BYTES);

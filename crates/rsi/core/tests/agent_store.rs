@@ -90,6 +90,7 @@ fn built_binary_verify_rejects_a_snapshot_with_an_uncheckpointed_wal() {
                         1,
                         1,
                         SessionFactBody::TurnAccepted {
+                            reasoning_effort: None,
                             turn_id,
                             text: "hello".into(),
                             model: None,

@@ -167,7 +167,9 @@ impl ConfigurationClient {
     }
 }
 
+mod discovery;
 mod providers;
+pub use discovery::{DiscoveryRequest, DiscoverySnapshot};
 pub use providers::{
     ManagedProvider, ManagedProvidersClient, ProviderKind, ProvidersOperation, ProvidersSnapshot,
 };

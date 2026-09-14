@@ -290,7 +290,7 @@ async fn remote_client_replacement(uds: bool) {
         ProfileEntry::new(
             "credentials",
             "rsi.credentials.local",
-            serde_json::json!({"service":"fixture"}),
+            serde_json::json!({}),
         ),
         ProfileEntry::new(
             "connection",
@@ -415,20 +415,21 @@ struct FixtureSecret(rsi_credentials_protocol::SecretValue);
 impl rsi_credentials_local::SecretStore for FixtureSecret {
     fn get(
         &self,
-        _: &str,
-        _: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
     ) -> rsi_credentials_protocol::Result<Option<rsi_credentials_protocol::SecretValue>> {
         Ok(Some(self.0.clone()))
     }
     fn set(
         &self,
-        _: &str,
-        _: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
         _: &rsi_credentials_protocol::SecretValue,
     ) -> rsi_credentials_protocol::Result<()> {
         unreachable!("read-only fixture")
     }
-    fn unset(&self, _: &str, _: &str) -> rsi_credentials_protocol::Result<bool> {
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<bool> {
         unreachable!("read-only fixture")
     }
 }

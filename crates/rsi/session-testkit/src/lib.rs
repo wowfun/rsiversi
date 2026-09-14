@@ -144,6 +144,7 @@ pub async fn assert_session_contract(
 
     let message_id = MessageId::new(format!("{session}-message")).unwrap();
     let submission = SubmitInput {
+        reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: message_id.clone(),
         content: vec![SessionInput::Text {
@@ -202,6 +203,7 @@ pub async fn assert_session_contract(
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: message_id.clone(),
                 content: vec![SessionInput::Text {

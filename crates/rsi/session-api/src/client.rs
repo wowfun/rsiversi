@@ -25,6 +25,7 @@ mod tests;
 
 mod commands;
 mod draft;
+mod preview;
 
 #[derive(Debug)]
 pub(super) struct State {
@@ -33,6 +34,7 @@ pub(super) struct State {
     pub interactions: InteractionRetention,
     pub projections: rsi_session_protocol::ProjectionRetention,
     pub jobs: rsi_session_protocol::JobsRetention,
+    preview: preview::Budget,
 }
 /// Shared Session application proxy over one negotiated API generation.
 #[derive(Clone, Debug)]
@@ -66,6 +68,7 @@ impl SessionClient {
                 interactions: InteractionRetention::default(),
                 projections: rsi_session_protocol::ProjectionRetention::default(),
                 jobs: rsi_session_protocol::JobsRetention::default(),
+                preview: preview::Budget::default(),
             }),
         }
     }
@@ -323,6 +326,33 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn peek_job(
+        &self,
+        request: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        request
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let handle = self.frozen();
+        let _permit = handle.state.preview.reserve(web_time::Instant::now())?;
+        let page: rsi_agent_turn_protocol::JobPreviewPage =
+            handle.call(Operation::PeekJob, &request).await?;
+        page.validate_for(&handle.session_id, &handle.target().header_key, &request)
+            .map_err(|_| malformed(Operation::PeekJob))?;
+        Ok(page)
+    }
+    async fn evidence(
+        &self,
+        request: rsi_session_protocol::EvidenceRead,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::EvidencePage> {
+        request.validate()?;
+        let response: rsi_session_protocol::EvidencePage =
+            self.frozen().call(Operation::Evidence, &request).await?;
+        response
+            .validate(&request)
+            .map_err(|_| malformed(Operation::Evidence))?;
+        Ok(response)
+    }
     async fn read_jobs(
         &self,
         request: rsi_agent_turn_protocol::TurnJobsRequest,
@@ -539,6 +569,33 @@ impl SessionHandle for Handle {
     }
     async fn observe_interactions(&self) -> rsi_session_protocol::Result<InteractionStream> {
         crate::client_stream::interactions(self).await
+    }
+    async fn metrics(&self) -> rsi_session_protocol::Result<rsi_session_protocol::MetricsRead> {
+        let frozen = self.frozen();
+        let metrics: rsi_session_protocol::MetricsRead =
+            frozen.call(Operation::Metrics, &()).await?;
+        metrics
+            .validate()
+            .map_err(|_| malformed(Operation::Metrics))?;
+        if metrics.session_id != self.session_id {
+            return Err(malformed(Operation::Metrics));
+        }
+        Ok(metrics)
+    }
+    async fn tree_metrics(
+        &self,
+        refresh: bool,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::TreeMetricsRead> {
+        let frozen = self.frozen();
+        let metrics: rsi_session_protocol::TreeMetricsRead =
+            frozen.call(Operation::TreeMetrics, &refresh).await?;
+        metrics
+            .validate()
+            .map_err(|_| malformed(Operation::TreeMetrics))?;
+        if metrics.session_id != self.session_id {
+            return Err(malformed(Operation::TreeMetrics));
+        }
+        Ok(metrics)
     }
     async fn inspect(&self) -> rsi_session_protocol::Result<StoreSessionInspection> {
         let frozen = self.frozen();

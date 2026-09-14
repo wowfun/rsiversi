@@ -2,6 +2,7 @@ use super::{AgentPresetId, ApplicationProfileId, HostProfileId, OsString, PathBu
 use rsi_application::arguments::utf8;
 
 pub(super) const HELP: &str = "Usage:\n\
+  rsi tui [APPLICATION ARGUMENTS]\n\
   rsi --profile PROFILE [APPLICATION ARGUMENTS]\n\
       headless: TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
                 [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
@@ -641,6 +642,12 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
     }
     if matches!(first.as_str(), "-V" | "--version") {
         return Ok(Parse::Version);
+    }
+    if first == "tui" {
+        return Ok(Parse::Application(ApplicationInvocation {
+            profile: ApplicationProfileId::new("tui").expect("builtin profile"),
+            arguments: arguments.collect(),
+        }));
     }
     if first == "--profile" {
         let profile = arguments

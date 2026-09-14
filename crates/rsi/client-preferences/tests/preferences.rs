@@ -51,16 +51,12 @@ async fn ordinary_preferences_validate_persist_and_retire_without_changing_captu
     let before = access.read(NAMESPACE).await.unwrap();
     let description = access.describe(NAMESPACE).await.unwrap();
     assert_eq!(description.metadata.applies, SettingsApply::Restart);
-    assert!(
-        description
-            .metadata
-            .description
-            .contains("Reconnect Web or restart TUI")
-    );
+    assert!(description.metadata.description.contains("Reconnect Web"));
     for value in [
         json!({"web":{"enter_submit":"yes"}}),
         json!({"web":{"unknown":true}}),
         json!({"other":false}),
+        json!({"tui":{"enter_submit":true}}),
     ] {
         assert!(matches!(
             access.replace(NAMESPACE, &before.version(), value).await,
@@ -79,7 +75,6 @@ async fn ordinary_preferences_validate_persist_and_retire_without_changing_captu
     assert!(!frozen.web.enter_submit);
     let next = Preferences::load(access.as_ref()).await.unwrap();
     assert!(next.web.enter_submit);
-    assert!(next.tui.enter_submit);
     assert!(matches!(
         access.clear(NAMESPACE, &before.version()).await,
         Err(SettingsError::Conflict { .. })
@@ -100,7 +95,7 @@ async fn ordinary_preferences_validate_persist_and_retire_without_changing_captu
 }
 #[tokio::test]
 async fn malformed_stored_preferences_do_not_publish_a_namespace_owner() {
-    let runtime = setup(json!({"rsi.client":{"tui":{"enter_submit":"no"}}})).await;
+    let runtime = setup(json!({"rsi.client":{"web":{"enter_submit":"no"}}})).await;
     let failed = runtime.root().apply(factory(), Value::Null).await.unwrap();
     assert!(
         matches!(failed.snapshot().state, FiberState::Failed(reason) if reason.contains("boolean"))

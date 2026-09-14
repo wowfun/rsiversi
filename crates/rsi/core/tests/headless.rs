@@ -41,16 +41,30 @@ const CHILD_PROVIDER_START_TIMEOUT: std::time::Duration = std::time::Duration::f
 struct EmptySecretStore;
 
 impl SecretStore for EmptySecretStore {
-    fn get(&self, _service: &str, _account: &str) -> CredentialResult<Option<SecretValue>> {
+    fn get(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> CredentialResult<Option<SecretValue>> {
         Ok(None)
     }
 
-    fn set(&self, _service: &str, _account: &str, _secret: &SecretValue) -> CredentialResult<()> {
-        Err(CredentialsError::Store("read-only test store".into()))
+    fn set(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+        _secret: &SecretValue,
+    ) -> CredentialResult<()> {
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 
-    fn unset(&self, _service: &str, _account: &str) -> CredentialResult<bool> {
-        Err(CredentialsError::Store("read-only test store".into()))
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> CredentialResult<bool> {
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 }
 
@@ -796,6 +810,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         .unwrap();
     let first = first_handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-first").unwrap(),
             content: vec![SessionInput::Text {
@@ -831,6 +846,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let second_handle = application.attach(&first.session_id).await.unwrap();
     let second = second_handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-second").unwrap(),
             content: vec![SessionInput::Text {
@@ -1176,6 +1192,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "report_goal",
             "send_message",
             "spawn_agent",
+            "todo_write",
             "wait_agent",
         ]
     );
@@ -1760,6 +1777,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             .unwrap();
         let receipt = handle
             .submit(SubmitInput {
+                reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("question-input").unwrap(),
                 content: vec![SessionInput::Text {
@@ -2104,6 +2122,7 @@ async fn built_binary_sigint_after_model_completion_with_a_full_renderer_queue()
     verify_undrained_stdout(Some(64)).await;
 }
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)] // Bounded pipe setup, completion evidence and signal cleanup share one child.
 async fn verify_undrained_stdout(deltas: Option<usize>) {
     use std::time::Duration;
     use tokio::io::AsyncReadExt as _;
@@ -2169,12 +2188,24 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
         .unwrap();
     // Confirm streamed model bytes reached the pipe, then retain it without draining.
     let mut stdout = child.stdout.take().unwrap();
-    let mut prefix = vec![0; 4096];
-    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut prefix))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(prefix.windows(32).any(|bytes| bytes == [b'x'; 32]));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut prefix = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let count = stdout.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "stdout closed before streamed model bytes");
+            prefix.extend_from_slice(&chunk[..count]);
+            if prefix.windows(32).any(|bytes| bytes == [b'x'; 32]) {
+                break;
+            }
+            assert!(
+                prefix.len() < 256 * 1024,
+                "bounded request metadata prefix did not reach model output"
+            );
+        }
+    })
+    .await
+    .unwrap();
     if let Some(count) = deltas {
         wait_for_completed_output(&fixture, count).await;
     }

@@ -159,36 +159,60 @@ impl RunningRsi {
     }
 
     async fn start_service(
-        composition: StandardComposition,
+        mut composition: StandardComposition,
         program: rsi_host::ProfileProgram,
         launch_key: Option<String>,
         parent: Option<&rsi_meta::Context>,
     ) -> Result<Self> {
-        #[cfg(unix)]
-        let owner = Box::pin(service_bootstrap::start(
-            composition,
-            program,
-            launch_key,
-            parent,
-        ))
-        .await?;
-        #[cfg(not(unix))]
-        let owner = {
-            let _ = launch_key;
-            let paths = composition.paths().clone();
-            let host = composition
-                .build()
-                .map_err(|error| RsiError::Boot(error.to_string()))?;
-            match parent {
-                Some(parent) => ProfileOwner::start_scoped(host, paths, parent, program).await?,
-                None => ProfileOwner::Root(
-                    host.start_program(program)
-                        .await
-                        .map_err(|error| RsiError::Boot(error.to_string()))?,
-                ),
-            }
-        };
-        Self::from_started_host(owner).await
+        composition.agent_store_factory = rsi_agent_store_sqlite::SqliteStoreFactory::default();
+        let store_diagnostic = composition.agent_store_factory.clone();
+        let started = Box::pin(async {
+            #[cfg(unix)]
+            let owner = Box::pin(service_bootstrap::start(
+                composition,
+                program,
+                launch_key,
+                parent,
+            ))
+            .await?;
+            #[cfg(not(unix))]
+            let owner = {
+                let _ = launch_key;
+                let paths = composition.paths().clone();
+                let host = composition
+                    .build()
+                    .map_err(|error| RsiError::Boot(error.to_string()))?;
+                match parent {
+                    Some(parent) => {
+                        ProfileOwner::start_scoped(host, paths, parent, program).await?
+                    }
+                    None => ProfileOwner::Root(
+                        host.start_program(program)
+                            .await
+                            .map_err(|error| RsiError::Boot(error.to_string()))?,
+                    ),
+                }
+            };
+            Self::from_started_host(owner).await
+        })
+        .await;
+        started.map_err(|error| {
+            store_diagnostic.take_startup_failure().map_or(error, |failure| {
+                use rsi_agent_store_sqlite::SqliteStoreStartupFailureKind as Kind;
+                let reason = match failure.kind {
+                    Kind::SchemaMismatch { expected, actual } => format!(
+                        "Agent Store schema mismatch: expected {expected}, actual {actual}; no automatic migration is available. Preserve the old Store and use a fresh root or a matching older build"
+                    ),
+                    Kind::WriterLocked => "Agent Store root already has an active writer".into(),
+                    Kind::Invalid => "Agent Store root or filesystem layout is invalid".into(),
+                    Kind::Corrupt => "Agent Store metadata is corrupt; inspect it with agent-store verify".into(),
+                    Kind::Io => "Agent Store could not be opened; inspect filesystem access and agent-store verify".into(),
+                };
+                #[allow(clippy::unnecessary_debug_formatting, reason = "Escape filesystem paths so terminal controls cannot execute in startup errors.")]
+                let root = format!("{:?}", failure.root);
+                RsiError::Boot(format!("{reason}; root {root}"))
+            })
+        })
     }
 
     async fn from_started_host(host: ProfileOwner) -> Result<Self> {

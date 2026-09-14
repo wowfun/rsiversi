@@ -25,6 +25,7 @@ use std::{
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 
+mod discovery;
 mod endpoint;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -46,6 +47,7 @@ struct State {
 /// One Host-owned durable desired document and its child Profile convergence.
 #[derive(Debug)]
 pub struct ManagedProviders {
+    discovery: discovery::Discovery,
     domain: Arc<dyn Domain>,
     access: Arc<ConfigurationAccess>,
     host: Arc<Host>,
@@ -186,6 +188,7 @@ impl ManagedProviders {
             let mut state = self.state.lock().expect("managed providers state poisoned");
             state.closed = true;
             self.writer.close();
+            self.discovery.close();
             self.tasks.close();
         }
         self.tasks.wait().await;
@@ -278,7 +281,25 @@ impl LocalContract for ManagedProvidersContract {
 
 /// Ordinary Host plugin with an explicit Storage backend.
 #[derive(Clone, Debug, Default)]
-pub struct ManagedProvidersFactory;
+pub struct ManagedProvidersFactory {
+    transport: Option<Arc<dyn rsi_ai_transport::HttpTransport>>,
+}
+impl ManagedProvidersFactory {
+    fn transport(&self) -> rsi_meta::Result<Arc<dyn rsi_ai_transport::HttpTransport>> {
+        match &self.transport {
+            Some(transport) => Ok(transport.clone()),
+            None => Ok(Arc::new(
+                rsi_ai_transport::ReqwestTransport::new().map_err(activation)?,
+            )),
+        }
+    }
+    /// Injects bounded HTTP transport for deterministic discovery tests and embedders.
+    pub fn with_transport(transport: Arc<dyn rsi_ai_transport::HttpTransport>) -> Self {
+        Self {
+            transport: Some(transport),
+        }
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -296,6 +317,7 @@ impl PluginFactory for ManagedProvidersFactory {
             ));
         }
         Ok(PreparedActivation::new(config.clone())
+            .requiring_local::<rsi_credentials_protocol::CredentialsResolveContract>()
             .requiring_local::<DomainFacilityContract>()
             .requiring_local::<ConfigurationAccessContract>()
             .requiring_local::<rsi_host::ProfileControlContract>()
@@ -346,6 +368,10 @@ impl PluginFactory for ManagedProvidersFactory {
             .await
             .map_err(activation)?;
         let owner = Arc::new(ManagedProviders {
+            discovery: discovery::Discovery::new(
+                plan.local::<rsi_credentials_protocol::CredentialsResolveContract>()?,
+                self.transport()?,
+            ),
             domain,
             access: plan.local::<ConfigurationAccessContract>()?,
             host,

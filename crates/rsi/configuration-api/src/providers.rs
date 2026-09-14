@@ -76,6 +76,8 @@ impl ProvidersSnapshot {
 /// Exact managed-provider wire operations.
 #[derive(Clone, Copy, Debug)]
 pub enum ProvidersOperation {
+    /// Explicit provider model-list request; no configuration is persisted.
+    Discover,
     /// Read current desired/applied state.
     Read,
     /// Preflight and apply one desired replacement against its revision.
@@ -91,6 +93,7 @@ impl ProvidersOperation {
             id: OperationId::new(
                 "providers",
                 match self {
+                    Self::Discover => "discover",
                     Self::Read => "read",
                     Self::Replace => "replace",
                 },
@@ -100,19 +103,23 @@ impl ProvidersOperation {
             access: OperationAccess::Authenticated,
             class: OperationClass::Data,
             effect: match self {
-                Self::Read => OperationEffect::Read,
+                Self::Read | Self::Discover => OperationEffect::Read,
                 Self::Replace => OperationEffect::Mutation,
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: 2 * 1024 * 1024,
-            maximum_response_bytes: 2 * 1024 * 1024,
+            maximum_response_bytes: if matches!(self, Self::Discover) {
+                rsi_ai_protocol::MAX_DISCOVERY_BYTES
+            } else {
+                2 * 1024 * 1024
+            },
         }
     }
 }
 /// Managed provider configuration client; no operation tests a remote model implicitly.
 #[derive(Clone, Debug)]
 pub struct ManagedProvidersClient {
-    api: Arc<dyn ApiClient>,
+    pub(crate) api: Arc<dyn ApiClient>,
 }
 impl ManagedProvidersClient {
     /// Requires both exact managed-provider operations.
@@ -141,7 +148,7 @@ impl ManagedProvidersClient {
             Err(never) => match never {},
         };
         value.validate().map_err(|error| match operation {
-            ProvidersOperation::Read => error,
+            ProvidersOperation::Read | ProvidersOperation::Discover => error,
             ProvidersOperation::Replace => ApiError::OutcomeUnknown,
         })?;
         Ok(value)

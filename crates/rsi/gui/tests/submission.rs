@@ -80,6 +80,9 @@ struct Backend {
     block_source: std::sync::atomic::AtomicBool,
     active_source: std::sync::atomic::AtomicUsize,
     commands: Mutex<Vec<SessionCommandInvocation>>,
+    model_outcome_unknown: std::sync::atomic::AtomicBool,
+    model_describe_fails: std::sync::atomic::AtomicBool,
+    model_describes: std::sync::atomic::AtomicUsize,
     command_receipt: Mutex<Option<SessionCommandReceipt>>,
     requests: Mutex<Vec<SubmitInput>>,
     pending_messages: Mutex<Vec<rsi_agent_store_protocol::StorePendingMessage>>,
@@ -143,6 +146,20 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn tree_metrics(
+        &self,
+        _: bool,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::TreeMetricsRead> {
+        missing()
+    }
+    async fn peek_job(
+        &self,
+        _: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture preview".into(),
+        ))
+    }
     async fn control_goal(
         &self,
         request: rsi_goal::GoalControl,
@@ -195,6 +212,13 @@ impl SessionHandle for Backend {
                     true,
                 )
                 .unwrap(),
+                SessionCommandDescriptor::new(
+                    ContributionId::new("fixture.model-selection").unwrap(),
+                    "model-selection",
+                    "Select model and effort",
+                    true,
+                )
+                .unwrap(),
             ],
         )
         .unwrap())
@@ -204,6 +228,13 @@ impl SessionHandle for Backend {
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
         self.commands.lock().unwrap().push(invocation.clone());
+        if invocation.command.as_str() == "fixture.model-selection"
+            && !self
+                .model_outcome_unknown
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(SessionCommandReceipt::draft_changed(&invocation, "a".repeat(64)).unwrap());
+        }
         Err(rsi_session_protocol::SessionError::CommandOutcomeUnknown {
             request_id: invocation.request_id,
         })
@@ -312,6 +343,19 @@ impl SessionHandle for Backend {
             durable_seq,
             has_more: start > 0,
         })
+    }
+    async fn evidence(
+        &self,
+        _: rsi_session_protocol::EvidenceRead,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::EvidencePage> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture request evidence".into(),
+        ))
+    }
+    async fn metrics(&self) -> rsi_session_protocol::Result<rsi_session_protocol::MetricsRead> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture metrics".into(),
+        ))
     }
     async fn inspect(
         &self,
@@ -457,7 +501,56 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Unused {
     }
 }
 #[async_trait]
-impl rsi_ai_protocol::LanguageModels for Unused {
+impl rsi_ai_protocol::LanguageModels for Service {
+    async fn describe_model(
+        &self,
+        model: &rsi_ai_protocol::ModelRef,
+    ) -> std::result::Result<rsi_ai_protocol::LanguageModelDescription, rsi_ai_protocol::ModelsError>
+    {
+        self.0
+            .model_describes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .0
+            .model_describe_fails
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_ai_protocol::ModelsError::Backend(
+                "temporary model outage".into(),
+            ));
+        }
+        let profile = rsi_ai_protocol::LanguageProfile::new(
+            8192,
+            1024,
+            2048,
+            rsi_ai_protocol::ToolDialect::Responses,
+            false,
+            rsi_ai_protocol::ImageToolResultCapability::No,
+            vec![],
+        )
+        .unwrap()
+        .with_reasoning_efforts(
+            rsi_ai_protocol::ReasoningEffortProfile::new(
+                vec![
+                    rsi_ai_protocol::ReasoningEffortId::new("low").unwrap(),
+                    rsi_ai_protocol::ReasoningEffortId::new("max").unwrap(),
+                ],
+                Some(rsi_ai_protocol::ReasoningEffortId::new("low").unwrap()),
+            )
+            .unwrap(),
+        );
+        Ok(rsi_ai_protocol::LanguageModelDescription::new(
+            model.clone(),
+            profile,
+            1,
+            "fixture",
+            "fixture",
+            "local",
+            "fixture",
+        )
+        .unwrap())
+    }
+
     async fn list_models(
         &self,
         _: Option<&rsi_ai_protocol::ModelRef>,
@@ -484,7 +577,9 @@ impl PluginFactory for Providers {
             .unwrap();
         let _m = plan
             .context()
-            .provide_local::<rsi_ai_protocol::LanguageModelsContract>(Arc::new(Unused))
+            .provide_local::<rsi_ai_protocol::LanguageModelsContract>(Arc::new(Service(
+                self.0.clone(),
+            )))
             .unwrap();
         let _se = plan
             .context()
@@ -622,7 +717,17 @@ async fn verify_retry(resolution: usize) {
                 text: "edited next draft".into()
             }]
         );
-        assert_eq!(last.model, Some(model));
+        assert!(last.model.is_none());
+        assert!(last.reasoning_effort.is_none());
+        let commands = backend.commands.lock().unwrap();
+        let selection = commands
+            .iter()
+            .find(|command| command.command.as_str() == "fixture.model-selection")
+            .unwrap();
+        assert_eq!(
+            selection.arguments.value()["model"],
+            serde_json::to_value(model).unwrap()
+        );
     }
     assert!(rt.shutdown().await.is_clean());
 }

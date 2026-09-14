@@ -38,14 +38,18 @@ pub(crate) enum Operation {
     GoalStatus,
     GoalObserve,
     Jobs,
+    PeekJob,
     Inspect,
+    Metrics,
+    TreeMetrics,
+    Evidence,
     Questions,
     AnswerQuestion,
     Approvals,
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 30] = [
         Self::Create,
         Self::Attach,
         Self::Recent,
@@ -67,7 +71,11 @@ impl Operation {
         Self::GoalStatus,
         Self::GoalObserve,
         Self::Jobs,
+        Self::PeekJob,
         Self::Inspect,
+        Self::Metrics,
+        Self::TreeMetrics,
+        Self::Evidence,
         Self::Questions,
         Self::AnswerQuestion,
         Self::Approvals,
@@ -104,6 +112,10 @@ impl Operation {
                 8192,
                 rsi_agent_turn_protocol::MAXIMUM_TURN_JOBS_BYTES + 8192,
             ),
+            Self::Metrics => ("metrics", Data, Read, 8192, 64 * 1024),
+            Self::TreeMetrics => ("tree-metrics", Data, Read, 8192, 256 * 1024),
+            Self::PeekJob => ("peek-job", Data, Read, 8192, 64 * 1024),
+            Self::Evidence => ("evidence", Data, Read, 8192, 2 * 1024 * 1024),
             Self::Inspect => ("inspect", Data, Read, 8192, LARGE_REPLY),
             Self::Questions => ("questions", Data, Read, 8192, INTERACTION_REPLY),
             Self::AnswerQuestion => ("answer-question", Control, Mutation, 128 * 1024, 8192),
@@ -115,7 +127,8 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create => 3,
+                    Self::Create => 4,
+                    Self::Submit | Self::MessageStatus | Self::Jobs => 2,
                     Self::Attach
                     | Self::Recent
                     | Self::DraftSnapshot
@@ -123,8 +136,7 @@ impl Operation {
                     | Self::History
                     | Self::Observe
                     | Self::Inspect
-                    | Self::ReadMessage
-                    | Self::MessageStatus => 2,
+                    | Self::ReadMessage => 3,
                     _ => 1,
                 },
             )
@@ -219,6 +231,7 @@ pub(crate) enum Observation<C, F> {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    SetupRequired {},
     Invalid {
         message: String,
     },
@@ -257,6 +270,7 @@ pub(crate) fn domain<T>(
     result.map(Ok).or_else(|error| {
         let invalid = |_| ApiError::Backend("invalid Session error identity".into());
         Ok(Err(match error {
+            SessionError::SetupRequired => Failure::SetupRequired {},
             SessionError::Api(error) => return Err(error),
             SessionError::Backend(_) => {
                 return Err(ApiError::Backend("Session backend failed".into()));
@@ -302,6 +316,7 @@ pub(crate) fn domain<T>(
 impl Failure {
     pub fn into_error(self) -> SessionError {
         match self {
+            Self::SetupRequired {} => SessionError::SetupRequired,
             Self::Invalid { message } => SessionError::Invalid(message),
             Self::NotFound {} => SessionError::NotFound("remote Session object".into()),
             Self::DraftConflict { session } => SessionError::DraftConflict {
@@ -331,5 +346,25 @@ impl Failure {
             }
             Self::ShuttingDown {} => SessionError::ShuttingDown,
         }
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+    #[test]
+    fn setup_error_roundtrips_without_exposing_backend_diagnostics() {
+        let wire = domain::<()>(Err(SessionError::SetupRequired))
+            .unwrap()
+            .unwrap_err();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let restored: Failure = serde_json::from_slice(&bytes).unwrap();
+        assert!(matches!(restored.into_error(), SessionError::SetupRequired));
+        let message = SessionError::SetupRequired.to_string();
+        assert!(message.contains("rsi.agent.default_model"));
+        assert!(!message.contains("/login") && !message.contains("/model"));
+        assert!(
+            matches!(domain::<()>(Err(SessionError::Backend("private-diagnostic".into()))), Err(ApiError::Backend(message)) if message == "Session backend failed")
+        );
     }
 }

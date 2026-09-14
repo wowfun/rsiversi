@@ -23,6 +23,7 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-workbench-ui = { path = "../workbench-ui" }
 rsi-navigation = { path = "../navigation" }
 rsi-navigation-api = { path = "../navigation-api" }
 rsi-configuration-access = { path = "../configuration-access" }
@@ -81,6 +82,8 @@ rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-tools = { path = "../../rsi-agent/tools" }
 rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
+rsi-agent-todo = { path = "../../rsi-agent/todo" }
+rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-agent-repeat-tool-reminder = { path = "../../rsi-agent/repeat-tool-reminder" }
 rsi-ai = { path = "../../rsi-ai/core" }

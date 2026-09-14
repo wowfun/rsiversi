@@ -1,10 +1,21 @@
 # rsi-session-api
 
-The current Session format is 12. Operations carrying changed Header, Fact or
-message shapes negotiate their own versions: create v3; attach, recent,
-draft-snapshot, select-preset, history, observe, inspect, message-status and read-message v2.
-Other operation schemas keep their existing versions. ModelEvent purpose tags
-remain present in bounded partial history and observation payloads.
+The closed `setup_required` domain failure preserves `SessionError::SetupRequired`
+across local and remote creation. Backend diagnostics remain redacted and retain
+their API failure category. Clients may show setup without treating data or Store
+failures as missing configuration.
+
+
+The current Session format is 13. Operations carrying changed Header, Fact or
+message shapes negotiate their own versions: create v4; submit v2; attach,
+recent, draft-snapshot, select-preset, history, observe, inspect and read-message
+v3. Message-status remains v2. Metrics is a read-only v1 operation returning a
+validated fixed watermark, progress and checked Session totals in at most 64 KiB.
+Evidence is a read-only v1 operation: one exact request section, at most 256 KiB
+decoded source per page and a 2 MiB encoded response ceiling. Clients revalidate
+source identity, byte offsets, UTF-8 progress and package-level unavailability.
+Other schemas retain their existing versions. ModelEvent purpose tags remain
+present in bounded partial history and observation payloads.
 
 Ordinary endpoint and client plugins expose the Session domain through registered
 versioned operations. The server consumes the shared Session service and its
@@ -113,3 +124,6 @@ to the API adapter fixtures.
 
 Goal status and observation replies each allow 16 KiB encoded, including the
 target envelope and maximum JSON escaping of the 4 KiB diagnostic.
+
+Live-preview admission uses a monotonic native/browser clock; deterministic tests
+pass the observation time explicitly without sleeping or requiring a Tokio timer.

@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+url.workspace = true
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 serde.workspace = true

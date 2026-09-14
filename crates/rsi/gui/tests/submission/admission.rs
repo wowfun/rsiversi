@@ -65,6 +65,101 @@ async fn rejected_fresh_submissions_do_not_exhaust_owned_message_capacity() {
 }
 
 #[tokio::test]
+async fn passive_model_refresh_preserves_efforts_during_catalog_outages() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let before: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    assert!(!before["surfaces"]["main"]["effort_profile"].is_null());
+    let describes = backend.model_describes.load(Ordering::SeqCst);
+    backend.model_describe_fails.store(true, Ordering::SeqCst);
+    for _ in 0..3 {
+        app.command(
+            &json!({"action":"model_refresh","pane":"main","generation":generation}).to_string(),
+        )
+        .await
+        .unwrap();
+    }
+    let after: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    assert_eq!(
+        after["surfaces"]["main"]["effort_profile"],
+        before["surfaces"]["main"]["effort_profile"]
+    );
+    assert_eq!(
+        backend.model_describes.load(Ordering::SeqCst),
+        describes + 3
+    );
+    assert!(app.command(&json!({"action":"model","pane":"main","generation":generation,"model":{"deployment":"other","model":"reasoner"},"reasoning_effort":"max"}).to_string()).await.is_err());
+    assert!(backend.commands.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn model_effort_change_retains_unknown_invocation_across_pane_replacement() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let selection = |generation: &str, effort| json!({"action":"model","pane":"main","generation":generation,"model":{"deployment":"other","model":"reasoner"},"reasoning_effort":effort});
+    assert!(
+        app.command(&selection(&generation, Some("xhigh")).to_string())
+            .await
+            .is_err()
+    );
+    assert!(backend.commands.lock().unwrap().is_empty());
+    backend.model_outcome_unknown.store(true, Ordering::SeqCst);
+    assert!(
+        app.command(&selection(&generation, Some("max")).to_string())
+            .await
+            .is_err()
+    );
+    let invocation = backend.commands.lock().unwrap()[0].clone();
+    assert_eq!(invocation.arguments.value()["reasoning_effort"], "max");
+    assert!(
+        app.command(&selection(&generation, Some("low")).to_string())
+            .await
+            .is_err()
+    );
+    let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    let session = view["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    let generation = view["surfaces"]["main"]["generation"].as_str().unwrap();
+    assert_eq!(
+        view["surfaces"]["main"]["model_command"]["pending"]["request_id"],
+        invocation.request_id.as_str()
+    );
+    assert!(
+        app.command(
+            &json!({"action":"model_refresh","pane":"main","generation":generation}).to_string()
+        )
+        .await
+        .is_err()
+    );
+    *backend.command_receipt.lock().unwrap() =
+        Some(SessionCommandReceipt::draft_changed(&invocation, "a".repeat(64)).unwrap());
+    app.command(
+        &json!({"action":"model_refresh","pane":"main","generation":generation}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        backend.commands.lock().unwrap().len(),
+        1,
+        "refresh must only query the original command"
+    );
+    let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    assert_eq!(view["surfaces"]["main"]["model"]["model"], "reasoner");
+    assert_eq!(view["surfaces"]["main"]["reasoning_effort"], "max");
+    assert_eq!(view["surfaces"]["main"]["effort_profile"]["default"], "low");
+    assert!(view["surfaces"]["main"]["model_command"]["pending"].is_null());
+    backend.model_outcome_unknown.store(false, Ordering::SeqCst);
+    app.command(&selection(generation, None::<&str>).to_string())
+        .await
+        .unwrap();
+    assert!(backend.commands.lock().unwrap()[1].arguments.value()["reasoning_effort"].is_null());
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn replaced_pane_cannot_dispatch_through_its_retired_controller() {
     let (runtime, backend, app, generation) = fixture().await;
     let prepared = prepare(&app, &generation, "old pane", vec![], false).await;
@@ -218,11 +313,14 @@ async fn crafted_frozen_messages_cannot_change_sandbox_or_delivery_policy() {
         serde_json::to_value(rsi_sandbox::SandboxMode::DangerFullAccess).unwrap();
     let mut steer_model = source.clone();
     steer_model["request"]["input"]["delivery"] = json!("steer");
-    let mut absent_model = source;
-    absent_model["request"]["input"]["model"] = json!(null);
-    let mut next_step = absent_model.clone();
+    steer_model["request"]["input"]["model"] = json!({"deployment":"test","model":"model"});
+    let mut override_model = source.clone();
+    override_model["request"]["input"]["model"] = json!({"deployment":"test","model":"model"});
+    let mut effort = source.clone();
+    effort["request"]["input"]["reasoning_effort"] = json!("high");
+    let mut next_step = source;
     next_step["request"]["input"]["delivery"] = json!("next_step");
-    for frozen in [sandbox, steer_model, absent_model, next_step] {
+    for frozen in [sandbox, steer_model, override_model, effort, next_step] {
         let mut crafted = prepared.clone();
         crafted["opaque"] = json!(frozen.to_string());
         for mode in ["dispatch", "retry_message", "query"] {

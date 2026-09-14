@@ -169,6 +169,7 @@ fn envelope(body: Value) -> Value {
 }
 fn submit() -> SubmitInput {
     SubmitInput {
+        reasoning_effort: None,
         delivery: MessageDelivery::NextTurn,
         message_id: MessageId::new("message").unwrap(),
         content: vec![SessionInput::Text {

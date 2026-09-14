@@ -545,6 +545,7 @@ async fn publish_competing(
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: TurnId::new("competing").unwrap(),
                         text: "durable truth".into(),
                         model: None,

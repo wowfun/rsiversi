@@ -55,6 +55,8 @@ pub enum SetupCommand {
         ticket: String,
         /// Selected provider route.
         model: rsi_ai_protocol::ModelRef,
+        /// Requested default effort; absence resets to this model's provider default.
+        reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     },
     /// Select the existing default Agent preset while preserving source roots.
     DefaultPreset {
@@ -69,32 +71,49 @@ fn secret<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<SecretValue, D::Error> {
     SecretValue::new(String::deserialize(decoder)?).map_err(serde::de::Error::custom)
 }
-#[derive(Debug, Serialize)]
-struct CredentialView {
-    provider: ProviderKind,
-    slot: String,
-    status: CredentialStatus,
+/// Credential availability without the credential value.
+#[derive(Clone, Debug, Serialize)]
+pub struct CredentialView {
+    /// Provider family.
+    pub provider: ProviderKind,
+    /// Provider-owned credential slot.
+    pub slot: String,
+    /// Redacted credential availability.
+    pub status: CredentialStatus,
 }
-#[derive(Debug, Serialize)]
-struct Receipt {
-    operation: String,
-    outcome: String,
-    message: String,
+/// One independent setup operation result.
+#[derive(Clone, Debug, Serialize)]
+pub struct Receipt {
+    /// Independent operation name.
+    pub operation: String,
+    /// Confirmed, failed, or unknown result.
+    pub outcome: String,
+    /// Bounded redacted receipt detail.
+    pub message: String,
 }
-#[derive(Debug, Default, Serialize)]
-struct View {
-    ticket: String,
-    allowed: bool,
-    providers: Option<ProvidersSnapshot>,
-    agent: Value,
-    presets: Value,
-    credential: Option<CredentialView>,
-    receipts: Vec<Receipt>,
-    diagnostic: Option<String>,
+/// Typed redacted application setup projection.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SetupView {
+    /// Exact version of this setup view.
+    pub ticket: String,
+    /// Whether configuration mutations are authorized.
+    pub allowed: bool,
+    /// Desired and applied provider configuration.
+    pub providers: Option<ProvidersSnapshot>,
+    /// Current non-secret Agent defaults.
+    pub agent: Value,
+    /// Current preset selection and roots.
+    pub presets: Value,
+    /// Most recently inspected credential status.
+    pub credential: Option<CredentialView>,
+    /// Recent independent operation receipts.
+    pub receipts: Vec<Receipt>,
+    /// Most recent bounded operation failure.
+    pub diagnostic: Option<String>,
 }
 #[derive(Debug, Default)]
 struct State {
-    view: View,
+    view: SetupView,
     agent: Option<SettingsSnapshot>,
     presets: Option<SettingsSnapshot>,
 }
@@ -109,6 +128,89 @@ pub struct SetupFeature {
     work: Work,
 }
 impl SetupFeature {
+    /// Captures typed redacted state for native application clients.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned the setup state lock.
+    pub fn snapshot(&self) -> SetupView {
+        self.state.lock().expect("setup view poisoned").view.clone()
+    }
+    /// Explicit cancellable discovery; dropping this read discards its result.
+    pub async fn discover(
+        &self,
+        request: rsi_configuration_api::DiscoveryRequest,
+    ) -> Result<rsi_configuration_api::DiscoverySnapshot> {
+        self.providers.discover(request).await.map_err(error)
+    }
+    /// Saves a model against the displayed provider revision, then optionally the default.
+    /// Each step retains its own receipt; failed or uncertain mutations are never replayed.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned the setup state lock.
+    pub fn save_model(
+        self: &Arc<Self>,
+        view: SetupView,
+        definition: ManagedProvider,
+        model: rsi_ai_protocol::ModelRef,
+        default: bool,
+    ) -> BoxFuture<'static, Result<()>> {
+        let owner = self.clone();
+        self.run(async move {
+            let providers = view.providers.ok_or("Refresh setup before saving")?;
+            let deployment = definition
+                .config
+                .get("deployment")
+                .and_then(Value::as_str)
+                .filter(|deployment| *deployment == model.deployment())
+                .ok_or("Provider deployment must match the selected model before saving")?;
+            let mut deployments = providers.deployments;
+            let existing = deployments.iter().position(|entry| {
+                entry.config.get("deployment").and_then(Value::as_str) == Some(deployment)
+            });
+            if let Some(index) = existing {
+                deployments[index] = definition;
+            } else {
+                deployments.push(definition);
+            }
+            owner
+                .execute(SetupCommand::ProvidersReplace {
+                    expected_revision: providers.desired_revision,
+                    deployments,
+                })
+                .await?;
+            {
+                let state = owner.state.lock().expect("setup view poisoned");
+                let applied = state
+                    .view
+                    .providers
+                    .as_ref()
+                    .ok_or("Provider status unavailable")?;
+                if applied.applying
+                    || applied.applied_revision != applied.desired_revision
+                    || applied.diagnostic.is_some()
+                {
+                    let reason = applied
+                        .diagnostic
+                        .as_deref()
+                        .unwrap_or("Refresh provider status before selecting this model.");
+                    return Err(format!(
+                        "Provider configuration saved, but routes are not applied. {reason}"
+                    ));
+                }
+            }
+            if default {
+                owner
+                    .execute(SetupCommand::DefaultModel {
+                        ticket: view.ticket,
+                        model,
+                        reasoning_effort: None,
+                    })
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
     /// Captures redacted form state; no credential value can be serialized here.
     ///
     /// # Panics
@@ -127,8 +229,15 @@ impl SetupFeature {
     /// Panics if an earlier panic poisoned this owner's state lock.
     pub fn command(self: &Arc<Self>, command: SetupCommand) -> BoxFuture<'static, Result<()>> {
         let owner = self.clone();
+        self.run(async move { owner.execute(command).await })
+    }
+    fn run(
+        self: &Arc<Self>,
+        future: impl std::future::Future<Output = Result<()>> + Send + 'static,
+    ) -> BoxFuture<'static, Result<()>> {
+        let owner = self.clone();
         self.work.run(async move {
-            let result = owner.execute(command).await;
+            let result = future.await;
             owner
                 .state
                 .lock()
@@ -232,22 +341,37 @@ impl SetupFeature {
                     .providers = Some(result.map_err(error)?);
                 Ok(())
             }
-            SetupCommand::DefaultModel { ticket, model } => {
+            SetupCommand::DefaultModel {
+                ticket,
+                model,
+                reasoning_effort,
+            } => {
                 self.select(
                     &ticket,
                     "rsi.agent",
                     "default_model",
                     serde_json::to_value(model).map_err(error)?,
+                    Some((
+                        "default_reasoning_effort",
+                        serde_json::to_value(reasoning_effort).map_err(error)?,
+                    )),
                 )
                 .await
             }
             SetupCommand::DefaultPreset { ticket, preset } => {
-                self.select(&ticket, "rsi.agent-presets", "default", json!(preset))
+                self.select(&ticket, "rsi.agent-presets", "default", json!(preset), None)
                     .await
             }
         }
     }
-    async fn select(&self, ticket: &str, namespace: &str, field: &str, value: Value) -> Result<()> {
+    async fn select(
+        &self,
+        ticket: &str,
+        namespace: &str,
+        field: &str,
+        value: Value,
+        extra: Option<(&str, Value)>,
+    ) -> Result<()> {
         let snapshot = {
             let state = self.state.lock().expect("setup view poisoned");
             if state.view.ticket != ticket {
@@ -262,6 +386,9 @@ impl SetupFeature {
         };
         let mut replacement = snapshot.value.clone();
         replacement[field] = value;
+        if let Some((key, value)) = extra {
+            replacement[key] = value;
+        }
         let result = self
             .settings
             .replace(namespace, &snapshot.version(), replacement)
@@ -351,3 +478,7 @@ impl rsi_ui::SurfaceRenderer for Card {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "setup_tests.rs"]
+mod tests;

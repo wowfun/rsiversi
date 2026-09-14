@@ -1,4 +1,12 @@
 use super::*;
+#[path = "tui/dialogs.rs"]
+mod dialogs;
+#[path = "tui/live.rs"]
+mod live;
+#[path = "tui/navigation.rs"]
+mod navigation;
+#[path = "tui/setup.rs"]
+mod setup;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::time::{Duration, Instant};
 
@@ -30,7 +38,7 @@ async fn fullscreen_agent_tree_reads_child_history_without_switching_session() {
             "tui-tree-local"
         };
         let mut terminal = TerminalClient::start(&fixture, &["--session-id", name]);
-        terminal.until("Ready").await;
+        terminal.until("Ctrl+J adds a line").await;
         terminal.send(b"Inspect a child task\r");
         tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
             .await
@@ -79,7 +87,7 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-contributions"]);
-    terminal.until("Ready").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"\x10");
     terminal.select_menu("Session details").await;
     terminal.until("Session: tui-contributions").await;
@@ -108,13 +116,13 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fullscreen_enter_preference_survives_session_switch_and_ctrl_s_submits() {
+async fn fullscreen_fixed_enter_survives_session_switch_and_ctrl_s_submits() {
     for remote in [false, true] {
-        verify_enter_preference(remote).await;
+        verify_fixed_enter(remote).await;
     }
 }
 
-async fn verify_enter_preference(remote: bool) {
+async fn verify_fixed_enter(remote: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
@@ -125,11 +133,6 @@ async fn verify_enter_preference(remote: bool) {
         axum::serve(listener, router).await.unwrap();
     });
     let fixture = CliFixture::new(&endpoint);
-    let path = fixture.temporary.path().join("config/rsi/settings.json");
-    let mut settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    settings["rsi.client"] = serde_json::json!({"tui":{"enter_submit":false}});
-    std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
     if remote {
         fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     }
@@ -139,17 +142,17 @@ async fn verify_enter_preference(remote: bool) {
         "tui-enter-local"
     };
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", name]);
-    terminal.until("Enter adds a line · Ctrl+S submits").await;
-    for (index, text) in ["first\rsecond", "after switch\rnext line"]
+    terminal.until("Ctrl+J adds a line").await;
+    for (index, text) in ["first\x0asecond", "after switch\x0anext line"]
         .into_iter()
         .enumerate()
     {
         if index > 0 {
             terminal.action(0);
-            terminal.until("Enter adds a line · Ctrl+S submits").await;
+            terminal.until("Ctrl+J adds a line").await;
         }
         terminal.send(text.as_bytes());
-        terminal.until(text.split('\r').next_back().unwrap()).await;
+        terminal.until(text.split('\n').next_back().unwrap()).await;
         assert_eq!(requests.lock().unwrap().len(), index);
         terminal.send(b"\x13");
         terminal.until("hello from daemon").await;
@@ -158,7 +161,7 @@ async fn verify_enter_preference(remote: bool) {
         assert!(
             requests[index]
                 .to_string()
-                .contains(&text.replace('\r', "\\n"))
+                .contains(&text.replace('\n', "\\n"))
         );
     }
     terminal.send(b"\x04");
@@ -177,13 +180,29 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     );
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-output"]);
-    terminal.until("Ready").await;
+    terminal.capture_name = "tool-failure-marker".into();
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"Capture both raw streams\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
         .unwrap();
     state.release.notify_one();
     terminal.until("hello from daemon").await;
+    terminal.until("Failed to run").await;
+    {
+        let parser = terminal.screen.lock().unwrap();
+        let screen = parser.screen();
+        let row = u16::try_from(
+            screen
+                .rows(0, 110)
+                .position(|row| row.contains("Failed to run"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(screen.cell(row, 0).unwrap().contents(), "▸");
+        assert_eq!(screen.cell(row, 0).unwrap().fgcolor(), vt100::Color::Idx(9));
+        assert_eq!(screen.cell(row, 2).unwrap().fgcolor(), vt100::Color::Idx(7));
+    }
     terminal.send(b"\t");
     terminal.send(b"\x10");
     terminal.select_menu("Card details").await;
@@ -237,14 +256,31 @@ async fn fullscreen_files_pages_exact_bytes_and_explicit_refresh() {
     bytes.extend_from_slice(b"SECOND-PAGE\n\x00\x1b\xff\n");
     std::fs::write(directory.join("00.txt"), &bytes).unwrap();
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-files"]);
-    terminal.until("Ready").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"\x10");
     terminal.select_menu("Workspace files").await;
     terminal.until("Workspace-relative path").await;
     terminal.send(b"\r");
     terminal.select_menu("Edit Workspace-relative path").await;
-    terminal.until("Enter accepts").await;
-    terminal.send(b"browse\r");
+    terminal.until("Enter save · Esc discard").await;
+    terminal.send(b"browse");
+    terminal.until("browse▏").await;
+    terminal.send(b"\x10");
+    terminal.until("┌Actions").await;
+    terminal.send(b"\x1b[200~MUST_NOT_LEAK\x1b[201~");
+    terminal.send(b"\x1b");
+    terminal.absent("┌Actions").await;
+    terminal.until("browse▏").await;
+    assert!(
+        !terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .contains("MUST_NOT_LEAK")
+    );
+    terminal.send(b"\r");
     terminal.send(b"\r");
     terminal.select_menu("List directory").await;
     terminal.until("Entries: 0–16 of 20").await;
@@ -311,9 +347,10 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
         configure_independent(&mut fixture, binary);
     }
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "pty-plan-command"]);
-    terminal.until("Ready").await;
+    terminal.until("Ctrl+J adds a line").await;
     inspect_plan_projection(&mut terminal, false, "Draft").await;
-    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\r");
+    terminal.send(b"\x10");
+    terminal.select_menu("Session commands").await;
     terminal.until("Session commands").await;
     terminal.until("/plan").await;
     terminal.send(b"\x1b");
@@ -329,15 +366,14 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
         assert!(Instant::now() < closed, "command menu did not close");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    terminal.send(b"/pl\t");
-    terminal.until("Command completed").await;
-    terminal.send(b"on\r");
-    terminal.until("DraftChanged").await;
+    terminal.send(b"/pl");
+    terminal.until("/plan").await;
+    terminal.send(b"\t on\r");
+    terminal.absent("/plan").await;
     inspect_plan_projection(&mut terminal, true, "Draft").await;
     assert!(requests.lock().unwrap().is_empty());
     terminal.send(b"inspect plan\r");
     terminal.until("hello from daemon").await;
-    terminal.until("\"status\": \"completed\"").await;
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(
         requests.lock().unwrap()[0]
@@ -345,7 +381,7 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
             .contains("Plan mode is enabled")
     );
     terminal.send(b"/plan off\r");
-    terminal.until("Committed").await;
+    terminal.absent("/plan").await;
     inspect_plan_projection(&mut terminal, false, "Durable").await;
     assert_eq!(requests.lock().unwrap().len(), 1);
     terminal.send(b"\x04");
@@ -431,7 +467,7 @@ async fn inspect_plan_projection(terminal: &mut TerminalClient, enabled: bool, c
     terminal.send(b"\x10");
     terminal.select_menu("Extension state").await;
     terminal.until("rsi.plan-policy.view").await;
-    terminal.send(b"\r");
+    terminal.select_menu("rsi.plan-policy.view").await;
     terminal.until(&format!("\"enabled\": {enabled}")).await;
     terminal.until(cursor).await;
     terminal.send(b"\x1b");
@@ -475,6 +511,10 @@ plugin = "rsi.ui.target"
 config = "application"
 [[steps]]
 kind = "plugin"
+id = "setup"
+plugin = "rsi.workbench.setup"
+[[steps]]
+kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]
@@ -505,6 +545,17 @@ plugin = "rsi.application.tui"
     }
     fn start_presentation(fixture: &CliFixture, arguments: &[&str], native: bool) -> Self {
         Self::write_profile(fixture, native);
+        Self::launch(fixture, arguments, &["--profile", "test-tui"])
+    }
+    fn launch(fixture: &CliFixture, arguments: &[&str], entry: &[&str]) -> Self {
+        Self::launch_environment(fixture, arguments, entry, &[])
+    }
+    fn launch_environment(
+        fixture: &CliFixture,
+        arguments: &[&str],
+        entry: &[&str],
+        environment: &[(&str, Option<&str>)],
+    ) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 30,
@@ -514,7 +565,7 @@ plugin = "rsi.application.tui"
             })
             .unwrap();
         let mut command = CommandBuilder::new(&fixture.binary);
-        command.args(["--profile", "test-tui"]);
+        command.args(entry);
         command.args(arguments);
         command.cwd(&fixture.workspace);
         for (name, path) in [
@@ -526,7 +577,18 @@ plugin = "rsi.application.tui"
         ] {
             command.env(name, fixture.temporary.path().join(path));
         }
+        command.env_remove("RSI_DEEPSEEK_API_KEY");
+        command.env_remove("RSI_OPENAI_API_KEY");
+        command.env_remove("DEEPSEEK_API_KEY");
+        command.env_remove("OPENAI_API_KEY");
         command.env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret");
+        for (name, value) in environment {
+            if let Some(value) = value {
+                command.env(name, value);
+            } else {
+                command.env_remove(name);
+            }
+        }
         command.env("TERM", "xterm-256color");
         command.env_remove("NO_COLOR");
         let child = pair.slave.spawn_command(command).unwrap();
@@ -577,28 +639,65 @@ plugin = "rsi.application.tui"
     }
 
     async fn select_menu(&mut self, label: &str) {
-        self.until("Enter select · Esc close").await;
+        self.until("Enter select").await;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut previous = None;
+        let mut clicked = false;
+        let matches = |text: &str| {
+            text == label
+                || text.starts_with(&format!("{label} ·"))
+                || text.starts_with(&format!("{label} ("))
+        };
         loop {
-            let screen = self.screen.lock().unwrap().screen().contents();
-            let selected = screen.lines().find_map(|line| {
-                line.split_once("› ")
-                    .map(|(_, label)| label.trim().to_owned())
-            });
-            if selected
-                .as_ref()
-                .is_some_and(|selected| selected.starts_with(label))
-            {
+            let (screen, selected, target) = {
+                let parser = self.screen.lock().unwrap();
+                let screen = parser.screen();
+                let (rows, cols) = screen.size();
+                let selected = (0..rows).find_map(|row| {
+                    let text = (0..cols)
+                        .filter_map(|col| screen.cell(row, col))
+                        .filter(|cell| cell.bgcolor() == vt100::Color::Idx(237))
+                        .map(vt100::Cell::contents)
+                        .collect::<String>();
+                    text.strip_prefix("› ").map(|label| label.trim().to_owned())
+                });
+                let target = (0..rows).find_map(|row| {
+                    let cells = (0..cols)
+                        .filter_map(|col| screen.cell(row, col).map(|cell| (col, cell)))
+                        .filter(|(_, cell)| matches!(cell.bgcolor(), vt100::Color::Idx(235 | 237)))
+                        .collect::<Vec<_>>();
+                    let text = cells
+                        .iter()
+                        .map(|(_, cell)| cell.contents())
+                        .collect::<String>();
+                    let text = text
+                        .strip_prefix("› ")
+                        .or_else(|| text.strip_prefix("  "))?;
+                    matches(text.trim()).then(|| (cells[0].0, row))
+                });
+                (screen.contents(), selected, target)
+            };
+            if selected.as_deref().is_some_and(&matches) {
                 self.send(b"\r");
                 self.absent(&format!("› {label}")).await;
                 return;
+            }
+            if Instant::now() >= deadline {
+                self.capture();
             }
             assert!(
                 Instant::now() < deadline,
                 "menu never selected {label}: {screen}"
             );
-            if selected.is_some() && selected != previous {
+            if let Some((x, y)) = target {
+                if !clicked {
+                    self.send(
+                        format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1)
+                            .as_bytes(),
+                    );
+                    clicked = true;
+                }
+            } else if selected.is_some() && selected != previous {
                 previous = selected;
                 self.send(b"\x1b[B");
             }
@@ -631,6 +730,9 @@ plugin = "rsi.application.tui"
                 self.capture();
                 return;
             }
+            if Instant::now() >= deadline {
+                self.capture();
+            }
             assert!(
                 Instant::now() < deadline,
                 "terminal never produced {text:?}: {}",
@@ -646,6 +748,62 @@ plugin = "rsi.application.tui"
             assert!(
                 self.child.try_wait().unwrap().is_none(),
                 "terminal exited before {text}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn until_activity(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut frames = std::collections::BTreeSet::new();
+        loop {
+            {
+                let parser = self.screen.lock().unwrap();
+                let screen = parser.screen();
+                let (rows, cols) = screen.size();
+                let footer = screen.rows(0, cols).nth(usize::from(rows - 2)).unwrap();
+                for ch in footer.chars().filter(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧".contains(*ch)) {
+                    frames.insert(ch);
+                }
+                if frames.len() >= 2
+                    && footer.split_whitespace().any(|part| {
+                        part.strip_suffix('s')
+                            .is_some_and(|n| n.parse::<u64>().is_ok())
+                    })
+                {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "active turn must animate and show elapsed time"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.capture();
+    }
+
+    async fn until_cell(&mut self, row: u16, column: u16, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if self
+                .screen
+                .lock()
+                .unwrap()
+                .screen()
+                .cell(row, column)
+                .is_some_and(|cell| cell.contents() == text)
+            {
+                self.capture();
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PTY did not display {text:?} at {row},{column}"
+            );
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "terminal exited before expected cell"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -692,7 +850,7 @@ plugin = "rsi.application.tui"
         let (height, width) = screen.size();
         let cells: Vec<_> = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| {
             let cell = screen.cell(y, x).unwrap();
-            serde_json::json!({"x": x, "y": y, "text": cell.contents(), "fg": format!("{:?}", cell.fgcolor()), "bg": format!("{:?}", cell.bgcolor()), "bold": cell.bold()})
+            serde_json::json!({"x": x, "y": y, "text": cell.contents(), "fg": format!("{:?}", cell.fgcolor()), "bg": format!("{:?}", cell.bgcolor()), "bold": cell.bold(), "dim": cell.dim()})
         }).collect();
         std::fs::write(
             base.with_extension("json"),
@@ -747,7 +905,7 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-paste"]);
-    terminal.until("Describe a change").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"\x1b[200~Repair UTF-8\nsecond line\x1b[201~");
     terminal.until("Repair UTF-8").await;
     terminal.send(b"\x1a");
@@ -756,13 +914,14 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     terminal.until("Repair UTF-8").await;
     terminal.send(b"\r");
     terminal.until("hello from daemon").await;
-    terminal.until("Accepted ").await;
+    terminal.until("2 in / 3 out").await;
     terminal.send(b"\x12");
     terminal.until("Submitted input history").await;
     terminal.send(b"\r");
-    terminal.until("Input recalled").await;
+    terminal.absent("Submitted input history").await;
     terminal.send(b"\x1a");
-    terminal.send(b"\x10\x1b[B\x1b[B\r");
+    terminal.send(b"\x10");
+    terminal.select_menu("Model and effort").await;
     terminal.until("fixture/fixture-model").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -784,8 +943,8 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
                 .unwrap()
                 .screen()
                 .contents()
-                .contains("exit interrupts"),
-            "resized header must remain on screen"
+                .contains("fixture-model"),
+            "resized footer must retain the selected model"
         );
         assert!(
             !frame.contains("\x1b[13;1H"),
@@ -829,7 +988,7 @@ async fn fullscreen_rejects_non_tty_before_host_boot_and_restores_after_sigterm(
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &[]);
-    terminal.until("Describe a change").await;
+    terminal.until("Ctrl+J adds a line").await;
     let pid = terminal.child.process_id().unwrap();
     let process = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(process, rustix::process::Signal::TERM).unwrap();
@@ -849,7 +1008,7 @@ async fn fullscreen_answers_live_questions_through_the_real_tool_and_provider_lo
     let (endpoint, state, provider) = gated_provider("ask_user").await;
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-question"]);
-    terminal.until("Describe a change").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"Ask me a question\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
@@ -880,7 +1039,7 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
     let fixture = CliFixture::new(&endpoint);
     fixture.require_approval();
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-approval"]);
-    terminal.until("Describe a change").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"Run a command requiring approval\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
@@ -896,7 +1055,7 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
     terminal.until("Allow once").await;
     terminal.send(b"\r"); // Deny is the initial focused action.
     terminal.until("failed").await;
-    terminal.until("Approval response accepted: true").await;
+    terminal.absent("1 approvals").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(80)).await;
     terminal.capture();
@@ -923,22 +1082,24 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
     let fixture = CliFixture::new(&endpoint);
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     let mut first = TerminalClient::start(&fixture, &["--session-id", "tui-resume"]);
-    first.until("exit detaches").await;
+    first.until("Ctrl+J adds a line").await;
     first.send(b"first task\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
         .unwrap();
     first.send(b"foreign queued body\r");
     tokio::time::sleep(Duration::from_millis(250)).await;
-    first.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    first.send(b"\x10");
+    first.select_menu("Pending inputs").await;
     first.until("Pending inputs").await;
     first.send(b"\r");
     first.until("foreign queued body").await;
     first.send(b"\x04");
     first.finish().await;
     let mut resumed = TerminalClient::start(&fixture, &["--resume", "tui-resume"]);
-    resumed.until("exit detaches").await;
-    resumed.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    resumed.until("fixture-model").await;
+    resumed.send(b"\x10");
+    resumed.select_menu("Pending inputs").await;
     resumed.until("Pending inputs").await;
     resumed.send(b"\r");
     resumed.until("foreign queued body").await;
@@ -1009,22 +1170,32 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
             .unwrap();
     let old = store.install(&manifest).unwrap().record.unwrap();
     store.enable_exact(&old, None).unwrap();
+    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let saved_settings = std::fs::read(&settings_path).unwrap();
+    std::fs::remove_file(&settings_path).unwrap();
+    let mut home = TerminalClient::start_presentation(&fixture, &[], true);
+    home.until("No session attached").await;
+    home.send(b"native unattached draft\r");
+    home.until("Draft retained; nothing was sent").await;
+    home.send(b"\x03");
+    home.finish().await;
+    std::fs::write(settings_path, saved_settings).unwrap();
     let mut terminal =
         TerminalClient::start_presentation(&fixture, &["--session-id", "native-hot-reload"], true);
-    terminal.until("Ready").await;
+    terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"hold this turn\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
         .unwrap();
-    terminal.until("RUNNING").await;
+    terminal.until_activity().await;
     terminal.send(b"unsubmitted-draft-kept");
     terminal.until("unsubmitted-draft-kept").await;
     std::fs::copy(&artifacts[1], source.join("artifact.bin")).unwrap();
     let next = store.install(&manifest).unwrap().record.unwrap();
     store.enable_exact(&next, Some(&old)).unwrap();
-    terminal.until("B RSI").await;
+    terminal.until_cell(0, 0, "B").await;
     terminal.until("unsubmitted-draft-kept").await;
-    terminal.until("RUNNING").await;
+    terminal.until_activity().await;
     assert_eq!(
         state.requests.lock().unwrap().len(),
         1,

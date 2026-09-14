@@ -1,5 +1,20 @@
 # rsi-conversation
 
+`RequestPresentation` folds one effect's partial lifecycle for bounded history
+windows. It preserves the prepared model/effort, reported usage, elapsed time and
+failure independently of event arrival order. It never contributes usage totals.
+Typed Tool argument summaries retain at most 512 UTF-8 bytes; raw arguments and
+results remain exact paged sources. Renderers own labels, color and terminal safety.
+`FactField::ToolCommand` selects the raw UTF-8 `command` string of a `bash`
+intent or rejection, independently of the bounded argument summary. Other tools,
+missing/non-string commands and mismatched Fact sequences are unavailable. Its
+byte offsets and windows refer to that string, without JSON quoting or escaping.
+
+Configured cost reduces each ModelIntent's frozen quote and normalized usage,
+including failed attempts. Integer nanounit multiplication and accumulation are
+checked; display alone rounds to four decimals. Missing prices, usage or required
+cache subsets remain explicit. Totals keep at most eight separate currencies.
+
 `ToolValuePath` selects an exact subfield of a `ToolValue` source without changing
 the source's Fact identity. It has 1–8 components, at most 64 UTF-8 bytes each and
 256 bytes total. Object keys are literal; array positions use canonical unsigned
@@ -81,3 +96,14 @@ Tests cover exact-source mismatch, closed wire fields and lossless sequences,
 UTF-8 boundaries, large nested JSON windows and early serializer termination,
 and independent Tool/process failure classification. Application tests cover
 Session binding, cancellation and renderer-specific retention separately.
+
+Session metrics are a pure, ordered reduction of this Session's own durable
+Facts. The reducer retains one open model effect, checked inclusive totals and
+the last completed attempt; it retains no history or growing effect-ID set.
+Usage is counted when reported, including attempts that later fail. Missing
+breakdowns remain unknown. A retry is another model effect. Sequence gaps fail;
+replayed Facts at or below the reducer cursor cannot double count. Acquisition,
+fixed watermarks, cache admission and tree membership belong to Session.
+
+Metrics content events validate their open request identity and advance only the
+Fact cursor; they do not clone completed request metadata or cost totals.

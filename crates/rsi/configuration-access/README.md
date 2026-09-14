@@ -35,7 +35,14 @@ set/unset operations for the three closed managed provider owner identities.
 There is no remote resolve operation. Status is authenticated; mutations require
 the same trusted-origin grant lease. Secrets are bounded to 64 KiB and moved into
 the existing zeroizing credential value; mutation errors never echo store text.
-Environment-owned credentials remain read-only. Each admitted credential write
+Environment-provided credentials may be replaced by a saved file entry. Each admitted credential write
 is retained through completion independently of its response waiter. A successful
 receipt confirms only that credential operation; provider apply and default-model
 selection are separate operations. An uncertain store result is never replayed.
+
+A determinate credential store failure uses the credential API's closed domain
+failure payload; invalid caller input remains `Invalid`. A writer lock timeout
+reports `Capacity`: the write was not published and may be retried. Unknown
+publication outcomes remain `OutcomeUnknown` and must be reconciled before any
+new mutation. The domain payload preserves a known failure through the API's
+mutation dispatcher, which treats an ordinary `Backend` error as uncertain.

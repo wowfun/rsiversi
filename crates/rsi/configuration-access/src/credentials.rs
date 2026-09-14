@@ -4,7 +4,8 @@ use super::{
 use rsi_api_protocol::{ApiRegistrar, ApiRegistration, json_handler};
 use rsi_configuration_api::{CredentialOperation, CredentialReceipt, ProviderKind};
 use rsi_credentials_protocol::{
-    CredentialRef, CredentialsAdmin, CredentialsError, CredentialsStatus, SecretValue,
+    CredentialRef, CredentialStoreFailure, CredentialsAdmin, CredentialsError, CredentialsStatus,
+    SecretValue,
 };
 
 #[derive(Serialize)]
@@ -34,13 +35,19 @@ fn secret<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<SecretValue, D::Error> {
     SecretValue::new(String::deserialize(decoder)?).map_err(serde::de::Error::custom)
 }
-fn error(error: &CredentialsError) -> ApiError {
-    match error {
-        CredentialsError::EnvironmentShadow(_) => ApiError::Invalid(
-            "credential is supplied by the Host environment and cannot be edited".into(),
-        ),
-        CredentialsError::InvalidInput(_) => ApiError::Invalid("invalid credential input".into()),
-        _ => ApiError::OutcomeUnknown,
+fn mutation_result<T>(
+    result: rsi_credentials_protocol::Result<T>,
+) -> Result<std::result::Result<T, CredentialStoreFailure>> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(CredentialsError::Store(CredentialStoreFailure::LockTimeout)) => {
+            Err(ApiError::Capacity)
+        }
+        Err(CredentialsError::Store(reason)) => Ok(Err(reason)),
+        Err(CredentialsError::InvalidInput(_)) => {
+            Err(ApiError::Invalid("invalid credential input".into()))
+        }
+        Err(_) => Err(ApiError::OutcomeUnknown),
     }
 }
 fn retained<T: Send + 'static>(
@@ -90,17 +97,14 @@ pub(super) fn register(
                 }
                 .validated()?;
                 retained(&authority, &context.origin, async move {
-                    credentials
-                        .set(&reference, input.secret)
-                        .await
-                        .map_err(|failure| error(&failure))?;
-                    Ok(CredentialReceipt {
-                        operation: CredentialOperation::Set,
-                        removed: None,
-                    })
+                    mutation_result(credentials.set(&reference, input.secret).await.map(|()| {
+                        CredentialReceipt {
+                            operation: CredentialOperation::Set,
+                            removed: None,
+                        }
+                    }))
                 })?
                 .await
-                .map(Ok::<_, Never>)
             }
         }),
     )?;
@@ -112,19 +116,41 @@ pub(super) fn register(
             async move {
                 let reference = input.validated()?;
                 retained(&authority, &context.origin, async move {
-                    let removed = credentials
-                        .unset(&reference)
-                        .await
-                        .map_err(|failure| error(&failure))?;
-                    Ok(CredentialReceipt {
-                        operation: CredentialOperation::Unset,
-                        removed: Some(removed),
-                    })
+                    mutation_result(credentials.unset(&reference).await.map(|removed| {
+                        CredentialReceipt {
+                            operation: CredentialOperation::Unset,
+                            removed: Some(removed),
+                        }
+                    }))
                 })?
                 .await
-                .map(Ok::<_, Never>)
             }
         }),
     )?;
     Ok(vec![read, set, unset])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_failure_classification_preserves_contention_and_unknown_outcomes() {
+        assert_eq!(
+            mutation_result::<()>(Err(CredentialsError::Store(
+                CredentialStoreFailure::LockTimeout
+            ))),
+            Err(ApiError::Capacity)
+        );
+        assert_eq!(
+            mutation_result::<()>(Err(CredentialsError::Store(
+                CredentialStoreFailure::Permissions
+            ))),
+            Ok(Err(CredentialStoreFailure::Permissions))
+        );
+        assert_eq!(
+            mutation_result::<()>(Err(CredentialsError::OutcomeUnknown)),
+            Err(ApiError::OutcomeUnknown)
+        );
+    }
 }

@@ -1,5 +1,20 @@
 # rsi-session-protocol
 
+`SessionHandle::peek_job` is a required read-only current-claim operation. A
+Session API client generation admits at most two in-flight peeks and four starts
+per second. The server independently bounds concurrent peeks to two; it does not
+enforce a per-connection polling interval. Replies are bounded to 64 KiB.
+Reads are cancelled with their Session lease. Consumers
+retain at most one focused job and 256 KiB of preview data, cancel on close or
+session switch, and use durable results when the process-local source is gone.
+
+`SessionError::SetupRequired` identifies missing configuration when creating a
+new Session. It is distinct from invalid settings, Store failures and API errors.
+Its diagnostic names the configuration field; each application supplies its own
+setup entry points rather than embedding terminal commands in the shared error.
+Attaching durable Sessions keeps their frozen settings and needs no global default.
+
+
 The optional current-Turn Jobs status read binds a caller-selected active Turn
 to this handle's exact Session/Header. It returns at most 32 summaries / 64 KiB
 encoded per page and retains that page's bytes through its final clone. One
@@ -200,3 +215,21 @@ reacquires it, so expired drafts and changed Header bindings are rejected before
 filesystem work. Both workspace trust values are allowed: the lease establishes
 current Session correlation and lifetime, not API authentication, model Tool
 policy or permission to promote file content into instructions.
+
+`tree_metrics(refresh)` explicitly reads the current Session and up to 255 descendants
+without execution. It returns membership completeness, the root membership control
+cursor, each member's optional captured Fact watermark and reduced cursor, and
+checked totals. Cuts are per member, not simultaneous. `refresh` starts a new
+cycle only after completion; an active cycle keeps its frozen roster and cuts.
+While `complete` is false, call `tree_metrics(false)` again to advance the same
+cycle. `complete: true` covers only the included roster: if `membership_complete`
+is false, totals remain partial even after reading finishes. Repeated calls do
+not page in omitted descendants, and refresh does not increase the roster limit.
+The API operation is version 1 with a 256 KiB reply bound.
+
+`metrics` reads a bounded forward reduction at a fixed Fact watermark. Each
+reply reports its cursor and whether that watermark is complete. Repeated reads
+continue the current cut before advancing to a newer one. Session totals exclude
+child and inherited attempts. This operation neither observes live executions
+nor changes Session state. The pure reducer belongs to Conversation; acquisition
+and bounded cache policy belong to Session.

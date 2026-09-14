@@ -96,6 +96,10 @@ max_output_reserve_tokens = 16384
         let mut command = Command::new(&self.binary);
         command
             .current_dir(&self.workspace)
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("RSI_DEEPSEEK_API_KEY")
+            .env_remove("RSI_OPENAI_API_KEY")
             .env("HOME", self.temporary.path().join("home"))
             .env("XDG_CONFIG_HOME", self.temporary.path().join("config"))
             .env("XDG_STATE_HOME", self.temporary.path().join("state"))
@@ -109,6 +113,10 @@ max_output_reserve_tokens = 16384
         let mut command = tokio::process::Command::new(&self.binary);
         command
             .current_dir(&self.workspace)
+            .env_remove("DEEPSEEK_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("RSI_DEEPSEEK_API_KEY")
+            .env_remove("RSI_OPENAI_API_KEY")
             .env("HOME", self.temporary.path().join("home"))
             .env("XDG_CONFIG_HOME", self.temporary.path().join("config"))
             .env("XDG_STATE_HOME", self.temporary.path().join("state"))

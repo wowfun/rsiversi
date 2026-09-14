@@ -320,7 +320,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
 async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
     let grant =
         Arc::new(rsi_session_api::SessionTargetClient::new(api, session_id.clone()).unwrap());
-    assert_eq!(grant.operations().len(), 24);
+    assert_eq!(grant.operations().len(), 28);
     let handle = rsi_session_api::SessionClient::attach_target(grant.clone(), session_id)
         .await
         .unwrap();
@@ -330,6 +330,11 @@ async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
         session_id
     );
     handle.commands().await.unwrap();
+    let tree = handle.tree_metrics(true).await.unwrap();
+    assert_eq!(&tree.session_id, session_id);
+    assert!(tree.membership_complete);
+    assert!(!tree.members.is_empty());
+    tree.validate().unwrap();
     assert!(matches!(
         handle.answer_approval(
             &SessionId::new("unrelated-approval-owner").unwrap(),
@@ -430,6 +435,7 @@ async fn lost_submission(api: Arc<HttpClient>, session: &SessionId) {
     let client = rsi_session_api::SessionClient::new(connection.clone()).unwrap();
     let handle = client.attach(session).await.unwrap();
     let request = rsi_session_protocol::SubmitInput {
+        reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: rsi_agent_session_protocol::MessageId::new("lost-http-reply").unwrap(),
         content: vec![rsi_session_protocol::SessionInput::Text {

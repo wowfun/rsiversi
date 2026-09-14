@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-conversation = { path = "../conversation" }
 rsi-goal = { path = "../goal" }
 tokio-util.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

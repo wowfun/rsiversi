@@ -26,7 +26,7 @@ use rsi_ai_provider::{ImageRegistrarContract, LanguageRegistrarContract};
 use rsi_apply_patch::ApplyPatchToolFactory;
 use rsi_approval_protocol::{ApprovalAnswerersContract, ApprovalContract};
 use rsi_commands_protocol::CommandRuntimeContract;
-use rsi_credentials_local::{CredentialsLocalFactory, KeyringSecretStore, SecretStore};
+use rsi_credentials_local::{CredentialsLocalFactory, FileSecretStore, SecretStore};
 use rsi_credentials_protocol::{
     CredentialsAdminContract, CredentialsResolveContract, CredentialsStatusContract, SecretValue,
 };
@@ -102,6 +102,8 @@ const CONTEXT_BUILDER_FACTORY: &str = "rsi.agent.context.default";
 const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const WORKSPACE_CONTRIBUTOR_FACTORY: &str = "rsi.agent.workspace-context.contributor";
 const TIME_CONTEXT_FACTORY: &str = "rsi.agent.time-context";
+const TODO_FACTORY: &str = "rsi.agent.todo";
+const MODEL_SELECTION_FACTORY: &str = "rsi.agent.model-selection";
 const PLAN_POLICY_FACTORY: &str = "rsi.agent.plan-policy";
 const REPEAT_REMINDER_FACTORY: &str = "rsi.agent.repeat-tool-reminder";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
@@ -126,6 +128,7 @@ pub struct StandardComposition {
     paths: HostPaths,
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
+    pub(crate) agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
     coding_tools: Option<StandardCodingTools>,
     agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
@@ -213,6 +216,11 @@ fn standard_agent_addon(
         Arc::new(rsi_files_tools::FilesToolsFactory),
     )?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
+    register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
+    register(
+        MODEL_SELECTION_FACTORY,
+        Arc::new(rsi_agent_model_selection::ModelSelectionFactory),
+    )?;
     register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))?;
     register(
         CONTEXT_BUILDER_FACTORY,
@@ -1000,9 +1008,12 @@ impl StandardComposition {
         coding_tools: Option<StandardCodingTools>,
     ) -> Self {
         Self {
+            credential_store: Arc::new(FileSecretStore::new(
+                paths.config().join("credentials/credentials.json"),
+            )),
+            agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
             paths,
             captured_environment,
-            credential_store: Arc::new(KeyringSecretStore),
             coding_tools,
             agent_presets: None,
             service_owner: None,
@@ -1344,6 +1355,7 @@ impl StandardComposition {
             self.captured_environment.clone(),
             self.coding_tools.clone(),
             agent_composition,
+            self.agent_store_factory.clone(),
         )?;
         let owner = self.service_owner_factory()?;
         builder.register_local_contract::<rsi_service_host::ServiceOwnerContract>()?;
@@ -1460,6 +1472,7 @@ fn register_factories(
     captured_environment: BTreeMap<String, SecretValue>,
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
+    agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
 ) -> rsi_host::Result<()> {
     register(
         builder,
@@ -1534,7 +1547,7 @@ fn register_factories(
         rsi_service_host::ApprovalBrokerFactory,
     )?;
     register_runtime_factories(builder, coding_tools, agent_composition)?;
-    register_agent_ai_factories(builder)
+    register_agent_ai_factories(builder, agent_store_factory)
 }
 
 #[allow(clippy::too_many_lines)] // The standard linked catalog is one product-owned composition boundary.
@@ -1655,7 +1668,10 @@ fn register_runtime_factories(
     Ok(())
 }
 
-fn register_agent_ai_factories(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+fn register_agent_ai_factories(
+    builder: &mut StandardAddonBuilder,
+    agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
+) -> rsi_host::Result<()> {
     register(
         builder,
         "rsi.ai.portable",
@@ -1683,7 +1699,7 @@ fn register_agent_ai_factories(builder: &mut StandardAddonBuilder) -> rsi_host::
         builder,
         SQLITE_STORE_FACTORY,
         UpdateMode::RestartRequired,
-        rsi_agent_store_sqlite::SqliteStoreFactory,
+        agent_store_factory,
     )?;
     register(
         builder,
@@ -1808,7 +1824,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             "rsi-credentials",
             CREDENTIALS_FACTORY,
             json!({
-                "service": "rsiversi",
+
                 "environment": [
                     { "reference": { "owner": OPENAI_FACTORY, "slot": "default" }, "variable": "OPENAI_API_KEY" },
                     { "reference": { "owner": OPENAI_COMPATIBLE_FACTORY, "slot": "default" }, "variable": "RSI_OPENAI_COMPATIBLE_API_KEY" },
@@ -2053,7 +2069,11 @@ mod tests {
     #[test]
     fn portable_ai_is_an_explicit_service_factory_with_restart_semantics() {
         let mut builder = StandardAddonBuilder::new("test.providers");
-        register_agent_ai_factories(&mut builder).unwrap();
+        register_agent_ai_factories(
+            &mut builder,
+            rsi_agent_store_sqlite::SqliteStoreFactory::default(),
+        )
+        .unwrap();
         let set = StandardAddonSet::new([builder.build().unwrap()]).unwrap();
         let description = set
             .descriptions()
@@ -2150,6 +2170,8 @@ mod tests {
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
+                TODO_FACTORY,
+                MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
                 REPEAT_REMINDER_FACTORY,
@@ -2174,6 +2196,8 @@ mod tests {
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
+                TODO_FACTORY,
+                MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
                 REPEAT_REMINDER_FACTORY,

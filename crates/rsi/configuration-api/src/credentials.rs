@@ -1,9 +1,11 @@
 use super::{
-    ApiClient, ApiError, Arc, Deserialize, DeserializeOwned, Never, OperationAccess,
-    OperationClass, OperationEffect, OperationId, OperationSpec, ProviderKind, RequestEncoding,
-    Result, Serialize, call_json,
+    ApiClient, ApiError, Arc, Deserialize, DeserializeOwned, OperationAccess, OperationClass,
+    OperationEffect, OperationId, OperationSpec, ProviderKind, RequestEncoding, Result, Serialize,
+    call_json,
 };
-use rsi_credentials_protocol::{CredentialRef, CredentialStatus, SecretValue};
+use rsi_credentials_protocol::{
+    CredentialRef, CredentialStatus, CredentialStoreFailure, SecretValue,
+};
 
 /// Closed credential configuration operations; resolution is deliberately absent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -30,7 +32,7 @@ impl CredentialOperation {
                     Self::Set => "set",
                     Self::Unset => "unset",
                 },
-                1,
+                2,
             )
             .expect("static credential operation"),
             access: OperationAccess::Authenticated,
@@ -42,7 +44,7 @@ impl CredentialOperation {
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: 512 * 1024,
-            maximum_response_bytes: 4096,
+            maximum_response_bytes: 8192,
         }
     }
 }
@@ -90,9 +92,11 @@ impl ProviderCredentialsClient {
         operation: CredentialOperation,
         input: &I,
     ) -> Result<O> {
-        match call_json::<_, _, Never>(self.api.as_ref(), &operation.spec(), input).await? {
+        match call_json::<_, _, CredentialStoreFailure>(self.api.as_ref(), &operation.spec(), input)
+            .await?
+        {
             Ok(value) => Ok(value),
-            Err(never) => match never {},
+            Err(failure) => Err(ApiError::Backend(failure.to_string())),
         }
     }
     /// Reads redacted current status; it does not test model connectivity.

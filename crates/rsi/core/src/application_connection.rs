@@ -342,6 +342,9 @@ fn register_presentations(builder: &mut crate::StandardAddonBuilder) -> crate::R
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
     let scope = crate::AddonScope::Application;
     builder
+        .register_local_contract_at::<rsi_workbench_ui::SetupFeatureContract>(scope)
+        .map_err(boot)?;
+    builder
         .register_local_contract_at::<rsi_ui::UiContract>(scope)
         .map_err(boot)?;
     builder
@@ -415,8 +418,12 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
 
 fn application_factories(
     diagnostics: &ApplicationDiagnostics,
-) -> [(&'static str, Arc<dyn PluginFactory>); 15] {
+) -> [(&'static str, Arc<dyn PluginFactory>); 16] {
     [
+        (
+            "rsi.workbench.setup",
+            Arc::new(rsi_workbench_ui::SetupFeatureFactory),
+        ),
         ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
         ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
         ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),

@@ -15,7 +15,10 @@ mod setup;
 pub use navigation::{
     NavigationCommand, NavigationFeature, NavigationFeatureContract, NavigationFeatureFactory,
 };
-pub use setup::{SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory};
+pub use setup::{
+    CredentialView, Receipt, SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory,
+    SetupView,
+};
 
 type Result<T> = std::result::Result<T, String>;
 #[derive(Debug)]
@@ -157,3 +160,6 @@ pub fn register(
     }
     Ok(())
 }
+
+mod model_metadata;
+pub use model_metadata::supplement_model;

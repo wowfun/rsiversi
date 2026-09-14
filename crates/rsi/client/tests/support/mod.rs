@@ -86,6 +86,22 @@ impl Handle {
 
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn tree_metrics(
+        &self,
+        _: bool,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::TreeMetricsRead> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture tree metrics".into(),
+        ))
+    }
+    async fn peek_job(
+        &self,
+        _: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture preview".into(),
+        ))
+    }
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
@@ -177,6 +193,19 @@ impl SessionHandle for Handle {
         limit: usize,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionHistoryPage> {
         self.source_reads.read(before, limit).await
+    }
+    async fn evidence(
+        &self,
+        _: rsi_session_protocol::EvidenceRead,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::EvidencePage> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture request evidence".into(),
+        ))
+    }
+    async fn metrics(&self) -> rsi_session_protocol::Result<rsi_session_protocol::MetricsRead> {
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "fixture metrics".into(),
+        ))
     }
     async fn inspect(
         &self,
@@ -459,6 +488,7 @@ pub async fn controller(
 }
 pub fn input(id: &str) -> SubmitInput {
     SubmitInput {
+        reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: MessageId::new(id).unwrap(),
         content: vec![rsi_session_protocol::SessionInput::Text {

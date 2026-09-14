@@ -199,9 +199,10 @@ impl GuiApplication {
                 rsi_session_protocol::validate_session_input(&content).map_err(error)?;
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
+                    reasoning_effort: None,
                     message_id: id.clone(), content,
                     delivery: if input.steer { MessageDelivery::Steer } else { MessageDelivery::NextTurn },
-                    model: (!input.steer).then(|| attached.model.lock().expect("Web model poisoned").clone()),
+                    model: None,
                     sandbox: None,
                 };
                 ("message", id.to_string(), Request::Message { input: request }, MAXIMUM_MESSAGE)
@@ -243,9 +244,11 @@ impl GuiApplication {
             match &frozen.request {
                 Request::Message { input } => {
                     if input.sandbox.is_some()
+                        || input.model.is_some()
+                        || input.reasoning_effort.is_some()
                         || !matches!(
-                            (input.delivery, &input.model),
-                            (MessageDelivery::NextTurn, Some(_)) | (MessageDelivery::Steer, None)
+                            input.delivery,
+                            MessageDelivery::NextTurn | MessageDelivery::Steer
                         )
                     {
                         return Err(
@@ -262,9 +265,6 @@ impl GuiApplication {
                     if texts > 1 || input.content.len() - texts > super::images::MAXIMUM_IMAGES ||
                         input.content.iter().any(|item| matches!(item, SessionInput::Text { text } if text.len() > 1024 * 1024)) {
                         return Err("Frozen draft exceeds its text or image limit".into());
-                    }
-                    if let Some(model) = &input.model {
-                        model.validate().map_err(error)?;
                     }
                 }
                 Request::Command { invocation } => {

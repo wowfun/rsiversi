@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-ai-transport = { path = "../../rsi-ai/transport" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-configuration-access = { path = "../configuration-access" }
@@ -22,8 +25,11 @@ rsi-ai-provider = { path = "../../rsi-ai/provider" }
 rsi-storage-domain = { path = "../../rsi-storage/domain" }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]
 workspace = true

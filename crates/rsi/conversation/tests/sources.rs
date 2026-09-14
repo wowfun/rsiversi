@@ -7,6 +7,57 @@ use serde::ser::SerializeSeq;
 use serde_json::json;
 
 #[test]
+fn shell_command_source_is_raw_bounded_and_variant_checked() {
+    let command = "printf '界\\n'\n\t# \"quoted\"\\path";
+    let source = SourceRef {
+        seq: 7,
+        field: FactField::ToolCommand,
+    };
+    for (name, arguments) in [
+        ("bash", json!({"command":command})),
+        ("other", json!({"command":command})),
+        ("bash", json!({"command":3})),
+        ("bash", json!({})),
+    ] {
+        let fact = SessionFact::new(
+            7,
+            1,
+            SessionFactBody::ToolIntent {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("tool").unwrap(),
+                source_model_effect_id: EffectId::new("model").unwrap(),
+                identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
+                    .unwrap(),
+                name: name.into(),
+                arguments: arguments.clone(),
+                approval: None,
+                parallel_safe: false,
+            },
+        )
+        .unwrap();
+        assert!(select_field(&fact, SourceRef { seq: 8, ..source }).is_none());
+        if name == "bash"
+            && arguments
+                .get("command")
+                .is_some_and(serde_json::Value::is_string)
+        {
+            let field = select_field(&fact, source).unwrap();
+            for start in 0..=command.len() {
+                assert_eq!(
+                    field.window(start, 8).unwrap(),
+                    FieldWindow::text(command, start, 8).unwrap()
+                );
+            }
+        } else {
+            assert!(select_field(&fact, source).is_none());
+        }
+    }
+    let wire = serde_json::to_value(source).unwrap();
+    assert_eq!(serde_json::from_value::<SourceRef>(wire).unwrap(), source);
+    assert!(serde_json::from_value::<FactField>(json!({"kind":"tool_command","index":0})).is_err());
+}
+
+#[test]
 fn dense_patch_evidence_fits_the_pretty_source_window() {
     use rsi_conversation::{ToolValuePath, select_tool_value_path};
     let mut evidence = json!({"version":1,"omitted":false,"diffs":[]});
@@ -359,6 +410,7 @@ fn input_sources_preserve_text_and_media_kinds() {
 
     check_fields(
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: TurnId::new("turn").unwrap(),
             text: "original input".into(),
             model: None,
@@ -477,6 +529,8 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     let effect = EffectId::new("tool").unwrap();
     check_fields(
         SessionFactBody::ToolIntent {
+            source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model")
+                .unwrap(),
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             identity: identity.clone(),
@@ -485,7 +539,10 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
             approval: None,
             parallel_safe: false,
         },
-        &[(FactField::ToolArguments, "exit 7")],
+        &[
+            (FactField::ToolArguments, "exit 7"),
+            (FactField::ToolCommand, "exit 7"),
+        ],
     );
     check_fields(
         SessionFactBody::ToolRejected {
@@ -501,6 +558,7 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
         },
         &[
             (FactField::ToolArguments, "never executed"),
+            (FactField::ToolCommand, "never executed"),
             (FactField::ToolRejection, "plan mode denied"),
         ],
     );
@@ -519,6 +577,7 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
         &[(FactField::ToolImage { index: 0 }, "image/png")],
     );
     let snapshot = PreparedCallSnapshot {
+        language_settings: None,
         call_id: "call".into(),
         deployment_id: "fixture".into(),
         provider_family: "deepseek".into(),
@@ -534,6 +593,10 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     };
     check_fields(
         SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
             purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),

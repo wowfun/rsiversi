@@ -1,5 +1,15 @@
 # rsi-workbench-ui
 
+Saving a model requires a string deployment identity in its provider definition
+that matches the selected model. Missing, null or mismatched identities are
+rejected before provider writes; incomplete entries cannot match one another by
+their absent JSON fields.
+
+Setup exposes typed snapshots to native consumers and the same redacted JSON
+projection to GUI consumers. Discovery candidates are ephemeral and never imply
+provider application or default selection. Each retained write keeps its own
+receipt; cancelled presentation does not undo an admitted credential write.
+
 Ordinary Application plugins own configuration and navigation presentation state
 over the connected Host's typed APIs. They contribute application-scoped status
 surfaces through the existing UI registry. Their closed command handles support
@@ -13,6 +23,10 @@ Settings selections use the exact snapshot retained under a fresh view ticket;
 stale forms fail before mutation. Configuration read failures do not discard a
 previous successful write receipt. Lost/unknown mutation replies require an
 explicit refresh; no write is replayed.
+Both setup commands and model saves publish their final failure in the typed view.
+A provider write that did not apply its routes retains the Host's convergence
+diagnostic, including restart requirements, separately from its confirmed write
+receipt and from default selection.
 
 Navigation owns query tickets and continuation cursors in Rust. One read round
 scans at most 4,096 rows through the Host's bounded pages, stopping at a nonempty
@@ -29,3 +43,12 @@ Each plugin admits one non-queued command and retains its execution independentl
 of the caller's waiter. Retirement closes admission, drains work and withdraws
 its UI contributions. Service configuration authorization remains at the Host's
 trusted-origin boundary. Local UI availability is not an authorization proof.
+
+The capacity snapshot in `model_metadata.rs` records official sources and the
+verification date. It matches exact provider, official API root (including the
+OpenAI `/v1` base alias) and model ID;
+custom endpoints receive no official fallback. Existing configured limits win,
+then valid online metadata, then missing snapshot fields. Unknown capacities
+remain explicit user inputs. Output reserve starts at `min(4096, maximum)` and
+all saved limits pass `LanguageModelLimits`. Rounded DeepSeek capacities use
+conservative decimal token counts.

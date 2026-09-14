@@ -206,9 +206,12 @@ impl GoalSession for LocalSessionHandle {
             .validate()
             .map_err(|error| GoalError::Invalid(error.to_string()))?;
         let header = self.header_snapshot().await.map_err(goal_error)?;
-        self.language
-            .describe(header.settings().default_model())
-            .map_err(|error| GoalError::Invalid(error.to_string()))?;
+        let selected = self
+            .current_model_selection(&header)
+            .await
+            .map_err(goal_error)?;
+        self.validate_model_selection(&selected)
+            .map_err(goal_error)?;
         let mut state = self.state.lock().await;
         if matches!(*state, HandleState::Attached(_)) {
             drop(state);

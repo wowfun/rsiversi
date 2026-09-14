@@ -2,6 +2,8 @@
 pub(crate) mod images;
 #[path = "inline.rs"]
 mod inline;
+#[path = "model_selection.rs"]
+mod model_selection;
 #[path = "remote_ui.rs"]
 mod remote_ui;
 #[path = "source_details.rs"]
@@ -45,6 +47,7 @@ pub(crate) struct ReuseDraft {
 
 #[derive(Debug)]
 struct SubmissionState {
+    model_command: rsi_client::CommandSubmission,
     receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     owned: Mutex<BTreeSet<MessageId>>,
     submissions: Arc<tokio::sync::Semaphore>,
@@ -52,6 +55,7 @@ struct SubmissionState {
 impl SubmissionState {
     fn new() -> Self {
         Self {
+            model_command: rsi_client::CommandSubmission::default(),
             receipt: Mutex::new(None),
             owned: Mutex::new(BTreeSet::new()),
             submissions: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -76,7 +80,8 @@ struct Attachment {
     ui_target: Arc<rsi_ui::UiTarget>,
     renderer: Arc<Renderer>,
     submission: Arc<SubmissionState>,
-    model: Mutex<rsi_ai_protocol::ModelRef>,
+    model: Mutex<rsi_agent_session_protocol::ModelSelection>,
+    model_description: Mutex<Option<rsi_ai_protocol::LanguageModelDescription>>,
     durable: std::sync::atomic::AtomicBool,
     history_work: tokio::sync::Semaphore,
 }
@@ -183,6 +188,15 @@ impl Pane {
             .state
             .lock()
             .expect("Web renderer poisoned");
+        let selection = current.selection(state.projections.as_ref());
+        let description = current
+            .model_description
+            .lock()
+            .expect("model description poisoned");
+        let profile = description
+            .as_ref()
+            .filter(|description| description.model() == &selection.model)
+            .map(rsi_ai_protocol::LanguageModelDescription::profile);
         let metadata = serde_json::json!({
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
@@ -193,7 +207,9 @@ impl Pane {
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
             "header":current.header, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
-            "model":*current.model.lock().expect("Web model poisoned"),
+            "model":selection.model,"reasoning_effort":selection.reasoning_effort,
+            "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
+            "model_command":current.submission.model_command.view(),
             "transcript":null, "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         });
@@ -322,15 +338,20 @@ impl GuiApplication {
                 pane,
                 generation,
                 model,
+                reasoning_effort,
             } => {
-                model.validate().map_err(error)?;
-                *self
-                    .pane(pane)?
-                    .attachment(&generation)?
-                    .model
-                    .lock()
-                    .expect("Web model poisoned") = model;
-                Ok(())
+                self.select_model(
+                    pane,
+                    &generation,
+                    rsi_agent_session_protocol::ModelSelection {
+                        model,
+                        reasoning_effort,
+                    },
+                )
+                .await
+            }
+            Command::ModelRefresh { pane, generation } => {
+                self.refresh_model(pane, &generation).await
             }
             Command::Cancel { pane, generation } => self.cancel(pane, &generation).await,
             Command::History { pane, generation } => self.history(pane, &generation).await,
@@ -542,7 +563,15 @@ impl GuiApplication {
             controller,
             renderer,
             submission: draft,
-            model: Mutex::new(header.settings().default_model().clone()),
+            model_description: Mutex::new(
+                self.models
+                    .describe_model(header.settings().default_model())
+                    .await
+                    .ok(),
+            ),
+            model: Mutex::new(rsi_agent_session_protocol::ModelSelection::baseline(
+                header.settings(),
+            )),
             durable: std::sync::atomic::AtomicBool::new(durable),
             history_work: tokio::sync::Semaphore::new(1),
         });
@@ -625,7 +654,7 @@ impl GuiApplication {
         if draft.revision != 0
             || draft.header.fingerprint().map_err(error)? != attached.header
             || *attached.model.lock().expect("Web model poisoned")
-                != *draft.header.settings().default_model()
+                != rsi_agent_session_protocol::ModelSelection::baseline(draft.header.settings())
         {
             return Ok(false);
         }

@@ -30,6 +30,8 @@ pub enum FactField {
     ModelSnapshot,
     /// Complete arguments from a Tool intent or pre-execution rejection.
     ToolArguments,
+    /// Raw shell command string from a bash intent or pre-execution rejection.
+    ToolCommand,
     /// Typed pre-execution rejection and provenance.
     ToolRejection,
     /// Complete programmatic Tool result value.
@@ -68,6 +70,7 @@ impl<'de> Deserialize<'de> for FactField {
             ("model_failure", None) => Self::ModelFailure,
             ("model_snapshot", None) => Self::ModelSnapshot,
             ("tool_arguments", None) => Self::ToolArguments,
+            ("tool_command", None) => Self::ToolCommand,
             ("tool_rejection", None) => Self::ToolRejection,
             ("tool_value", None) => Self::ToolValue,
             ("tool_text", Some(index)) => Self::ToolText { index },
@@ -121,7 +124,8 @@ fn order(field: FactField) -> (u8, u16, u8) {
         FactField::ModelToolArguments => (4, 0, 0),
         FactField::ModelFailure => (5, 0, 0),
         FactField::ModelSnapshot => (6, 0, 0),
-        FactField::ToolArguments => (7, 0, 0),
+        FactField::ToolCommand => (7, 0, 0),
+        FactField::ToolArguments => (7, 0, 1),
         FactField::ToolRejection => (8, 0, 0),
         FactField::ToolValue => (9, 0, 0),
         FactField::ToolText { index } => (10, index, 0),
@@ -253,6 +257,7 @@ pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<
             | SessionFactBody::ToolRejected { arguments, .. },
             FactField::ToolArguments,
         ) => return Some(FieldValue::Json(arguments)),
+        (_, FactField::ToolCommand) => command_text(fact.body())?,
         (SessionFactBody::ToolRejected { rejection, .. }, FactField::ToolRejection) => {
             return Some(FieldValue::Rejection(rejection));
         }
@@ -280,4 +285,16 @@ pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<
         _ => return None,
     };
     Some(FieldValue::Text(Cow::Borrowed(text)))
+}
+
+fn command_text(body: &SessionFactBody) -> Option<&str> {
+    match body {
+        SessionFactBody::ToolIntent {
+            name, arguments, ..
+        }
+        | SessionFactBody::ToolRejected {
+            name, arguments, ..
+        } if name == "bash" => arguments.get("command")?.as_str(),
+        _ => None,
+    }
 }

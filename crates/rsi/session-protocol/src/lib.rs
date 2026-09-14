@@ -21,7 +21,11 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod evidence;
 mod reads;
+pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead};
+mod model_selection;
+pub use model_selection::{ModelAvailability, ModelSelectionRead};
 pub use reads::{SessionReadContract, SessionReadLease, SessionReads, SessionTarget};
 
 mod interactions;
@@ -236,6 +240,8 @@ pub struct SubmitInput {
     pub content: Vec<SessionInput>,
     /// Optional invocation-scoped model route.
     pub model: Option<ModelRef>,
+    /// Effort for an explicit invocation model; absent means that model's default.
+    pub reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     /// Optional invocation-scoped sandbox mode.
     pub sandbox: Option<SandboxMode>,
 }
@@ -329,6 +335,13 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Peeks one bounded current-claim process tail without consuming results.
+    async fn peek_job(
+        &self,
+        request: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> Result<rsi_agent_turn_protocol::JobPreviewPage>;
+    /// Reads exact captured request bytes without reconstructing context or executing work.
+    async fn evidence(&self, request: EvidenceRead) -> Result<EvidencePage>;
     /// Reads current-Turn process-local status without reporting or acquiring Jobs.
     async fn read_jobs(
         &self,
@@ -399,6 +412,11 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn observe_interactions(&self) -> Result<InteractionStream>;
     /// Observes complete extension views at one draft revision or durable dual cursor.
     async fn observe_projections(&self) -> Result<ProjectionStream>;
+    /// Reads or advances this Session's bounded durable usage reduction.
+    async fn metrics(&self) -> Result<MetricsRead>;
+    /// Explicit bounded tree usage cycle; refresh only replaces a completed cycle.
+    async fn tree_metrics(&self, refresh: bool) -> Result<TreeMetricsRead>;
+
     /// Captures one atomic durable inspection of this Session and subtree.
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection>;
     /// Lists this root Session's live pending human questions.
@@ -466,6 +484,11 @@ impl rsi_meta_contract::LocalContract for SessionContract {
 /// Closed Session application failure taxonomy shared by all adapters.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    /// New Sessions require an explicitly configured default model.
+    #[error(
+        "Setup required: configure rsi.agent.default_model with its deployment and model fields"
+    )]
+    SetupRequired,
     /// An existing command identity names different logical input.
     #[error("command request {request_id} conflicts with its original invocation")]
     CommandConflict {
@@ -552,5 +575,102 @@ pub(crate) fn map_question_error(
         error @ (QuestionError::Invalid(_) | QuestionError::Conflict) => {
             SessionError::Invalid(error.to_string())
         }
+    }
+}
+
+/// Bounded durable usage progress for one fixed Session watermark.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsRead {
+    /// Current selection and capability facts, independent of the usage watermark.
+    pub current_model: ModelSelectionRead,
+    /// Exact Session owning these Facts.
+    pub session_id: rsi_agent_session_protocol::SessionId,
+    /// Fixed durable Fact horizon for this read cycle.
+    pub watermark: u64,
+    /// Whether all Facts through the horizon have been reduced.
+    pub complete: bool,
+    /// Reported usage and the exact reduced cursor.
+    pub summary: rsi_conversation::SessionMetrics,
+}
+
+/// One tree member's individually sampled Fact horizon and forward progress.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeMetricsMember {
+    /// Exact member whose own Facts are counted.
+    pub session_id: rsi_agent_session_protocol::SessionId,
+    /// Absent until this member's forward scan starts.
+    pub watermark: Option<u64>,
+    /// Highest reduced Fact in this member.
+    pub through_seq: u64,
+    /// Whether the captured member cut is fully reduced.
+    pub complete: bool,
+}
+/// A bounded explicit tree read, with no implicit simultaneous snapshot claim.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeMetricsRead {
+    /// Root requested by the caller.
+    pub session_id: rsi_agent_session_protocol::SessionId,
+    /// Root control cursor when membership was captured.
+    pub membership_control_seq: u64,
+    /// False when the fixed roster excludes members beyond the first 256.
+    pub membership_complete: bool,
+    /// All included members are read through their individual cuts.
+    pub complete: bool,
+    /// Root first, then at most 255 lexical descendants.
+    pub members: Vec<TreeMetricsMember>,
+    /// Own usage from the included reduced prefixes, without inherited history.
+    pub totals: rsi_conversation::UsageTotals,
+}
+impl TreeMetricsRead {
+    /// Checks bounded unique membership, individual cuts and aggregate counters.
+    pub fn validate(&self) -> Result<()> {
+        self.totals
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.into()))?;
+        let invalid = self.members.is_empty()
+            || self.members.len() > 256
+            || self
+                .members
+                .first()
+                .is_none_or(|member| member.session_id != self.session_id)
+            || self.complete != self.members.iter().all(|member| member.complete)
+            || self
+                .members
+                .iter()
+                .map(|member| &member.session_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.members.len()
+            || self.members.iter().any(|member| match member.watermark {
+                Some(watermark) => {
+                    member.through_seq > watermark
+                        || member.complete != (member.through_seq == watermark)
+                }
+                None => member.through_seq != 0 || member.complete,
+            });
+        if invalid {
+            return Err(SessionError::Invalid(
+                "invalid tree metrics membership or watermarks".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+impl MetricsRead {
+    /// Validates the fixed horizon and progress relationship.
+    pub fn validate(&self) -> Result<()> {
+        self.current_model.validate()?;
+        self.summary
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.into()))?;
+        if self.summary.through_seq > self.watermark
+            || self.complete != (self.summary.through_seq == self.watermark)
+        {
+            return Err(SessionError::Invalid("metrics watermark mismatch".into()));
+        }
+        Ok(())
     }
 }

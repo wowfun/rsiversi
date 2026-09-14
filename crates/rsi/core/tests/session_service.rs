@@ -33,33 +33,57 @@ mod files;
 mod addon_acceptance;
 #[path = "session_service/goal.rs"]
 mod goal;
+#[path = "session_service/job_preview.rs"]
+mod job_preview;
 #[path = "session_service/managed_providers.rs"]
 mod managed_providers;
+#[path = "session_service/model_selection.rs"]
+mod model_selection;
 #[path = "session_service/navigation.rs"]
 mod navigation;
 #[path = "session_service/plan_policy.rs"]
 mod plan_policy;
+#[path = "session_service/pricing.rs"]
+mod pricing;
 #[path = "session_service/repeat_reminder.rs"]
 mod repeat_reminder;
+#[path = "session_service/request_evidence.rs"]
+mod request_evidence;
 #[path = "session_service/session_api.rs"]
 mod session_api;
 #[path = "session_service/standard_api.rs"]
 mod standard_api;
+#[path = "session_service/todo.rs"]
+mod todo;
 
 #[derive(Debug)]
 struct EmptySecretStore;
 
 impl SecretStore for EmptySecretStore {
-    fn get(&self, _service: &str, _account: &str) -> CredentialResult<Option<SecretValue>> {
+    fn get(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> CredentialResult<Option<SecretValue>> {
         Ok(None)
     }
 
-    fn set(&self, _service: &str, _account: &str, _secret: &SecretValue) -> CredentialResult<()> {
-        Err(CredentialsError::Store("read-only test store".into()))
+    fn set(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+        _secret: &SecretValue,
+    ) -> CredentialResult<()> {
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 
-    fn unset(&self, _service: &str, _account: &str) -> CredentialResult<bool> {
-        Err(CredentialsError::Store("read-only test store".into()))
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> CredentialResult<bool> {
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 }
 
@@ -278,6 +302,7 @@ async fn run_message_to_terminal(
     let message_id = MessageId::new(message_id).unwrap();
     let receipt = handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
             content: vec![SessionInput::Text {
@@ -861,6 +886,7 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
         .unwrap();
     let result = handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("rejected-media-message").unwrap(),
             content: vec![SessionInput::Image {

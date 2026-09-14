@@ -107,6 +107,7 @@ async fn replacing_only_tree_reader_fences_actions_and_cancels_admitted_reads() 
             1,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new("turn").unwrap(),
                 text: "exact".into(),
                 model: None,

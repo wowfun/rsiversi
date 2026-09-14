@@ -309,7 +309,10 @@ struct UnavailableLanguage;
 
 #[async_trait]
 impl LanguageCall for UnavailableLanguage {
-    fn describe(&self, _model: &ModelRef) -> Result<LanguageProfile, AiError> {
+    fn describe(
+        &self,
+        _model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
         panic!("durable attachment must not resolve a Language route")
     }
 
@@ -327,8 +330,11 @@ struct AvailableLanguage;
 
 #[async_trait]
 impl LanguageCall for AvailableLanguage {
-    fn describe(&self, _model: &ModelRef) -> Result<LanguageProfile, AiError> {
-        Ok(LanguageProfile::new(
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
+        let profile = LanguageProfile::new(
             128_000,
             4_096,
             16_384,
@@ -336,6 +342,16 @@ impl LanguageCall for AvailableLanguage {
             false,
             ImageToolResultCapability::No,
             Vec::new(),
+        )
+        .unwrap();
+        Ok(rsi_ai_protocol::LanguageModelDescription::new(
+            model.clone(),
+            profile,
+            1,
+            "fixture",
+            "fixture",
+            "memory",
+            "fixture",
         )
         .unwrap())
     }
@@ -481,6 +497,7 @@ impl TurnService for CompetingPublicationTurns {
                             1,
                             1,
                             SessionFactBody::TurnAccepted {
+                                reasoning_effort: None,
                                 turn_id,
                                 text: "published by the competing handle".into(),
                                 model: None,
@@ -973,6 +990,7 @@ async fn submit_text(
 ) -> rsi_session_protocol::Result<MessageReceipt> {
     handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new(message_id).unwrap(),
             content: vec![SessionInput::Text { text: text.into() }],
@@ -1201,6 +1219,7 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     assert!(
         handle
             .submit(SubmitInput {
+                reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("message-lost-publication-race").unwrap(),
                 content: vec![SessionInput::Text {
@@ -1222,6 +1241,7 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     }
     let receipt = handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-after-publication-race").unwrap(),
             content: vec![SessionInput::Text {
@@ -1351,6 +1371,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: TurnId::new("turn-existing-concurrent-resume").unwrap(),
                         text: "existing".into(),
                         model: None,
@@ -1479,6 +1500,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: turn_id.clone(),
                         text: "existing".into(),
                         model: None,
@@ -1524,6 +1546,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
 
     let result = handle
         .submit(SubmitInput {
+            reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-must-not-start").unwrap(),
             content: vec![SessionInput::Text {
@@ -1563,6 +1586,7 @@ async fn attach_and_history_need_only_the_durable_store() {
         1,
         1,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id,
             text: "durable".into(),
             model: None,
@@ -1650,6 +1674,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
                     1,
                     1,
                     SessionFactBody::TurnAccepted {
+                        reasoning_effort: None,
                         turn_id: TurnId::new("turn-approval-root").unwrap(),
                         text: "existing".into(),
                         model: None,

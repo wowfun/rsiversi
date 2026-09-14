@@ -20,7 +20,7 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
         rsi_host::ProfileEntry::new(
             "credentials",
             "rsi.credentials.local",
-            serde_json::json!({"service":"unused"}),
+            serde_json::json!({}),
         ),
         rsi_host::ProfileEntry::new(
             "connection",

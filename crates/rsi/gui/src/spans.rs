@@ -193,6 +193,7 @@ mod tests {
                 4,
                 1,
                 SessionFactBody::MessageTurnAccepted {
+                    reasoning_effort: None,
                     turn_id: TurnId::new("turn").unwrap(),
                     activation_id: rsi_agent_session_protocol::ActivationId::new("activation")
                         .unwrap(),

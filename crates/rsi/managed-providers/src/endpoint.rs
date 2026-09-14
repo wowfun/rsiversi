@@ -16,6 +16,21 @@ pub(super) fn register(
     registrar: &dyn ApiRegistrar,
     owner: Arc<ManagedProviders>,
 ) -> Result<Vec<ApiRegistration>> {
+    let discovery = owner.clone();
+    let discover = registrar.register(
+        ProvidersOperation::Discover.spec(),
+        json_handler(
+            move |context, input: rsi_configuration_api::DiscoveryRequest| {
+                let service = discovery.clone();
+                async move {
+                    service
+                        .discover(&context.origin, input)
+                        .await
+                        .map(Ok::<_, Never>)
+                }
+            },
+        ),
+    )?;
     let service = owner.clone();
     let read = registrar.register(
         ProvidersOperation::Read.spec(),
@@ -36,5 +51,5 @@ pub(super) fn register(
             }
         }),
     )?;
-    Ok(vec![read, replace])
+    Ok(vec![read, replace, discover])
 }

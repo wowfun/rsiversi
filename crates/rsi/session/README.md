@@ -1,5 +1,11 @@
 # rsi-session
 
+Request-evidence reads bind an exact ModelIntent sequence in the attached Session.
+The Session owner resolves one direct original-inline reference per selected
+section, checks its digest/length and returns at most 256 KiB aligned UTF-8 bytes.
+Reads neither reconstruct context nor acquire execution authority. The API client
+validates the echoed identity, page bounds and unavailable state.
+
 Goal control revision and identity conflicts remain typed command conflicts,
 bound to the original request ID, across Session API. A rejected pause/cancel
 still revokes live scheduling before its command gate; it does not claim a
@@ -77,3 +83,34 @@ compares the current Header under that activity. Durable reads need no Agent pin
 expired drafts are rejected and service retirement cancels leases. The owning
 API establishes authentication separately, then retains this lease through the
 read. File tokens hold only correlation data and filesystem resources.
+
+Metrics cache admission reserves at most 64 own-Session or tree slots, conservatively charged
+as 256 KiB each (16 MiB total), and four concurrent readers. A Session has one
+serialized forward scan; concurrent callers wait on its cursor before acquiring
+one of four workers. Cache-slot, worker and retained-byte admission failures all
+report the domain `SessionError::Capacity`. Inactive entries
+evict in least-recent-use order. Each read yields a progress response after at
+most eight 128-Fact pages or 16 MiB of processed Facts. One larger Fact is processed
+alone to guarantee progress; a Store page remains indivisible during acquisition
+under the Store's existing page bound. This cache retains
+only reducers and tree counters, never Facts, headers, transcripts or effect-ID sets. Shutdown and
+caller cancellation drop the read work and its permits.
+
+An explicit tree metrics cycle freezes root plus at most 255 lexical descendants
+from one Store inspection. It reports the membership control cursor and whether
+the roster was truncated. Each member captures its own Fact watermark when its
+scan begins; these cuts are explicit and are not a simultaneous tree snapshot.
+One reducer advances members in order, retaining only their cursors and a checked
+aggregate. Per-member completion and whole-cycle completion are distinct from
+membership completeness. A completed cycle remains readable until an explicit
+refresh starts another; reads never attach or resume descendants. This avoids
+thrashing the own-Session cache when a tree contains more than 64 Sessions.
+Each retained slot must fit its 256 KiB accounting reservation, including owned
+string/vector capacities and inline structures; an over-budget state is discarded
+before reporting capacity failure. No response stores a lifetime
+set of effect identities. Tree aggregate currencies are capped at eight and
+checked overflow is an explicit read error, never a saturated reported total.
+
+Attached handles share their immutable Header internally. Metrics and model
+availability polling do not copy the frozen pricing table; an owned Header is
+materialized only for the public Header response.

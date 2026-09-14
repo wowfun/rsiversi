@@ -48,11 +48,13 @@ use rsi_session_protocol::{
 pub struct LocalSessionService {
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
+    preview_workers: Arc<tokio::sync::Semaphore>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
+    metrics: Arc<metrics::MetricsCache>,
     execution: rsi_meta::Execution,
     turns: Arc<dyn TurnService>,
     commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
@@ -99,10 +101,12 @@ impl LocalSessionService {
             goals: None,
             jobs: None,
             jobs_retention: rsi_session_protocol::JobsRetention::default(),
+            preview_workers: Arc::new(tokio::sync::Semaphore::new(2)),
             continuations: None,
             projection_service: projections,
             projection_retention: rsi_session_protocol::ProjectionRetention::default(),
             projection_stopped: tokio_util::sync::CancellationToken::new(),
+            metrics: Arc::new(metrics::MetricsCache::default()),
             execution: execution.clone(),
             turns,
             commands,
@@ -160,9 +164,11 @@ impl LocalSessionService {
             continuations: self.continuations.clone(),
             jobs: self.jobs.clone(),
             jobs_retention: self.jobs_retention.clone(),
+            preview_workers: self.preview_workers.clone(),
             projection_service: self.projection_service.clone(),
             projection_retention: self.projection_retention.clone(),
             projection_stopped: self.projection_stopped.clone(),
+            metrics: self.metrics.clone(),
             execution: self.execution.clone(),
             projection_changes: Arc::new(tokio::sync::watch::channel(()).0),
             session_id: state
@@ -205,7 +211,7 @@ impl LocalSessionService {
             .header(session_id)
             .await
             .map_err(map_store_error)?;
-        Ok(self.handle_from_state(HandleState::Attached(Box::new(header)), None))
+        Ok(self.handle_from_state(HandleState::Attached(Arc::new(header)), None))
     }
 
     /// Stops draft admission and waits for service-owned preparation and sweeping.
@@ -333,7 +339,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
 
 enum HandleState {
     Fresh(Box<AgentSessionDraft>),
-    Attached(Box<SessionHeader>),
+    Attached(Arc<SessionHeader>),
     Expired,
 }
 
@@ -351,11 +357,13 @@ impl HandleState {
 struct LocalSessionHandle {
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
+    preview_workers: Arc<tokio::sync::Semaphore>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
+    metrics: Arc<metrics::MetricsCache>,
     execution: rsi_meta::Execution,
     projection_changes: Arc<tokio::sync::watch::Sender<()>>,
     session_id: SessionId,
@@ -389,8 +397,12 @@ impl LocalSessionHandle {
         &self.session_id
     }
 
-    async fn header_snapshot(&self) -> Result<SessionHeader> {
-        self.state.lock().await.header().cloned()
+    async fn header_snapshot(&self) -> Result<Arc<SessionHeader>> {
+        let state = self.state.lock().await;
+        match &*state {
+            HandleState::Attached(header) => Ok(Arc::clone(header)),
+            _ => state.header().cloned().map(Arc::new),
+        }
     }
 
     fn begin_activity(&self) -> Result<Option<drafts::Activity>> {
@@ -436,7 +448,7 @@ impl LocalSessionHandle {
                 .header()
                 .expect("fresh publication has a Header")
                 .clone();
-            *state = HandleState::Attached(Box::new(header));
+            *state = HandleState::Attached(Arc::new(header));
             self.published
                 .store(true, std::sync::atomic::Ordering::Release);
         } else {
@@ -510,6 +522,7 @@ impl LocalSessionHandle {
             source: AgentMessageSource::Human,
             content,
             options: MessageOptions {
+                reasoning_effort: request.reasoning_effort,
                 model: request.model,
                 sandbox: request.sandbox,
             },
@@ -523,6 +536,49 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn peek_job(
+        &self,
+        request: rsi_agent_turn_protocol::JobPreviewRequest,
+    ) -> Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        request.validate().map_err(map_turn_error)?;
+        let _activity = self.begin_activity()?;
+        let _permit = self
+            .preview_workers
+            .try_acquire()
+            .map_err(|_| SessionError::Api(rsi_api_protocol::ApiError::Capacity))?;
+        let service = self
+            .jobs
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("live job output".into()))?;
+        let header = self
+            .header_snapshot()
+            .await?
+            .fingerprint()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let cancellation = self.projection_stopped.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let page = tokio::select! {
+            () = cancellation.cancelled() => return Err(SessionError::ShuttingDown),
+            result = service.peek_job(self.session_id(), &header, request.clone(), cancellation.clone()) => result,
+        }.map_err(|error| match error {
+            TurnError::StaleClaim => SessionError::NotFound("live job output".into()),
+            error => map_turn_error(error),
+        })?;
+        Ok(page)
+    }
+    async fn evidence(
+        &self,
+        request: rsi_session_protocol::EvidenceRead,
+    ) -> Result<rsi_session_protocol::EvidencePage> {
+        request.validate()?;
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        tokio::select! {
+            biased;
+            () = self.projection_stopped.cancelled() => Err(SessionError::ShuttingDown),
+            result = evidence::read(self.store.as_ref(), &self.session_id, &request) => result,
+        }
+    }
     async fn read_jobs(
         &self,
         request: rsi_agent_turn_protocol::TurnJobsRequest,
@@ -550,8 +606,6 @@ impl SessionHandle for LocalSessionHandle {
             TurnError::StaleClaim => SessionError::NotFound("current-Turn Jobs source".into()),
             error => map_turn_error(error),
         })?;
-        page.validate_for(self.session_id(), &header, &request)
-            .map_err(map_turn_error)?;
         reservation.retain(page)
     }
     async fn control_goal(
@@ -649,7 +703,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn header(&self) -> Result<SessionHeader> {
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
-        self.header_snapshot().await
+        self.header_snapshot().await.map(|header| (*header).clone())
     }
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
@@ -662,14 +716,20 @@ impl SessionHandle for LocalSessionHandle {
             ));
         }
         let header = self.header_snapshot().await?;
-        self.language
-            .describe(
-                request
-                    .model
-                    .as_ref()
-                    .unwrap_or_else(|| header.settings().default_model()),
-            )
-            .map_err(|error| map_ai_error(&error))?;
+        if request.reasoning_effort.is_some() && request.model.is_none() {
+            return Err(SessionError::Invalid(
+                "effort override requires an explicit model".into(),
+            ));
+        }
+        let selected = if let Some(model) = &request.model {
+            rsi_agent_session_protocol::ModelSelection {
+                model: model.clone(),
+                reasoning_effort: request.reasoning_effort.clone(),
+            }
+        } else {
+            self.current_model_selection(&header).await?
+        };
+        self.validate_model_selection(&selected)?;
         let mut state = self.state.lock().await;
         if matches!(*state, HandleState::Attached(_)) {
             drop(state);
@@ -809,6 +869,60 @@ impl SessionHandle for LocalSessionHandle {
             .await
             .map_err(map_turn_error)?;
         Ok(Box::pin(source.map(|item| item.map_err(map_turn_error))))
+    }
+
+    async fn metrics(&self) -> Result<rsi_session_protocol::MetricsRead> {
+        let _activity = self.begin_activity()?;
+        let durable = self.reconcile_fresh_read().await?;
+        let header = self.header_snapshot().await?;
+        let current_model = self.current_model_read(&header).await?;
+        if !durable {
+            return Ok(rsi_session_protocol::MetricsRead {
+                current_model,
+                session_id: self.session_id.clone(),
+                watermark: 0,
+                complete: true,
+                summary: rsi_conversation::SessionMetrics::default(),
+            });
+        }
+        tokio::select! {
+            biased;
+            () = self.projection_stopped.cancelled() => Err(SessionError::ShuttingDown),
+            result = self.metrics.read(self.store.as_ref(), &self.session_id) => {
+                let mut progress = result?;
+                if let Some(context) = &progress.summary.last_context {
+                    let matches = match &current_model.availability {
+                        rsi_session_protocol::ModelAvailability::Available {description} => &context.description == description,
+                        rsi_session_protocol::ModelAvailability::Unavailable {..} => false,
+                    };
+                    if !matches {progress.summary.last_context = None;}
+                }
+                Ok(rsi_session_protocol::MetricsRead {current_model,session_id:self.session_id.clone(),watermark:progress.watermark,complete:progress.complete,summary:progress.summary})
+            },
+        }
+    }
+
+    async fn tree_metrics(&self, refresh: bool) -> Result<rsi_session_protocol::TreeMetricsRead> {
+        let _activity = self.begin_activity()?;
+        if !self.reconcile_fresh_read().await? {
+            return Ok(rsi_session_protocol::TreeMetricsRead {
+                session_id: self.session_id.clone(),
+                membership_control_seq: 0,
+                membership_complete: true,
+                complete: true,
+                members: vec![rsi_session_protocol::TreeMetricsMember {
+                    session_id: self.session_id.clone(),
+                    watermark: Some(0),
+                    through_seq: 0,
+                    complete: true,
+                }],
+                totals: rsi_conversation::UsageTotals::default(),
+            });
+        }
+        tokio::select! {biased;
+            ()=self.projection_stopped.cancelled()=>Err(SessionError::ShuttingDown),
+            result=self.metrics.tree(self.store.as_ref(),&self.session_id,refresh)=>result,
+        }
     }
 
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
@@ -1043,3 +1157,7 @@ mod publication_admission_tests {
         ));
     }
 }
+
+mod evidence;
+mod metrics;
+mod model_selection;

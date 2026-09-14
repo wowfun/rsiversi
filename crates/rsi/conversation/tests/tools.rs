@@ -10,7 +10,7 @@ fn fact(seq: u64, kind: &str, owner: &str) -> SessionFact {
     let effect_id = EffectId::new("effect").unwrap();
     let identity = ToolResultIdentity::new(owner, "invoke", "call", "a".repeat(64)).unwrap();
     let body = match kind {
-        "intent" => SessionFactBody::ToolIntent {
+        "intent" => SessionFactBody::ToolIntent { source_model_effect_id: EffectId::new("source-model").unwrap(),
             turn_id, effect_id, identity, name: "bash".into(), arguments: json!({"command":"exit 7"}), approval: None, parallel_safe: false,
         },
         "started" => SessionFactBody::ToolStarted { turn_id, effect_id, identity },
@@ -38,7 +38,7 @@ fn partial_tool_lifecycle_preserves_exact_pairing_and_repairs_only_missing_inten
     assert_eq!(state.phase, ToolPhase::Running);
     state.observe(&result);
     assert_eq!(state.phase, ToolPhase::Settled(ToolOutcome::ProcessFailed));
-    assert_eq!(state.title(), "bash · command failed");
+    assert_eq!(state.title(), "bash · command failed · exit 7");
     let complete = serde_json::to_value(&state).unwrap();
     let mut suffix = ToolState::from_fact(&result).unwrap();
     assert!(!suffix.intent_present);
@@ -68,7 +68,7 @@ fn partial_tool_lifecycle_preserves_exact_pairing_and_repairs_only_missing_inten
 fn rejection_has_arguments_and_provenance_without_inventing_started_or_intent() {
     let rejected = ToolState::from_fact(&fact(4, "rejected", "owner")).unwrap();
     assert_eq!(rejected.phase, ToolPhase::Rejected);
-    assert_eq!(rejected.title(), "bash · rejected");
+    assert_eq!(rejected.title(), "bash · rejected · exit 7");
     assert!(!rejected.intent_present);
     assert!(rejected.arguments.is_some());
     assert!(rejected.rejection.is_some());

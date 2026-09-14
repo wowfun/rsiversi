@@ -28,8 +28,6 @@ pub struct Composer {
 pub struct Preferences {
     /// Web document composer behavior.
     pub web: Composer,
-    /// Fullscreen terminal composer behavior.
-    pub tui: Composer,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -37,7 +35,6 @@ impl Default for Preferences {
             web: Composer {
                 enter_submit: false,
             },
-            tui: Composer { enter_submit: true },
         }
     }
 }
@@ -75,9 +72,9 @@ impl PluginFactory for ClientPreferencesFactory {
             defaults: serde_json::to_value(Preferences::default()).expect("closed preferences"),
             base: json!({}),
             metadata: rsi_settings_protocol::SettingsMetadata {
-                schema: json!({"type":"object","properties":{"web":composer,"tui":composer},"required":["web","tui"],"additionalProperties":false}),
+                schema: json!({"type":"object","properties":{"web":composer},"required":["web"],"additionalProperties":false}),
                 applies: rsi_settings_protocol::SettingsApply::Restart,
-                description: "Reconnect Web or restart TUI to apply composer Enter behavior. Ctrl/Command+Enter sends in Web; Ctrl+S sends in TUI. Questions and form fields keep their own keys.".into(),
+                description: "Reconnect Web to apply composer Enter behavior. Ctrl/Command+Enter sends in Web. Questions and form fields keep their own keys.".into(),
                 sensitive_fields: vec![],
             },
             validator: Arc::new(ValidateWith(|value: &Value| parse(value.clone()).map(|_| ()))),

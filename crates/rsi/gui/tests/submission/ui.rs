@@ -39,6 +39,7 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
             9,
             1,
             SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
                 turn_id: TurnId::new("turn").unwrap(),
                 text: text.clone(),
                 model: None,

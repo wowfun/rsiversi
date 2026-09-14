@@ -522,6 +522,10 @@ plugin = "rsi.ui.target"
 config = "application"
 [[steps]]
 kind = "plugin"
+id = "setup"
+plugin = "rsi.workbench.setup"
+[[steps]]
+kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]

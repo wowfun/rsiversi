@@ -13,6 +13,11 @@ generation.
 
 ## Decision
 
+The [live preview decision](2026-09-14-live-job-preview.md) adds a non-consuming
+Process/Jobs tail read for an explicitly focused terminal detail. It neither
+reports Jobs nor extends their scope. This supplements the readonly status and
+durable Tool evidence described here.
+
 The Tool persists bounded optional operation diffs in Tool values and keeps
 model content to the complete ledger. It reserves evidence from the frozen Turn
 byte allowance, with deterministic whole-hunk omission and no filesystem reread.

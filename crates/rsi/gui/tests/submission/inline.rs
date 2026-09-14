@@ -19,6 +19,7 @@ fn facts() -> Vec<SessionFact> {
         rsi_tools_protocol::ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
             .unwrap();
     vec![SessionFact::new(8, 1, SessionFactBody::ToolIntent {
+        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
         turn_id: turn_id.clone(), effect_id: effect_id.clone(), identity: identity.clone(), name: "apply_patch".into(), arguments: json!({"patch":"unused"}), approval: None, parallel_safe: false,
     }).unwrap(), SessionFact::new(9, 1, SessionFactBody::ToolResult {
         turn_id, effect_id, identity, result: rsi_tools_protocol::ToolResult::new(json!({"large":"unrelated".repeat(32_000),
@@ -144,6 +145,7 @@ async fn inline_close_failure_does_not_skip_replacement_and_failed_admission_can
                 seq,
                 seq,
                 SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
                     turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
                     text: format!("input-{seq}"),
                     model: None,

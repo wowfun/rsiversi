@@ -27,7 +27,7 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
             return Err(SessionError::ShuttingDown);
         }
         Ok(rsi_session_protocol::SessionReadLease::new(
-            header,
+            (*header).clone(),
             self.projection_stopped.clone(),
             activity,
         ))

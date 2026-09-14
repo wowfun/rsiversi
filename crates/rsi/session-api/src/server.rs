@@ -245,6 +245,15 @@ fn handle_operations(
     }
     vec![
         add!(
+            PeekJob,
+            |owner, request: rsi_agent_turn_protocol::JobPreviewRequest| async move {
+                request.validate().map_err(|error| {
+                    rsi_session_protocol::SessionError::Invalid(error.to_string())
+                })?;
+                owner.peek_job(request).await
+            }
+        ),
+        add!(
             Jobs,
             |owner, request: rsi_agent_turn_protocol::TurnJobsRequest| async move {
                 request.validate().map_err(|error| {
@@ -313,6 +322,19 @@ fn handle_operations(
                 owner.history_before(request.before, request.limit).await?,
             ))
         }),
+        add!(
+            Metrics,
+            |owner, (): ()| async move { owner.metrics().await }
+        ),
+        add!(TreeMetrics, |owner, refresh: bool| async move {
+            owner.tree_metrics(refresh).await
+        }),
+        add!(
+            Evidence,
+            |owner, request: rsi_session_protocol::EvidenceRead| async move {
+                owner.evidence(request).await
+            }
+        ),
         add!(
             Inspect,
             |owner, (): ()| async move { owner.inspect().await }

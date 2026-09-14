@@ -119,6 +119,7 @@ fn text_fact(seq: u64, text: String) -> SessionFact {
         seq,
         1,
         SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
             turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
             text,
             model: None,

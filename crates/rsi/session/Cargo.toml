@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-conversation = { path = "../conversation" }
+rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

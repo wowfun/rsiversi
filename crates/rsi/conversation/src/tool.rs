@@ -39,6 +39,8 @@ pub struct ToolState {
     key: String,
     /// Registered name if an intent or rejection is known.
     pub name: Option<String>,
+    /// Bounded semantic preview of known Tool arguments, without owning their source.
+    pub argument_summary: Option<String>,
     /// True only when the exact intent was observed.
     pub intent_present: bool,
     /// Exact arguments from intent or rejection.
@@ -63,6 +65,7 @@ impl ToolState {
         let mut state = Self {
             key,
             name: None,
+            argument_summary: None,
             intent_present: false,
             arguments: None,
             result: None,
@@ -87,13 +90,17 @@ impl ToolState {
         }
         let seq = fact.seq();
         let phase = match fact.body() {
-            SessionFactBody::ToolIntent { name, .. } => {
+            SessionFactBody::ToolIntent {
+                name, arguments, ..
+            } => {
                 self.intent_present = true;
-                self.named(seq, name);
+                self.named(seq, name, arguments);
                 ToolPhase::Prepared
             }
-            SessionFactBody::ToolRejected { name, .. } => {
-                self.named(seq, name);
+            SessionFactBody::ToolRejected {
+                name, arguments, ..
+            } => {
+                self.named(seq, name, arguments);
                 self.rejection = Some(SourceRef {
                     seq,
                     field: FactField::ToolRejection,
@@ -121,9 +128,10 @@ impl ToolState {
         }
         true
     }
-    fn named(&mut self, seq: u64, name: &str) {
+    fn named(&mut self, seq: u64, name: &str, arguments: &serde_json::Value) {
         if seq >= self.named_seq {
             self.name = Some(name.into());
+            self.argument_summary = argument_summary(name, arguments);
             self.arguments = Some(SourceRef {
                 seq,
                 field: FactField::ToolArguments,
@@ -141,12 +149,16 @@ impl ToolState {
             ToolPhase::Settled(ToolOutcome::ToolFailed) => "tool failed",
             ToolPhase::Settled(ToolOutcome::ProcessFailed) => "command failed",
         };
-        format!("{} · {status}", self.name.as_deref().unwrap_or("Tool"))
+        let title = format!("{} · {status}", self.name.as_deref().unwrap_or("Tool"));
+        self.argument_summary
+            .as_ref()
+            .map_or(title.clone(), |summary| format!("{title} · {summary}"))
     }
     /// Heap capacities retained in addition to this value's inline size.
     pub fn owned_bytes(&self) -> usize {
         self.key.capacity()
             + self.name.as_ref().map_or(0, String::capacity)
+            + self.argument_summary.as_ref().map_or(0, String::capacity)
             + self
                 .outputs
                 .iter()
@@ -154,4 +166,37 @@ impl ToolState {
                 .map(|output| output.0.capacity())
                 .sum::<usize>()
     }
+}
+
+fn argument_summary(name: &str, arguments: &serde_json::Value) -> Option<String> {
+    let string = |key| arguments.get(key).and_then(serde_json::Value::as_str);
+    let text = match name {
+        "bash" => string("command")?,
+        "file_read" | "directory_list" => {
+            string("path").or_else(|| string("path_hex")).unwrap_or(".")
+        }
+        "spawn_agent" => string("task_name")?,
+        "send_message" | "followup_task" | "interrupt_agent" => string("target")?,
+        "todo_write" => {
+            return arguments
+                .get("todos")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| format!("{} tasks", items.len()));
+        }
+        _ => return None,
+    };
+    let mut summary = String::new();
+    for character in text.chars() {
+        let character = if character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if summary.len() + character.len_utf8() > 508 {
+            summary.push('…');
+            break;
+        }
+        summary.push(character);
+    }
+    Some(summary)
 }

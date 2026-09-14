@@ -49,12 +49,16 @@ submission reconciliation and observation cursor/retry policy live in
 The standard catalog links providers but does not select or enable a deployment.
 A missing default model is a valid unconfigured Agent defaults document. The
 defaults plugin and its Settings namespace remain active; new Session creation
-returns an actionable setup-required error until a model is selected. Every
+returns the typed `SetupRequired` error until a model is selected. Every
 provided field and all policy invariants are validated before persistence.
 Existing Sessions retain their frozen settings.
 A persistent Profile instantiates the intended provider, while Settings names
 the exact default deployment and model. Tests can inject a credential store at
-the public composition seam without consulting real user state.
+the public composition seam without consulting real user state. Standard credentials
+use `HostPaths.config()/credentials/credentials.json`, including for daemon
+clients. Only the credential owner reads or writes that file; Settings retain
+references. Old keyring entries require login again and are never imported or
+deleted. No current backend depends on a desktop credential service.
 
 The standard service Profile installs an API registry, persistent service identity,
 connection negotiation and the domain endpoint plugins. Identity uses the same
@@ -162,6 +166,12 @@ the bootstrap's staged native factories. Sharing the Loader does not replace the
 Service's Settings-backed roots or default selection with bootstrap defaults.
 The catalog owner retains one bounded startup diagnostic for its management caller;
 generic Profile lifecycle diagnostics continue to redact plugin error text.
+
+Service startup preserves the SQLite factory's safe startup diagnostic separately
+from Profile errors. A schema mismatch reports the configured Store root, expected
+and actual versions, and the absence of automatic migration. Startup neither
+rewrites an old schema version nor replaces the user's Store with an empty one.
+Each Service boot owns a fresh diagnostic slot, independent of cloned compositions.
 
 Application startup may use the last published role catalog so linked management
 surfaces remain available after a failed native candidate. New Agent selection

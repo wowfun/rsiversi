@@ -2,116 +2,14 @@
 
 ## Terminal application
 
-`rsi --profile tui` selects the fullscreen text application. It accepts `--cwd`,
-`--resume`, `--session-id`, `--agent-preset`, and `--trust-workspace`. Both stdin
-and stdout must be terminals; rejection happens before Host bootstrap. The
-input backend currently requires Unix; native Windows input is unsupported.
-The terminal application plugin owns input, rendering, signals, and cleanup. One active Session
-has one durable observer and one live-interaction observer. Child inspection
-uses finite history reads rather than additional observers. Switching Sessions
-preserves drafts and ignores asynchronous results from prior attachments.
-Renderer or scene-encoding failure preserves the resident Session and draft,
-shows a resident diagnostic without relying on the renderer, and retries at
-most once every 250 ms. A diagnostic frame grants no transcript source mapping.
-The client retains at most 64 saved Session drafts and 1,024 owned pending
-message identities. Read work leaves reserved capacity for submission and
-cancellation; at most 12 client requests are outstanding.
-
-Enter submits NextTurn, Ctrl+J inserts a newline, Ctrl+O sends Steer, Ctrl+P opens
-the action menu, and Ctrl+Y copies the selection. Mouse release also copies a
-selection. Ctrl+C always cancels the attached active Turn and this client's
-accepted pending input, preserving the editor draft. Esc closes the focused
-layer or selection. Ctrl+D with an empty editor exits. Bracketed paste is
-enabled; enhanced keyboard events are negotiated when supported. Alt+Enter is
-left to the terminal. A bounded input framer rejects an entire oversized paste
-and discards through its terminator before accepting keys again. Drafts are
-limited to 1 MiB UTF-8 each; draft and undo/redo text buffers share a 4 MiB
-aggregate budget across saved Sessions. Rejected insertion preserves
-the previous draft. Real SIGINT invokes cancellation; SIGTERM and SIGHUP exit.
-Ctrl+S always submits NextTurn. The ordinary [client preferences](client-preferences/README.md)
-Settings contribution can change plain Enter to insert a newline; TUI captures
-that setting at application startup. Form fields and question answers still
-accept with Enter.
-Ctrl+Z undoes an edit and Alt+Z (or enhanced Ctrl+Shift+Z) redoes it. A bracketed
-paste is one edit. Editing after undo discards the redo branch. Each editor keeps
-at most 128 changes and 1 MiB of removed/inserted text; the oldest changes are
-discarded first when a bound is reached. A change too large for the journal
-resets it without rejecting otherwise valid input. Submission clears that
-editor's journal so undo cannot recreate a submitted input; saved drafts retain
-their own journal when switching Sessions. Question and contributed-field editors
-have independent journals under the same per-editor bound.
-Ctrl+R opens this application's submitted text inputs for the current Session.
-The history keeps at most 100 entries and 1 MiB across Sessions, preserves exact
-text and skips consecutive duplicates within a Session. Entries are captured from
-the frozen local request, including failed or unresolved attempts; their receipts
-and outcomes remain in submission details. History is memory-only and
-does not replay requests or restore image attachments. Selecting an entry replaces
-the draft as one undoable edit without submitting it. Tab completes a registered
-Session command when the composer contains only a slash-name prefix; multiple
-matches open a choice menu. Completion reads never submit a command, and a result
-for a changed draft or attachment is discarded. Outside that prefix, Tab retains
-its conversation-card behavior.
-
-Model selection is client-local and affects future explicit NextTurn requests.
-An admitted request freezes its identity, model, and content through retries.
-The Header remains the Session default. Steer carries no model override and may
-be promoted to a new Turn using that default; the UI reports durable routing
-rather than claiming a snapshot prevents the race. Questions and tree approvals
-come from live snapshots and keep their exact request and owner identities.
-PageUp/PageDown scroll long questions and details. The focused-card action
-provides exact Fact source windows and separate stdout/stderr output pages;
-left/right moves between pages. Opening another detail resets its actions.
-
-All dynamic text uses the shared terminal sanitization rule before rendering
-or copying: controls other than newline/Tab and Unicode bidi controls become
-U+FFFD. Layout expands tabs and uses narrow ambiguous-character width throughout.
-No model or tool text is interpreted as terminal escape sequences. A single
-writer owns terminal output, including OSC52; diagnostics do not write over the
-alternate screen. Cleanup restores terminal modes before ordinary diagnostics.
-Panic cleanup is best effort and does not cover SIGKILL.
-
-Initial history uses 128-Fact pages at a captured watermark, stopping at the
-latest Turn start or after eight pages / 1,024 Facts / 16 MiB returned encoded
-bytes. The byte threshold stops further prefetch, not an already returned page.
-The live display retains at most 512 blocks, 4 MiB of text, and 8 MiB of projection
-metadata including retained container capacity. A block has a 256 KiB text
-window; omitted text has an explicit source range and can be reloaded.
-Manual backward browsing owns a second projection with the same bounds, evicting
-newer blocks to admit older pages. Live observation continues into the live
-projection. End restores that live view and fences outstanding history reads.
-Layout keeps only the viewport and one screen of overscan. A valid 36 MiB Fact and a
-64 MiB transport page remain possible transient allocations; these UI budgets
-are not RSS limits. Observation handles are released after projection.
-
-Selection uses stable source positions across reflow, streaming, and historical
-prepending. Copy preserves sanitized source text and hard line breaks, excluding
-soft wrapping and UI decoration. Selection copy is limited to 4 MiB; it never
-silently succeeds with a prefix. Native clipboard helpers use bounded process
-operations; OSC52 sequences have a separate 32 KiB encoded limit and delivery is
-reported as confirmed, unverified, or failed. Completed process output is read
-only by its issued cache identity; it is not a general Fact archive.
-
-The fullscreen Application Profile explicitly composes the shared UI registry,
-an application target and ordinary Session inspection contributions. Each Session
-surface publishes a UI target depending on its controller. Ctrl+P includes
-contributed view entries and a Card details action. Cards use the same closed
-text/field/form/button contract as Web; Enter opens card actions, editable fields
-use the existing Unicode editor, Enter accepts the field, and Esc abandons that
-field edit. Opening another detail cancels presentation reads. Contribution or
-surface retirement rejects new actions and drains already admitted work.
-Opening and dismissing the action menu preserves the visible card, its field
-edits and any action in progress; choosing another view replaces that presentation.
-While a card field is being edited, its detail panel leaves the editor visible.
-Modal margins clear the obscured conversation, including its wide-text cells.
-The ordinary [Agent tree inspector](session-tree-ui/README.md) supplies finite
-tree, breadcrumb, activity and paged conversation views through that same UI
-registry. Child inspection starts no observer or execution and uses the existing
-detail slot in both applications.
-
-Fullscreen exit follows the same remote-detach / embedded-shutdown lifecycle
-as the line application, and displays the actual consequence. TUI behavior tests
-use a pure controller and TestBackend, with Linux PTYs for input and terminal
-restoration. Native terminal/clipboard and live-provider evidence is opt-in.
+`rsi tui` (equivalently `rsi --profile tui`) selects the fullscreen text
+application. It accepts application arguments only; a custom Application Profile
+uses `rsi --profile NAME`. The [terminal package](terminal/README.md) owns startup,
+Home, setup, input, controller lifetime and terminal cleanup. Its
+[interaction design](terminal/docs/tui-design.md) owns information hierarchy,
+transcript presentation, editing, model/effort selection and Session navigation.
+The [pure presentation library](terminal-ui/README.md) owns validated scenes,
+cells, geometry and acknowledged source maps.
 
 ## Line application
 

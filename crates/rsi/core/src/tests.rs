@@ -204,3 +204,17 @@ async fn daemon_stop_selection_remains_live_during_reload() {
 fn removed_direct_run_is_rejected() {
     assert!(parse(&["run", "task"]).is_err());
 }
+
+#[test]
+fn tui_alias_preserves_application_arguments() {
+    let Parse::Application(alias) = parse(&["tui", "--resume", "saved"]).unwrap() else {
+        panic!("application");
+    };
+    let Parse::Application(profile) = parse(&["--profile", "tui", "--resume", "saved"]).unwrap()
+    else {
+        panic!("application");
+    };
+    assert_eq!(alias.profile, profile.profile);
+    assert_eq!(alias.arguments, profile.arguments);
+    assert!(parse(&[]).is_err());
+}

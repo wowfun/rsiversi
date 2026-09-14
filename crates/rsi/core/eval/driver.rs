@@ -156,17 +156,27 @@ mod tests {
 #[derive(Debug)]
 struct NoCredentialStore;
 impl SecretStore for NoCredentialStore {
-    fn get(&self, _: &str, _: &str) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
+    fn get(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
         Ok(None)
     }
-    fn set(&self, _: &str, _: &str, _: &SecretValue) -> rsi_credentials_protocol::Result<()> {
+    fn set(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+        _: &SecretValue,
+    ) -> rsi_credentials_protocol::Result<()> {
         Err(CredentialsError::Store(
-            "evaluation has no credential store".into(),
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
         ))
     }
-    fn unset(&self, _: &str, _: &str) -> rsi_credentials_protocol::Result<bool> {
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<bool> {
         Err(CredentialsError::Store(
-            "evaluation has no credential store".into(),
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
         ))
     }
 }

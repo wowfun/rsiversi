@@ -22,7 +22,7 @@ impl AgentSettingsSource for Service {
             .get()
             .map_err(|error| SessionError::Backend(error.to_string()))?;
         if snapshot.value.get("default_model").is_none() {
-            return Err(SessionError::Backend("Setup required: configure `rsi.agent.default_model` with its `deployment` and `model` fields".into()));
+            return Err(SessionError::SetupRequired);
         }
         serde_json::from_value(snapshot.value)
             .map_err(|error| SessionError::Backend(error.to_string()))
@@ -96,6 +96,8 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
                 "settings_id":{"type":"string","description":"Immutable settings identity captured in each Session."},
                 "system_prompt":{"type":"string"},
                 "default_model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},
+                "default_reasoning_effort":{"type":["string","null"],"minLength":1,"maxLength":32,"pattern":"^[A-Za-z0-9_-]+$"},
+                "pricing":{"type":"array","maxItems":256,"description":"Session-frozen exact deployment/endpoint/model quotes in integer currency billionths per token; validated by the Agent price table."},
                 "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
                 "require_approval":{"type":"boolean"},
                 "turn_budget":{"type":"object","additionalProperties":false,"properties":{
@@ -121,15 +123,27 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         system_prompt: String,
         #[serde(default)]
         default_model: Option<rsi_ai_protocol::ModelRef>,
+        default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
+        #[serde(default)]
+        pricing: rsi_agent_session_protocol::PriceTable,
         sandbox: rsi_sandbox::SandboxMode,
         require_approval: bool,
         turn_budget: rsi_agent_session_protocol::TurnBudget,
     }
     let config: Configuration = serde_json::from_value(value.clone())
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
+    config
+        .pricing
+        .validate()
+        .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
     if value.get("default_model").is_some() && config.default_model.is_none() {
         return Err(SettingsError::InvalidInput(
             "default_model must be absent or an exact deployment/model object".into(),
+        ));
+    }
+    if config.default_reasoning_effort.is_some() && config.default_model.is_none() {
+        return Err(SettingsError::InvalidInput(
+            "default effort requires a default model".into(),
         ));
     }
     FrozenAgentSettings::validate_policy(

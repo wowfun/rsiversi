@@ -1,6 +1,23 @@
 # rsi-gui
 
+Passive model refresh updates descriptions on successful reads, including
+changed capabilities for the same model. A transient read failure keeps the
+prior metadata without producing a passive-refresh notice. Explicit
+selection still validates current availability before mutation, and descriptions
+for a different model never supply the current effort selector.
+
+Model/effort controls submit the durable `model-selection` Session command through
+one saved `CommandSubmission`; ordinary messages carry no model override. Unknown
+selection outcomes retain the original invocation and refresh queries its receipt.
+Pane projection follows the live selection domain. Effort choices come from the
+selected model's described profile; a default remains an absent explicit choice.
+Description reads confer no execution authority and stale attachment results are
+not applied to a successor pane.
+
 Model events carry their intent-checked purpose even in partial history pages.
+Each request has one actual prepared model/effort, reported usage, duration and
+failure summary, folded by the shared pure RequestPresentation. Backfill fills
+missing metadata without inventing zero usage or substituting the current model.
 Internal summary text uses a Context compaction status block, never an Assistant
 answer block; raw source paging preserves its exact Fact provenance.
 
@@ -141,8 +158,8 @@ submission preparation and opaque execution have separate 8 MiB message and 32 K
 command bounds. Encoded views use a separate 32 MiB reservation.
 Preparation reads the current Header and validates full text/image input without
 mutation. Dispatch revalidates the exact Session/Header and opaque typed request,
-including absent sandbox overrides and the prepared delivery/model pairing
-(next-turn with a model, steer without one), then uses the shared controller.
+including absent sandbox, model and effort overrides for both next-turn and steer
+delivery, then uses the shared controller.
 Query-only reconciliation never sends input;
 explicit message retry uses the controller's authoritative NotFound rule. Commands
 are executed once and later only queried. Generic failures after dispatch remain
