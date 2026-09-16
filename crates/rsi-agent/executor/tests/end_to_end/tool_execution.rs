@@ -834,10 +834,15 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
             _ => None,
         })
         .expect("durable ToolStarted identity");
-    assert_eq!(
-        stack.tool_runtime().query(&identity).unwrap(),
-        RetainedToolResult::Absent
-    );
+    // Terminal publication precedes the independent retirement task. Observe
+    // that task's public result without relying on which worker runs next.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while stack.tool_runtime().query(&identity).unwrap() != RetainedToolResult::Absent {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the durable budget failure must retire its retained Tool identity");
 
     drop(tool_lease);
     drop(tools);

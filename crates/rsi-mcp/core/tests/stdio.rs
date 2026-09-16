@@ -180,6 +180,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
     })
     .await
     .unwrap();
+    #[cfg(target_os = "linux")]
     let pid = std::fs::read_to_string(&marker).unwrap();
     cancel.cancel();
     assert_eq!(call.await.unwrap().unwrap_err(), McpError::Cancelled);
@@ -239,6 +240,7 @@ async fn dropping_a_refresh_waiter_keeps_admission_until_its_child_is_reaped() {
     })
     .await
     .unwrap();
+    #[cfg(target_os = "linux")]
     let pid = std::fs::read_to_string(marker).unwrap();
     refresh.abort();
     assert!(refresh.await.unwrap_err().is_cancelled());
