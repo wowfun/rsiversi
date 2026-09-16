@@ -54,3 +54,11 @@ network-specific translations to private IPv4. Fetch restricts destination ports
 to 80 and 443; exposing arbitrary public TCP ports is outside the web Tool's purpose.
 Conservative address policy and same-origin redirects can reject legitimate
 sites; failures remain explicit and do not weaken the public-network boundary.
+
+The resolver follows the patched 0.26 line. The upstream
+[NSEC3 validation advisory](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-3v94-mw7p-v465)
+and [message encoding advisory](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-q2qq-hmj6-3wpp)
+leave 0.25 without a complete fix. This client does not enable DNSSEC validation
+or encode arbitrary response record sets, but retaining the affected dependency
+would require a permanent reachability exception. Upgrading preserves the async
+resolver boundary without adding an audit suppression.

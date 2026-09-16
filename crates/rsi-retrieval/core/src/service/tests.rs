@@ -193,21 +193,17 @@ fn unusable_search_urls_do_not_hide_other_provider_sources() {
 async fn dns_deadlines_release_all_operation_slots_and_do_not_hold_shutdown() {
     use hickory_resolver::{
         TokioResolver,
-        config::{LookupIpStrategy, NameServerConfigGroup, ResolverConfig},
-        name_server::TokioConnectionProvider,
+        config::{LookupIpStrategy, NameServerConfig, ResolverConfig},
+        net::runtime::TokioRuntimeProvider,
     };
     let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let config = ResolverConfig::from_parts(
-        None,
-        vec![],
-        NameServerConfigGroup::from_ips_clear(
-            &["127.0.0.1".parse().unwrap()],
-            sink.local_addr().unwrap().port(),
-            false,
-        ),
-    );
-    let mut builder =
-        TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+    let mut nameserver = NameServerConfig::udp_and_tcp("127.0.0.1".parse().unwrap());
+    nameserver.trust_negative_responses = false;
+    for connection in &mut nameserver.connections {
+        connection.port = sink.local_addr().unwrap().port();
+    }
+    let config = ResolverConfig::from_name_servers(vec![nameserver]);
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
     builder.options_mut().timeout = std::time::Duration::from_mins(1);
     builder.options_mut().attempts = 1;
@@ -215,7 +211,7 @@ async fn dns_deadlines_release_all_operation_slots_and_do_not_hold_shutdown() {
         json!({"web_fetch":true,"web_search":false}),
     )));
     let service = Arc::new(RetrievalService {
-        dns: Ok(Arc::new(builder.build())),
+        dns: Ok(Arc::new(builder.build().unwrap())),
         settings: fixture.clone(),
         credentials: fixture,
         permits: Arc::new(Semaphore::new(8)),

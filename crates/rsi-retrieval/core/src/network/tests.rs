@@ -5,10 +5,10 @@ use tokio::{
 };
 
 use hickory_resolver::{
-    config::{NameServerConfigGroup, ResolverConfig},
-    name_server::TokioConnectionProvider,
+    config::{NameServerConfig, ResolverConfig},
+    net::runtime::TokioRuntimeProvider,
     proto::{
-        op::{Message, MessageType, ResponseCode},
+        op::{Message, ResponseCode},
         rr::{
             RData, Record, RecordType,
             rdata::{A, AAAA},
@@ -19,20 +19,16 @@ use hickory_resolver::{
 #[tokio::test]
 async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fallback() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let config = ResolverConfig::from_parts(
-        None,
-        vec![],
-        NameServerConfigGroup::from_ips_clear(
-            &["127.0.0.1".parse().unwrap()],
-            socket.local_addr().unwrap().port(),
-            false,
-        ),
-    );
-    let mut builder =
-        TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+    let mut nameserver = NameServerConfig::udp_and_tcp("127.0.0.1".parse().unwrap());
+    nameserver.trust_negative_responses = false;
+    for connection in &mut nameserver.connections {
+        connection.port = socket.local_addr().unwrap().port();
+    }
+    let config = ResolverConfig::from_name_servers(vec![nameserver]);
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
     builder.options_mut().attempts = 1;
-    let resolver = Arc::new(builder.build());
+    let resolver = Arc::new(builder.build().unwrap());
     let discovery = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let deny_discovery = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = discovery.clone();
@@ -42,21 +38,18 @@ async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fall
         loop {
             let (length, peer) = socket.recv_from(&mut bytes).await.unwrap();
             let request = Message::from_vec(&bytes[..length]).unwrap();
-            let query = &request.queries()[0];
+            let query = &request.queries[0];
             let host = query.name().to_ascii();
             let is_discovery = host == "ipv4only.arpa.";
-            let mut response = Message::new();
-            response
-                .set_id(request.id())
-                .set_message_type(MessageType::Response)
-                .set_recursion_desired(true)
-                .set_recursion_available(true)
-                .add_query(query.clone());
+            let mut response = Message::response(request.id, request.op_code);
+            response.metadata.recursion_desired = true;
+            response.metadata.recursion_available = true;
+            response.add_query(query.clone());
             if is_discovery {
                 observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             if is_discovery && deny.load(std::sync::atomic::Ordering::SeqCst) {
-                response.set_response_code(ResponseCode::Refused);
+                response.metadata.response_code = ResponseCode::Refused;
             } else {
                 let address = match (host.as_str(), query.query_type()) {
                     ("ipv4only.arpa.", RecordType::A) => "192.0.0.170",

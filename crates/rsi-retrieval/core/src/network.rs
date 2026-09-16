@@ -137,7 +137,7 @@ pub(crate) fn system_resolver() -> Result<Arc<TokioResolver>, Error> {
     options.timeout = std::time::Duration::from_secs(2);
     options.attempts = 2;
     options.cache_size = 64;
-    Ok(Arc::new(builder.build()))
+    builder.build().map(Arc::new).map_err(|_| Error::Resolution)
 }
 async fn lookup(resolver: &TokioResolver, host: &str, port: u16) -> Result<Vec<SocketAddr>, Error> {
     // Absolute URL authorities never acquire a resolver search-domain suffix.
