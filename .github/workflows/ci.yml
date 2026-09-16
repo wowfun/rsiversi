@@ -75,7 +75,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 110
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -97,48 +97,73 @@ jobs:
             fixtures/rsi/web-product/package-lock.json
             plugins/rsi/web/package-lock.json
       - name: Install matching bindings generator
+        id: bindings
         timeout-minutes: 15
         run: cargo install wasm-bindgen-cli --locked --version 0.2.127
       - name: Install browser harness and engines
+        id: browsers
         timeout-minutes: 10
         working-directory: fixtures/rsi-meta/browser-probe
         run: |
           npm ci --ignore-scripts
           npx playwright install --with-deps chromium firefox
       - name: Exercise real Worker conformance
+        id: meta_worker
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' }}
         timeout-minutes: 10
         working-directory: fixtures/rsi-meta/browser-probe
-        run: npm test
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/meta_worker.log") 2>&1
+          npm test
       - name: Exercise API ownership inside real Workers
+        id: api_worker
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' }}
         timeout-minutes: 10
         working-directory: fixtures/rsi-api/browser-probe
         run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/api_worker.log") 2>&1
           npm ci --ignore-scripts
           npm test
       - name: Exercise actual browser Fetch and cookie cleanup
+        id: fetch
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' }}
         timeout-minutes: 10
         working-directory: fixtures/rsi-api/browser-fetch
         run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/fetch.log") 2>&1
           npm ci --ignore-scripts
           npm test
       - name: Exercise shared application controllers inside real Workers
+        id: controllers
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' }}
         timeout-minutes: 10
         working-directory: fixtures/rsi/client-probe
         run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/controllers.log") 2>&1
           npm ci --ignore-scripts
           npm test
 
       - name: Install native Web product dependencies
+        id: web_native
+        if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config
       - name: Exercise the product Web application over TLS and HTTP/2
+        id: web_product
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' }}
         timeout-minutes: 30
         working-directory: fixtures/rsi/web-product
         env:
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
         run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web-product.log") 2>&1
           declare -A previous_policy
           restore_policy() {
             for key in "${!previous_policy[@]}"; do
@@ -159,12 +184,32 @@ jobs:
           npm ci --ignore-scripts
           npm test
 
+      - name: Record browser step outcomes
+        timeout-minutes: 1
+        if: always()
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
+          PRODUCT_OUTCOME: ${{ steps.web_product.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          steps = json.loads(os.environ["STEP_OUTCOMES"])
+          outcomes = {name: {field: value.get(field) for field in ("outcome", "conclusion")} for name, value in steps.items()}
+          (root / "rsi-browser-logs/outcomes.json").write_text(json.dumps(outcomes))
+          if os.environ["PRODUCT_OUTCOME"] == "success":
+              report = json.loads((root / "rsi-web-evidence/results.json").read_text())
+              assert len(report["results"]) == 2
+              assert {row["browser"] for row in report["results"] if row["status"] == "passed"} == {"chromium", "firefox"}
+          PY
       - name: Preserve browser acceptance evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: rsi-web-evidence
           path: |
+            ${{ runner.temp }}/rsi-browser-logs
             ${{ runner.temp }}/rsi-web-evidence
             !${{ runner.temp }}/rsi-web-evidence/chromium-recovery/rsi
             !${{ runner.temp }}/rsi-web-evidence/firefox-recovery/rsi
@@ -200,10 +245,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' --all-targets
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise Linux Bubblewrap enforcement
         if: runner.os == 'Linux'
@@ -229,7 +274,7 @@ jobs:
         timeout-minutes: 5
       - name: Exercise Tool JSON feature-unification boundary
         if: runner.os == 'Linux'
-        run: cargo test --locked -p rsi-tools-protocol --all-targets --features serde_json/arbitrary_precision
+        run: cargo test --locked -p rsi-tools-protocol --all-targets --no-fail-fast --features serde_json/arbitrary_precision
         timeout-minutes: 10
 
   rsi-ai:
@@ -263,7 +308,7 @@ jobs:
         run: cargo clippy --locked -p 'rsi-ai*' --all-targets --all-features -- -D warnings
         timeout-minutes: 30
       - name: Exercise rsi-ai
-        run: cargo test --locked -p 'rsi-ai*' --all-targets --all-features
+        run: cargo test --locked -p 'rsi-ai*' --all-targets --no-fail-fast --all-features
         timeout-minutes: 30
 
   rsi-agent:
@@ -292,7 +337,7 @@ jobs:
         run: cargo clippy --locked -p 'rsi-agent*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Exercise rsi-agent
-        run: cargo test --locked -p 'rsi-agent*' --all-targets
+        run: cargo test --locked -p 'rsi-agent*' --all-targets --no-fail-fast
         timeout-minutes: 20
 
   rsi:
@@ -305,7 +350,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 190
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -341,10 +386,13 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --no-deps --all-features
         timeout-minutes: 15
       - name: Compile standard rsi tests
+        id: standard_build
         run: cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: runner.os == 'Linux'
+        env:
+          RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
         run: |
           declare -A previous_policy
           restore_policy() {
@@ -362,13 +410,31 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets
+          cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+        timeout-minutes: 35
+      - name: Exercise development TUI smoke
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}
+        timeout-minutes: 5
+        run: |
+          declare -A previous_policy
+          restore_policy() {
+            for key in "${!previous_policy[@]}"; do
+              sudo sysctl -w "$key=${previous_policy[$key]}"
+            done
+          }
+          trap restore_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
           cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
             smoke_status=$?
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
             exit "$smoke_status"
           }
-        timeout-minutes: 35
       - name: Build Session API evaluation driver
         id: session_eval_build
         if: runner.os == 'Linux' && !cancelled()
@@ -410,8 +476,18 @@ jobs:
           if-no-files-found: warn
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
-        run: cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture
+        env:
+          RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
+        run: cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
+
+      - name: Preserve PTY evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-pty-${{ runner.os }}
+          path: ${{ runner.temp }}/rsi-pty-evidence
+          if-no-files-found: warn
 
   repository-tools:
     runs-on: ubuntu-24.04
@@ -432,7 +508,7 @@ jobs:
         run: cargo clippy --locked -p rsi-xtask --all-targets -- -D warnings
         timeout-minutes: 15
       - name: Exercise repository tools
-        run: cargo test --locked -p rsi-xtask --all-targets
+        run: cargo test --locked -p rsi-xtask --all-targets --no-fail-fast
         timeout-minutes: 15
 
   dependency-audit:
@@ -452,10 +528,12 @@ jobs:
         timeout-minutes: 15
         shell: bash
         run: |
-          cargo audit --file ./Cargo.lock
+          status=0
+          cargo audit --file ./Cargo.lock || status=1
           while IFS= read -r -d '' lockfile; do
-            cargo audit --no-fetch --file "$lockfile"
+            cargo audit --no-fetch --file "$lockfile" || status=1
           done < <(git ls-files -z -- '**/Cargo.lock')
+          exit "$status"
 
   windows-rsi-meta:
     runs-on: windows-2025
@@ -531,7 +609,7 @@ jobs:
         timeout-minutes: 25
         run: |
           cargo clippy --locked -p rsi-desktop --all-targets -- -D warnings
-          cargo test --locked -p rsi-desktop --all-targets
+          cargo test --locked -p rsi-desktop --all-targets --no-fail-fast
           cargo build --locked -p rsi-desktop --bin rsi-desktop
       - name: Exercise native admission
         timeout-minutes: 10

@@ -548,7 +548,17 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
                 .is_some_and(|run| run.contains("cargo xtask dev tui --smoke"))
         })
         .expect("product CI exercises the actual development launcher");
-    assert_eq!(step["if"].as_str(), Some("runner.os == 'Linux'"));
+    let condition = step["if"].as_str().unwrap();
+    for prerequisite in [
+        "!cancelled()",
+        "runner.os == 'Linux'",
+        "steps.standard_build.outcome == 'success'",
+    ] {
+        assert!(
+            condition.contains(prerequisite),
+            "smoke omitted prerequisite: {prerequisite}"
+        );
+    }
     let run = step["run"].as_str().unwrap();
     let smoke = run.find("cargo xtask dev tui --smoke").unwrap();
     for setup in [
@@ -724,4 +734,132 @@ fn evaluation_evidence_is_independent_of_standard_tests_and_always_retained() {
             .unwrap()
             .contains("rsi-session-api-evaluation")
     );
+}
+
+#[test]
+fn browser_acceptance_has_explicit_independent_prerequisites_and_outcomes() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for step in steps.iter().filter(|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("npm test"))
+    }) {
+        let id = step["id"]
+            .as_str()
+            .expect("every browser test step needs a recorded ID");
+        let condition = step["if"].as_str().unwrap();
+        for prerequisite in [
+            "!cancelled()",
+            "steps.bindings.outcome == 'success'",
+            "steps.browsers.outcome == 'success'",
+        ] {
+            assert!(
+                condition.contains(prerequisite),
+                "{id} omitted {prerequisite}"
+            );
+        }
+        if id == "web_product" {
+            assert!(condition.contains("steps.web_native.outcome == 'success'"));
+        }
+        assert!(!condition.contains("steps.controllers.outcome"));
+        assert!(!condition.contains("success()"));
+    }
+    let outcomes = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Record browser step outcomes"))
+        .unwrap();
+    assert_eq!(outcomes["if"].as_str(), Some("always()"));
+    let run = outcomes["run"].as_str().unwrap();
+    assert!(run.contains("outcomes.json"));
+    assert!(run.contains("results.json"));
+    #[cfg(unix)]
+    {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("rsi-web-evidence")).unwrap();
+        let execute = || {
+            std::process::Command::new("bash").args(["-c",run])
+            .env("RUNNER_TEMP",root.path()).env("PRODUCT_OUTCOME","success")
+            .env("STEP_OUTCOMES",r#"{"web_product":{"outcome":"success","conclusion":"success","outputs":{"secret":"must-not-copy"}}}"#)
+            .output().unwrap()
+        };
+        assert!(
+            !execute().status.success(),
+            "an empty report directory is not acceptance evidence"
+        );
+        fs::write(root.path().join("rsi-web-evidence/results.json"),r#"{"results":[{"browser":"chromium","status":"passed"},{"browser":"firefox","status":"failed"}]}"#).unwrap();
+        assert!(
+            !execute().status.success(),
+            "both browser results must pass"
+        );
+        fs::write(root.path().join("rsi-web-evidence/results.json"),r#"{"results":[{"browser":"chromium","status":"passed"},{"browser":"firefox","status":"passed"}]}"#).unwrap();
+        assert!(execute().status.success());
+        let retained =
+            fs::read_to_string(root.path().join("rsi-browser-logs/outcomes.json")).unwrap();
+        assert!(!retained.contains("must-not-copy"));
+        assert!(!retained.contains("outputs"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let step = workflow["jobs"]["dependency-audit"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Audit every committed Cargo lockfile"))
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        (
+            "git",
+            "#!/bin/sh\nprintf 'one/Cargo.lock\\0two/Cargo.lock\\0'\n",
+        ),
+        (
+            "cargo",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RSI_TEST_LOG\"\ncase \"$*\" in *\"$RSI_TEST_FAIL\"*) exit 1;; esac\n",
+        ),
+    ] {
+        let path = root.path().join(name);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (failure, success) in [
+        ("./Cargo.lock", false),
+        ("one/Cargo.lock", false),
+        ("never-match", true),
+    ] {
+        let log = root.path().join("calls");
+        fs::write(&log, "").unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    root.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("RSI_TEST_LOG", &log)
+            .env("RSI_TEST_FAIL", failure)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success);
+        assert_eq!(
+            fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(),
+            [
+                "audit --file ./Cargo.lock",
+                "audit --no-fetch --file one/Cargo.lock",
+                "audit --no-fetch --file two/Cargo.lock",
+            ]
+        );
+    }
 }
