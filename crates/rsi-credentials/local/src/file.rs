@@ -108,7 +108,15 @@ mod platform {
     fn failure(kind: Failure) -> CredentialsError {
         CredentialsError::Store(kind)
     }
+    #[cfg_attr(test, track_caller)]
     fn io(error: &std::io::Error) -> CredentialsError {
+        #[cfg(test)]
+        eprintln!(
+            "credential fixture I/O at {}: kind={:?}, errno={:?}",
+            std::panic::Location::caller(),
+            error.kind(),
+            error.raw_os_error()
+        );
         failure(if error.kind() == std::io::ErrorKind::PermissionDenied {
             Failure::Permissions
         } else if rsi_files_native_fs::is_link_rejection(error) {
@@ -415,9 +423,79 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::{fs, process::Command};
+
+        fn temp_root() -> tempfile::TempDir {
+            tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+        }
+        fn reference(slot: &str) -> CredentialRef {
+            CredentialRef::new("fixture.provider", slot).unwrap()
+        }
+        fn key(value: &str) -> SecretValue {
+            SecretValue::new(value).unwrap()
+        }
+        #[test]
+        fn concurrent_processes_preserve_each_others_records() {
+            let root = temp_root();
+            let path = root.path().join("credentials/credentials.json");
+            let mut children = Vec::new();
+            for n in 0..8 {
+                children.push(
+                    Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "file::platform::tests::file_writer_child",
+                            "--nocapture",
+                        ])
+                        .env("RSI_CREDENTIAL_TEST_FILE", &path)
+                        .env("RSI_CREDENTIAL_TEST_WRITER", n.to_string())
+                        .stdout(std::process::Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            // Reap every writer before asserting, so one failure cannot remove the
+            // temporary root while other children are still reporting their result.
+            let statuses: Vec<_> = children
+                .iter_mut()
+                .map(|child| child.wait().unwrap())
+                .collect();
+            assert!(
+                statuses.iter().all(std::process::ExitStatus::success),
+                "{statuses:?}"
+            );
+            let store = FileSecretStore::new(&path);
+            for writer in 0..8 {
+                for n in 0..8 {
+                    assert_eq!(
+                        store
+                            .get(&reference(&format!("writer-{writer}-{n}")))
+                            .unwrap()
+                            .unwrap()
+                            .expose_secret(),
+                        "fixture"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn file_writer_child() {
+            let Ok(path) = std::env::var("RSI_CREDENTIAL_TEST_FILE") else {
+                return;
+            };
+            let writer = std::env::var("RSI_CREDENTIAL_TEST_WRITER").unwrap();
+            let store = FileSecretStore::new(path);
+            for n in 0..8 {
+                store
+                    .set(&reference(&format!("writer-{writer}-{n}")), &key("fixture"))
+                    .unwrap();
+            }
+        }
+
         #[test]
         fn publication_failures_preserve_old_data_or_report_unknown_after_replacement() {
-            let root = tempfile::tempdir().unwrap();
+            let root = temp_root();
             let path = root.path().join("credentials/credentials.json");
             let store = FileSecretStore::new(&path);
             let reference = CredentialRef::new("fixture", "primary").unwrap();

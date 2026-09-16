@@ -8,7 +8,6 @@ use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::Path,
-    process::Command,
 };
 
 fn temp_root() -> tempfile::TempDir {
@@ -249,54 +248,6 @@ fn held_writer_lock_times_out_without_changing_the_document() {
     assert_eq!(fs::read(&path).unwrap(), original);
     lock.unlock().unwrap();
     store.set(&reference("a"), &key("replacement")).unwrap();
-}
-
-#[test]
-fn concurrent_processes_preserve_each_others_records() {
-    let root = temp_root();
-    let path = root.path().join("credentials/credentials.json");
-    let mut children = Vec::new();
-    for n in 0..8 {
-        children.push(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "file_writer_child", "--nocapture"])
-                .env("RSI_CREDENTIAL_TEST_FILE", &path)
-                .env("RSI_CREDENTIAL_TEST_WRITER", n.to_string())
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-    }
-    for mut child in children {
-        assert!(child.wait().unwrap().success());
-    }
-    let store = FileSecretStore::new(&path);
-    for writer in 0..8 {
-        for n in 0..8 {
-            assert_eq!(
-                store
-                    .get(&reference(&format!("writer-{writer}-{n}")))
-                    .unwrap()
-                    .unwrap()
-                    .expose_secret(),
-                "fixture"
-            );
-        }
-    }
-}
-
-#[test]
-fn file_writer_child() {
-    let Ok(path) = std::env::var("RSI_CREDENTIAL_TEST_FILE") else {
-        return;
-    };
-    let writer = std::env::var("RSI_CREDENTIAL_TEST_WRITER").unwrap();
-    let store = FileSecretStore::new(path);
-    for n in 0..8 {
-        store
-            .set(&reference(&format!("writer-{writer}-{n}")), &key("fixture"))
-            .unwrap();
-    }
 }
 
 #[test]
