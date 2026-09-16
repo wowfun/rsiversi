@@ -156,6 +156,7 @@ default="off"
             .output
             .lock()
             .unwrap()
+            .complete()
             .windows(key.len())
             .any(|window| window == key.as_bytes()),
         "credential reached terminal output"

@@ -1,7 +1,9 @@
+import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { NativeDocument } from "./src/native.ts";
 import { MountTable } from "/mounts.js";
 import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
+import { openFilePicker } from "./file-picker.js";
 export function initialize() {
 const $ = id => document.getElementById(id);
 let pending = new Map();
@@ -338,14 +340,27 @@ class Pane {
     this.input.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} message`);
     this.input.placeholder = "Describe the work…";
     this.input.maxLength = 1024 * 1024;
+    this.input.addEventListener("compositionstart", () => { this.composing = true; this.closeCompletions(); });
+    this.input.addEventListener("compositionend", () => { this.composing = false; this.updateCompletions(); });
     this.input.addEventListener("input", () => {
-      try { this.edit(this.input.value); }
+      try { this.edit(this.input.value); this.updateCompletions(); }
       catch (error) { this.input.value = this.editor?.text ?? ""; notify(error.message); }
     });
     this.input.addEventListener("keydown", event => {
       if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "@" && !event.ctrlKey && !event.metaKey && !event.altKey && this.input.selectionStart === this.input.selectionEnd && (this.input.selectionStart === 0 || /\s/u.test(this.input.value[this.input.selectionStart-1]))) {
+        event.preventDefault(); perform(() => {const cursor=this.input.selectionStart; const text=this.input.value.slice(0,cursor)+"@"+this.input.value.slice(cursor); this.edit(text); this.input.value=text; this.input.setSelectionRange(cursor+1,cursor+1); openFilePicker(this, call, button);}); return;
+      }
+      if (this.completionKey(event)) return;
       if (event.key === "Enter" && !event.shiftKey && (event.metaKey || event.ctrlKey || this.enterSubmit)) { event.preventDefault(); perform(() => this.submit(false)); }
     });
+    this.input.addEventListener("click", () => this.updateCompletions());
+    this.input.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) this.updateCompletions(); });
+    this.completionPanel = element("section", "input-completions");
+    this.completionPanel.hidden = true;
+    this.completionPanel.setAttribute("aria-label", "Commands and skills");
+    this.resourcePreview = element("section", "input-resource-preview");
+    this.resourcePreview.hidden = true;
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
     const bar = element("div", "composer-bar");
     this.model = element("select"); this.model.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} model`);
@@ -366,6 +381,10 @@ class Pane {
       perform(() => this.upload(files));
     });
     this.attach = button("Add images", () => this.imageInput.click(), "quiet");
+    this.addReference = button("Reference session", () => this.showReferencePicker(), "quiet");
+    this.addFile = button("@ File path", () => openFilePicker(this, call, button), "quiet");
+    this.referenceList = element("div", "draft-references");
+    this.referenceList.setAttribute("aria-label", "Conversation references");
     this.imageList = element("div", "draft-images");
     this.frozenImages = element("p", "hint frozen-images");
     this.draftStatus = element("div", "draft-status");
@@ -374,9 +393,9 @@ class Pane {
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
-    actions.append(this.attach, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
+    actions.append(this.attach, this.addFile, this.addReference, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
-    this.composer.append(this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
+    this.composer.append(this.resourcePreview, this.completionPanel, this.referenceList, this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.recovery, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
@@ -433,12 +452,12 @@ class Pane {
       });
     }
   }
-  edit(text, images = this.editor?.images ?? []) {
+  edit(text, images = this.editor?.images ?? [], references = this.editor?.references ?? []) {
     if (!this.editor) throw new Error("The saved draft is still loading");
-    const textBytes = validateEditor(text, images);
+    const textBytes = validateEditor(text, images, references);
     const total = [...this.editors.values()].reduce((sum, editor) => sum + (editor === this.editor ? textBytes : editor.textBytes), 0);
     if (total > 2 * 1024 * 1024) throw new Error("Local drafts exceed this pane's 2 MiB limit");
-    this.editor.edit(text, images);
+    this.editor.edit(text, images, references);
   }
   async bindDraft(data) {
     const generation = this.generation, current = connection;
@@ -489,11 +508,93 @@ class Pane {
     } else if (editor?.dirty) this.draftStatus.append(element("p", "hint", "Saving draft…"));
     if (pending) {
       this.draftStatus.append(element("p", "hint", `${pending.kind === "command" ? "Command" : "Message"} ${pending.id} · ${pending.phase === "prepared" ? "Saved before execution" : "Awaiting confirmation"}`));
+      if (pending.references) this.draftStatus.append(element("p", "hint", `Saved request includes ${pending.references} frozen conversation reference${pending.references === 1 ? "" : "s"}. Later draft edits apply to the next request.`));
       if (pending.phase === "prepared") this.draftStatus.append(button("Cancel saved request", () => editor.update(record => editor.store.cancelPrepared(record)), "quiet"));
       else this.draftStatus.append(button("Check previous result", () => this.reconcile("query"), "quiet"));
     }
     this.renderImages(view?.surfaces[this.index]);
+    this.renderReferences();
     this.renderCommands(view?.surfaces[this.index]);
+  }
+  renderReferences() {
+    const editor = this.editor;
+    this.addReference.disabled = !editor || !!this.bindingError || editor.transferring || this.switching || editor.references.length >= 4;
+    this.addFile.disabled = !editor || !!this.bindingError || editor.transferring || this.switching;
+    const key = `${this.generation}:${editor?.referencesRevision}`;
+    if (editor === this.referenceEditor && key === this.referenceKey) return;
+    this.referenceEditor = editor;
+    this.referenceKey = key; this.referenceList.replaceChildren();
+    for (const reference of editor?.references ?? []) {
+      const row = element("div", "reference-row");
+      const source = reference.metadata.source.session_id;
+      row.append(element("span", "reference-origin", `Session ${source} · through Fact ${reference.metadata.through_seq}${reference.metadata.omissions.length ? " · shortened" : ""}`),
+        button("Preview reference", () => this.showReferencePicker(reference), "quiet"),
+        button("Remove reference", () => { this.edit(this.editor.text, this.editor.images, this.editor.references.filter(item => item.snapshot.sha256 !== reference.snapshot.sha256)); this.input.focus(); }, "quiet"));
+      this.referenceList.append(row);
+    }
+    this.referenceList.hidden = !editor?.references.length;
+  }
+  showReferencePicker(existing) {
+    const editor = this.editor, generation = this.generation;
+    if (!editor || !generation || this.switching) throw new Error("Open a conversation first");
+    this.referenceDialog?.close();
+    const dialog = element("dialog", "detail-dialog reference-dialog");
+    dialog.setAttribute("aria-label", existing ? "Frozen conversation reference" : "Reference a conversation");
+    this.referenceDialog = dialog;
+    const heading = element("div", "dialog-heading");
+    heading.append(element("h2", "", existing ? "Frozen conversation reference" : "Reference a conversation"), button("Close", () => dialog.close(), "quiet"));
+    const help = element("p", "hint", "Capture human and assistant text from a saved conversation. The reference keeps these bytes when the source changes.");
+    const source = element("input"); source.type = "text"; source.placeholder = "Session ID"; source.setAttribute("aria-label", "Source Session ID"); source.maxLength = 256;
+    const choices = element("select"); choices.setAttribute("aria-label", "Recent source conversations");
+    const initial = element("option", "", "Choose a visible conversation…"); initial.value = ""; choices.append(initial);
+    for (const entry of view?.navigation?.entries ?? []) { const option = element("option", "", entry.metadata.title ?? entry.session); option.value = entry.session; choices.append(option); }
+    choices.addEventListener("change", () => { source.value = choices.value; });
+    const status = element("p", "hint"); status.setAttribute("role", "status");
+    const content = element("section", "reference-preview-content");
+    const actions = element("div", "actions");
+    let request = 0;
+    const alive = () => dialog.open && this.generation === generation && this.editor === editor && this.referenceDialog === dialog;
+    const show = (reference, page) => {
+      content.replaceChildren();
+      const meta = reference.metadata;
+      content.append(element("p", "reference-origin", `Source Session ${meta.source.session_id} · through Fact ${meta.through_seq}`),
+        element("p", "hint", `Retained Facts ${BigInt(meta.retained_after_seq) + 1n}–${meta.retained_through_seq} · ${meta.text_bytes} text bytes`));
+      if (meta.omissions.length) content.append(element("p", "hint", `Earlier material omitted: ${meta.omissions.map(reason => ({ fact_limit:"capture reached 1,024 Facts", scan_bytes:"capture reached 16 MiB of source Facts", content_bytes:"text reached 1 MiB" })[reason]).join("; ")}.`));
+      content.append(element("pre", "", page?.text ?? reference.preview));
+      const offset = page?.offset ?? 0, next = page?.next_offset ?? new TextEncoder().encode(reference.preview).length;
+      if (offset > 0) content.append(button("Previous reference page", () => preview(reference, Math.max(0, offset - 8192)), "quiet"));
+      if (page?.has_more ?? next < meta.text_bytes) content.append(button("Next reference page", () => preview(reference, next), "quiet"));
+      const add = button("Add to draft", () => {
+        if (!alive()) return;
+        this.edit(editor.text, editor.images, [...editor.references, reference]); dialog.close();
+      }, "primary");
+      add.disabled = editor.references.some(item => item.snapshot.sha256 === reference.snapshot.sha256) || editor.references.length >= 4;
+      if (!existing) content.append(add);
+    };
+    const preview = async (reference, offset) => {
+      const revision = ++request; status.textContent = "Reading frozen reference…";
+      try {
+        const page = JSON.parse(await call("reference_input", JSON.stringify({ pane:this.index, generation, operation:{kind:"preview",reference,offset,maximum:8192} })));
+        if (!alive() || request !== revision) return;
+        status.textContent = ""; show(reference, page);
+      } catch (error) { if (alive() && request === revision) status.textContent = `Reference unavailable: ${error.message}. Your draft is unchanged.`; }
+    };
+    const capture = button("Capture preview", async () => {
+      const revision = ++request; capture.disabled = true; content.replaceChildren(); status.textContent = "Capturing conversation…";
+      try {
+        const reference = JSON.parse(await call("reference_input", JSON.stringify({pane:this.index,generation,operation:{kind:"capture",source:source.value.trim()}})));
+        if (!alive() || revision !== request) return;
+        status.textContent = "Captured. Review it before adding to the draft."; show(reference);
+      } catch (error) { if (alive() && revision === request) status.textContent = `Capture failed: ${error.message}. Your draft is unchanged.`; }
+      finally { if (alive()) capture.disabled = false; }
+    }, "primary");
+    actions.append(capture);
+    dialog.append(heading,help);
+    if (!existing) dialog.append(choices,source,actions);
+    dialog.append(status,content);
+    dialog.addEventListener("close", () => { request++; if (this.referenceDialog === dialog) this.referenceDialog = undefined; dialog.remove(); if (this.generation === generation && this.editor === editor) this.input.focus(); });
+    document.body.append(dialog); dialog.showModal();
+    if (existing) show(existing); else source.focus();
   }
   async submit(steer) {
     if (this.submitting || this.uploading) return;
@@ -504,7 +605,7 @@ class Pane {
       const editor = this.editor, generation = this.generation, current = connection;
       if (!editor.record.pending) {
         const captured = editor.record;
-        const prepared = JSON.parse(await call("prepare_submission", JSON.stringify({ pane: this.index, generation, text: editor.text, images: editor.images, steer })));
+        const prepared = JSON.parse(await call("prepare_submission", JSON.stringify({ pane: this.index, generation, text: editor.text, images: editor.images, references: editor.references, steer })));
         if (connection !== current || current.closing || this.editor !== editor) throw new Error("Conversation changed before request preparation completed");
         await editor.update(() => editor.store.freeze(captured, prepared));
       }
@@ -603,7 +704,7 @@ class Pane {
         await this.binding;
         if (connection === current && this.editor && JSON.stringify(this.editor.record.key) === JSON.stringify(moved.key)) {
           if (this.editor.dirty || this.editor.failure) { this.editor.failure = new Error("Saved input was restored while you were typing; choose which editor to keep"); }
-          else { this.editor.record = moved; this.editor.text = moved.text; this.editor.images = structuredClone(moved.images); }
+          else { this.editor.record = moved; this.editor.text = moved.text; this.editor.images = structuredClone(moved.images); this.editor.references = structuredClone(moved.references); }
         }
         if (this.editor === source) this.editor = undefined;
         this.editors.delete(key);
@@ -629,8 +730,129 @@ class Pane {
       return row;
     }));
   }
-  reset() { this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
+  completionToken() {
+    const text = this.input.value, cursor = this.input.selectionStart;
+    if (this.composing || !this.generation || this.switching || !text.startsWith("/") || text.startsWith("//") || /[\r\n]/.test(text)) return;
+    const end = text.search(/\s/), stop = end < 0 ? text.length : end;
+    if (cursor > stop || this.input.selectionEnd !== cursor) return;
+    return { query: text.slice(1, stop), end: stop, text, cursor };
+  }
+  updateCompletions(refresh = false) {
+    const token = this.completionToken();
+    if (!token) { this.closeCompletions(); this.completionRequestKey = undefined; return; }
+    const key = JSON.stringify([this.generation, token.text, token.cursor]);
+    if (!refresh && key === this.completionRequestKey) return;
+    this.completionRequestKey = key;
+    this.completionFailure = undefined;
+    this.completionState = { ...token, sequence: String(this.completionSequence = (this.completionSequence ?? 0) + 1), generation: this.generation, selected: 0 };
+    const state = this.completionState;
+    clearTimeout(this.completionTimer);
+    this.renderCompletions(view?.surfaces[this.index]);
+    this.completionTimer = setTimeout(() => {
+      if (this.completionState !== state) return;
+      void this.action("completions", { query: state.query, sequence: state.sequence, refresh }).catch(error => {
+        if (this.completionState === state) { this.completionFailure = error.message; this.renderCompletions(view?.surfaces[this.index]); }
+      });
+    }, 80);
+  }
+  closeCompletions() {
+    clearTimeout(this.completionTimer);
+    this.completionState = undefined; this.completionRenderKey = undefined; this.completionPanel.hidden = true;
+    this.input.removeAttribute("aria-activedescendant"); this.input.setAttribute("aria-expanded", "false");
+    this.input.removeAttribute("aria-controls");
+  }
+  completionEntries(data = view?.surfaces[this.index]) {
+    const state = this.completionState, result = data?.completions;
+    if (!state || state.generation !== this.generation || result?.sequence !== state.sequence || result.query !== state.query) return;
+    return result.entries;
+  }
+  pickCompletion(item) {
+    const state = this.completionState, token = this.completionToken();
+    if (!state || !token || state.text !== token.text || state.cursor !== token.cursor || state.generation !== this.generation) return;
+    this.input.setRangeText(item.replacement, 0, token.end, "end");
+    this.edit(this.input.value);
+    this.completionRequestKey = JSON.stringify([this.generation, this.input.value, this.input.selectionStart]);
+    this.closeCompletions();
+    this.input.focus();
+  }
+  completionKey(event) {
+    if (event.key === "Escape" && !this.resourcePreview.hidden) {
+      event.preventDefault(); perform(() => this.action("resource_close")); this.input.focus(); return true;
+    }
+    if (!this.completionState || this.completionPanel.hidden) return false;
+    if (event.key === "Escape") {
+      event.preventDefault(); this.closeCompletions();
+      return true;
+    }
+    const entries = this.completionEntries();
+    if (!entries?.length) return false;
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault();
+      this.completionState.selected = Math.max(0, Math.min(entries.length - 1, this.completionState.selected + (event.key === "ArrowDown" ? 1 : -1)));
+      this.renderCompletions(view?.surfaces[this.index]);
+      this.completionPanel.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+      return true;
+    }
+    if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault(); this.pickCompletion(entries[this.completionState.selected]); return true;
+    }
+    if (event.key === "F2" && entries[this.completionState.selected].resource) {
+      event.preventDefault(); perform(() => this.action("resource_read", { request: entries[this.completionState.selected].resource })); return true;
+    }
+    return false;
+  }
+  renderCompletions(data) {
+    const state = this.completionState;
+    if (!state || state.generation !== this.generation) { this.closeCompletions(); return; }
+    const entries = this.completionEntries(data);
+    // One completed response is immutable for its request sequence.
+    const key = JSON.stringify([state.generation, state.sequence, state.selected, !!entries, this.completionFailure, data?.completions?.sequence === state.sequence ? data.completions.notice : null]);
+    if (key === this.completionRenderKey) return;
+    this.completionRenderKey = key;
+    this.completionPanel.hidden = false;
+    this.input.setAttribute("aria-expanded", "true");
+    this.input.setAttribute("aria-autocomplete", "list");
+    const list = element("div", "completion-options");
+    list.id = `completion-${this.index}`; list.setAttribute("role", "listbox");
+    this.input.setAttribute("aria-controls", list.id);
+    this.input.removeAttribute("aria-activedescendant");
+    let group;
+    for (const [index, item] of (entries ?? []).entries()) {
+      if (group !== item.group) { group = item.group; const heading = element("div", "completion-group", group === "skill" ? "Skills" : "Commands"); heading.setAttribute("role", "presentation"); list.append(heading); }
+      const row = button(item.replacement, () => this.pickCompletion(item), "completion-option");
+      row.id = `${list.id}-${index}`; row.tabIndex = -1; row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(state.selected === index));
+      row.append(element("span", "completion-description", item.description));
+      row.addEventListener("mousedown", event => event.preventDefault());
+      list.append(row);
+      if (state.selected === index) this.input.setAttribute("aria-activedescendant", row.id);
+    }
+    if (!entries?.length) { const status = element("p", "hint", this.completionFailure ?? (entries ? "No matching commands or skills" : "Loading commands and skills…")); status.setAttribute("role", "status"); list.append(status); }
+    const tools = element("div", "completion-tools");
+    tools.append(element("span", "hint", "↑ ↓ choose · Enter / Tab insert · F2 preview · Esc close"));
+    const selected = entries?.[state.selected];
+    if (selected?.resource) tools.append(button("Preview skill", () => this.action("resource_read", { request: selected.resource }), "quiet"));
+    tools.append(button("Refresh", () => this.updateCompletions(true), "quiet"));
+    const scroll = this.completionPanel.querySelector(".completion-options")?.scrollTop ?? 0;
+    this.completionPanel.replaceChildren(list, tools);
+    list.scrollTop = scroll;
+    if (data?.completions?.sequence === state.sequence && data.completions.notice) this.completionPanel.append(element("p", "hint", data.completions.notice));
+  }
+  renderResourcePreview(data) {
+    const result = data?.resource, value = result?.value;
+    const key = `${data?.generation}:${data?.resource_revision}`;
+    if (key === this.resourcePreviewKey) return;
+    this.resourcePreviewKey = key;
+    this.resourcePreview.replaceChildren(); this.resourcePreview.hidden = value?.kind !== "read";
+    if (value?.kind !== "read") return;
+    const title = element("div", "resource-preview-title");
+    title.append(element("strong", "", value.resource.name), button("Close preview", async () => { await this.action("resource_close"); this.input.focus(); }, "quiet"));
+    this.resourcePreview.append(title, element("p", "hint", value.resource.source), element("pre", "resource-preview-text", value.text));
+  }
   renderCommands(data) {
+    this.renderCompletions(data);
+    this.renderResourcePreview(data);
     this.commands.disabled = !data || this.switching;
     const key = JSON.stringify([data?.generation, data?.commands, data?.command_receipt]);
     if (key === this.commandKey) return;
@@ -674,8 +896,13 @@ class Pane {
     const changed = this.generation !== data?.generation;
     if (this.selection !== data?.selection) { this.selection = data?.selection; this.switching = false; }
     if (changed) {
+      this.referenceDialog?.close();
+      this.fileDialog?.close();
       this.switching = false;
       this.generation = data?.generation;
+      this.completionState = undefined; this.completionRequestKey = undefined;
+      this.completionFailure = undefined; this.completionPanel.hidden = true;
+      clearTimeout(this.completionTimer);
       this.binding = this.bindDraft(data).catch(error => notify(error.message));
       this.blocks.clear(); this.transcript.replaceChildren();
       this.pendingKey = undefined;
@@ -815,7 +1042,7 @@ async function openInSelected(fields) {
   try {
     await pane.flush().catch(() => {});
     const editor = pane.editor;
-    const reuse = fields.action === "create" && editor && !editor.dirty && !editor.failure && !editor.record.pending && !editor.text && !editor.images.length && !pane.submitting && !pane.uploading
+    const reuse = fields.action === "create" && editor && !editor.dirty && !editor.failure && !editor.record.pending && !editor.text && !editor.images.length && !editor.references.length && !pane.submitting && !pane.uploading
       ? {generation:pane.generation,header:editor.record.header} : undefined;
     await command({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) });
   } catch (error) {
@@ -963,12 +1190,24 @@ function renderDetail(next) {
       disclosure.append(element("summary", "", label), element("pre", "", JSON.stringify(value, null, 2))); form.append(disclosure);
     }
     if (description.metadata.sensitive_fields.length) form.append(element("p", "hint", `Sensitive fields: ${description.metadata.sensitive_fields.map(path => path.join(" / ") || "(root)").join(", ")}`));
-    form.append(element("p", "hint", "Saving requires the version you opened."), text, save);
+    const safeForm = canUseSettingsForm(editor.text);
+    const fields = safeForm ? settingsForm(description.metadata.schema, JSON.parse(editor.text), !description.writable) : {element:element("p","hint","This value contains exact numeric text; use JSON to preserve it."),read:()=>{throw new Error("Use the exact JSON editor")}};
+    let jsonMode = !safeForm;
+    const toggle = button("Edit as JSON", () => {
+      if (!jsonMode) {text.value=fields.json();failure.textContent="";jsonMode=true;fields.element.hidden=true;text.hidden=false;toggle.hidden=true;text.focus()}
+    });
+    text.hidden=safeForm;toggle.hidden=!safeForm;
+    const failure = element("p", "settings-error settings-field-error");failure.setAttribute("role","alert");
+    form.append(element("p", "hint", "Saving requires the version you opened."), fields.element, toggle, text, failure, save);
     if (!description.writable) { text.readOnly = true; save.disabled = true; form.append(element("p", "hint", "Settings provider is read-only.")); }
     if (new TextEncoder().encode(editor.text).length > 1024 * 1024) {
-      text.readOnly = true; save.disabled = true; form.append(element("p", "hint", "This value exceeds the Web editor's 1 MiB input limit."));
+      fields.element.disabled=true;text.readOnly=true;save.disabled=true;form.append(element("p", "hint", "This value exceeds the Web editor's 1 MiB input limit."));
     }
-    form.addEventListener("submit", event => { event.preventDefault(); perform(() => command({ action: "settings_save", ticket: editor.ticket, text: text.value })); });
+    form.addEventListener("submit", async event => {
+      event.preventDefault();if(save.disabled)return;save.disabled=true;failure.textContent="";
+      try {await command({action:"settings_save",ticket:editor.ticket,text:jsonMode ? text.value : JSON.stringify(fields.read())})}
+      catch(error) {failure.textContent=error instanceof Error ? error.message : String(error);save.disabled=!description.writable}
+    });
     showDialog(editor.ticket, editor.namespace, form); return;
   }
   if (next.detail) {

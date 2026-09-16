@@ -6,6 +6,8 @@
 mod binding;
 mod output;
 mod patch;
+mod references;
+mod retrieval;
 mod tasks;
 pub use binding::SessionUiBinderFactory;
 
@@ -149,6 +151,16 @@ impl PluginFactory for SessionUiFactory {
                     ],
                     actions: vec![
                         ActionContribution {
+                            name: "retrieval".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(retrieval::Read),
+                        },
+                        ActionContribution {
+                            name: "reference".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(references::Read),
+                        },
+                        ActionContribution {
                             name: "goal".into(),
                             target: TargetKind::Surface,
                             handler: Arc::new(tasks::GoalAction),
@@ -169,11 +181,23 @@ impl PluginFactory for SessionUiFactory {
                             handler: Arc::new(output::ReadOutput),
                         },
                     ],
-                    renderers: vec![BlockRendererContribution {
-                        name: "tool".into(),
-                        target: TargetKind::Surface,
-                        renderer: Arc::new(ToolCard),
-                    }],
+                    renderers: vec![
+                        BlockRendererContribution {
+                            name: "retrieval".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(retrieval::Renderer),
+                        },
+                        BlockRendererContribution {
+                            name: "reference".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(references::Renderer),
+                        },
+                        BlockRendererContribution {
+                            name: "tool".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(ToolCard),
+                        },
+                    ],
                 },
             )
             .map_err(meta)?;

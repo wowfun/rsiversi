@@ -7,13 +7,18 @@ The Python fixtures require Python 3.11 or newer.
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
 RSI paths and an empty configuration, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
+Button clicks relocate only after WebDriver explicitly reports a stale element
+before dispatch; ambiguous click failures are never replayed.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
 Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
-Screenshots, capabilities, request summaries and native cleanup logs are evidence.
+The native window also reads and refreshes Plugins status, reads the separate
+Exa credential status, and opens the typed retrieval Settings controls without
+submitting a model request. Screenshots, capabilities, request summaries and
+native cleanup logs are evidence.
 Teardown attempts every owned process, stream and temporary-directory cleanup
 even if another cleanup fails. Cleanup diagnostics attach to an active primary
 failure; without one, cleanup failures make the run fail after all phases finish.

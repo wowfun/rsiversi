@@ -82,7 +82,7 @@ pub(crate) fn failure(revision: u64, opened: bool, error: &str) -> UiView {
         .insert(0, UiElement::Text { text: error.into() });
     view
 }
-fn preview(bytes: &[u8], maximum: usize) -> String {
+pub(crate) fn preview(bytes: &[u8], maximum: usize) -> String {
     let mut text = rsi_tools_protocol::safe_tool_text(bytes);
     if text.len() > maximum {
         let mut end = maximum;
@@ -210,7 +210,7 @@ pub(crate) fn directory(revision: u64, file: &OpenedFile, page: DirectoryPage) -
     }
     view
 }
-fn decode(hex: &str) -> Vec<u8> {
+pub(crate) fn decode(hex: &str) -> Vec<u8> {
     hex.as_bytes()
         .chunks_exact(2)
         .map(|pair| {

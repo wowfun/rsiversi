@@ -66,6 +66,10 @@ Validation precedes advancing; field errors clear on editing and transitions,
 while save receipts remain independent. Discovery offers retry, key/connection
 repair and manual entry. Changing connection inputs retires prior reads.
 
+Integration credentials opened from Plugins are independent of model login.
+Escape returns directly to Plugins; an admitted write remains owned until its
+result arrives, and reopening never replays it.
+
 The shared [setup owner](../workbench-ui/README.md) persists through Host APIs.
 Known capacities complete selection immediately; missing capacities are editable
 in both directions and validated together. Attached Enter changes subsequent
@@ -354,3 +358,11 @@ Idle slash completion retains its menu until the editor or command catalog chang
 Fold-budget eviction scans retained keys a bounded number of times, removes an
 oldest Session's excess entries as one batch, and shrinks each visited allocation
 once. Draft text and pending submission identities survive fold-cache eviction.
+
+Successful command-catalog notices remain visible without triggering a retry on
+every edit. Only failed reads retry on edits; reopening or explicit refresh
+requests a new catalog.
+
+The TUI completion display retains at most 64 KiB of catalog text and resource
+coordinates, including skills. Omitted entries produce a visible notice. Filtering
+and help frames share immutable entry strings and skill metadata.

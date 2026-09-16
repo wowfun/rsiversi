@@ -1,5 +1,18 @@
 # rsi-gui
 
+Resource previews carry a generation-local monotone revision. Clearing, starting
+and completing a read advance it; document rendering compares this identity
+without serializing the preview body. Draft reference rows similarly follow the
+editor's reference revision and attachment identity.
+Document retirement closes the file and reference dialogs with that attachment.
+
+The finite reference-input bridge captures a durable source or reads a frozen
+preview through the selected pane's actual Session handle. It accepts bounded
+typed input and returns a descriptor or page; the document owns its insertion
+into the persistent draft. Generation changes discard late UI delivery. Human
+reference data is never interpreted as a slash command. Preparation includes
+frozen references in the opaque request and admission rechecks CAS binding.
+
 Passive model refresh updates descriptions on successful reads, including
 changed capabilities for the same model. A transient read failure keeps the
 prior metadata without producing a passive-refresh notice. Explicit

@@ -241,6 +241,8 @@ impl Bridge {
                 Ok(Vec::new())
             }
             "restore_session" => Ok(self.app.restore_session(text(source)?).await?.into_bytes()),
+            "reference_input" => Ok(self.app.reference_input(text(source)?).await?.into_bytes()),
+            "file_input" => Ok(self.app.file_input(text(source)?).await?.into_bytes()),
             "prepare_submission" => Ok(self
                 .app
                 .prepare_submission(text(source)?)

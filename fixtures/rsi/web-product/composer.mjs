@@ -40,7 +40,7 @@ export async function verifyComposer(page) {
         pane.edit("one saved input"); await pane.flush();
         const editor = pane.editor;
         if (firstMode === "query" || secondMode === "query") {
-          await editor.update(record => editor.store.freeze(record, { kind: "message", id: session, opaque: "{}", text_bytes: 15, images: 0 }));
+          await editor.update(record => editor.store.freeze(record, { kind: "message", id: session, opaque: "{}", text_bytes: 15, images: 0, references: 0 }));
           await editor.update(record => editor.store.begin(record));
         }
         let entered, release, preparations = 0, dispatches = 0;
@@ -51,7 +51,7 @@ export async function verifyComposer(page) {
         call = async method => {
           if (method === "prepare_submission") {
             preparations++;
-            return JSON.stringify({ kind: "message", id: session, opaque: "{}", text_bytes: 15, images: 0 });
+            return JSON.stringify({ kind: "message", id: session, opaque: "{}", text_bytes: 15, images: 0, references: 0 });
           }
           dispatches++;
           return JSON.stringify({ status: "complete", receipt: "{}" });
@@ -85,7 +85,7 @@ export async function verifyComposer(page) {
     try {
       const store = connection.drafts, session = "automatic-reconcile-overlap";
       let record = await store.ensure("main", session, "c".repeat(64));
-      record = await store.freeze(record, { kind: "message", id: session, opaque: "{}", text_bytes: 0, images: 0 });
+      record = await store.freeze(record, { kind: "message", id: session, opaque: "{}", text_bytes: 0, images: 0, references: 0 });
       await store.begin(record);
       DraftEditor.prototype.flush = async function () { entered(); await held; return originalFlush.call(this); };
       pane.reconcile = function (mode) { const result = originalReconcile.call(this, mode); automatic ??= result; return result; };

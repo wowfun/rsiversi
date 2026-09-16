@@ -28,6 +28,12 @@ filesystem or git read. Omission is shown separately from an empty effect list.
 The same model and standard renderer serve inline and detail presentations;
 complete result paging remains available through the existing source action.
 
+Frozen human references expose an inline card with their recorded origin,
+capture horizon, omission state and bounded preview. Read actions carry only
+the recorded Session/Fact/content index and byte offset; the Session reference
+service verifies the durable entry and immutable envelope. Each page is 8 KiB.
+No history card recaptures its source or accepts a caller-supplied CAS digest.
+
 Goal and current-Turn Jobs are separate contributed surfaces. The target watches
 the controller's existing projection cache and its one live Goal observer, then
 invalidates only this target's presentations. Goal shows durable phase, allocated
@@ -84,3 +90,8 @@ Each server target also publishes `UiBusinessApiContract` in its isolated mappin
 Its `SessionTargetClient` retains this binding's trusted origin and permits only
 the controller's Session. Portable presentation children consume this explicit
 facet; neither the UI source nor a presentation identity selects a global API.
+`web_fetch` and `web_search` additionally contribute a recorded-source card.
+It checks the exact intent/result sequences and full Tool identity, the request
+and result operation, and the bounded retrieval DTO. Previews and text paging
+read only those durable Facts. Neither model content nor a card can initiate
+network retrieval; URLs remain plain attributed text for explicit user use.

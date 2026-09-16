@@ -9,6 +9,8 @@ use rsi_ai_protocol::ModelRef;
 pub(super) enum Action {
     Login,
     SetupModels,
+    Plugins(rsi_workbench_ui::PluginsCommand),
+    IntegrationCredential(super::setup::IntegrationCredential),
     RecallPrompt(u64),
     Help,
     UiSurface(rsi_ui::UiReference),
@@ -17,6 +19,14 @@ pub(super) enum Action {
     UiInvoke(rsi_ui::UiReference, serde_json::Value, u64),
     New,
     Recent,
+    References,
+    FilePicker(rsi_session_files_ui::FilePickerRequest),
+    InsertFile(String),
+    ReferenceSources(Option<rsi_session_protocol::RecentSessionCursor>),
+    CaptureReference(SessionId),
+    PreviewReference(rsi_agent_session_protocol::FrozenReference, usize),
+    AddReference(rsi_agent_session_protocol::FrozenReference),
+    RemoveReference(String),
     Agents,
     Parent,
     Metrics,
@@ -70,7 +80,22 @@ impl Menu {
             items: vec![
                 ("New session".into(), Action::New),
                 ("Recent sessions".into(), Action::Recent),
+                (
+                    "Draft references · capture, preview, remove".into(),
+                    Action::References,
+                ),
+                (
+                    "@ Workspace file · browse and insert path".into(),
+                    Action::FilePicker(rsi_session_files_ui::FilePickerRequest::Open {
+                        path: rsi_files_protocol::RelativePath::default(),
+                        file_kind: rsi_files_protocol::FileKind::Directory,
+                    }),
+                ),
                 ("Model and effort".into(), Action::SetupModels),
+                (
+                    "Plugins".into(),
+                    Action::Plugins(rsi_workbench_ui::PluginsCommand::Refresh),
+                ),
                 ("Subagent sessions".into(), Action::Agents),
                 ("Return to parent session".into(), Action::Parent),
                 ("Session commands".into(), Action::Commands),
@@ -119,6 +144,10 @@ pub(super) struct State {
     pub(super) workspace_label: String,
     pub(super) transcript: Transcript,
     pub(super) editor: Editor,
+    pub(super) references: Vec<rsi_agent_session_protocol::FrozenReference>,
+    pub(super) reference_bytes: usize,
+    pub(super) reference_status: String,
+    pub(super) file_insert: Option<std::ops::Range<usize>>,
     pub(super) model: Option<ModelRef>,
     pub(super) reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     pub(super) menu: Option<Menu>,
@@ -215,6 +244,10 @@ impl State {
             remote,
             transcript: Transcript::default(),
             editor: Editor::default(),
+            references: Vec::new(),
+            reference_bytes: 0,
+            reference_status: String::new(),
+            file_insert: None,
             model: None,
             reasoning_effort: None,
             menu: None,
@@ -363,6 +396,9 @@ impl State {
         self.status.clear();
         self.status_is_error = false;
         if self.menu.take().is_some() {
+            if self.detail.is_none() {
+                self.file_insert = None;
+            }
             if self.ui_form.is_none() {
                 self.invalidate_detail();
             }
@@ -374,6 +410,7 @@ impl State {
             return;
         }
         if self.detail.take().is_some() {
+            self.file_insert = None;
             self.ui_form = None;
             self.detail_next = None;
             self.detail_previous = None;

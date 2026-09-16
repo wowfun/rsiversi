@@ -2,12 +2,15 @@
 mod clipboard;
 mod commands;
 mod home;
+mod plugins;
 mod setup;
 mod slash;
 use rsi_terminal_ui::editor;
+mod files;
 mod input;
 mod job_preview;
 mod prompts;
+mod references;
 mod render;
 mod request_details;
 mod retention;
@@ -165,6 +168,7 @@ fn live_window(page: rsi_session_protocol::SessionHistoryPage) -> transcript::Tr
 
 enum Update {
     Ui(rsi_ui::BoundView),
+    Plugins(rsi_workbench_ui::PluginsView),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
     Inspect(Box<StoreSessionInspection>),
@@ -175,6 +179,8 @@ enum Update {
     Preview(rsi_session_protocol::Result<rsi_agent_turn_protocol::JobPreviewPage>),
     Menu(Menu),
     Recent(rsi_session_protocol::RecentSessionPage),
+    Reference(rsi_agent_session_protocol::ReferenceTextPage),
+    FilePicker(rsi_session_files_ui::FilePickerPage),
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_process::OutputPage),
     Notice(String),
@@ -242,6 +248,8 @@ struct History {
 struct SavedSession {
     command: Arc<rsi_client::CommandSubmission>,
     editor: editor::Editor,
+    references: Vec<rsi_agent_session_protocol::FrozenReference>,
+    reference_bytes: usize,
     model: Option<ModelRef>,
     reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     top: Option<transcript::Anchor>,
@@ -258,7 +266,12 @@ enum Durability {
 
 #[allow(clippy::struct_excessive_bools)] // Independent asynchronous request lanes have separate pending flags.
 struct Client {
+    plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
+    files: Option<
+        Arc<<rsi_session_files_ui::FilesBrowserContract as rsi_meta::LocalContract>::Service>,
+    >,
     setup_command: Option<setup::Command>,
+    integration_credential: Option<setup::IntegrationCredential>,
     prompts: prompts::Prompts,
     ui: ui::Bindings,
     application: Arc<dyn SessionService>,
@@ -289,6 +302,45 @@ struct Client {
 }
 
 impl Client {
+    fn switch_session_draft(&mut self, header: SessionHeader) {
+        let old = self.state.header.session_id().clone();
+        let draft = std::mem::take(&mut self.state.editor);
+        let references = std::mem::take(&mut self.state.references);
+        let model = self.state.model.take();
+        let owned = std::mem::take(&mut self.owned);
+        let command = std::mem::take(&mut self.command);
+        let top = self.state.top;
+        let folds = std::mem::take(&mut self.state.folds);
+        let reasoning_effort = self.state.reasoning_effort.clone();
+        self.drafts.insert(
+            old,
+            SavedSession {
+                editor: draft,
+                references,
+                reference_bytes: self.state.reference_bytes,
+                model,
+                reasoning_effort,
+                top,
+                folds,
+                last_used: self.generation,
+                owned,
+                command,
+            },
+        );
+        self.state = State::new(header, self.state.remote);
+        if let Some(saved) = self.drafts.remove(self.state.header.session_id()) {
+            self.state.editor = saved.editor;
+            self.state.references = saved.references;
+            self.state.refresh_references();
+            self.state.model = saved.model;
+            self.state.reasoning_effort = saved.reasoning_effort;
+            self.state.top = saved.top;
+            self.state.folds = saved.folds;
+            self.owned = saved.owned;
+            self.command = saved.command;
+        }
+    }
+
     fn toggle_fold_at(&mut self, view: &render::View, x: u16, y: u16) -> bool {
         if view.0.choice_revision != self.state.view_revision {
             return false;
@@ -334,7 +386,10 @@ impl Client {
             ui_target,
         } = services;
         let mut client = Self {
+            files: None,
+            plugins: None,
             setup_command: None,
+            integration_credential: None,
             prompts: prompts::Prompts::default(),
             ui: ui::Bindings {
                 registry: ui,
@@ -576,7 +631,7 @@ impl Client {
                 self.state.notice("Resolve the previous submission through Actions → Retry; this draft is retained");
                 return;
             }
-            if self.state.editor.text().trim().is_empty() {
+            if self.state.editor.text().trim().is_empty() && self.state.references.is_empty() {
                 return;
             }
             if delivery == MessageDelivery::Steer && !self.state.active {
@@ -604,16 +659,22 @@ impl Client {
                     return;
                 }
             };
+            let content = self.state.reference_input();
+            if let Err(problem) = rsi_session_protocol::validate_session_input(&content) {
+                self.state.notice(problem.to_string());
+                return;
+            }
             self.submission.request = Some(SubmitInput {
                 reasoning_effort: None,
                 delivery,
                 message_id,
-                content: vec![MessageInput::Text {
-                    text: self.state.editor.take(),
-                }],
+                content,
                 model: None,
                 sandbox: None,
             });
+            self.state.editor.take();
+            self.state.references.clear();
+            self.state.refresh_references();
             self.remember_prompt();
         }
         let Some(request) = self.submission.request.clone() else {
@@ -860,6 +921,14 @@ impl Client {
         self.state.invalidate_detail();
         self.extension_view = None;
         match action {
+            action @ (Action::References
+            | Action::ReferenceSources(_)
+            | Action::CaptureReference(_)
+            | Action::PreviewReference(..)
+            | Action::AddReference(_)
+            | Action::RemoveReference(_)) => self.reference_action(action),
+            Action::FilePicker(request) => self.file_picker(request),
+            Action::InsertFile(locator) => self.insert_file(&locator),
             Action::Help => self.state.slash.open_help(),
             Action::Jobs(request) => self.job_menu(request),
             Action::Preview(request) => {
@@ -868,6 +937,8 @@ impl Client {
                 self.state.preview = Some(job_preview::Preview::new(request));
                 self.poll_preview(tokio::time::Instant::now());
             }
+            Action::Plugins(command) => self.plugins(command),
+            Action::IntegrationCredential(target) => self.integration_credential = Some(target),
             Action::Login => self.setup_command = Some(setup::Command::Login(None)),
             Action::SetupModels => self.setup_command = Some(setup::Command::Models),
             Action::RecallPrompt(id) => self.recall_prompt(id),
@@ -892,12 +963,15 @@ impl Client {
                     let body = request
                         .content
                         .iter()
-                        .filter_map(|input| {
-                            if let MessageInput::Text { text } = input {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
+                        .filter_map(|input| match input {
+                            MessageInput::Text { text } => Some(text.clone()),
+                            MessageInput::Reference { reference } => Some(format!(
+                                "Reference {} · through Fact {}\n{}",
+                                reference.metadata.source.session_id,
+                                reference.metadata.through_seq,
+                                reference.preview
+                            )),
+                            MessageInput::Image { .. } => None,
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -1612,6 +1686,8 @@ async fn run_inner(
             .clone()
             .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
+    client.plugins = context.lookup_local::<rsi_workbench_ui::PluginsFeatureContract>();
+    client.files = observer.as_ref().expect("initial surface").files.clone();
     let mut ui_changes = client.ui.registry.membership_changes();
     client.state.editor = draft;
     client.refresh_metrics();
@@ -1639,15 +1715,17 @@ async fn run_inner(
     let result: Result<()> = async {
         loop {
             client.enforce_fold_budget();
+            if let Some(target) = client.integration_credential.take()
+                && let Some(feature) = client.plugins.clone() { setup.open_integration(target, feature); }
             if let Some(command) = client.setup_command.take() {
-                match command { setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, command => setup.open(command, true) }
+                match command { setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
                 dirty = true;
             }
             if client.state.menu.is_some() || client.state.answer.is_some() || client.state.ui_edit.is_some() || client.state.detail.is_some() || setup.active {client.state.slash.hide();}
             else {client.state.slash.update(&client.state.editor, Some(&client.controller));}
             if let Some(selection) = setup.chosen.take() { client.select_model(selection); dirty = true; }
             client.state.busy = client.submission.busy;
-            client.state.editor.set_retention_limit((4 * 1024 * 1024usize).saturating_sub(client.drafts.values().map(|saved| saved.editor.retained_bytes()).sum()));
+            client.state.editor.set_retention_limit((4 * 1024 * 1024usize).saturating_sub(client.draft_reference_retention()));
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
@@ -1721,7 +1799,10 @@ async fn run_inner(
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
                             if control && key.code == KeyCode::Char('p') { client.action_menu(); continue; }
                             if control && key.code == KeyCode::Char('r') && !client.state.has_dialog() { client.prompt_menu(); continue; }
-                            if control && key.code == KeyCode::Char('d') && client.state.editor.text().is_empty() && client.state.answer.is_none() && client.state.ui_edit.is_none() && client.submission.request.is_none() { break; }
+                            if key.code == KeyCode::Char('@') && !control && !client.state.has_dialog() && client.state.editor.text()[..client.state.editor.cursor()].chars().next_back().is_none_or(char::is_whitespace) {
+                                if let Err(problem) = client.state.editor.insert("@") {client.state.notice(problem);} else {client.action(Action::FilePicker(rsi_session_files_ui::FilePickerRequest::Open {path:rsi_files_protocol::RelativePath::default(),file_kind:rsi_files_protocol::FileKind::Directory}));} continue;
+                            }
+                            if control && key.code == KeyCode::Char('d') && client.state.references.is_empty() && client.state.editor.text().is_empty() && client.state.answer.is_none() && client.state.ui_edit.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
                                     KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
@@ -1809,6 +1890,9 @@ async fn run_inner(
                             if let Some(osc) = delivery.osc && terminal.commands.try_send(osc).is_err() { client.state.notice("Copy failed: terminal command queue is busy"); }
                         },
                         Ok(Update::Menu(menu)) => client.state.menu = Some(menu),
+                        Ok(Update::Plugins(view)) => client.state.show_plugins(view),
+                        Ok(Update::Reference(page)) => client.state.show_reference(page),
+                        Ok(Update::FilePicker(page)) => client.state.show_file_picker(page),
                         Ok(Update::Recent(page)) => {
                             client.recent = page.sessions.last().map(rsi_session_protocol::SessionSummary::cursor);
                             let mut items = page.sessions.into_iter().map(|summary| (format!("{} · {}", summary.header.session_id(), summary.header.canonical_cwd()), Action::Attach(summary.header.session_id().clone()))).collect::<Vec<_>>();
@@ -1885,21 +1969,14 @@ async fn run_inner(
                             let setup_was_active=setup.active;
                             setup.attachment_changed();
                             client.controller = next.controller.clone();
+                            client.files.clone_from(&next.files);
                             client.ui.surface = next.ui_target.clone().ok_or_else(|| error("TUI surface target is unavailable"))?;
                             client.projections = None; client.projection_notice.clear(); client.extension_view = None;
                             observer = Some(next);
                             client.tasks.clear(); client.generation += 1;
-                            let old = client.state.header.session_id().clone();
-                            let draft = std::mem::take(&mut client.state.editor); let model = client.state.model.take();
-                            let owned = std::mem::take(&mut client.owned);
-                            let command = std::mem::take(&mut client.command);
-                            let top = client.state.top;
-                            let folds = std::mem::take(&mut client.state.folds);
-                            let reasoning_effort = client.state.reasoning_effort.clone();
-                            client.drafts.insert(old, SavedSession { editor: draft, model, reasoning_effort, top, folds, last_used: client.generation, owned, command });
-                            client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
+                            client.handle = attached.handle;
+                            client.switch_session_draft(attached.header);
                             if setup_was_active {client.state.notice(format!("Session changed. {}",setup.notice()));}
-                            if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.state.reasoning_effort = saved.reasoning_effort; client.state.top = saved.top; client.state.folds = saved.folds; client.owned = saved.owned; client.command = saved.command; }
                             client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = attached.live_page.map(live_window);
                             client.state.active = client.inspection.as_ref().is_some_and(|snapshot| snapshot.active_turn_id.is_some()); client.state.live_turn = client.inspection.as_ref().and_then(|snapshot| snapshot.active_turn_id.clone());
                             client.history.loading = false; client.inspecting = false; client.metrics_loading = false; client.history.pages = 0; client.history.bytes = 0; client.history.backfill = true;

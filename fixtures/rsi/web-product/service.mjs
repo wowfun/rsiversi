@@ -120,7 +120,7 @@ export async function startService({ binary, assets, report, configure, onReques
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
   const env = { ...inherited, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
-  const run = args => boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000 });
+  const run = (args, {input} = {}) => boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000, input });
   // Only the explicitly invoked live fixture supplies this value. Default tests
   // remain keyless even when the developer's process has a real provider key.
   if (deepseekKey !== undefined) {

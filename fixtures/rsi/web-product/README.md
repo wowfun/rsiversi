@@ -9,7 +9,9 @@ This does not replay a control action or accept a connected but obscured button.
 It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
-CI retains reports under `RSI_WEB_REPORT` and fails artifact upload if none exist.
+CI retains reports under `RSI_WEB_REPORT`, command logs and explicit step outcomes.
+A successful product step must produce `results.json` with passing Chromium and
+Firefox results; skipped steps remain visibly skipped.
 Recovery and task probes write `binary.json` with the frozen executable's SHA-256
 before starting the scenario. CI excludes their executable copies while retaining
 hashes, screenshots, action receipts, logs, assets and durable diagnostic data.

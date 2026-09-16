@@ -16,6 +16,8 @@ rsi-conversation = { path = "../conversation" }
 rsi-session-protocol = { path = "../session-protocol" }
 rsi-session-files = { path = "../session-files" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-files-tools = { path = "../../rsi-files/tools" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true

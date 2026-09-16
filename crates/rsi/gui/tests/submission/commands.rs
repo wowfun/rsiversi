@@ -52,6 +52,7 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
         "plan"
     );
     let generation = generation.as_str().unwrap();
+    assert_commands_survive_unavailable_skills(&app, generation).await;
     let prepared = prepare(&app, generation, "/plan on", vec![], false).await;
     assert_eq!(prepared["kind"], "command");
     assert!(backend.commands.lock().unwrap().is_empty());
@@ -97,4 +98,20 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
     assert_eq!(backend.commands.lock().unwrap().len(), 1);
     assert!(backend.requests.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
+}
+
+async fn assert_commands_survive_unavailable_skills(
+    app: &Arc<rsi_gui::GuiApplication>,
+    generation: &str,
+) {
+    app.command(&json!({"action":"completions","pane":"main","generation":generation,"query":"pl","sequence":"1","refresh":true}).to_string()).await.unwrap();
+    let completion = view(app)["surfaces"]["main"]["completions"].clone();
+    assert_eq!(completion["entries"][0]["replacement"], "/plan");
+    assert!(
+        completion["notice"]
+            .as_str()
+            .unwrap()
+            .starts_with("Skills unavailable:"),
+        "commands remain usable when skill discovery fails"
+    );
 }

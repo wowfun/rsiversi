@@ -67,7 +67,9 @@ with byte offsets into the original command string. The 512 KiB text bound still
 no whole resident transcript or business action reference enters the scene.
 The scene rejects a question index outside its request and invalid UTF-8 cursor
 windows before rendering. Editor text and cursor mutate only through editor
-operations; consumers receive read-only accessors.
+operations; consumers receive read-only accessors. Completion replaces one
+validated grapheme-aligned range atomically, preserves the suffix, and places the
+cursor after the inserted text. Undo restores both the original text and cursor.
 The 128 KiB UI model names this source; large text is outside model JSON. The
 renderer returns a complete binary cell frame and exact source map, never ANSI
 commands. The resident writer validates dimensions, symbols, styles, source

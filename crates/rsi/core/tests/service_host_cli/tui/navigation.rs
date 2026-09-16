@@ -321,7 +321,8 @@ async fn footer_selection_shows_declared_default_and_explicit_effort_without_not
         assert_eq!(requests[0]["reasoning_effort"], "high");
         assert_eq!(requests[1]["reasoning_effort"], "low");
         let output = terminal.output.lock().unwrap();
-        let output = String::from_utf8_lossy(&output);
+        let bytes = output.complete();
+        let output = String::from_utf8_lossy(&bytes);
         for removed in [
             "Describe a change",
             "Model and effort selected",
@@ -504,7 +505,7 @@ async fn transcript_metadata_and_thinking_mouse_clicks_have_source_grounded_disp
         terminal.finish().await;
         assert_eq!(requests.lock().unwrap().len(), 2);
         assert!(
-            !String::from_utf8_lossy(&terminal.output.lock().unwrap())
+            !String::from_utf8_lossy(&terminal.output.lock().unwrap().complete())
                 .contains("Beginning of retained history")
         );
         if remote {

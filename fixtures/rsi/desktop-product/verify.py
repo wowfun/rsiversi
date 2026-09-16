@@ -171,8 +171,18 @@ try:
         call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
         until(lambda: script('return arguments[0].value', [item]) == value)
     def button(text):
-        item = until(lambda: script(r'return [...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0]&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text]))
-        call('POST', root + f'/element/{eid(item)}/click', {})
+        def attempt():
+            item = script(r'return [...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0]&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
+            if item is None: return False
+            try:
+                call('POST', root + f'/element/{eid(item)}/click', {})
+            except RuntimeError as error:
+                reply = error.args[0] if error.args else None
+                if isinstance(reply, dict) and reply.get('value', {}).get('error') == 'stale element reference':
+                    return False
+                raise
+            return True
+        until(attempt)
     def painted():
         script(r'window.fixturePaint=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.fixturePaint=true));return true')
         until(lambda: script(r'return window.fixturePaint'))
@@ -216,7 +226,28 @@ try:
     until(lambda: script(r'const e=document.querySelector("select[aria-label=\"Default model\"]");return e&&!e.disabled&&[...e.options].some(o=>o.textContent===arguments[0])', [model_label]))
     script(r'const e=document.querySelector("select[aria-label=\"Default model\"]"),option=[...e.options].find(o=>o.textContent===arguments[0]);if(e.disabled||!option)throw new Error("Default model is not ready");e.value=option.value;e.dispatchEvent(new Event("change",{bubbles:true}));return true', [model_label])
     until(lambda: script(r'return document.body.textContent.includes("default_model · confirmed")&&!document.querySelector("select[aria-label=\"Default model\"]").disabled'))
-    screenshot('setup.png'); button('Close settings'); click('#workspaces .nav-item')
+    screenshot('setup.png')
+    button('Plugins')
+    until(lambda: script(r'return document.querySelector(".plugin-row")'))
+    revisions = script(r'return document.querySelector(".plugin-revisions").textContent')
+    assert 'Desired ' in revisions and 'Observed ' in revisions, revisions
+    button('Refresh plugin status')
+    until(lambda: script(r'return document.querySelector(".plugin-row")'))
+    button('Read MCP status')
+    until(lambda: script(r'return document.querySelector("[aria-label=\"MCP connections\"]").textContent.includes("MCP catalog verified.")'))
+    summary = script(r'return document.querySelector("[aria-label=\"Web retrieval\"] summary")')
+    call('POST', root + f'/element/{eid(summary)}/click', {})
+    button('Read Exa credential status')
+    until(lambda: script(r'return !document.querySelector("[aria-label=\"Web retrieval\"] input[type=password]").disabled'))
+    script(r'document.querySelector("[aria-label=\"Web retrieval\"]").scrollIntoView({block:"center"});return true')
+    screenshot('plugins-retrieval.png')
+    button('Web retrieval settings')
+    flags = until(lambda: script(r'return [...document.querySelectorAll("input[type=checkbox]")].filter(e=>e.getAttribute("aria-label")?.startsWith("Settings / web_")).map(e=>({label:e.getAttribute("aria-label"),checked:e.checked}))'))
+    assert len(flags) == 2 and all(not flag['checked'] for flag in flags), flags
+    screenshot('retrieval-settings.png')
+    button('Close details')
+    (args.report / 'plugins.json').write_text(json.dumps({'status':'passed','revisions':revisions,'retrievalDefaultFlags':flags,'exaStatusRead':True}, indent=2))
+    button('Close settings'); click('#workspaces .nav-item')
     until(lambda: script(r'return document.querySelector("textarea[aria-label=\"Main message\"]")'))
     if secret: button('Trajectory')
     prompt = 'This is an isolated desktop integration test. Use the available bash tool to write the UTF-8 line "rsi-live-ok" to milestone.txt in the current workspace, then use bash to read it back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.' if secret else '桌面首次对话：请确认收到。'

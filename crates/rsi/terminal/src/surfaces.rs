@@ -214,6 +214,7 @@ impl TerminalSurfaces {
             .ok_or_else(|| error("terminal observation sink is unavailable"))?;
         let ui_target = surface.lookup_local::<rsi_ui::UiTargetContract>();
         Ok(Observer {
+            files: surface.lookup_local::<rsi_session_files_ui::FilesBrowserContract>(),
             ui_target,
             surface,
             controller,
@@ -236,6 +237,9 @@ impl TerminalSurfaces {
 
 #[derive(Debug)]
 pub(crate) struct Observer {
+    pub files: Option<
+        Arc<<rsi_session_files_ui::FilesBrowserContract as rsi_meta::LocalContract>::Service>,
+    >,
     surface: Surface,
     pub controller: Arc<SessionController>,
     pub ui_target: Option<Arc<rsi_ui::UiTarget>>,

@@ -38,8 +38,10 @@ pub(super) enum Command {
     Models,
     Effort,
     Help,
+    Plugins,
     New,
     Resume(Option<SessionId>),
+    Reference(Option<SessionId>),
     Quit,
     Invalid,
 }
@@ -49,12 +51,17 @@ pub(super) fn command(text: &str) -> Option<Command> {
     }
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
+        ["/plugins"] => Some(Command::Plugins),
         ["/help"] => Some(Command::Help),
         ["/new"] => Some(Command::New),
         ["/quit" | "/exit"] => Some(Command::Quit),
         ["/resume"] => Some(Command::Resume(None)),
         ["/resume", id] => {
             Some(SessionId::new(*id).map_or(Command::Invalid, |id| Command::Resume(Some(id))))
+        }
+        ["/reference"] => Some(Command::Reference(None)),
+        ["/reference", id] => {
+            Some(SessionId::new(*id).map_or(Command::Invalid, |id| Command::Reference(Some(id))))
         }
         ["/model"] => Some(Command::Models),
         ["/effort"] => Some(Command::Effort),
@@ -66,7 +73,8 @@ pub(super) fn command(text: &str) -> Option<Command> {
             _ => Command::Invalid,
         }),
         [
-            "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume",
+            "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume"
+            | "/reference" | "/plugins",
             ..,
         ] => Some(Command::Invalid),
         _ => None,
@@ -104,10 +112,72 @@ enum Stage {
     Text(Field),
     Secret,
 }
+/// Exact supported integration credential targets; no arbitrary owner/slot input.
+#[derive(Clone, Debug)]
+pub(super) enum IntegrationCredential {
+    Mcp(rsi_configuration_api::McpCredentialTarget),
+    Exa,
+}
+impl IntegrationCredential {
+    fn title(&self) -> String {
+        match self {
+            Self::Mcp(target) => format!(
+                "MCP credential · {} · {}",
+                target.server, target.reference.slot
+            ),
+            Self::Exa => "Exa search credential".into(),
+        }
+    }
+    fn read(&self) -> rsi_workbench_ui::PluginsCommand {
+        match self {
+            Self::Mcp(target) => rsi_workbench_ui::PluginsCommand::McpCredentialStatus {
+                target: target.clone(),
+            },
+            Self::Exa => rsi_workbench_ui::PluginsCommand::ExaStatus,
+        }
+    }
+    fn write(self, secret: SecretValue) -> rsi_workbench_ui::PluginsCommand {
+        match self {
+            Self::Mcp(target) => {
+                rsi_workbench_ui::PluginsCommand::McpCredentialSet { target, secret }
+            }
+            Self::Exa => rsi_workbench_ui::PluginsCommand::ExaSet { secret },
+        }
+    }
+    fn observed(&self, view: &rsi_workbench_ui::PluginsView) -> Option<CredentialStatus> {
+        match self {
+            Self::Mcp(target) => view
+                .mcp_credential
+                .as_ref()
+                .filter(|status| status.target == *target)
+                .map(|status| CredentialStatus {
+                    availability: status.availability.clone(),
+                    editable: status.editable,
+                    store_path: None,
+                }),
+            Self::Exa => view.exa_credential.as_ref().map(|status| CredentialStatus {
+                availability: status.availability.clone(),
+                editable: status.editable,
+                store_path: None,
+            }),
+        }
+    }
+    fn saved(&self) -> &'static str {
+        match self {
+            Self::Mcp(_) => {
+                "Credential saved. Close this screen and refresh the MCP connection to verify access."
+            }
+            Self::Exa => {
+                "Exa credential saved. No search was submitted. Enable web_search separately for new conversations."
+            }
+        }
+    }
+}
 enum Update {
     Open(Command, Vec<ModelRef>),
     Credential,
     CredentialStatus,
+    IntegrationCredential(Option<CredentialStatus>, bool),
     Discovered(Vec<DiscoveredModel>),
     Saved(ModelRef),
     Efforts(ModelRef, rsi_ai_protocol::LanguageProfile),
@@ -131,6 +201,7 @@ pub(super) struct Ui {
     declare_effort: bool,
     feature: Option<Arc<SetupFeature>>,
     catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
+    integration: Option<(IntegrationCredential, Arc<rsi_workbench_ui::PluginsFeature>)>,
     pub active: bool,
     attached: bool,
     stage: Stage,
@@ -166,6 +237,7 @@ impl Ui {
             declare_effort: false,
             feature,
             catalog,
+            integration: None,
             active: false,
             attached: false,
             stage: Stage::Menu(vec![]),
@@ -192,6 +264,63 @@ impl Ui {
             chosen: None,
         }
     }
+    pub(super) fn open_integration(
+        &mut self,
+        target: IntegrationCredential,
+        feature: Arc<rsi_workbench_ui::PluginsFeature>,
+    ) {
+        if self.pending.is_some() && self.mutation {
+            self.active = true;
+            self.status = "Waiting for the current credential result".into();
+            return;
+        }
+        self.pending = None;
+        self.secret.zeroize();
+        self.editor = Editor::default();
+        self.back.clear();
+        self.definition = None;
+        self.candidate = None;
+        self.active = true;
+        self.attached = true;
+        self.followup = true;
+        self.mutation = false;
+        self.composer_prefix = None;
+        self.view = SetupView::default();
+        self.title = target.title();
+        self.status = "Reading current credential status…".into();
+        self.stage = Stage::Secret;
+        self.credential = None;
+        self.integration = Some((target.clone(), feature.clone()));
+        self.pending = Some(Box::pin(async move {
+            feature.command(target.read()).await?;
+            Ok(Update::IntegrationCredential(
+                target.observed(&feature.snapshot()),
+                false,
+            ))
+        }));
+    }
+    fn submit_integration_secret(&mut self) -> Outcome<()> {
+        let (target, feature) = self
+            .integration
+            .clone()
+            .ok_or("Integration credential screen is unavailable")?;
+        if !self
+            .credential
+            .as_ref()
+            .is_some_and(|status| status.editable)
+        {
+            return Err("Read an editable credential status before saving".into());
+        }
+        let secret = SecretValue::new(std::mem::take(&mut *self.secret))
+            .map_err(|_| "Enter a nonempty API key within 64 KiB".to_owned())?;
+        self.pending = Some(Box::pin(async move {
+            feature.command(target.write(secret)).await?;
+            Ok(Update::IntegrationCredential(None, true))
+        }));
+        self.mutation = true;
+        self.status = "Saving credential…".into();
+        Ok(())
+    }
     pub fn open_effort(&mut self, selection: rsi_agent_session_protocol::ModelSelection) {
         self.open(Command::Effort, true);
         if !self.mutation {
@@ -206,6 +335,7 @@ impl Ui {
             return;
         }
         self.pending = None;
+        self.integration = None;
         self.effort_selection = None;
         self.composer_prefix = match command {
             Command::Models => Some("/model ".into()),
@@ -258,6 +388,26 @@ impl Ui {
         };
         self.pending = None;
         let was_mutation = std::mem::take(&mut self.mutation);
+        if let Some((target, _)) = &self.integration {
+            self.status = match result {
+                Ok(Update::IntegrationCredential(status, saved)) => {
+                    self.credential = status;
+                    if saved {
+                        target.saved().into()
+                    } else {
+                        "Enter a key and press Enter to save. Esc returns to Plugins.".into()
+                    }
+                }
+                Err(problem) => {
+                    self.credential = None;
+                    format!(
+                        "Credential: {problem}. Close and reopen this screen to reconcile before another write."
+                    )
+                }
+                _ => "Credential response changed; close and reopen this screen".into(),
+            };
+            return;
+        }
         if let Some(feature) = &self.feature {
             self.view = feature.snapshot();
         }
@@ -283,6 +433,9 @@ impl Ui {
             return;
         }
         match result {
+            Ok(Update::IntegrationCredential(_, _)) => {
+                self.status = "Integration credential screen is no longer active".into();
+            }
             Err(problem) => {
                 let composer_prefix = self.composer_prefix.clone();
                 if was_mutation {
@@ -943,6 +1096,10 @@ impl Ui {
         self.active = false;
     }
     fn back(&mut self) {
+        if self.integration.is_some() {
+            self.close();
+            return;
+        }
         if self.mutation && self.pending.is_some() {
             self.close();
             return;
@@ -1099,6 +1256,9 @@ impl Ui {
         }
     }
     fn submit_secret(&mut self) -> Outcome<()> {
+        if self.integration.is_some() {
+            return self.submit_integration_secret();
+        }
         if self.credential.as_ref().is_some_and(|status| {
             matches!(
                 status.availability,
@@ -1141,6 +1301,14 @@ impl Ui {
         Ok(())
     }
     fn secret_insert(&mut self, value: &str) -> Outcome<()> {
+        if self.integration.is_some()
+            && !self
+                .credential
+                .as_ref()
+                .is_some_and(|status| status.editable)
+        {
+            return Err("Read an editable credential status before entering a key".into());
+        }
         if self
             .credential
             .as_ref()
@@ -1306,6 +1474,32 @@ impl Ui {
         } else {
             credential
         };
+        let credential = if self.integration.is_some() {
+            match &self.credential {
+                Some(status) if status.editable => format!(
+                    "{} · enter a nonempty key to save; tool settings are separate",
+                    if matches!(
+                        status.availability,
+                        CredentialAvailability::Configured { .. }
+                    ) {
+                        "Credential configured"
+                    } else {
+                        "Credential missing"
+                    }
+                ),
+                Some(_) => {
+                    "Credential is read only or unavailable; close and reopen to refresh status"
+                        .into()
+                }
+                None if self.pending.is_some() => {
+                    "Reading or saving the selected credential…".into()
+                }
+                None => "Credential status needs an explicit refresh; close and reopen this screen"
+                    .into(),
+            }
+        } else {
+            credential
+        };
         let receipts = self
             .view
             .receipts
@@ -1364,6 +1558,9 @@ impl Ui {
             }),
             receipts,
             hint: match self.stage {
+                Stage::Secret if self.integration.is_some() => {
+                    "Enter save · Esc returns to Plugins · Ctrl+C close"
+                }
                 Stage::Secret
                     if self.credential.as_ref().is_some_and(|status| {
                         matches!(

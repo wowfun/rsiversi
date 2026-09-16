@@ -11,9 +11,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, watch};
 use tokio_util::task::TaskTracker;
 mod navigation;
+mod plugins;
 mod setup;
 pub use navigation::{
     NavigationCommand, NavigationFeature, NavigationFeatureContract, NavigationFeatureFactory,
+};
+pub use plugins::{
+    PluginsCommand, PluginsFeature, PluginsFeatureContract, PluginsFeatureFactory, PluginsView,
 };
 pub use setup::{
     CredentialView, Receipt, SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory,
@@ -139,12 +143,14 @@ pub fn register(
     entries: &mut Vec<rsi_host::ProfileEntry>,
 ) -> rsi_host::Result<()> {
     builder.register_local_contract::<SetupFeatureContract>()?;
+    builder.register_local_contract::<PluginsFeatureContract>()?;
     builder.register_local_contract::<NavigationFeatureContract>()?;
     for (name, factory) in [
         (
             "rsi.workbench.setup",
             Arc::new(SetupFeatureFactory) as Arc<dyn PluginFactory>,
         ),
+        ("rsi.workbench.plugins", Arc::new(PluginsFeatureFactory)),
         (
             "rsi.workbench.navigation",
             Arc::new(NavigationFeatureFactory),

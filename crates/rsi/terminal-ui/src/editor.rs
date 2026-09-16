@@ -80,6 +80,41 @@ impl Editor {
         Ok(())
     }
 
+    pub fn replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        text: &str,
+    ) -> Result<(), &'static str> {
+        let boundary = |position| {
+            position == self.text.len()
+                || self
+                    .text
+                    .grapheme_indices(true)
+                    .any(|(index, _)| index == position)
+        };
+        if range.start > range.end
+            || range.end > self.text.len()
+            || !boundary(range.start)
+            || !boundary(range.end)
+        {
+            return Err("Completion range is not aligned with the input");
+        }
+        if text.contains(['\0', '\u{7f}']) {
+            return Err("Input contains NUL or DEL; nothing was inserted");
+        }
+        if self
+            .text
+            .len()
+            .saturating_sub(range.len())
+            .saturating_add(text.len())
+            > self.limit.min(MAX_TEXT).min(self.retention_limit)
+        {
+            return Err("Input exceeds its size limit; nothing was inserted");
+        }
+        self.replace(range, text);
+        Ok(())
+    }
+
     fn replace(&mut self, range: std::ops::Range<usize>, value: &str) {
         if self.text[range.clone()] == *value {
             return;
@@ -233,6 +268,38 @@ mod tests {
         let mut key: KeyEvent = KeyCode::Char(code).into();
         key.modifiers = modifiers;
         key
+    }
+
+    #[test]
+    fn completion_is_atomic_preserves_suffix_and_restores_cursor_on_undo() {
+        let mut editor = Editor::with_text("/rev 参数 e\u{301}".into(), 1024);
+        editor.cursor = 3;
+        editor.replace_range(0..4, "/review").unwrap();
+        assert_eq!(editor.text(), "/review 参数 e\u{301}");
+        assert_eq!(editor.cursor(), 7);
+        editor.key(shortcut('z', Modifiers::CONTROL)).unwrap();
+        assert_eq!(editor.text(), "/rev 参数 e\u{301}");
+        assert_eq!(editor.cursor(), 3);
+        let original = editor.text().to_owned();
+        assert!(
+            editor
+                .replace_range(editor.text().len() - 2..editor.text().len(), "x")
+                .is_err(),
+            "cannot split a combining grapheme"
+        );
+        assert!(editor.replace_range(0..4, &"x".repeat(1024)).is_err());
+        assert!(
+            editor
+                .replace_range(
+                    std::ops::Range {
+                        start: usize::MAX,
+                        end: 0
+                    },
+                    ""
+                )
+                .is_err()
+        );
+        assert_eq!(editor.text(), original);
     }
 
     #[test]

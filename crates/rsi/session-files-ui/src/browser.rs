@@ -16,6 +16,8 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+#[path = "picker.rs"]
+pub(crate) mod picker;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Opened {
@@ -156,6 +158,21 @@ impl Browser {
                 self.open(path, kind).await?;
             }
             Operation::Open { path, kind } => self.open(path, kind).await?,
+            Operation::Presented { entry } => {
+                entry.validate()?;
+                let intent = self
+                    .session
+                    .history_before(entry.intent.seq.checked_add(1), 1)
+                    .await
+                    .map_err(|error| UiError::Action(error.to_string()))?;
+                let result = self
+                    .session
+                    .history_before(entry.result.seq.checked_add(1), 1)
+                    .await
+                    .map_err(|error| UiError::Action(error.to_string()))?;
+                let path = crate::presented::resolve(&entry, &intent.facts, &result.facts)?;
+                self.open(path, FileKind::File).await?;
+            }
             Operation::Page { offset, hex } => return self.page(offset, hex, revision).await,
             Operation::Refresh => {
                 let file = self
@@ -175,7 +192,7 @@ impl Browser {
         }
         self.page(0, false, revision).await
     }
-    async fn invoke(&self, target: ActionTarget, input: ActionInput) -> Result<UiView> {
+    pub(crate) async fn invoke(&self, target: ActionTarget, input: ActionInput) -> Result<UiView> {
         if input.fields.len() > 1
             || input
                 .fields
@@ -262,6 +279,9 @@ pub(crate) enum Operation {
         path: RelativePath,
         #[serde(rename = "file_kind")]
         kind: FileKind,
+    },
+    Presented {
+        entry: crate::presented::Entry,
     },
     Page {
         #[serde(with = "decimal_offset")]

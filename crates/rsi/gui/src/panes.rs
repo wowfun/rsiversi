@@ -1,9 +1,13 @@
+#[path = "file_input.rs"]
+mod file_input;
 #[path = "images.rs"]
 pub(crate) mod images;
 #[path = "inline.rs"]
 mod inline;
 #[path = "model_selection.rs"]
 mod model_selection;
+#[path = "reference_input.rs"]
+mod reference_input;
 #[path = "remote_ui.rs"]
 mod remote_ui;
 #[path = "source_details.rs"]
@@ -65,6 +69,14 @@ impl SubmissionState {
 
 #[derive(Debug)]
 struct Attachment {
+    files: Option<
+        Arc<<rsi_session_files_ui::FilesBrowserContract as rsi_meta::LocalContract>::Service>,
+    >,
+    file_read: Mutex<tokio_util::sync::CancellationToken>,
+    completion_catalog: tokio::sync::Mutex<Option<(Vec<rsi_client::InputCompletion>, String)>>,
+    completion_sequence: std::sync::atomic::AtomicU64,
+    completions: Mutex<Option<serde_json::Value>>,
+    resource: Mutex<ResourcePreview>,
     inline: Mutex<BTreeMap<String, Arc<inline::InlineCard>>>,
     inline_work: tokio::sync::Mutex<u64>,
     commands: Mutex<Option<rsi_agent_session_protocol::SessionCommandsView>>,
@@ -85,8 +97,48 @@ struct Attachment {
     durable: std::sync::atomic::AtomicBool,
     history_work: tokio::sync::Semaphore,
 }
+#[derive(Debug, Default)]
+struct ResourcePreview {
+    revision: u64,
+    cancellation: tokio_util::sync::CancellationToken,
+    value: Option<rsi_session_protocol::ResourceSnapshot>,
+}
+impl ResourcePreview {
+    fn finish(
+        &mut self,
+        revision: u64,
+        value: rsi_session_protocol::ResourceSnapshot,
+    ) -> Result<()> {
+        if self.revision == revision {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or("Resource preview capacity exhausted")?;
+            self.value = Some(value);
+        }
+        Ok(())
+    }
+    fn clear(&mut self) -> Result<u64> {
+        self.cancellation.cancel();
+        self.value = None;
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("Resource preview capacity exhausted")?;
+        self.cancellation = tokio_util::sync::CancellationToken::new();
+        Ok(self.revision)
+    }
+}
 impl Attachment {
     async fn close(&self) -> Result<()> {
+        self.file_read
+            .lock()
+            .expect("File picker cancellation poisoned")
+            .cancel();
+        self.resource
+            .lock()
+            .expect("GUI resource poisoned")
+            .clear()?;
         let cards = std::mem::take(&mut *self.inline.lock().expect("inline cards poisoned"));
         for card in cards.values() {
             card.stop.cancel();
@@ -197,6 +249,10 @@ impl Pane {
             .as_ref()
             .filter(|description| description.model() == &selection.model)
             .map(rsi_ai_protocol::LanguageModelDescription::profile);
+        let (resource_revision, resource) = {
+            let preview = current.resource.lock().expect("GUI resource poisoned");
+            (preview.revision.to_string(), preview.value.clone())
+        };
         let metadata = serde_json::json!({
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
@@ -204,6 +260,8 @@ impl Pane {
             "ui_cards": ui.has_block_renderers(&current.ui_target),
             "ui_revision": ui.membership_changes().borrow().to_string(),
             "commands":*current.commands.lock().expect("Web commands poisoned"),
+            "completions":*current.completions.lock().expect("GUI completions poisoned"),
+            "resource":resource, "resource_revision":resource_revision,
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
             "header":current.header, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
@@ -297,6 +355,74 @@ impl GuiApplication {
                 let attached = self.pane(pane)?.attachment(&generation)?;
                 let commands = attached.controller.commands().await.map_err(error)?;
                 *attached.commands.lock().expect("Web commands poisoned") = Some(commands);
+                Ok(())
+            }
+            Command::Completions {
+                pane,
+                generation,
+                query,
+                sequence,
+                refresh,
+            } => {
+                if query.len() > 256 {
+                    return Err("Completion query exceeds its limit".into());
+                }
+                let sequence_value: u64 = sequence
+                    .parse()
+                    .map_err(|_| "Invalid completion sequence")?;
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                attached
+                    .completion_sequence
+                    .fetch_max(sequence_value, std::sync::atomic::Ordering::AcqRel);
+                let mut catalog = attached.completion_catalog.lock().await;
+                if refresh || catalog.is_none() {
+                    let (entries, notice) = attached
+                        .controller
+                        .completion_catalog(&[])
+                        .await
+                        .map_err(error)?;
+                    *catalog = Some((entries, notice));
+                }
+                let (entries, notice) = catalog.as_ref().expect("loaded completion catalog");
+                if attached
+                    .completion_sequence
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == sequence_value
+                {
+                    *attached
+                        .completions
+                        .lock()
+                        .expect("GUI completions poisoned") = Some(
+                        serde_json::json!({"query":query,"sequence":sequence,"entries":rsi_client::rank_completions(entries, &query),"notice":notice}),
+                    );
+                }
+                Ok(())
+            }
+            Command::ResourceRead {
+                pane,
+                generation,
+                request,
+            } => {
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                let (revision, stop) = {
+                    let mut preview = attached.resource.lock().expect("GUI resource poisoned");
+                    let revision = preview.clear()?;
+                    (revision, preview.cancellation.clone())
+                };
+                let resource = tokio::select! { biased;
+                    () = stop.cancelled() => return Ok(()),
+                    result = attached.controller.read_resource(request) => result.map_err(error)?,
+                };
+                let mut preview = attached.resource.lock().expect("GUI resource poisoned");
+                preview.finish(revision, resource)
+            }
+            Command::ResourceClose { pane, generation } => {
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                attached
+                    .resource
+                    .lock()
+                    .expect("GUI resource poisoned")
+                    .clear()?;
                 Ok(())
             }
             Command::Open { pane, session } => self.open(pane, session, None).await,
@@ -545,10 +671,16 @@ impl GuiApplication {
             .ok_or("Surface UI target is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            files: surface.lookup_local::<rsi_session_files_ui::FilesBrowserContract>(),
+            file_read: Mutex::new(tokio_util::sync::CancellationToken::new()),
             inline: Mutex::new(BTreeMap::new()),
             inline_work: tokio::sync::Mutex::new(0),
             ui_target,
             commands: Mutex::new(None),
+            completion_catalog: tokio::sync::Mutex::new(None),
+            completion_sequence: std::sync::atomic::AtomicU64::new(0),
+            completions: Mutex::new(None),
+            resource: Mutex::new(ResourcePreview::default()),
             generation,
             id,
             path: header.canonical_cwd().into(),
@@ -808,6 +940,34 @@ impl GuiApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resource_completion_advances_revision_and_cannot_reopen_a_closed_preview() {
+        let value = rsi_session_protocol::ResourceRetention::default()
+            .reserve()
+            .unwrap()
+            .retain(rsi_agent_session_protocol::SessionResourceResponse {
+                session_id: SessionId::new("preview").unwrap(),
+                header_sha256: "a".repeat(64),
+                composition_sha256: "b".repeat(64),
+                request: rsi_agent_session_protocol::SessionResourceRequest::Sources,
+                value: rsi_agent_session_protocol::SessionResourceValue::Sources {
+                    sources: Vec::new(),
+                },
+            })
+            .unwrap();
+        let mut preview = ResourcePreview::default();
+        let first = preview.clear().unwrap();
+        let second = preview.clear().unwrap();
+        preview.finish(first, value.clone()).unwrap();
+        assert!(preview.value.is_none());
+        preview.finish(second, value.clone()).unwrap();
+        assert!(preview.revision > second);
+        assert!(preview.value.is_some());
+        let closed = preview.clear().unwrap();
+        preview.finish(second, value).unwrap();
+        assert_eq!(preview.revision, closed);
+        assert!(preview.value.is_none());
+    }
     #[tokio::test]
     async fn failed_cleanup_releases_the_surface_only_after_its_owner_finishes() {
         let id = crate::SurfaceId::MAIN;

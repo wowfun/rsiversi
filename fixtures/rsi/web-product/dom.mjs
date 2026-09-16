@@ -20,6 +20,8 @@ export async function verifyDom(browser, root, report, name) {
     // Classic exposure is confined to this document-only fixture; production uses ESM.
     await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/mounts.js"), "utf8")).replace("export class MountTable", "class MountTable")} globalThis.MountTable = MountTable; })();` });
     await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/drafts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export function ", "function ")} Object.assign(globalThis, {DraftStore, DraftEditor, validateEditor}); })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/settings-form.js"), "utf8")).replaceAll("export function ", "function ")} Object.assign(globalThis, {settingsForm, canUseSettingsForm}); })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/file-picker.js"), "utf8")).replace("export function ", "function ")} globalThis.openFilePicker = openFilePicker; })();` });
     await page.addScriptTag({ content: 'function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "plugins/rsi/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     await page.evaluate(async () => {
       mounts = await MountTable.open();
@@ -31,6 +33,87 @@ export async function verifyDom(browser, root, report, name) {
         pane.render = (data, models) => render(data ? { header: "c".repeat(64), creation: null, ...data } : data, models);
       }
     });
+    await page.evaluate(() => renderDetail({settings:{ticket:"numeric-switch", namespace:"fixture.numbers", text:'{"limit":2}', description:{writable:true, defaults:{limit:2}, metadata:{description:"Exact numeric input", applies:"live", sensitive_fields:[], schema:{type:"object", properties:{limit:{type:"number"}}, required:["limit"]}}}}}));
+    await page.getByLabel("Settings / limit", {exact:true}).fill("1.0000000000000001");
+    await page.getByRole("button", {name:"Save settings", exact:true}).click();
+    await page.locator(".settings-field-error").filter({hasText:"exact number representation"}).waitFor();
+    await page.getByRole("button", {name:"Edit as JSON", exact:true}).click();
+    assert.equal(await page.locator(".settings-field-error").innerText(), "");
+    await page.getByLabel("Settings JSON", {exact:true}).waitFor({state:"visible", timeout:2000});
+    assert.match(await page.getByLabel("Settings JSON", {exact:true}).inputValue(), /1\.0000000000000001/);
+    await page.screenshot({path:join(report, `${name}-settings-exact-json.png`)});
+    await page.evaluate(() => {document.querySelector("#detail").close(); dialogKey=undefined;});
+    const completionIdentity = await page.evaluate(() => {
+      const pane=panes.get("main");
+      pane.generation="completion-proof";
+      pane.completionState={generation:pane.generation,sequence:"1",query:"he",text:"/he",cursor:3,selected:0};
+      const data={completions:{sequence:"1",query:"he",entries:[{replacement:"/help",description:"Help",group:"command"}],notice:""}};
+      pane.renderCompletions(data);
+      const option=pane.completionPanel.querySelector(".completion-option"),refresh=[...pane.completionPanel.querySelectorAll("button")].at(-1);
+      for(let i=0;i<40;i++)pane.renderCompletions(structuredClone(data));
+      const retained=option===pane.completionPanel.querySelector(".completion-option") && refresh===[...pane.completionPanel.querySelectorAll("button")].at(-1);
+      pane.completionFailure="Request failed";pane.renderCompletions(data);
+      const errorUpdates=option!==pane.completionPanel.querySelector(".completion-option");
+      pane.closeCompletions();pane.completionState={generation:pane.generation,sequence:"1",query:"he",text:"/he",cursor:3,selected:0};pane.renderCompletions(data);
+      const reopened=!pane.completionPanel.hidden;pane.closeCompletions();pane.generation=undefined;
+      return {retained,errorUpdates,reopened};
+    });
+    assert.deepEqual(completionIdentity,{retained:true,errorUpdates:true,reopened:true});
+    const resourceIdentity = await page.evaluate(() => {
+      const pane = panes.get("main");
+      const original = JSON.stringify;
+      let deepComparisons = 0;
+      JSON.stringify = function(value, ...rest) {
+        if (Array.isArray(value) && value.length === 2 && (value[1]?.value?.kind === "read" || Array.isArray(value[1]))) deepComparisons++;
+        return original.call(this, value, ...rest);
+      };
+      try {
+        const data = { generation: "preview", resource_revision: "1", resource: { value: { kind: "read", resource: { name: "Review guide", source: "Fixture" }, text: "预览正文\n".repeat(20000) } } };
+        pane.renderResourcePreview(data);
+        const preview = pane.resourcePreview.lastElementChild;
+        for (let i = 0; i < 40; i++) pane.renderResourcePreview({ ...data, resource: { ...data.resource } });
+        const retained = preview === pane.resourcePreview.lastElementChild;
+        pane.renderResourcePreview({ ...data, resource_revision: "2", resource: { value: { ...data.resource.value, text: "replacement" } } });
+        const replaced = preview !== pane.resourcePreview.lastElementChild && pane.resourcePreview.textContent.includes("replacement");
+        pane.renderResourcePreview({ ...data, resource_revision: "3", resource: null });
+        const closed = pane.resourcePreview.hidden && !pane.resourcePreview.children.length;
+        const saved = pane.editor;
+        pane.editor = { referencesRevision: 1, references: [{ snapshot: { sha256: "a".repeat(64) }, metadata: { source: { session_id: "source" }, through_seq: "1", omissions: [] } }] };
+        pane.renderReferences();
+        const row = pane.referenceList.firstElementChild;
+        for (let i = 0; i < 40; i++) pane.renderReferences();
+        const referencesRetained = row === pane.referenceList.firstElementChild;
+        pane.editor.references = []; pane.editor.referencesRevision++;
+        pane.renderReferences();
+        const referencesClosed = pane.referenceList.hidden && !pane.referenceList.children.length;
+        pane.editor = saved;
+        return { retained, replaced, closed, referencesRetained, referencesClosed, deepComparisons };
+      } finally { JSON.stringify = original; }
+    });
+    assert.deepEqual(resourceIdentity, { retained: true, replaced: true, closed: true, referencesRetained: true, referencesClosed: true, deepComparisons: 0 });
+    await writeFile(join(report, `${name}-resource-identity.json`), JSON.stringify(resourceIdentity));
+    const resetClosesReference = await page.evaluate(() => {
+      const pane = panes.get("main");
+      pane.generation = "reset-proof";
+      pane.editor = { references: [], text: "retained input", images: [] };
+      pane.showReferencePicker();
+      const dialog = pane.referenceDialog;
+      pane.reset();
+      return !dialog.open;
+    });
+    assert.equal(resetClosesReference, true, "Session retirement must close the reference dialog");
+    const filePickerErrors=[];const fileError=error=>filePickerErrors.push(error.message);page.on("pageerror",fileError);
+    await page.evaluate(() => {
+      const pane=panes.get("main");pane.generation="file-error-proof";pane.editor={text:"",references:[],images:[]};pane.input.value="";
+      pane.originalReferencePicker=pane.showReferencePicker;
+      pane.showReferencePicker=()=>{throw new Error("Reference picker unavailable in fixture")};
+      openFilePicker(pane,async()=>{throw new Error("File fixture offline")},button);
+    });
+    await page.getByRole("button",{name:"Reference conversation",exact:true}).click();
+    assert.deepEqual(filePickerErrors,[],"picker actions must use the product error handler");
+    assert.match(await page.locator("#notice").textContent(),/Reference picker unavailable in fixture/);
+    page.off("pageerror",fileError);
+    await page.evaluate(()=>{const pane=panes.get("main");pane.showReferencePicker=pane.originalReferencePicker;delete pane.originalReferencePicker;pane.reset();});
     const results = await page.evaluate(() => {
       return ["approval", "question"].map(kind => {
         const data = { generation: "1", session: "retained-session", path: "/workspace", draft: "",
@@ -70,7 +153,7 @@ export async function verifyDom(browser, root, report, name) {
       let submitted;
       try {
         call = async (method, payload) => {
-          if (method === "prepare_submission") { submitted = JSON.parse(payload).text; return JSON.stringify({kind:"message",id:"message-one",opaque:payload,text_bytes:submitted.length,images:0}); }
+          if (method === "prepare_submission") { submitted = JSON.parse(payload).text; return JSON.stringify({kind:"message",id:"message-one",opaque:payload,text_bytes:submitted.length,images: 0, references: 0}); }
           return JSON.stringify({status:"complete",receipt:"{}"});
         };
         pane.render(data, []); await pane.binding;
@@ -92,7 +175,7 @@ export async function verifyDom(browser, root, report, name) {
         for (const text of ["original", "edited next draft"]) {
           pane.edit("original"); await pane.flush();
           const editor = pane.editor;
-          await editor.update(record => editor.store.freeze(record, {kind:"message",id:`retry-${text.length}`,opaque:"{}",text_bytes:8,images:0}));
+          await editor.update(record => editor.store.freeze(record, {kind:"message",id:`retry-${text.length}`,opaque:"{}",text_bytes:8,images: 0, references: 0}));
           await editor.update(record => editor.store.begin(record));
           if (text !== "original") { pane.edit(text); await pane.flush(); }
           pane.renderComposer();

@@ -1,3 +1,4 @@
+import { Plugins } from './plugins.tsx'
 import { useRef, useState } from 'react'
 import { Button } from '../vendor/dsh/primitives/Button.tsx'
 import { StateDot } from '../vendor/dsh/primitives/StateDot.tsx'
@@ -7,6 +8,7 @@ type Limits = {context_window_tokens: number; default_output_reserve_tokens: num
 type Row = {name: string; limits: Limits}
 const newRow = (): Row => ({name:'',limits:{context_window_tokens:128000,default_output_reserve_tokens:4096,max_output_reserve_tokens:16384}})
 export function Setup({close}: {close: () => void}) {
+  const [tab,setTab] = useState('models')
   const setup = useView(view => view?.setup), catalog = useView(view => view?.catalog), contributions = useView(view => view?.application_surfaces)
   const [provider,setProvider] = useState<Provider['provider']>('deepseek'), [slot,setSlot] = useState('default'), secret = useRef<HTMLInputElement>(null)
   const [deployment,setDeployment] = useState(''), [endpoint,setEndpoint] = useState('https://api.deepseek.com'), [protocol,setProtocol] = useState('responses')
@@ -35,7 +37,9 @@ export function Setup({close}: {close: () => void}) {
     await command({kind:'providers_replace',expected_revision:providers.desired_revision,deployments:next}); setEditing(undefined)
   }
   return <section className="setup-panel" aria-label="Settings">
-    <div className="setup-heading"><div><span className="eyebrow">Application settings</span><h1>Models & access</h1><p className="hint">Changes apply to new conversations. Each step saves independently.</p></div><Button onClick={close} aria-label="Close settings">×</Button></div>
+    <div className="settings-header"><div className="setup-heading"><div><span className="eyebrow">Application settings</span><h1>{tab === 'plugins' ? 'Plugins' : 'Models & access'}</h1><p className="hint">{tab === 'plugins' ? 'Current service observations. Refresh to read again.' : 'Changes apply to new conversations. Each step saves independently.'}</p></div><Button onClick={close} aria-label="Close settings">×</Button></div>
+    <nav className="settings-tabs" aria-label="Settings sections"><Button aria-pressed={tab === 'models'} onClick={() => setTab('models')}>Models & access</Button><Button aria-pressed={tab === 'plugins'} onClick={() => {setTab('plugins');act(() => input.command({action:'plugins',command:{kind:'refresh'}}))}}>Plugins</Button></nav></div>
+    {tab === 'plugins' ? <Plugins/> : <>
     {!setup?.allowed && <p className="permission-note">Configuration is read only for this connection. A service administrator can grant this device access.</p>}
     <Button disabled={busy} size="sm" onClick={() => act(() => command({kind:'refresh'}))}>Refresh setup status</Button>
     {setup?.diagnostic && <p role="alert" className="settings-error">{setup.diagnostic}</p>}
@@ -69,5 +73,6 @@ export function Setup({close}: {close: () => void}) {
     <section className="setup-receipts" aria-label="Setup receipts"><h2>Operation results</h2>{setup?.receipts.map((receipt,index)=><p key={index} data-outcome={receipt.outcome}><strong>{receipt.operation} · {receipt.outcome}</strong> — {receipt.message}</p>)}</section>
     <section className="application-extensions"><h2>Application extensions</h2>{contributions?.map(item=><Button key={JSON.stringify(item.reference)} size="sm" onClick={()=>act(()=>input.command({action:"application_ui_surface",reference:item.reference}))}>{item.title}</Button>)}</section>
     <details className="advanced-settings"><summary>Additional settings</summary><Button size="sm" onClick={()=>act(()=>input.command({action:'settings_list'}))}>Open registered settings</Button></details>
+    </>}
   </section>
 }

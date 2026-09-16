@@ -29,7 +29,9 @@ try {
   await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.getByRole('button',{name:'Check credential',exact:true}).click();
-  await page.getByText('configured · read only',{exact:true}).waitFor();
+  await page.locator('.credential-status').getByText('configured',{exact:true}).waitFor();
+  await page.waitForFunction(()=>!document.querySelector('input[aria-label="API key"]').disabled);
+  assert(await page.getByRole('button',{name:'Save credential',exact:true}).isEnabled());
   await page.getByLabel('Deployment name').fill('live-deepseek');await page.getByLabel('Provider endpoint').fill('https://api.deepseek.com');
   await page.getByLabel('DeepSeek protocol').selectOption('chat-completions');await page.getByLabel('Model identifier 1',{exact:true}).fill(process.env.RSI_LIVE_MODEL);
   await page.getByRole('button',{name:'Apply provider',exact:true}).click();await page.getByText('Desired 1 · Applied 1',{exact:true}).waitFor();

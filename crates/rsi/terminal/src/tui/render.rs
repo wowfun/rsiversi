@@ -86,7 +86,7 @@ pub(super) fn input(state: &State) -> rsi_terminal_ui::Input<'_> {
         status: if state.has_dialog() {
             &state.status
         } else {
-            ""
+            &state.reference_status
         },
         actual_model: state.actual_model.as_deref(),
         active: state.active,

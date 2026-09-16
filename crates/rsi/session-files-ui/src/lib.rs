@@ -4,16 +4,21 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod browser;
+mod presented;
 mod view;
 use async_trait::async_trait;
 use browser::Browser;
+pub use browser::picker::{FileChoice, FilePickerPage, FilePickerRequest, file_locator};
 use rsi_client::SessionControllerContract;
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_session_files::SessionFilesContract;
 use rsi_session_protocol::SessionContract;
-use rsi_ui::{ActionContribution, Contributions, SurfaceContribution, TargetKind, UiContract};
+use rsi_ui::{
+    ActionContribution, BlockRendererContribution, Contributions, SurfaceContribution, TargetKind,
+    UiContract,
+};
 use std::sync::Arc;
 
 /// UI-owned preference within the domain's file page bound.
@@ -108,12 +113,23 @@ impl PluginFactory for FilesUiFactory {
                         target: TargetKind::Surface,
                         renderer: Arc::new(view::Card),
                     }],
-                    actions: vec![ActionContribution {
-                        name: "browse".into(),
+                    actions: vec![
+                        ActionContribution {
+                            name: "browse".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(browser::Browse),
+                        },
+                        ActionContribution {
+                            name: "presented_open".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(presented::Open),
+                        },
+                    ],
+                    renderers: vec![BlockRendererContribution {
+                        name: "presented".into(),
                         target: TargetKind::Surface,
-                        handler: Arc::new(browser::Browse),
+                        renderer: Arc::new(presented::Renderer),
                     }],
-                    renderers: Vec::new(),
                 },
             )
             .map_err(meta)?;

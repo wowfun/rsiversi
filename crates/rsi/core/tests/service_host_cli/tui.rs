@@ -1,10 +1,15 @@
 use super::*;
+#[path = "tui/capture.rs"]
+mod capture;
+use capture::RawCapture;
 #[path = "tui/dialogs.rs"]
 mod dialogs;
 #[path = "tui/live.rs"]
 mod live;
 #[path = "tui/navigation.rs"]
 mod navigation;
+#[path = "tui/resources.rs"]
+mod resources;
 #[path = "tui/setup.rs"]
 mod setup;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -14,7 +19,7 @@ struct TerminalClient {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn std::io::Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    output: Arc<std::sync::Mutex<Vec<u8>>>,
+    output: Arc<std::sync::Mutex<RawCapture>>,
     reader: Option<std::thread::JoinHandle<()>>,
     screen: Arc<std::sync::Mutex<vt100::Parser>>,
     capture_name: String,
@@ -122,13 +127,34 @@ async fn fullscreen_fixed_enter_survives_session_switch_and_ctrl_s_submits() {
     }
 }
 
+type SwitchProvider = (
+    Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    tokio::sync::watch::Sender<usize>,
+);
+
+async fn switch_reply(
+    State((requests, count)): State<SwitchProvider>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> Response {
+    let index = {
+        let mut requests = requests.lock().unwrap();
+        requests.push(request);
+        requests.len()
+    };
+    count.send_replace(index);
+    let delta = serde_json::json!({"choices":[{"delta":{"role":"assistant","content":format!("switch-reply-{index}")},"finish_reason":null}]});
+    Response::builder().status(StatusCode::OK).header("content-type", "text/event-stream")
+        .body(Body::from(format!("data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"))).unwrap()
+}
+
 async fn verify_fixed_enter(remote: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let (count, mut observed_count) = tokio::sync::watch::channel(0_usize);
     let router = Router::new()
-        .route("/v1/chat/completions", post(super::commands::capture))
-        .with_state(requests.clone());
+        .route("/v1/chat/completions", post(switch_reply))
+        .with_state((requests.clone(), count));
     let provider = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -149,13 +175,38 @@ async fn verify_fixed_enter(remote: bool) {
     {
         if index > 0 {
             terminal.action(0);
-            terminal.until("Ctrl+J adds a line").await;
+            terminal
+                .until_screen("new Session composer", |screen| {
+                    screen.contains("Ctrl+J adds a line")
+                        && !screen.contains("Enter select")
+                        && !screen.contains("switch-reply-1")
+                })
+                .await;
+            // Opening details before Attached is consumed changes view_revision.
+            // Open it once, only after the causal transition above.
+            terminal.send(b"\x10");
+            terminal.select_menu("Session details").await;
+            terminal.until("Session: ").await;
+            let details = terminal.screen.lock().unwrap().screen().contents();
+            assert!(
+                !details.contains(&format!("Session: {name}")),
+                "session identity did not change: {details}"
+            );
+            terminal.send(b"\x1b");
+            terminal.absent("Session: ").await;
         }
         terminal.send(text.as_bytes());
         terminal.until(text.split('\n').next_back().unwrap()).await;
         assert_eq!(requests.lock().unwrap().len(), index);
         terminal.send(b"\x13");
-        terminal.until("hello from daemon").await;
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            observed_count.wait_for(|count| *count == index + 1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        terminal.until(&format!("switch-reply-{}", index + 1)).await;
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), index + 1);
         assert!(
@@ -374,6 +425,17 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
     assert!(requests.lock().unwrap().is_empty());
     terminal.send(b"inspect plan\r");
     terminal.until("hello from daemon").await;
+    // The reply is streamed before the terminal control commit. Wait for the
+    // footer's activity projection to settle before executing a versioned command.
+    terminal
+        .until_screen("idle after the first turn", |screen| {
+            screen.lines().rev().nth(1).is_some_and(|footer| {
+                footer.contains("fixture-model")
+                    && !footer.chars().any(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧".contains(ch))
+            })
+        })
+        .await;
+
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(
         requests.lock().unwrap()[0]
@@ -515,6 +577,10 @@ id = "setup"
 plugin = "rsi.workbench.setup"
 [[steps]]
 kind = "plugin"
+id = "plugins"
+plugin = "rsi.workbench.plugins"
+[[steps]]
+kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]
@@ -595,7 +661,7 @@ plugin = "rsi.application.tui"
         drop(pair.slave);
         let writer = pair.master.take_writer().unwrap();
         let mut source = pair.master.try_clone_reader().unwrap();
-        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = Arc::new(std::sync::Mutex::new(RawCapture::default()));
         let captured = output.clone();
         let screen = Arc::new(std::sync::Mutex::new(vt100::Parser::new(30, 110, 0)));
         let rendered = screen.clone();
@@ -605,11 +671,8 @@ plugin = "rsi.application.tui"
                 match source.read(&mut bytes) {
                     Ok(0) | Err(_) => break,
                     Ok(count) => {
-                        let mut output = captured.lock().unwrap();
-                        if output.len() + count <= 16 * 1024 * 1024 {
-                            output.extend_from_slice(&bytes[..count]);
-                            rendered.lock().unwrap().process(&bytes[..count]);
-                        }
+                        captured.lock().unwrap().push(&bytes[..count]);
+                        rendered.lock().unwrap().process(&bytes[..count]);
                     }
                 }
             }
@@ -708,13 +771,7 @@ plugin = "rsi.application.tui"
     async fn until_ansi(&self, text: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if self
-                .output
-                .lock()
-                .unwrap()
-                .windows(text.len())
-                .any(|bytes| bytes == text.as_bytes())
-            {
+            if self.output.lock().unwrap().contains(text.as_bytes()) {
                 return;
             }
             assert!(Instant::now() < deadline, "PTY never emitted {text:?}");
@@ -723,10 +780,15 @@ plugin = "rsi.application.tui"
     }
 
     async fn until(&mut self, text: &str) {
+        self.until_screen(text, |screen| screen.contains(text))
+            .await;
+    }
+
+    async fn until_screen(&mut self, text: &str, matches: impl Fn(&str) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let output = self.screen.lock().unwrap().screen().contents();
-            if output.contains(text) {
+            if matches(&output) {
                 self.capture();
                 return;
             }
@@ -862,7 +924,16 @@ plugin = "rsi.application.tui"
         .unwrap();
         std::fs::write(base.with_extension("txt"), screen.contents()).unwrap();
         drop(parser);
-        std::fs::write(base.with_extension("ansi"), &*self.output.lock().unwrap()).unwrap();
+        let output = self.output.lock().unwrap();
+        std::fs::write(base.with_extension("ansi"), &output.prefix).unwrap();
+        std::fs::write(
+            base.with_extension("tail.ansi"),
+            output.tail.iter().copied().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        std::fs::write(base.with_extension("capture.json"), serde_json::to_vec(&serde_json::json!({
+            "prefix_bytes": output.prefix.len(), "tail_bytes": output.tail.len(), "discarded_bytes": output.discarded,
+        })).unwrap()).unwrap();
     }
 
     async fn finish(&mut self) {
@@ -880,9 +951,7 @@ plugin = "rsi.application.tui"
         }
         let output = self.output.lock().unwrap();
         assert!(
-            output
-                .windows(b"\x1b[?1049l".len())
-                .any(|bytes| bytes == b"\x1b[?1049l"),
+            output.contains(b"\x1b[?1049l"),
             "alternate screen was not restored"
         );
         let termios = self.master.get_termios().expect("PTY termios");
@@ -934,7 +1003,8 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     {
         let output = terminal.output.lock().unwrap();
-        let output = String::from_utf8_lossy(&output);
+        let bytes = output.complete();
+        let output = String::from_utf8_lossy(&bytes);
         let frame = output.rsplit("\x1b[2J").next().unwrap();
         assert!(
             terminal
@@ -1201,7 +1271,7 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
         1,
         "reload must not replay a model request"
     );
-    let output = terminal.output.lock().unwrap().clone();
+    let output = terminal.output.lock().unwrap().complete();
     assert_eq!(
         output
             .windows(b"\x1b[?1049h".len())

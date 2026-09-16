@@ -20,6 +20,8 @@ struct Prepare {
     generation: String,
     text: String,
     images: Vec<MediaRef>,
+    #[serde(default)]
+    references: Vec<rsi_agent_session_protocol::FrozenReference>,
     steer: bool,
 }
 
@@ -168,7 +170,9 @@ impl GuiApplication {
                 return Err("Submission preparation exceeds 8 MiB".into());
             }
             let input: Prepare = serde_json::from_str(source).map_err(error)?;
-            if input.text.len() > 1024 * 1024 || input.images.len() > super::images::MAXIMUM_IMAGES
+            if input.text.len() > 1024 * 1024
+                || input.images.len() > super::images::MAXIMUM_IMAGES
+                || input.references.len() > rsi_agent_session_protocol::MAXIMUM_MESSAGE_REFERENCES
             {
                 return Err("Draft exceeds its text or image limit".into());
             }
@@ -182,7 +186,7 @@ impl GuiApplication {
             let attached = app.pane(input.pane)?.attachment(&input.generation)?;
             let header = attached.handle.header().await.map_err(error)?.fingerprint().map_err(error)?;
             let mut command = None;
-            if input.images.is_empty() && let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
+            if input.images.is_empty() && input.references.is_empty() && let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
                 let commands = attached.controller.commands().await.map_err(error)?;
                 if commands.commands().iter().any(|command| command.name() == name) {
                     let id = DomainRequestId::new(rsi_ui::fresh_identity("command")?).map_err(error)?;
@@ -196,6 +200,7 @@ impl GuiApplication {
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
                 content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
+                content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference }));
                 rsi_session_protocol::validate_session_input(&content).map_err(error)?;
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
@@ -211,7 +216,7 @@ impl GuiApplication {
             let opaque = serde_json::to_string(&frozen).map_err(error)?;
             if opaque.len() > maximum { return Err("Frozen submission exceeds its encoded limit".into()); }
             serde_json::to_string(&serde_json::json!({ "kind":kind, "id":id, "opaque":opaque,
-                "text_bytes":if kind == "message" { input.text.len() } else { 0 }, "images":input.images.len() })).map_err(error)
+                "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":input.images.len(), "references":input.references.len() })).map_err(error)
         })
     }
 
@@ -262,7 +267,7 @@ impl GuiApplication {
                         .iter()
                         .filter(|item| matches!(item, SessionInput::Text { .. }))
                         .count();
-                    if texts > 1 || input.content.len() - texts > super::images::MAXIMUM_IMAGES ||
+                    if texts > 1 || input.content.iter().filter(|item| matches!(item, SessionInput::Image { .. })).count() > super::images::MAXIMUM_IMAGES ||
                         input.content.iter().any(|item| matches!(item, SessionInput::Text { text } if text.len() > 1024 * 1024)) {
                         return Err("Frozen draft exceeds its text or image limit".into());
                     }

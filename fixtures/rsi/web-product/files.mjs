@@ -52,5 +52,6 @@ export async function verifyFiles(page, pane, service, report, browser) {
   await card.getByRole("button", { name: "Release snapshot", exact: true }).click();
   await card.getByRole("button", { name: "Current snapshot", exact: true }).waitFor({ state: "detached" });
   await page.getByRole("button", { name: "Close details", exact: true }).click();
+  await page.locator("#detail").waitFor({state:"hidden"});
   assert.equal(service.provider.requests.length, before);
 }

@@ -1,13 +1,27 @@
 # Web document bridge
 
-IndexedDB schema 2 namespaces composer records by endpoint, real principal
+IndexedDB schema 3 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Upgrade
 validates both old pane ledgers, migrates their records and commits one aggregate
 ledger atomically. It preserves exact pending request strings, phases, receipts
 and incarnations; a malformed record or quota mismatch aborts the entire upgrade.
+The record migration adds empty reference lists and reference counts; it never
+rewrites the opaque Rust submission. A different service/Store version does not
+make an old pending request replayable: Rust checks its operation and immutable
+Header binding. Reconnect to the owning compatible service to reconcile it;
+otherwise retain the old record for explicit recovery instead of replaying or
+silently deleting it.
 The origin-wide allowance remains the old two-pane aggregate: 128 records, 4 MiB
 editable text, 4 MiB pending text and 32 MiB opaque pending requests. Creating
 another surface or connecting another principal does not increase that allowance.
+The current editor record also retains at most four frozen conversation
+references, charged to editable-text quota by their encoded descriptor size.
+Schema 1 and 2 upgrades add an empty reference list without changing pending
+opaque requests. Captured descriptors keep their original target Header binding;
+moving a Fresh draft to a different Header requires removing its references and
+explicitly capturing them again. Capture failure, preview and removal preserve
+the text editor and focus. Submission freezes text, images and references together;
+retry uses the same opaque request and never captures again.
 
 The first-party workbench uses one React 18.3.1 runtime for its workspace/session
 navigation, selected Chat/Trajectory surface, composer and Session resource column.
@@ -227,3 +241,24 @@ source reads use the same exact snapshot tickets as details.
 Visible-card hints retry once with the same sequence after a failed acknowledgement.
 This idempotent presentation hint does not retry user mutations. Generation change
 or disconnect stops the retry; a second failure remains visible to the user.
+
+Registered Settings use schema-directed controls for bounded simple objects and
+scalar/enum fields. Optional fields have explicit inclusion, and unsupported
+schema branches use JSON without discarding unknown properties. Switching to JSON
+preserves current form edits. The form rejects edited numbers, including nested
+JSON fields, whose exact JSON
+representation cannot survive JavaScript parsing. Use the full JSON editor for
+those values; switching preserves the original numeric tokens from current form
+edits, and the full editor forwards the original text to Rust.
+The Settings owner still validates values and the exact displayed version
+controls replacement.
+Apply timing, validation failures and read-only state stay visible; credential
+values use the separate setup operation. Plugin diagnostics use the shared
+workbench's granted finite read and retain no Local Inspector authority.
+
+Settings strings containing carriage returns use a JSON field, preserving CRLF
+and lone CR through edits. Completion options retain their DOM identity across
+unrelated frames; request, selection and diagnostic changes update the popup.
+
+File-picker buttons use the same product action handler as the composer, so
+synchronous and asynchronous failures reach the visible notice.

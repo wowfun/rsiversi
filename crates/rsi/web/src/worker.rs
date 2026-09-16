@@ -394,6 +394,21 @@ pub async fn prepare_submission(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Captures or previews immutable reference data for the selected Session.
+#[wasm_bindgen]
+pub async fn reference_input(source: String) -> Result<String, JsValue> {
+    application()?
+        .reference_input(&source)
+        .await
+        .map_err(failure)
+}
+
+/// Read or close the actual pane's finite human file picker.
+#[wasm_bindgen]
+pub async fn file_input(source: String) -> Result<String, JsValue> {
+    application()?.file_input(&source).await.map_err(failure)
+}
+
 /// Restores saved input only to an exact Session, or explicitly creates a Fresh replacement.
 #[wasm_bindgen]
 pub async fn restore_session(source: String) -> Result<String, JsValue> {

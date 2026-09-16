@@ -26,6 +26,8 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function ui_source() {}
     export async function restore_session() {}
     export async function prepare_submission() {}
+    export async function reference_input() {}
+    export async function file_input() {}
     export async function dispatch_submission() {}
     export async function import_image() {}
     export async function read_image() {}
@@ -68,6 +70,7 @@ export async function verifyWorkerLifecycle(browser, root) {
         try {
           const result = await Promise.race([
             new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Worker ${mode} did not settle`)), 5000); }),
+            new Promise((_, reject) => { worker.onerror = event => reject(new Error(event.message || `Worker ${mode} failed to load`)); }),
             (async () => {
               await call("connect", {}); await frame;
               if (mode !== "awaiting_ack" && mode !== "saturated") {

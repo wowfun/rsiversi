@@ -6,6 +6,11 @@ use termina::event::KeyEvent;
 
 const BUILTINS: &[(&str, &str)] = &[
     ("help", "Commands and keyboard shortcuts"),
+    ("plugins", "Read and refresh observed plugin status"),
+    (
+        "reference",
+        "Frozen conversation reference: /reference [session_id]",
+    ),
     (
         "login",
         "Log in: /login [deepseek|openai|openai-compatible]",
@@ -53,19 +58,54 @@ pub(super) fn literal(text: &str) -> bool {
 }
 #[derive(Clone)]
 struct Entry {
-    name: String,
-    description: String,
+    name: Arc<str>,
+    description: Arc<str>,
     application: bool,
+    skill: Option<Arc<rsi_client::InputCompletion>>,
 }
-type Catalog = BoxFuture<'static, (u64, Result<Vec<Entry>>)>;
+fn catalog_entry(entry: rsi_client::InputCompletion, remaining: &mut usize) -> Option<Entry> {
+    let skill = entry.group == rsi_client::CompletionGroup::Skill;
+    // The encoded entry includes every resource coordinate; count the separate display copy too.
+    let bytes = serde_json::to_vec(&entry)
+        .ok()?
+        .len()
+        .saturating_add(entry.name.len())
+        .saturating_add(entry.description.len())
+        .saturating_add(10);
+    if bytes > *remaining {
+        return None;
+    }
+    *remaining -= bytes;
+    Some(Entry {
+        name: entry.name.clone().into(),
+        description: if skill {
+            format!("Skill · {}", entry.description).into()
+        } else {
+            entry.description.clone().into()
+        },
+        application: false,
+        skill: skill.then(|| Arc::new(entry)),
+    })
+}
+type Catalog = BoxFuture<'static, (u64, Result<(Vec<Entry>, String)>)>;
+type Preview = BoxFuture<'static, (u64, Result<String>)>;
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent completion, help, dismissal and refresh flags"
+)]
 pub(super) struct Ui {
     pub popup: Option<Completion>,
     entries: Vec<Entry>,
     catalog: Vec<Entry>,
     pending: Option<Catalog>,
+    preview: Option<Preview>,
+    preview_request: Option<rsi_agent_session_protocol::SessionResourceRequest>,
+    previewing: bool,
     refresh: bool,
+    failed: bool,
     generation: u64,
+    session: Option<rsi_agent_session_protocol::SessionId>,
     revision: u64,
     observed: String,
     cursor: usize,
@@ -125,8 +165,50 @@ impl Ui {
         editor: &editor::Editor,
         controller: Option<&Arc<rsi_client::SessionController>>,
     ) {
+        let session = controller.map(|controller| controller.session_id());
+        if session != self.session.as_ref() {
+            self.session = session.cloned();
+            self.failed = false;
+            self.generation += 1;
+            self.pending = None;
+            self.preview = None;
+            self.preview_request = None;
+            self.previewing = false;
+            self.detail = None;
+            self.help = false;
+            self.catalog.clear();
+            self.refresh = true;
+            self.rebuild();
+        }
+        if let Some(controller) = controller
+            && let Some(request) = self.preview_request.take()
+        {
+            let controller = controller.clone();
+            let generation = self.generation;
+            self.preview = Some(Box::pin(async move {
+                let result = controller
+                    .read_resource(request)
+                    .await
+                    .map_err(error)
+                    .and_then(|snapshot| {
+                        if let rsi_agent_session_protocol::SessionResourceValue::Read {
+                            resource,
+                            text,
+                        } = &snapshot.response().value
+                        {
+                            Ok(format!(
+                                "{}\n{}\n\n{}",
+                                resource.name, resource.source, text
+                            ))
+                        } else {
+                            Err(error("Invalid skill preview"))
+                        }
+                    });
+                (generation, result)
+            }));
+        }
         let changed = self.observed != editor.text() || self.cursor != editor.cursor();
-        if changed && !self.diagnostic.is_empty() {
+        if changed && self.failed {
             self.invalidate();
         }
         if changed {
@@ -149,37 +231,44 @@ impl Ui {
             let controller = controller.clone();
             let generation = self.generation;
             self.pending = Some(Box::pin(async move {
-                let result = controller.commands().await.map_err(error).map(|view| {
-                    let mut remaining: usize = 64 * 1024 - 1024;
-                    view.commands()
-                        .iter()
-                        .filter(|command| {
-                            visible_session_command(command.name())
-                                && !BUILTINS.iter().any(|(name, _)| *name == command.name())
-                        })
-                        .filter_map(|command| {
-                            if command.name().len() > remaining {
-                                return None;
-                            }
-                            let description =
-                                bounded(command.description(), remaining - command.name().len());
-                            remaining -= description.len() + command.name().len();
-                            Some(Entry {
-                                name: command.name().into(),
-                                description,
-                                application: false,
+                let reserved: Vec<_> = BUILTINS.iter().map(|(name, _)| *name).collect();
+                let result = controller
+                    .completion_catalog(&reserved)
+                    .await
+                    .map_err(error)
+                    .map(|(entries, mut notice)| {
+                        let mut remaining = 64 * 1024 - 1024;
+                        let mut omitted = false;
+                        let entries = entries
+                            .into_iter()
+                            .filter_map(|entry| {
+                                let value = catalog_entry(entry, &mut remaining);
+                                omitted |= value.is_none();
+                                value
                             })
-                        })
-                        .collect()
-                });
+                            .collect();
+                        if omitted {
+                            notice.push_str(
+                                " Some command or skill entries exceed the 64 KiB display limit.",
+                            );
+                        }
+                        (entries, notice)
+                    });
                 (generation, result)
             }));
         }
     }
     pub async fn next(&mut self) {
-        let (generation, result) = match &mut self.pending {
-            Some(work) => work.await,
-            None => std::future::pending().await,
+        let (generation, result) = tokio::select! {
+            result = async { match &mut self.pending { Some(work) => work.await, None => std::future::pending().await } } => result,
+            (generation, result) = async { match &mut self.preview { Some(work) => work.await, None => std::future::pending().await } } => {
+                self.preview = None;
+                if generation == self.generation && self.help && self.previewing {
+                    self.detail = Some(result.unwrap_or_else(|error| format!("Skill unavailable: {error}. Close and preview again to retry.")));
+                    self.revision += 1;
+                }
+                return;
+            }
         };
         self.pending = None;
         if generation != self.generation || ((self.token.is_none() || self.dismissed) && !self.help)
@@ -188,11 +277,13 @@ impl Ui {
         }
         self.revision += 1;
         match result {
-            Ok(entries) => {
+            Ok((entries, notice)) => {
+                self.failed = false;
                 self.catalog = entries;
-                self.diagnostic.clear();
+                self.diagnostic = notice;
             }
             Err(error) => {
+                self.failed = true;
                 self.catalog.clear();
                 self.diagnostic = format!("Commands unavailable: {error}; edit or reopen to retry");
             }
@@ -247,26 +338,27 @@ impl Ui {
                     name: (*name).into(),
                     description: "Provider".into(),
                     application: true,
+                    skill: None,
                 })
                 .collect::<Vec<_>>()
         } else {
             self.all()
         };
         entries.retain(|entry| {
-            entry.name.contains(filter) && (!filter.is_empty() || entry.name != "exit")
+            rsi_client::completion_rank(&entry.name, filter).is_some()
+                && (!filter.is_empty() || entry.name.as_ref() != "exit")
         });
         if !filter.is_empty() {
-            entries.sort_by_key(|entry| {
-                (
-                    if entry.name == filter {
-                        0
-                    } else if entry.name.starts_with(filter) {
-                        1
-                    } else {
-                        2
-                    },
-                    entry.name.clone(),
-                )
+            entries.sort_by(|left, right| {
+                let key = |entry: &Entry| {
+                    (
+                        entry.skill.is_some(),
+                        rsi_client::completion_rank(&entry.name, filter).unwrap_or(3),
+                    )
+                };
+                key(left)
+                    .cmp(&key(right))
+                    .then_with(|| left.name.cmp(&right.name))
             });
         }
         let items = entries
@@ -274,9 +366,12 @@ impl Ui {
             .map(|entry| {
                 (
                     if providers {
-                        entry.name.clone()
+                        entry.name.to_string()
                     } else {
-                        format!("/{}", entry.name)
+                        entry.skill.as_ref().map_or_else(
+                            || format!("/{}", entry.name),
+                            |skill| skill.replacement.clone(),
+                        )
                     },
                     bounded(&entry.description, 256),
                 )
@@ -305,13 +400,29 @@ impl Ui {
                 name: (*name).into(),
                 description: (*description).into(),
                 application: true,
+                skill: None,
             })
             .chain(self.catalog.iter().cloned())
             .collect()
     }
     /// Returns true when the key was consumed. Enter may leave submission to caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One exhaustive projection keeps related state transitions and ownership visible together"
+    )]
     pub fn key(&mut self, key: KeyEvent, editor: &mut editor::Editor) -> bool {
         let control = key.modifiers.contains(Modifiers::CONTROL);
+        if self.help && self.previewing && key.code == KeyCode::Escape {
+            self.preview = None;
+            self.preview_request = None;
+            self.previewing = false;
+            self.help = false;
+            self.detail = None;
+            self.dismissed = false;
+            self.revision += 1;
+            self.rebuild();
+            return true;
+        }
         if self.help {
             self.revision += 1;
             if key.code == KeyCode::Escape {
@@ -374,6 +485,22 @@ impl Ui {
         let Some(popup) = &mut self.popup else {
             return key.code == KeyCode::Tab && self.token.is_some();
         };
+        if key.code == KeyCode::Function(2) {
+            if let Some(request) = self.entries[popup.selected]
+                .skill
+                .as_ref()
+                .and_then(|skill| skill.resource.clone())
+            {
+                self.preview_request = Some(request);
+                self.previewing = true;
+                self.help = true;
+                self.detail = Some("Loading skill…".into());
+                self.page = 0;
+                self.offset = 0;
+                self.revision += 1;
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Up => {
                 popup.selected = popup.selected.saturating_sub(1);
@@ -394,9 +521,10 @@ impl Ui {
                     return false;
                 }
                 let mid_cursor = editor.cursor() != editor.text().len();
-                let mut text = editor.text().to_owned();
-                text.replace_range(range, replacement);
-                let _ = editor.replace_text(&text);
+                if let Err(error) = editor.replace_range(range, replacement) {
+                    self.diagnostic = error.into();
+                    return true;
+                }
                 // Application execution still passes exact argument/cursor validation.
                 key.code == KeyCode::Tab || !entry.application || mid_cursor
             }
@@ -417,6 +545,7 @@ impl Ui {
         true
     }
     pub fn open_help(&mut self) {
+        self.previewing = false;
         self.revision += 1;
         self.page = 0;
         self.offset = 0;
@@ -443,8 +572,8 @@ impl Ui {
         });
         Ok(Scene::from(ApplicationScene {
             revision:self.revision,
-            title:if detail.is_some() {format!("RSI · Help · page {}",self.page+1)} else {"RSI · Help".into()},
-            explanation:"Enter sends · Shift+Enter / Ctrl+J line · Ctrl+P actions · Ctrl+R recall · Ctrl+Y copy ID · Ctrl+C cancel turn".into(),
+            title:if self.previewing {format!("RSI · Skill · page {}",self.page+1)} else if detail.is_some() {format!("RSI · Help · page {}",self.page+1)} else {"RSI · Help".into()},
+            explanation:if self.previewing {"Preview only · Esc returns to your draft"} else {"Enter sends · Shift+Enter / Ctrl+J line · Ctrl+P actions · Ctrl+R recall · Ctrl+Y copy ID · Ctrl+C cancel turn"}.into(),
             items:if detail.is_some() {vec![]} else {self.help_entries().iter().map(|e|format!("/{} · {}",e.name,bounded(&e.description,256))).collect()},
             selected:if detail.is_some() {0} else {self.selected},
             field:detail.is_none().then(||"Filter commands · Enter detail".into()),
@@ -519,6 +648,85 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn skill(name: &str, replacement: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            description: "Review a change".into(),
+            application: false,
+            skill: Some(Arc::new(rsi_client::InputCompletion {
+                name: name.into(),
+                description: "Review a change".into(),
+                replacement: replacement.into(),
+                group: rsi_client::CompletionGroup::Skill,
+                resource: Some(rsi_agent_session_protocol::SessionResourceRequest::Read {
+                    source: rsi_agent_session_protocol::ContributionId::new("rsi.workspace-skills")
+                        .unwrap(),
+                    id: name.into(),
+                }),
+            })),
+        }
+    }
+    #[test]
+    fn skill_preview_escape_and_collision_insert_preserve_the_draft_and_cursor() {
+        let mut ui = Ui {
+            catalog: vec![skill("model", "/skill model")],
+            ..Ui::default()
+        };
+        let mut editor = editor::Editor::with_text("/mod 参数".into(), 1024);
+        editor.key(KeyCode::Home.into()).unwrap();
+        for _ in 0..4 {
+            editor.key(KeyCode::Right.into()).unwrap();
+        }
+        ui.update(&editor, None);
+        assert_eq!(
+            ui.entries
+                .iter()
+                .filter(|entry| entry.name.as_ref() == "model")
+                .count(),
+            2
+        );
+        let selected = ui
+            .entries
+            .iter()
+            .position(|entry| entry.skill.is_some())
+            .unwrap();
+        ui.popup.as_mut().unwrap().selected = selected;
+        assert!(ui.key(KeyCode::Function(2).into(), &mut editor));
+        assert!(ui.previewing);
+        assert!(ui.preview_request.is_some());
+        assert_eq!(editor.text(), "/mod 参数");
+        assert!(ui.key(KeyCode::Escape.into(), &mut editor));
+        assert!(!ui.help && ui.preview_request.is_none());
+        assert_eq!(editor.cursor(), 4);
+        let selected = ui
+            .entries
+            .iter()
+            .position(|entry| entry.skill.is_some())
+            .unwrap();
+        ui.popup.as_mut().unwrap().selected = selected;
+        assert!(ui.key(KeyCode::Tab.into(), &mut editor));
+        assert_eq!(editor.text(), "/skill model 参数");
+        assert_eq!(editor.cursor(), "/skill model".len());
+    }
+    #[test]
+    fn skill_display_budget_and_filter_clones_keep_payload_ownership_bounded() {
+        let mut remaining = 64 * 1024 - 1024;
+        let entry = rsi_client::InputCompletion {
+            name: "large".into(),
+            description: "x".repeat(40 * 1024),
+            replacement: "/large".into(),
+            group: rsi_client::CompletionGroup::Skill,
+            resource: None,
+        };
+        assert!(catalog_entry(entry, &mut remaining).is_none());
+        let retained = skill("guide", "/guide");
+        let clone = retained.clone();
+        assert!(Arc::ptr_eq(&retained.description, &clone.description));
+        assert!(Arc::ptr_eq(
+            retained.skill.as_ref().unwrap(),
+            clone.skill.as_ref().unwrap()
+        ));
+    }
     #[test]
     fn empty_query_starts_with_help_and_the_exit_alias_remains_searchable() {
         let mut ui = Ui::default();
@@ -547,11 +755,15 @@ mod tests {
             receive.await.unwrap();
             (
                 old,
-                Ok(vec![Entry {
-                    name: "old-session-command".into(),
-                    description: "obsolete".into(),
-                    application: false,
-                }]),
+                Ok((
+                    vec![Entry {
+                        name: "old-session-command".into(),
+                        description: "obsolete".into(),
+                        application: false,
+                        skill: None,
+                    }],
+                    String::new(),
+                )),
             )
         }));
         ui.invalidate();
@@ -570,7 +782,7 @@ mod tests {
         ));
         ui.next().await;
         assert!(ui.diagnostic.contains("read denied"));
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 7);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 9);
         assert!(
             !ui.popup
                 .as_ref()
@@ -579,6 +791,34 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name.contains("old-session"))
         );
+    }
+    #[tokio::test]
+    async fn advisory_notice_does_not_refetch_after_each_keystroke_but_errors_retry() {
+        let mut ui = Ui::default();
+        let editor = editor::Editor::with_text("/".into(), 1024);
+        ui.update(&editor, None);
+        ui.refresh = false;
+        let generation = ui.generation;
+        ui.pending = Some(Box::pin(async move {
+            (
+                generation,
+                Ok((vec![], "Skills unavailable; refresh when ready".into())),
+            )
+        }));
+        ui.next().await;
+        ui.update(&editor::Editor::with_text("/h".into(), 1024), None);
+        assert_eq!(
+            ui.generation, generation,
+            "an advisory response is a successful catalog"
+        );
+        assert!(!ui.refresh);
+        ui.pending = Some(Box::pin(
+            async move { (generation, Err(error("read denied"))) },
+        ));
+        ui.next().await;
+        ui.update(&editor::Editor::with_text("/he".into(), 1024), None);
+        assert!(ui.generation > generation);
+        assert!(ui.refresh);
     }
     #[tokio::test]
     async fn failed_help_refresh_clamps_selection_to_remaining_application_commands() {
@@ -595,7 +835,7 @@ mod tests {
             .unwrap()
             .render(42, 12)
             .unwrap();
-        assert_eq!(ui.selected, 7);
+        assert_eq!(ui.selected, 9);
         assert!(ui.diagnostic.contains("permission revoked"));
     }
     #[tokio::test]
@@ -608,11 +848,15 @@ mod tests {
         ui.pending = Some(Box::pin(async move {
             (
                 generation,
-                Ok(vec![Entry {
-                    name: "unknown-old".into(),
-                    description: "stale".into(),
-                    application: false,
-                }]),
+                Ok((
+                    vec![Entry {
+                        name: "unknown-old".into(),
+                        description: "stale".into(),
+                        application: false,
+                        skill: None,
+                    }],
+                    String::new(),
+                )),
             )
         }));
         assert!(ui.key(KeyCode::Escape.into(), &mut editor));
@@ -712,7 +956,7 @@ mod tests {
         let mut ui = Ui::default();
         let mut editor = editor::Editor::with_text("/".into(), 1024);
         ui.update(&editor, None);
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 7);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 9);
         editor.replace_text("/log deepseek").unwrap();
         for _ in 0..9 {
             editor.key(KeyCode::Left.into()).unwrap();

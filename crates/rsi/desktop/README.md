@@ -1,13 +1,13 @@
 # rsi-desktop
 
 The Linux desktop adapter composes ordinary Application-only GUI, navigation and
-setup plugins with the standard Service connection. It uses the shared Web
+setup and Plugins workbench plugins with the standard Service connection. It uses the shared Web
 document and `rsi-gui`; Tauri owns only the main-thread event loop, a private
 persistent WebView data directory and the native document transport. The headless
 `rsi` executable has no dependency on this package or GTK/WebKit.
-The standard Application catalog owns setup registration shared with TUI. The
+The standard Application catalog owns setup and Plugins registration shared with TUI. The
 desktop addon registers only its GUI, navigation and native transport factories;
-its Profile selects the shared setup factory without registering it again.
+its Profile selects both shared factories without registering them again.
 
 Start with `rsi-desktop --assets /absolute/bundle [--host-profile standard]`.
 The companion `rsi` beside this executable is the canonical coding helper.

@@ -31,6 +31,9 @@ pub(crate) enum Command {
     CloseSurface {
         pane: crate::SurfaceId,
     },
+    Plugins {
+        command: rsi_workbench_ui::PluginsCommand,
+    },
     Setup {
         command: rsi_workbench_ui::SetupCommand,
     },
@@ -118,6 +121,23 @@ pub(crate) enum Command {
         pane: crate::SurfaceId,
         generation: String,
     },
+    Completions {
+        pane: crate::SurfaceId,
+        generation: String,
+        query: String,
+        sequence: String,
+        #[serde(default)]
+        refresh: bool,
+    },
+    ResourceRead {
+        pane: crate::SurfaceId,
+        generation: String,
+        request: rsi_agent_session_protocol::SessionResourceRequest,
+    },
+    ResourceClose {
+        pane: crate::SurfaceId,
+        generation: String,
+    },
     Live {
         pane: crate::SurfaceId,
         generation: String,
@@ -183,6 +203,9 @@ impl Command {
             | Self::Cancel { pane, .. }
             | Self::History { pane, .. }
             | Self::Commands { pane, .. }
+            | Self::Completions { pane, .. }
+            | Self::ResourceRead { pane, .. }
+            | Self::ResourceClose { pane, .. }
             | Self::Live { pane, .. }
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
@@ -191,6 +214,7 @@ impl Command {
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
             | Self::Setup { .. }
+            | Self::Plugins { .. }
             | Self::Navigate { .. }
             | Self::RemoteUiList { .. }
             | Self::RemoteUiNext { .. }
@@ -250,6 +274,7 @@ pub(crate) struct SettingsEditor {
 /// Ordinary shared GUI application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
 pub struct GuiApplication {
+    pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
     pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
     pub(crate) navigation: Option<Arc<rsi_workbench_ui::NavigationFeature>>,
     pub(crate) ui: Arc<rsi_ui::Ui>,
@@ -293,9 +318,14 @@ impl GuiApplication {
             Ok(command) => command,
             Err(_) => return Box::pin(async { Err("Invalid Web command".into()) }),
         };
-        self.admit(true, command.affected_pane(), move |app| async move {
-            app.execute(command).await
-        })
+        // Plugin operations publish their outcome in the shared workbench. A
+        // recovered connection must not leave its previous error as a global banner.
+        let global_error = !matches!(command, Command::Plugins { .. });
+        self.admit(
+            global_error,
+            command.affected_pane(),
+            move |app| async move { app.execute(command).await },
+        )
     }
     pub(crate) fn admit<T, F, Fut>(
         self: &Arc<Self>,
@@ -391,6 +421,7 @@ impl GuiApplication {
         let details = self.details.lock().expect("Web details poisoned");
         serde_json::json!({
             "application_surfaces": self.application_target.as_ref().and_then(|target| self.ui.surfaces(target).ok()).unwrap_or_default(),
+            "plugins": self.plugins.as_ref().map(|feature| feature.snapshot()),
             "setup": self.setup.as_ref().map(|feature| feature.view()),
             "navigation": self.navigation.as_ref().map(|feature| feature.view()),
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
@@ -435,6 +466,13 @@ impl GuiApplication {
         match command {
             Command::AddSurface { pane } => self.add_surface(pane),
             Command::CloseSurface { pane } => self.close_surface(pane).await,
+            Command::Plugins { command } => {
+                self.plugins
+                    .as_ref()
+                    .ok_or("Plugin status is unavailable on this connection")?
+                    .command(command)
+                    .await
+            }
             Command::Setup { command } => {
                 self.setup
                     .as_ref()
@@ -548,6 +586,9 @@ impl PluginFactory for GuiApplicationFactory {
             .is_some();
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
         let app = Arc::new(GuiApplication {
+            plugins: plan
+                .context()
+                .lookup_local::<rsi_workbench_ui::PluginsFeatureContract>(),
             setup: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
@@ -750,6 +791,7 @@ pub(crate) fn surface_program(
 fn watch_features(app: &Arc<GuiApplication>) {
     let mut ui_changes = app.ui.membership_changes();
     for changes in [
+        app.plugins.as_ref().map(|feature| feature.changes()),
         app.setup.as_ref().map(|feature| feature.changes()),
         app.navigation.as_ref().map(|feature| feature.changes()),
     ]

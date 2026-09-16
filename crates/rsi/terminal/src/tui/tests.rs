@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 
+mod references;
 mod ui;
 mod workspace;
 
@@ -778,6 +779,8 @@ async fn fold_retention_charges_current_keys_and_allocation_capacity_without_dis
         client.drafts.insert(
             SessionId::new(format!("saved-{session}")).unwrap(),
             SavedSession {
+                references: Vec::new(),
+                reference_bytes: 0,
                 editor,
                 command: Arc::new(rsi_client::CommandSubmission::default()),
                 model: None,
@@ -1622,6 +1625,48 @@ async fn multiline_reserved_and_double_slash_reach_human_submission_exactly() {
         assert!(
             matches!(handle.submitted_requests.lock().unwrap()[0].content.as_slice(),[MessageInput::Text{text:body}] if body==text)
         );
+        surface.stop().await;
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
+async fn gated_attachment_keeps_pretransition_input_with_its_original_session() {
+    for remote in [false, true] {
+        let (mut client, handle, runtime, surface) = client().await;
+        client.state.remote = remote;
+        let original = client.state.header.clone();
+        let mut wire = serde_json::to_value(&original).unwrap();
+        wire["session_id"] = serde_json::json!("new-attachment");
+        let next: SessionHeader = serde_json::from_value(wire).unwrap();
+        let (release, admitted) = tokio::sync::oneshot::channel();
+        let attachment = async move {
+            admitted.await.unwrap();
+            next
+        };
+        tokio::pin!(attachment);
+        assert!(futures_util::poll!(&mut attachment).is_pending());
+        client.state.editor.insert("before attachment").unwrap();
+        assert_eq!(client.state.header.session_id(), original.session_id());
+        release.send(()).unwrap();
+        client.switch_session_draft(attachment.await);
+        assert!(client.state.editor.text().is_empty());
+        assert_eq!(
+            client.drafts[original.session_id()].editor.text(),
+            "before attachment"
+        );
+        client.state.editor.insert("after attachment").unwrap();
+        assert_eq!(client.state.header.session_id().as_str(), "new-attachment");
+        assert_eq!(client.state.editor.text(), "after attachment");
+        client.switch_session_draft(original);
+        assert_eq!(client.state.editor.text(), "before attachment");
+        assert_eq!(
+            client.drafts[&SessionId::new("new-attachment").unwrap()]
+                .editor
+                .text(),
+            "after attachment"
+        );
+        assert!(handle.submitted_requests.lock().unwrap().is_empty());
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());
     }

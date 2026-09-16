@@ -24,6 +24,7 @@ rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-conversation = { path = "../conversation" }
 rsi-process = { path = "../../rsi-process/core" }
+rsi-retrieval-protocol = { path = "../../rsi-retrieval/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true

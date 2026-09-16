@@ -18,6 +18,7 @@ rsi-session-tree-ui = { path = "../session-tree-ui" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-session-files = { path = "../session-files" }
 rsi-session-files-ui = { path = "../session-files-ui" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
 zeroize.workspace = true

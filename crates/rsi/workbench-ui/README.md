@@ -52,3 +52,9 @@ then valid online metadata, then missing snapshot fields. Unknown capacities
 remain explicit user inputs. Output reserve starts at `min(4096, maximum)` and
 all saved limits pass `LanguageModelLimits`. Rounded DeepSeek capacities use
 conservative decimal token counts.
+
+Plugin status is an independent ordinary feature over the grant-gated Configuration
+read. It retains one 32-row page, explicit refresh and exact-ticket adjacent-page
+commands. Desired and observed revision changes invalidate pagination; failed reads
+clear the old page. Both TUI `/plugins` and GUI Settings → Plugins consume this
+owner, whose admitted reads drain before feature retirement.

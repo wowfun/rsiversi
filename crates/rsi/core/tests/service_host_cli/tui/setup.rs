@@ -2,6 +2,61 @@ use super::*;
 use rsi_credentials_local::SecretStore as _;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugins_exa_credential_is_masked_independent_and_preserves_the_composer() {
+    let fixture = CliFixture::new("http://127.0.0.1:1");
+    let mut terminal = TerminalClient::start(&fixture, &[]);
+    terminal.capture_name = "plugins-exa".into();
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"DRAFT_KEEP_PLUGIN\x10");
+    terminal.select_menu("Plugins").await;
+    terminal.until("Web retrieval").await;
+    terminal.capture();
+    terminal.send(b"\r");
+    terminal.select_menu("Set Exa credential…").await;
+    terminal.until("Exa search credential").await;
+    terminal.until("Credential missing").await;
+    let key = "isolated-exa-credential-must-never-render";
+    terminal.send(key.as_bytes());
+    terminal.until("••••••••").await;
+    terminal.capture();
+    terminal
+        .output
+        .lock()
+        .unwrap()
+        .assert_absent(key.as_bytes());
+    terminal.send(b"\r");
+    terminal.until("Exa credential saved").await;
+    terminal.send(b"\x1b");
+    terminal.until("Web retrieval").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Read Exa credential status").await;
+    terminal.until("Configured").await;
+    let path = fixture
+        .temporary
+        .path()
+        .join("config/rsi/credentials/credentials.json");
+    let store = rsi_credentials_local::FileSecretStore::new(path);
+    let reference = rsi_credentials_protocol::CredentialRef::new("rsi.retrieval", "exa").unwrap();
+    assert_eq!(store.get(&reference).unwrap().unwrap().expose_secret(), key);
+    terminal.send(b"\r");
+    terminal.select_menu("Remove Exa credential").await;
+    terminal.until("Exa credential removed").await;
+    assert!(store.get(&reference).unwrap().is_none());
+    terminal.send(b"\x1b");
+    terminal.absent("Esc returns to draft").await;
+    terminal.until("DRAFT_KEEP_PLUGIN").await;
+    terminal.send(b"\x15");
+    terminal.absent("DRAFT_KEEP_PLUGIN").await;
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    terminal
+        .output
+        .lock()
+        .unwrap()
+        .assert_absent(key.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let root = fixture.temporary.path().join("state/rsi/agent");
@@ -19,7 +74,7 @@ async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() 
         .await;
     terminal.until("no automatic migration").await;
     let output = terminal.output.lock().unwrap();
-    assert!(String::from_utf8_lossy(&output).contains(root.to_str().unwrap()));
+    assert!(String::from_utf8_lossy(&output.complete()).contains(root.to_str().unwrap()));
     drop(output);
     let status = terminal.child.wait().unwrap();
     assert_eq!(status.exit_code(), 2);
@@ -183,7 +238,8 @@ async fn login_discovery_default_first_message_and_restart_local_and_daemon() {
         terminal.send(b"\x04");
         terminal.finish().await;
         assert!(
-            !String::from_utf8_lossy(&terminal.output.lock().unwrap()).contains("fixture-secret")
+            !String::from_utf8_lossy(&terminal.output.lock().unwrap().complete())
+                .contains("fixture-secret")
         );
         assert!(
             fixture
@@ -428,6 +484,7 @@ async fn masked_key_and_manual_limits_complete_setup_with_injected_store() {
                 .output
                 .lock()
                 .unwrap()
+                .complete()
                 .windows(b"never-in-scene-secret".len())
                 .any(|bytes| bytes == b"never-in-scene-secret")
         );
@@ -436,6 +493,7 @@ async fn masked_key_and_manual_limits_complete_setup_with_injected_store() {
                 .output
                 .lock()
                 .unwrap()
+                .complete()
                 .windows(b"rejected-fixture-key".len())
                 .any(|bytes| bytes == b"rejected-fixture-key")
         );

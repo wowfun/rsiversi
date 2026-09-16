@@ -1,5 +1,11 @@
 # rsi-session-files-ui
 
+Successful `present` Tool blocks also expose recorded file cards. Their actions
+contain only intent/result sequence coordinates and a file index. The renderer
+reads durable Facts and validates the exact Tool identity and result format;
+opening then uses the current human Files binding. File declarations preserve
+paths and descriptions, not historical bytes or Tool execution authority.
+
 An ordinary UI contribution supplies a workspace browser over Session Files.
 Web and TUI consume its existing closed cards, inputs, text/code and buttons;
 neither adapter implements Files authorization or reader semantics.
@@ -39,3 +45,12 @@ and drains the local action before dropping its state.
 Tests cover revision/capacity fences, paging, exact bytes and paths, refresh,
 read cancellation and ordinary target retirement. Actual Web/TUI visual and
 transport evidence belongs to standard-product fixtures.
+
+The composer file picker shares this same surface browser and nonqueued slot.
+Its finite native interface exposes bounded directory choices and byte previews,
+never tokens. Open selects a new snapshot; page and release require its exact
+revision. Selecting a file inserts only a canonical workspace-relative locator:
+`@"path"` uses JSON quoting for valid UTF-8; `@path_hex:...` preserves other bytes.
+Preview, paging and insertion are separate human actions. Neither adapter loads
+file contents into an input implicitly. Closing or replacing the picker cancels
+its waiter; the existing Files lease still bounds a lost open response.

@@ -1,4 +1,4 @@
-import init, { connect, command, restore_session, prepare_submission, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { connect, command, restore_session, prepare_submission, reference_input, file_input, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const initialized = init();
 let connected = false;
@@ -62,6 +62,10 @@ async function dispatch(data) {
     result = await restore_session(data.payload);
   } else if (data.method === "prepare_submission") {
     result = await prepare_submission(data.payload);
+  } else if (data.method === "file_input") {
+    result = await file_input(data.payload);
+  } else if (data.method === "reference_input") {
+    result = await reference_input(data.payload);
   } else if (data.method === "dispatch_submission") {
     result = await dispatch_submission(data.payload.pane, data.payload.generation, data.payload.opaque, data.payload.mode);
   } else if (data.method === "import_image") {
