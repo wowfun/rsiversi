@@ -24,6 +24,12 @@ allowlist; the generic backend remains strict. Only the
 first component is resolved, and both logical and resolved paths are validated.
 All remaining components keep no-follow, ownership and permission checks.
 
+Lock-file acquisition uses exclusive creation followed by a non-creating open
+when the name already exists. Native macOS concurrency tests observed `ENOENT`
+from non-exclusive `openat(O_CREAT)` during first-store initialization, although
+the parent directory was already retained. Separating publication from opening
+avoids that combined create/open path and keeps every existing-file trust check.
+
 ## Alternatives considered
 
 Memory-only login does not survive Host restart. A keyring-first fallback creates

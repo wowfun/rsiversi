@@ -34,7 +34,10 @@ its absolute path. Other targets fail explicitly as unsupported when equivalent
 native access controls are unavailable; they never write an unprotected file.
 
 Writers acquire a stable private lock file with a one-second bounded wait, reread
-the current document under the lock and preserve unrelated entries. A unique
+the current document under the lock and preserve unrelated entries. Lock files
+are created exclusively; an existing name is opened separately without creation
+flags and receives the same no-follow and metadata checks. Writers never remove
+or replace that lock file. A unique
 same-directory temporary file is written and synced before atomic replacement;
 the directory is then synced. Pre-publication failures preserve the old document.
 A failure after replacement reports an unknown mutation outcome, never a false

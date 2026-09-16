@@ -254,13 +254,19 @@ mod platform {
                 .to_str()
                 .ok_or_else(|| failure(Failure::UnsafePath))?
         );
-        let fd = openat(
+        let flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+        let fd = match openat(
             dir,
             lock_name.as_str(),
-            OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            flags | OFlags::CREATE | OFlags::EXCL,
             Mode::RUSR | Mode::WUSR,
-        )
-        .map_err(|e| io(&e.into()))?;
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::EXIST) => {
+                openat(dir, lock_name.as_str(), flags, Mode::empty()).map_err(|e| io(&e.into()))?
+            }
+            Err(error) => return Err(io(&error.into())),
+        };
         let file = File::from(fd);
         validate_file(&file)?;
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -433,6 +439,22 @@ mod platform {
         }
         fn key(value: &str) -> SecretValue {
             SecretValue::new(value).unwrap()
+        }
+        #[test]
+        fn acquiring_an_existing_writer_lock_preserves_its_identity_and_contents() {
+            let root = temp_root();
+            let path = root.path().join("credentials/credentials.json");
+            let directory = directory(&path, true).unwrap().unwrap();
+            let mut first = lock(&directory, &path).unwrap();
+            first.write_all(b"retained lock").unwrap();
+            let before = first.metadata().unwrap();
+            drop(first);
+            let mut next = lock(&directory, &path).unwrap();
+            let after = next.metadata().unwrap();
+            assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+            let mut contents = String::new();
+            next.read_to_string(&mut contents).unwrap();
+            assert_eq!(contents, "retained lock");
         }
         #[test]
         fn concurrent_processes_preserve_each_others_records() {
