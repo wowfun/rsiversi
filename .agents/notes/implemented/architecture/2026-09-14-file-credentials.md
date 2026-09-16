@@ -18,13 +18,20 @@ Resolve/Admin separation, bounded blocking admission and independent mutation
 receipts. Historical Keyring provenance remains readable without a keyring backend.
 The [local contract](../../../../crates/rsi-credentials/local/README.md) owns the
 format, file trust checks, publication and failure rules.
+Standard composition permits resolving the first component beneath the trusted
+filesystem root (including aliases such as macOS `/var`), without a pathname
+allowlist; the generic backend remains strict. Only the
+first component is resolved, and both logical and resolved paths are validated.
+All remaining components keep no-follow, ownership and permission checks.
 
 ## Alternatives considered
 
 Memory-only login does not survive Host restart. A keyring-first fallback creates
 host-dependent persistence behavior. Keeping an optional keyring adds another
 configuration and maintenance path. The user selected file-only persistence and
-manual re-login instead of importing existing secrets. Pi demonstrates a usable
+manual re-login instead of importing existing secrets. Canonicalizing every
+component would accept nested redirection. Disabling alias handling in standard
+composition would reject ordinary macOS temporary and configuration roots. Pi demonstrates a usable
 file-first login flow; its in-place writes are not the chosen publication model.
 
 ## Consequences

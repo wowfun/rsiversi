@@ -8,28 +8,53 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct FileSecretStore {
     path: PathBuf,
+    #[cfg(unix)]
+    trusted_root_alias: bool,
 }
 
 impl FileSecretStore {
     /// Selects an explicit Host-owned absolute location, validated on every operation.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            #[cfg(unix)]
+            trusted_root_alias: false,
+        }
+    }
+
+    /// Selects a location whose first component beneath `/` is caller-trusted.
+    /// Resolution occurs on each operation; the remaining components reject links.
+    #[must_use]
+    pub fn with_trusted_root_alias(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            #[cfg(unix)]
+            trusted_root_alias: true,
+        }
+    }
+
+    fn operation_path(&self) -> Result<std::borrow::Cow<'_, Path>> {
+        #[cfg(unix)]
+        if self.trusted_root_alias {
+            return platform::resolve_root_alias(&self.path).map(std::borrow::Cow::Owned);
+        }
+        Ok(std::borrow::Cow::Borrowed(&self.path))
     }
 }
 
 impl SecretStore for FileSecretStore {
     fn get(&self, reference: &CredentialRef) -> Result<Option<SecretValue>> {
         reference.validate()?;
-        platform::get(&self.path, reference)
+        platform::get(&self.operation_path()?, reference)
     }
     fn set(&self, reference: &CredentialRef, secret: &SecretValue) -> Result<()> {
         reference.validate()?;
-        platform::modify(&self.path, reference, Some(secret)).map(|_| ())
+        platform::modify(&self.operation_path()?, reference, Some(secret)).map(|_| ())
     }
     fn unset(&self, reference: &CredentialRef) -> Result<bool> {
         reference.validate()?;
-        platform::modify(&self.path, reference, None)
+        platform::modify(&self.operation_path()?, reference, None)
     }
     fn location(&self) -> Option<String> {
         self.path
@@ -104,7 +129,7 @@ mod platform {
         }
         Ok(())
     }
-    fn directory(path: &Path, create: bool) -> Result<Option<Dir>> {
+    fn validate_path(path: &Path) -> Result<()> {
         if !path.is_absolute()
             || path
                 .to_str()
@@ -112,6 +137,17 @@ mod platform {
         {
             return Err(failure(Failure::UnsafePath));
         }
+        Ok(())
+    }
+    pub(super) fn resolve_root_alias(path: &Path) -> Result<std::path::PathBuf> {
+        validate_path(path)?;
+        let resolved = rsi_files_native_fs::resolve_absolute_root_alias(path, true)
+            .map_err(|error| io(&error))?;
+        validate_path(&resolved)?;
+        Ok(resolved)
+    }
+    fn directory(path: &Path, create: bool) -> Result<Option<Dir>> {
+        validate_path(path)?;
         let parent = path.parent().ok_or_else(|| failure(Failure::UnsafePath))?;
         let dir = if create {
             create_absolute_directory_no_follow(parent)

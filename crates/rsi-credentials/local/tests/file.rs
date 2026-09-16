@@ -11,6 +11,20 @@ use std::{
     process::Command,
 };
 
+fn temp_root() -> tempfile::TempDir {
+    tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
+
+#[expect(unsafe_code, reason = "isolated Unix FIFO fixture without forking")]
+fn fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the live CString is NUL-terminated, the mode is valid, and mkfifo
+    // retains no pointer. Every caller owns an isolated temporary directory.
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
+}
+
 fn reference(slot: &str) -> CredentialRef {
     CredentialRef::new("fixture.provider", slot).unwrap()
 }
@@ -26,7 +40,7 @@ fn private_file(path: &Path, contents: &[u8]) {
 
 #[test]
 fn saved_credentials_survive_reopen_and_isolate_full_references() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     assert!(store.get(&reference("primary")).unwrap().is_none());
@@ -76,7 +90,7 @@ fn saved_credentials_survive_reopen_and_isolate_full_references() {
 
 #[test]
 fn invalid_documents_are_never_overwritten_or_echoed() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     for contents in [
@@ -103,7 +117,7 @@ fn invalid_documents_are_never_overwritten_or_echoed() {
 
 #[test]
 fn oversized_documents_and_record_counts_fail_explicitly() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     private_file(&path, &vec![b' '; 4 * 1024 * 1024 + 1]);
@@ -124,7 +138,7 @@ fn oversized_documents_and_record_counts_fail_explicitly() {
 
 #[test]
 fn writes_exceeding_document_or_record_limits_preserve_the_previous_file() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     for (count, value) in [(4096, "fixture".into()), (63, "s".repeat(64 * 1024))] {
@@ -146,7 +160,7 @@ fn writes_exceeding_document_or_record_limits_preserve_the_previous_file() {
 
 #[test]
 fn permissive_files_and_directories_are_rejected_without_repair() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     store.set(&reference("a"), &key("fixture")).unwrap();
@@ -176,7 +190,7 @@ fn permissive_files_and_directories_are_rejected_without_repair() {
 
 #[test]
 fn links_and_special_files_cannot_redirect_reads_or_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let outside = root.path().join("outside");
     private_file(&path, br#"{"version":1,"entries":[]}"#);
@@ -197,14 +211,7 @@ fn links_and_special_files_cannot_redirect_reads_or_writes() {
         CredentialsError::Store(Failure::UnsafePath)
     );
     fs::remove_file(&path).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        &path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    fifo(&path);
     assert_eq!(
         store.get(&reference("a")).unwrap_err(),
         CredentialsError::Store(Failure::UnsafePath)
@@ -228,7 +235,7 @@ fn links_and_special_files_cannot_redirect_reads_or_writes() {
 
 #[test]
 fn held_writer_lock_times_out_without_changing_the_document() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let store = FileSecretStore::new(&path);
     store.set(&reference("a"), &key("fixture")).unwrap();
@@ -246,7 +253,7 @@ fn held_writer_lock_times_out_without_changing_the_document() {
 
 #[test]
 fn concurrent_processes_preserve_each_others_records() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temp_root();
     let path = root.path().join("credentials/credentials.json");
     let mut children = Vec::new();
     for n in 0..8 {
@@ -290,4 +297,40 @@ fn file_writer_child() {
             .set(&reference(&format!("writer-{writer}-{n}")), &key("fixture"))
             .unwrap();
     }
+}
+
+#[test]
+fn trusted_root_alias_keeps_nested_links_rejected() {
+    let root = temp_root();
+    let target = root.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let alias = root.path().join("alias");
+    symlink(&target, &alias).unwrap();
+    let store = FileSecretStore::with_trusted_root_alias(alias.join("credentials.json"));
+    assert!(matches!(
+        store.get(&reference("a")),
+        Err(CredentialsError::Store(Failure::UnsafePath))
+    ));
+    assert!(store.set(&reference("a"), &key("fixture")).is_err());
+    assert!(!target.join("credentials.json").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trusted_macos_root_alias_preserves_strict_default() {
+    let root = tempfile::tempdir_in("/var/tmp").unwrap();
+    let path = root.path().join("credentials/credentials.json");
+    let strict = FileSecretStore::new(&path);
+    assert!(strict.set(&reference("a"), &key("fixture")).is_err());
+    let selected = FileSecretStore::with_trusted_root_alias(&path);
+    selected.set(&reference("a"), &key("fixture")).unwrap();
+    assert_eq!(
+        selected
+            .get(&reference("a"))
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "fixture"
+    );
+    assert!(strict.get(&reference("a")).is_err());
 }

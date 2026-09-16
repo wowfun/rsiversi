@@ -1008,7 +1008,7 @@ impl StandardComposition {
         coding_tools: Option<StandardCodingTools>,
     ) -> Self {
         Self {
-            credential_store: Arc::new(FileSecretStore::new(
+            credential_store: Arc::new(FileSecretStore::with_trusted_root_alias(
                 paths.config().join("credentials/credentials.json"),
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
