@@ -29,6 +29,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 #[cfg(unix)]
 use tokio::sync::Notify;
 
+mod duplex;
+
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 #[cfg(unix)]
 mod output_cache;
@@ -282,6 +284,7 @@ struct ChildState {
     settled: Notify,
     active_released: AtomicBool,
     termination_started: AtomicBool,
+    duplex_stop: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[cfg(unix)]
@@ -363,6 +366,9 @@ impl Drop for ChildState {
 #[cfg(unix)]
 impl ChildState {
     fn terminate(self: &Arc<Self>) {
+        if let Some(stop) = &self.duplex_stop {
+            stop.cancel();
+        }
         if self.termination_started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -476,7 +482,7 @@ impl Service {
         spec: ProcessSpec,
         runtime: &tokio::runtime::Handle,
     ) -> Result<ManagedProcess> {
-        let (child, pid, capture_bytes) = self.admit_and_spawn(&spec)?;
+        let (child, pid, capture_bytes) = self.admit_and_spawn(&spec, false)?;
         let reservation = Arc::new(CaptureReservation {
             service: Arc::downgrade(&self.state),
             bytes: capture_bytes,
@@ -489,27 +495,7 @@ impl Service {
         }
         let stdout = Arc::new(stdout);
         let stderr = Arc::new(stderr);
-        let state = Arc::new(ChildState {
-            pid,
-            grace: Duration::from_millis(spec.termination_grace_ms),
-            runtime: runtime.clone(),
-            service: Arc::downgrade(&self.state),
-            groups: Arc::clone(&self.groups),
-            outcome: Mutex::new(None),
-            settled: Notify::new(),
-            active_released: AtomicBool::new(false),
-            termination_started: AtomicBool::new(false),
-        });
-        let published = {
-            let mut registry = lock_registry(&self.state);
-            registry.managed.insert(pid, Arc::clone(&state));
-            registry.inflight = registry
-                .inflight
-                .checked_sub(1)
-                .expect("every spawn publication has an in-flight admission");
-            registry.accepting
-        };
-        self.state.changed.notify_waiters();
+        let (state, published) = self.publish_child(pid, spec.termination_grace_ms, runtime, None);
         supervise_child(
             runtime,
             child,
@@ -533,8 +519,52 @@ impl Service {
     }
 
     #[cfg(unix)]
-    fn admit_and_spawn(&self, spec: &ProcessSpec) -> Result<(tokio::process::Child, u32, usize)> {
-        let capture_bytes = spec.capture_bytes()?;
+    fn publish_child(
+        &self,
+        pid: u32,
+        grace: u64,
+        runtime: &tokio::runtime::Handle,
+        duplex_stop: Option<tokio_util::sync::CancellationToken>,
+    ) -> (Arc<ChildState>, bool) {
+        let state = Arc::new(ChildState {
+            pid,
+            grace: Duration::from_millis(grace),
+            runtime: runtime.clone(),
+            service: Arc::downgrade(&self.state),
+            groups: Arc::clone(&self.groups),
+            outcome: Mutex::new(None),
+            settled: Notify::new(),
+            active_released: AtomicBool::new(false),
+            termination_started: AtomicBool::new(false),
+            duplex_stop,
+        });
+        let published = {
+            let mut registry = lock_registry(&self.state);
+            registry.managed.insert(pid, Arc::clone(&state));
+            registry.inflight = registry
+                .inflight
+                .checked_sub(1)
+                .expect("every spawn publication has an in-flight admission");
+            registry.accepting
+        };
+        self.state.changed.notify_waiters();
+        (state, published)
+    }
+
+    #[cfg(unix)]
+    fn admit_and_spawn(
+        &self,
+        spec: &ProcessSpec,
+        persistent_stdin: bool,
+    ) -> Result<(tokio::process::Child, u32, usize)> {
+        let capture_bytes = spec
+            .capture_bytes()?
+            .checked_add(if persistent_stdin {
+                rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES
+            } else {
+                0
+            })
+            .ok_or(ProcessError::Capacity)?;
         let mut registry = lock_registry(&self.state);
         let capture_after = registry
             .capture_reserved
@@ -559,7 +589,7 @@ impl Service {
             .current_dir(&spec.process.cwd)
             .env_clear()
             .envs(spec.environment.iter().cloned())
-            .stdin(if spec.stdin.is_empty() {
+            .stdin(if spec.stdin.is_empty() && !persistent_stdin {
                 std::process::Stdio::null()
             } else {
                 std::process::Stdio::piped()
@@ -654,22 +684,7 @@ fn supervise_child(
     let wait_state = Arc::clone(state);
     let drain_grace = state.grace;
     runtime.spawn(async move {
-        let status = child
-            .wait()
-            .await
-            .map_err(|error| ProcessError::Io(error.to_string()));
-        let group_settlement_timed_out = if wait_state.group_is_alive() {
-            wait_state.terminate();
-            !wait_for_group_disappearance(
-                &wait_state,
-                wait_state
-                    .grace
-                    .saturating_add(POST_KILL_GROUP_SETTLEMENT_TIMEOUT),
-            )
-            .await
-        } else {
-            false
-        };
+        let status = reap_group(&mut child, &wait_state).await;
         if let Some(task) = stdin_task.as_mut() {
             if !task.is_finished() {
                 task.abort();
@@ -715,19 +730,44 @@ fn supervise_child(
             }
         }
         let outcome = status.and_then(|status| {
-            if group_settlement_timed_out {
-                return Err(ProcessError::SettlementTimeout);
-            }
             if let Some(error) = drain_error {
                 return Err(ProcessError::Io(error));
             }
-            Ok(ProcessOutcome {
-                exit_code: status.code(),
-                signal: status.signal(),
-            })
+            Ok(status)
         });
+        drop((stdout, stderr));
         wait_state.finish(outcome);
     });
+}
+
+#[cfg(unix)]
+async fn reap_group(
+    child: &mut tokio::process::Child,
+    wait_state: &Arc<ChildState>,
+) -> Result<ProcessOutcome> {
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| ProcessError::Io(error.to_string()));
+    let group_settlement_timed_out = if wait_state.group_is_alive() {
+        wait_state.terminate();
+        !wait_for_group_disappearance(
+            wait_state,
+            wait_state
+                .grace
+                .saturating_add(POST_KILL_GROUP_SETTLEMENT_TIMEOUT),
+        )
+        .await
+    } else {
+        false
+    };
+    if group_settlement_timed_out {
+        return Err(ProcessError::SettlementTimeout);
+    }
+    status.map(|status| ProcessOutcome {
+        exit_code: status.code(),
+        signal: status.signal(),
+    })
 }
 
 #[cfg(unix)]
@@ -870,6 +910,10 @@ impl PluginFactory for ProcessLocalFactory {
         };
         let process: Arc<dyn Process> = service.clone();
         let supply = plan.context().provide_local::<ProcessContract>(process)?;
+        let duplex: Arc<dyn rsi_process::DuplexProcess> = service.clone();
+        let duplex_supply = plan
+            .context()
+            .provide_local::<rsi_process::DuplexProcessContract>(duplex)?;
         #[cfg(unix)]
         let cache_supply = if service.config.output_cache.is_some() {
             let cache: Arc<dyn rsi_process::ProcessOutputCache> = service.clone();
@@ -890,6 +934,7 @@ impl PluginFactory for ProcessLocalFactory {
                     let result = Ok(());
                     drop(service);
                     drop(supply);
+                    drop(duplex_supply);
                     #[cfg(unix)]
                     drop(cache_supply);
                     result
@@ -982,6 +1027,7 @@ mod tests {
             settled: Notify::new(),
             active_released: AtomicBool::new(false),
             termination_started: AtomicBool::new(false),
+            duplex_stop: None,
         })
     }
 

@@ -70,3 +70,12 @@ Generated private regular entries with multiple hard links are unlinked from
 the cache during startup, including interrupted `.part` to `.log` publication.
 Only cache-local names are removed; external link names are never followed or
 modified. A surviving single-link completed file may be admitted normally.
+
+The same provider also publishes the sibling duplex capability. Both spawn paths
+use the same validated confined-plan admission, process registry, capture budget,
+identity-fenced TERM/KILL and reaping mechanics. Duplex stdout waits for free queue
+space before reading another bounded pipe chunk. Its explicit stdin port serializes
+one write and closes on termination or direct-child exit. Lossless stdout EOF is
+published only after the child is reaped and both pipes settle; cancelled or timed-out drains publish
+a stream error after any already buffered bytes. Protocol streams do not enter the
+best-effort completed-output cache.

@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod duplex;
+pub use duplex::*;
+
 use async_trait::async_trait;
 use rsi_meta_contract::LocalContract;
 use rsi_sandbox::{ConfinedProcess, MAXIMUM_SANDBOX_ARGUMENTS, MAXIMUM_SANDBOX_PLAN_BYTES};
@@ -48,125 +51,18 @@ pub struct ProcessSpec {
 impl ProcessSpec {
     /// Validates platform-neutral request bounds before spawn admission.
     pub fn validate(&self) -> Result<()> {
-        self.validate_process_plan()?;
+        validate_process_plan(&self.process)?;
         if self.stdin.len() > MAXIMUM_PROCESS_STDIN_BYTES {
             return Err(ProcessError::InvalidInput(format!(
                 "process stdin exceeds {MAXIMUM_PROCESS_STDIN_BYTES} bytes"
             )));
         }
-        self.validate_environment()?;
-        for (name, value) in [
-            ("stdout_max_bytes", self.stdout_max_bytes),
-            ("stderr_max_bytes", self.stderr_max_bytes),
-        ] {
-            if value == 0 || value > MAXIMUM_PROCESS_STREAM_BYTES {
-                return Err(ProcessError::InvalidInput(format!(
-                    "{name} must be within 1..={MAXIMUM_PROCESS_STREAM_BYTES}"
-                )));
-            }
-        }
-        if self.termination_grace_ms == 0 || self.termination_grace_ms > MAXIMUM_PROCESS_GRACE_MS {
-            return Err(ProcessError::InvalidInput(format!(
-                "termination_grace_ms must be within 1..={MAXIMUM_PROCESS_GRACE_MS}"
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_process_plan(&self) -> Result<()> {
-        if self
-            .process
-            .program
-            .as_os_str()
-            .as_encoded_bytes()
-            .contains(&b'\0')
-            || self
-                .process
-                .cwd
-                .as_os_str()
-                .as_encoded_bytes()
-                .contains(&b'\0')
-        {
-            return Err(ProcessError::InvalidInput(
-                "process executable or working directory contains an invalid byte".into(),
-            ));
-        }
-        if self.process.arguments.len() > MAXIMUM_SANDBOX_ARGUMENTS {
-            return Err(ProcessError::InvalidInput(format!(
-                "process argument count exceeds {MAXIMUM_SANDBOX_ARGUMENTS}"
-            )));
-        }
-        let mut process_plan_bytes = self
-            .process
-            .program
-            .as_os_str()
-            .len()
-            .checked_add(self.process.cwd.as_os_str().len())
-            .and_then(|bytes| bytes.checked_add(self.process.stamp.workspace.as_os_str().len()))
-            .ok_or_else(|| {
-                ProcessError::InvalidInput("process plan byte count overflowed".into())
-            })?;
-        for argument in &self.process.arguments {
-            if argument.as_encoded_bytes().contains(&b'\0') {
-                return Err(ProcessError::InvalidInput(
-                    "process arguments contain an invalid byte".into(),
-                ));
-            }
-            process_plan_bytes =
-                process_plan_bytes
-                    .checked_add(argument.len())
-                    .ok_or_else(|| {
-                        ProcessError::InvalidInput("process plan byte count overflowed".into())
-                    })?;
-        }
-        if process_plan_bytes > MAXIMUM_SANDBOX_PLAN_BYTES {
-            return Err(ProcessError::InvalidInput(format!(
-                "process plan exceeds {MAXIMUM_SANDBOX_PLAN_BYTES} bytes"
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_environment(&self) -> Result<()> {
-        if self.environment.len() > MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES {
-            return Err(ProcessError::InvalidInput(format!(
-                "process environment exceeds {MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES} entries"
-            )));
-        }
-        let mut environment_bytes = 0_usize;
-        let mut names = BTreeSet::new();
-        for (name, value) in &self.environment {
-            if name.is_empty() {
-                return Err(ProcessError::InvalidInput(
-                    "process environment names must be nonempty".into(),
-                ));
-            }
-            if name.as_encoded_bytes().contains(&b'=')
-                || name.as_encoded_bytes().contains(&b'\0')
-                || value.as_encoded_bytes().contains(&b'\0')
-            {
-                return Err(ProcessError::InvalidInput(
-                    "process environment contains an invalid byte".into(),
-                ));
-            }
-            environment_bytes = environment_bytes
-                .checked_add(name.len())
-                .and_then(|bytes| bytes.checked_add(value.len()))
-                .and_then(|bytes| bytes.checked_add(2))
-                .ok_or_else(|| {
-                    ProcessError::InvalidInput("process environment byte count overflowed".into())
-                })?;
-            if environment_bytes > MAXIMUM_PROCESS_ENVIRONMENT_BYTES {
-                return Err(ProcessError::InvalidInput(format!(
-                    "process environment exceeds {MAXIMUM_PROCESS_ENVIRONMENT_BYTES} bytes"
-                )));
-            }
-            if !names.insert(name) {
-                return Err(ProcessError::InvalidInput(
-                    "process environment names must be unique".into(),
-                ));
-            }
-        }
+        validate_environment(&self.environment)?;
+        validate_capture(
+            self.stdout_max_bytes,
+            self.stderr_max_bytes,
+            self.termination_grace_ms,
+        )?;
         Ok(())
     }
 
@@ -176,6 +72,109 @@ impl ProcessSpec {
             .checked_add(self.stderr_max_bytes)
             .ok_or_else(|| ProcessError::InvalidInput("capture reservation overflow".into()))
     }
+}
+
+fn validate_process_plan(process: &ConfinedProcess) -> Result<()> {
+    if process
+        .program
+        .as_os_str()
+        .as_encoded_bytes()
+        .contains(&b'\0')
+        || process.cwd.as_os_str().as_encoded_bytes().contains(&b'\0')
+    {
+        return Err(ProcessError::InvalidInput(
+            "process executable or working directory contains an invalid byte".into(),
+        ));
+    }
+    if process.arguments.len() > MAXIMUM_SANDBOX_ARGUMENTS {
+        return Err(ProcessError::InvalidInput(format!(
+            "process argument count exceeds {MAXIMUM_SANDBOX_ARGUMENTS}"
+        )));
+    }
+    let mut process_plan_bytes = process
+        .program
+        .as_os_str()
+        .len()
+        .checked_add(process.cwd.as_os_str().len())
+        .and_then(|bytes| bytes.checked_add(process.stamp.workspace.as_os_str().len()))
+        .ok_or_else(|| ProcessError::InvalidInput("process plan byte count overflowed".into()))?;
+    for argument in &process.arguments {
+        if argument.as_encoded_bytes().contains(&b'\0') {
+            return Err(ProcessError::InvalidInput(
+                "process arguments contain an invalid byte".into(),
+            ));
+        }
+        process_plan_bytes = process_plan_bytes
+            .checked_add(argument.len())
+            .ok_or_else(|| {
+                ProcessError::InvalidInput("process plan byte count overflowed".into())
+            })?;
+    }
+    if process_plan_bytes > MAXIMUM_SANDBOX_PLAN_BYTES {
+        return Err(ProcessError::InvalidInput(format!(
+            "process plan exceeds {MAXIMUM_SANDBOX_PLAN_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_environment(environment: &[(OsString, OsString)]) -> Result<()> {
+    if environment.len() > MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES {
+        return Err(ProcessError::InvalidInput(format!(
+            "process environment exceeds {MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES} entries"
+        )));
+    }
+    let mut environment_bytes = 0_usize;
+    let mut names = BTreeSet::new();
+    for (name, value) in environment {
+        if name.is_empty() {
+            return Err(ProcessError::InvalidInput(
+                "process environment names must be nonempty".into(),
+            ));
+        }
+        if name.as_encoded_bytes().contains(&b'=')
+            || name.as_encoded_bytes().contains(&b'\0')
+            || value.as_encoded_bytes().contains(&b'\0')
+        {
+            return Err(ProcessError::InvalidInput(
+                "process environment contains an invalid byte".into(),
+            ));
+        }
+        environment_bytes = environment_bytes
+            .checked_add(name.len())
+            .and_then(|bytes| bytes.checked_add(value.len()))
+            .and_then(|bytes| bytes.checked_add(2))
+            .ok_or_else(|| {
+                ProcessError::InvalidInput("process environment byte count overflowed".into())
+            })?;
+        if environment_bytes > MAXIMUM_PROCESS_ENVIRONMENT_BYTES {
+            return Err(ProcessError::InvalidInput(format!(
+                "process environment exceeds {MAXIMUM_PROCESS_ENVIRONMENT_BYTES} bytes"
+            )));
+        }
+        if !names.insert(name) {
+            return Err(ProcessError::InvalidInput(
+                "process environment names must be unique".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capture(stdout: usize, stderr: usize, grace: u64) -> Result<()> {
+    for (name, value) in [("stdout_max_bytes", stdout), ("stderr_max_bytes", stderr)] {
+        if value == 0 || value > MAXIMUM_PROCESS_STREAM_BYTES {
+            return Err(ProcessError::InvalidInput(format!(
+                "{name} must be within 1..={MAXIMUM_PROCESS_STREAM_BYTES}"
+            )));
+        }
+    }
+    if grace == 0 || grace > MAXIMUM_PROCESS_GRACE_MS {
+        return Err(ProcessError::InvalidInput(format!(
+            "termination_grace_ms must be within 1..={MAXIMUM_PROCESS_GRACE_MS}"
+        )));
+    }
+    Ok(())
 }
 
 /// One raw offset-based output read.

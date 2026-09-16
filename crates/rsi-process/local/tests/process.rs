@@ -569,3 +569,6 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
     drop((cache, process, managed));
     assert!(fiber.dispose().await.is_clean());
 }
+
+#[path = "process/duplex.rs"]
+mod duplex;

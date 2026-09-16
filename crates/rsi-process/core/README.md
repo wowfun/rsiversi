@@ -18,6 +18,12 @@ must be nonempty, unique, and contain neither `=` nor NUL; values must not
 contain NUL. These process-API invariants are rejected by the platform-neutral
 request contract before any provider admission.
 
+This is a trusted in-process Local capability. A `ConfinedProcess` is a typed
+plan, not an unforgeable authorization token: its holder must forward the exact
+Sandbox-produced plan. Process validates spawn framing, not the authenticity of
+the issuer or the truth of a caller-supplied enforcement stamp. Untrusted callers
+must enter through the policy-owning product boundary, not receive Process.
+
 Readers use monotonically increasing whole-stream offsets. Each stream retains
 only its requested tail: a read older than the retained window is marked
 lossy and begins at the oldest retained byte. Reads preserve arbitrary bytes;
@@ -56,3 +62,21 @@ Completed pages use immutable shared bytes. API clients transfer their received
 buffer owner into the page; clones and slices retain the original receive lease
 until the last byte owner drops. `ProcessError::Api` preserves transport failure
 classification. Raw bytes and cursors remain independent of display decoding.
+
+`DuplexProcess` is a separate Local contract for ongoing byte protocols. Its
+request has no batch stdin. It retains a bounded lossless stdout queue, a bounded
+stderr tail and explicit persistent stdin. Reads consume stdout once in order;
+queue saturation backpressures the child instead of dropping bytes. Each read or
+write is at most 64 KiB; overlapping reads/writes on the same stream reject as
+capacity rather than creating unbounded waiters. A write reports actual bytes
+accepted and must not be blindly replayed after cancellation. Closing stdin is
+explicit. Dropping the final managed duplex handle starts termination; clones
+share one handle lifetime, while retained byte ports remain readable through
+settlement without keeping the child alive. JSON framing and RPC identity belong to the consumer.
+
+Duplex and batch processes share the same provider's 256-process and 64 MiB
+capture admission. Output capacity remains reserved while handles/readers retain
+it. Termination and provider retirement unblock protocol pipes, terminate the
+managed group and reap the direct child. A pipe that cannot drain within the
+explicit grace reports an error, never lossless EOF. The same Unix process-group,
+descendant-escape and host-crash limitations apply to both contracts.
