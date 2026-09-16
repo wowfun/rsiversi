@@ -1,7 +1,7 @@
 use super::{
-    AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit,
-    Arc, AtomicAgentCommit, AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet,
-    CasObjectRef, Digest, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
+    AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit, Arc, AtomicAgentCommit,
+    AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet, CasObjectRef, Digest,
+    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
     MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
     MessageId, MessageTarget, Ordering, Result, SessionFact, SessionHeader, SessionId,
@@ -11,14 +11,75 @@ use super::{
     StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
-    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
-    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, TurnId,
-    WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
-    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreSessionWatermarks,
+    StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint,
+    TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
+    async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn read_fact_suffix(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreFactSuffix> {
+        rsi_agent_store_protocol::validate_suffix_limits(limit, maximum_bytes)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let mut suffix = rsi_agent_store_protocol::StoreFactSuffix {
+            through_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            fact_prefix_sha256: hex::encode(session.fact_prefix_digest),
+            facts: Vec::new(),
+            encoded_bytes: 0,
+            byte_limited: false,
+        };
+        for fact in session.facts.iter().rev().take(limit) {
+            let length = fact.encoded_len();
+            if length > maximum_bytes - suffix.encoded_bytes {
+                suffix.byte_limited = true;
+                break;
+            }
+            suffix.encoded_bytes += length;
+            suffix.facts.push(fact.as_ref().clone());
+        }
+        suffix.facts.reverse();
+        suffix.validate(limit, maximum_bytes)?;
+        Ok(suffix)
+    }
+    async fn prepare_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::SessionValidationLease> {
+        self.validate_session(session_id).await?;
+        Ok(rsi_agent_store_protocol::SessionValidationLease::new(
+            Arc::clone(&self.inner),
+        ))
+    }
+
+    async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        Ok(StoreSessionWatermarks {
+            session_id: session_id.clone(),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+        })
+    }
+
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
         if self.should_fail_append() {
@@ -1282,7 +1343,7 @@ fn apply_domain_updates(
 fn apply_atomic_memory_append(
     state: &mut MemoryState,
     append: AtomicSessionAppend,
-) -> Result<AgentCommitWatermark> {
+) -> Result<StoreSessionWatermarks> {
     let session_id = append.session_id.clone();
     let minimum_entered_fact_seq = append
         .expected_fact_seq
@@ -1417,7 +1478,7 @@ fn apply_atomic_memory_append(
         boundary.terminal_control =
             Some((record.seq(), hex::encode(session.control_prefix_digest)));
     }
-    Ok(AgentCommitWatermark {
+    Ok(StoreSessionWatermarks {
         session_id,
         durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),

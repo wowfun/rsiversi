@@ -1,3 +1,4 @@
+use super::bounded_text;
 use super::*;
 
 pub(super) fn install_cas(
@@ -80,6 +81,14 @@ pub(super) fn sync_directory_io(_path: &Path) -> std::io::Result<()> {
 }
 
 pub(super) fn read_cas_file(cas_dir: &Path, sha256: &str) -> Result<Vec<u8>> {
+    read_cas_file_bounded(cas_dir, sha256, MAXIMUM_STORE_CAS_BYTES)
+}
+
+pub(super) fn read_cas_file_bounded(
+    cas_dir: &Path,
+    sha256: &str,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>> {
     validate_sha256("CAS identity", sha256)?;
     let path = cas_dir.join(sha256);
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
@@ -94,7 +103,7 @@ pub(super) fn read_cas_file(cas_dir: &Path, sha256: &str) -> Result<Vec<u8>> {
             "CAS entry is not a regular file".into(),
         ));
     }
-    let bytes = read_regular_file_bounded(&path, MAXIMUM_STORE_CAS_BYTES).map_err(|error| {
+    let bytes = read_regular_file_bounded(&path, maximum_bytes).map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidData {
             StoreError::Corrupt(error.to_string())
         } else {
@@ -291,8 +300,8 @@ pub(super) fn read_indexed_fact(
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    bounded_text(row, 1, 256)?,
+                    bounded_text(row, 2, 8)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<String>>(4)?,
                 ))

@@ -102,7 +102,7 @@ async fn domain_stage_seals_exact_definitions_and_closes_failed_and_withdrawn_ca
     ])
     .unwrap();
     let (runtime, tools, composition, service) = activate_composition(presets, contributions).await;
-    let first = service.pin(&id).await.unwrap();
+    let first = service.pin(&id, None).await.unwrap();
     assert_eq!(
         first.domains().baseline()[0].state().value(),
         &serde_json::json!(false)
@@ -112,7 +112,7 @@ async fn domain_stage_seals_exact_definitions_and_closes_failed_and_withdrawn_ca
         .propose(DomainRevision::new(1), &true)
         .unwrap();
     fs::write(&path, source("enabled = true")).unwrap();
-    let second = service.pin(&id).await.unwrap();
+    let second = service.pin(&id, None).await.unwrap();
     assert_eq!(
         second.domains().baseline()[0].state().value(),
         &serde_json::json!(true)
@@ -124,7 +124,7 @@ async fn domain_stage_seals_exact_definitions_and_closes_failed_and_withdrawn_ca
     ));
 
     fs::write(&path, source("enabled = true, duplicate = true")).unwrap();
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     {
         let captured = factory.captured.lock().unwrap();
         for entry in captured.iter() {
@@ -142,7 +142,7 @@ async fn domain_stage_seals_exact_definitions_and_closes_failed_and_withdrawn_ca
         second.domains().validate_proposal(&accepted).unwrap();
     }
     fs::write(&path, source("withdraw = true")).unwrap();
-    let withdrawn = service.pin(&id).await.unwrap();
+    let withdrawn = service.pin(&id, None).await.unwrap();
     assert!(withdrawn.domains().baseline().is_empty());
     let stale = factory
         .captured

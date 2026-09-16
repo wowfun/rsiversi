@@ -803,3 +803,98 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
         ))
         .unwrap();
 }
+
+#[test]
+fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
+    for limited in [false, true] {
+        let mut fold = if limited {
+            ContextFold::with_limits(header(""), ContextLimits::new(8, 1024).unwrap())
+        } else {
+            ContextFold::new(header(""))
+        }
+        .unwrap();
+        for seq in 1..=rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES as u64 {
+            let fact = SessionFact::new(
+                seq,
+                seq,
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new(format!("retained-{seq}")).unwrap(),
+                    text: "still active".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox: SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap();
+            fold.apply(&[fact]).unwrap();
+        }
+        let seq = rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES as u64 + 1;
+        let fact = SessionFact::new(
+            seq,
+            seq,
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new("over-limit").unwrap(),
+                text: "overflow".into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                fold.apply(std::slice::from_ref(&fact)),
+                Err(ContextError::TooLarge)
+            ));
+        }
+        assert_eq!(fold.through_seq(), seq - 1);
+        assert_eq!(
+            fold.project(
+                ContextLimits::new(
+                    rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES,
+                    rsi_agent_context::MAXIMUM_CONTEXT_BYTES
+                )
+                .unwrap()
+            )
+            .unwrap()
+            .messages
+            .len(),
+            rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES
+        );
+    }
+}
+
+#[test]
+fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
+    let mut fold =
+        ContextFold::with_limits(header(""), ContextLimits::new(8, 1024).unwrap()).unwrap();
+    let mut rejected = false;
+    for seq in 1..=128 {
+        let fact = SessionFact::new(
+            seq,
+            seq,
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new(format!("bytes-{seq}")).unwrap(),
+                text: "x".repeat(512 * 1024),
+                model: None,
+                reasoning_effort: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap();
+        match fold.apply(std::slice::from_ref(&fact)) {
+            Ok(()) => {}
+            Err(ContextError::TooLarge) => {
+                assert_eq!(fold.through_seq(), seq - 1);
+                assert!(matches!(fold.apply(&[fact]), Err(ContextError::TooLarge)));
+                rejected = true;
+                break;
+            }
+            Err(error) => panic!("unexpected error: {error}"),
+        }
+    }
+    assert!(rejected);
+}

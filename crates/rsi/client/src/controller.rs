@@ -17,6 +17,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[path = "commands.rs"]
 pub(super) mod commands;
+#[path = "resources.rs"]
+pub(super) mod resources;
 #[path = "source.rs"]
 pub(super) mod source;
 #[path = "tasks.rs"]

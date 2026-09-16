@@ -79,7 +79,7 @@ async fn source_contract_blocks_composition_publication_until_its_provider_is_ac
     .await
     .unwrap();
     let pin = service
-        .pin(&AgentPresetId::new("default").unwrap())
+        .pin(&AgentPresetId::new("default").unwrap(), None)
         .await
         .unwrap();
     assert_eq!(probe.active("managed"), 1);
@@ -157,17 +157,17 @@ async fn unchanged_profile_rebuilds_for_catalog_and_preserves_old_pin() {
     )
     .await;
     let id = AgentPresetId::new("default").unwrap();
-    let a = service.pin(&id).await.unwrap();
-    let again = service.pin(&id).await.unwrap();
+    let a = service.pin(&id, None).await.unwrap();
+    let again = service.pin(&id, None).await.unwrap();
     assert_eq!(a.source_digest(), again.source_digest());
     assert_eq!(a_probe.activations.load(Ordering::Acquire), 1);
     *source.current.lock().unwrap() = Some(snapshot(&presets, "b", &b_probe));
-    let b = service.pin(&id).await.unwrap();
+    let b = service.pin(&id, None).await.unwrap();
     assert_ne!(a.source_digest(), b.source_digest());
     assert_eq!(a_probe.active("same"), 1);
     assert_eq!(b_probe.active("same"), 1);
     *source.current.lock().unwrap() = None;
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     assert_eq!(b_probe.active("same"), 1);
     assert_eq!(source.reads.load(Ordering::Acquire), 4);
     drop((a, again, a_snapshot));
@@ -214,7 +214,7 @@ async fn replacement_during_activation_does_not_mix_catalog_snapshots() {
     let build = tokio::spawn({
         let service = Arc::clone(&service);
         let id = id.clone();
-        async move { service.pin(&id).await }
+        async move { service.pin(&id, None).await }
     });
     gate.wait_entered(1).await;
     *source.current.lock().unwrap() = Some(Arc::new(AgentCompositionSnapshot::new(
@@ -224,7 +224,7 @@ async fn replacement_during_activation_does_not_mix_catalog_snapshots() {
     gate.release.cancel();
     let old = build.await.unwrap().unwrap();
     assert_eq!(source.reads.load(Ordering::Acquire), 1);
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     assert_eq!(source.reads.load(Ordering::Acquire), 2);
     drop(old);
     assert!(composition.dispose().await.is_clean());
@@ -324,12 +324,12 @@ config = { role = "consumer" }
     )
     .await;
     let id = AgentPresetId::new("default").unwrap();
-    let a = service.pin(&id).await.unwrap();
+    let a = service.pin(&id, None).await.unwrap();
     *source.current.lock().unwrap() = Some(Arc::new(AgentCompositionSnapshot::new(
         presets,
         portable_catalog("b"),
     )));
-    let b = service.pin(&id).await.unwrap();
+    let b = service.pin(&id, None).await.unwrap();
     let inspected = runtime
         .inspect(rsi_meta::InspectionRequest::default())
         .unwrap();
@@ -478,12 +478,12 @@ async fn cache_identity_includes_nominal_bindings_portable_keys_and_update_mode(
             presets.clone(),
             changed_catalog(&probe, step),
         )));
-        let pin = service.pin(&id).await.unwrap();
+        let pin = service.pin(&id, None).await.unwrap();
         for old in &pins {
             assert_ne!(pin.source_digest(), old);
         }
         pins.push(pin.source_digest().to_owned());
-        let again = service.pin(&id).await.unwrap();
+        let again = service.pin(&id, None).await.unwrap();
         assert_eq!(again.source_digest(), pin.source_digest());
         assert_eq!(probe.activations.load(Ordering::Acquire), step + 1);
     }
@@ -525,9 +525,9 @@ async fn last_pin_retains_the_entire_selected_catalog_through_scope_cleanup() {
     )
     .await;
     let id = AgentPresetId::new("default").unwrap();
-    let old = service.pin(&id).await.unwrap();
+    let old = service.pin(&id, None).await.unwrap();
     *source.current.lock().unwrap() = Some(snapshot(&presets, "b", &probe));
-    let new = service.pin(&id).await.unwrap();
+    let new = service.pin(&id, None).await.unwrap();
     assert!(unused_weak.upgrade().is_some());
     drop(old);
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -559,7 +559,7 @@ async fn refreshed_compiler_allowlist_is_checked_before_a_possible_cache_hit() {
     )
     .await;
     let id = AgentPresetId::new("default").unwrap();
-    let old = service.pin(&id).await.unwrap();
+    let old = service.pin(&id, None).await.unwrap();
     let environment = ProfileEnvironment::new(
         temp.path().join("config"),
         temp.path().join("state"),
@@ -579,10 +579,10 @@ async fn refreshed_compiler_allowlist_is_checked_before_a_possible_cache_hit() {
     )
     .unwrap();
     *source.current.lock().unwrap() = Some(snapshot(&restricted, "a", &probe));
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     assert_eq!(probe.activations.load(Ordering::Acquire), 1);
     *source.current.lock().unwrap() = Some(healthy);
-    let restored = service.pin(&id).await.unwrap();
+    let restored = service.pin(&id, None).await.unwrap();
     assert_eq!(old.source_digest(), restored.source_digest());
     assert_eq!(probe.activations.load(Ordering::Acquire), 1);
     drop((old, restored));

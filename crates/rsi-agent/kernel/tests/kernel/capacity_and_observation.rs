@@ -1,5 +1,37 @@
 use super::*;
 
+#[tokio::test]
+async fn resource_read_distinguishes_caller_cancellation_from_shutdown() {
+    use rsi_agent_session_protocol::SessionResourceRequest;
+    use rsi_agent_turn_protocol::SessionResources as _;
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let worker = kernel.start_workers();
+    let session = SessionId::new("resource-cancellation").unwrap();
+    let stop = CancellationToken::new();
+    stop.cancel();
+    assert!(matches!(
+        kernel
+            .read_resource(
+                &session,
+                SessionResourceRequest::Sources.validated().unwrap(),
+                stop
+            )
+            .await,
+        Err(TurnError::Cancelled)
+    ));
+    kernel.shutdown(worker).await.unwrap();
+    assert!(matches!(
+        kernel
+            .read_resource(
+                &session,
+                SessionResourceRequest::Sources.validated().unwrap(),
+                CancellationToken::new()
+            )
+            .await,
+        Err(TurnError::ShuttingDown)
+    ));
+}
+
 #[tokio::test(start_paused = true)]
 async fn durable_cancellation_fires_even_after_the_requesting_future_detaches() {
     let store = Arc::new(MemoryStore::new());
@@ -2391,7 +2423,9 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
             ("exceeds protocol count", 1, 2, 513, 514),
             ("no progress", 1, 2, 0, 3),
         ] {
-            let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+            let memory = Arc::new(MemoryStore::new());
+            append_terminal_history(&memory, "fault-page", 1).await;
+            let store = Arc::new(FactReadRaceStore::new(memory));
             let kernel = AgentKernel::recover_with_clock_and_limits(
                 store.clone(),
                 composition(),

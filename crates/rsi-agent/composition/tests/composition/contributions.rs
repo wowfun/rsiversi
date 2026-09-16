@@ -129,7 +129,7 @@ async fn execution_catalog_freezes_business_order_and_rolls_back_failed_candidat
     ])
     .unwrap();
     let (runtime, tools, composition, service) = activate_composition(presets, contributions).await;
-    let first = service.pin(&id).await.unwrap();
+    let first = service.pin(&id, None).await.unwrap();
     let names: Vec<_> = first
         .contributions()
         .entries()
@@ -148,10 +148,10 @@ async fn execution_catalog_freezes_business_order_and_rolls_back_failed_candidat
         ]
     );
     fs::write(&path, source("duplicate = true")).unwrap();
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     assert_eq!(first.contributions().entries().len(), 6);
     fs::write(&path, source("withdraw = true")).unwrap();
-    let second = service.pin(&id).await.unwrap();
+    let second = service.pin(&id, None).await.unwrap();
     assert_eq!(second.contributions().entries().len(), 3);
     for (registrar, context) in factory.captured.lock().unwrap().iter() {
         assert!(matches!(

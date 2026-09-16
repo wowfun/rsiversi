@@ -24,6 +24,8 @@ pub enum ContributionStage {
     Command,
     /// Disposable extension view over a captured Session state.
     Projection,
+    /// Finite resource discovery or body reads outside execution.
+    ResourceRead,
 }
 
 /// One narrow callback registered in an Agent-only composition.
@@ -41,6 +43,8 @@ pub enum ContributionKind {
     Command(crate::SessionCommandRegistration),
     /// Read-only complete Session view, isolated from other projection failures.
     Projection(Arc<dyn crate::SessionProjection>),
+    /// Bounded resource reader captured in this exact generation.
+    ResourceRead(Arc<dyn crate::SessionResourceReader>),
 }
 
 /// Stable identity, explicit priority and one callback.
@@ -77,6 +81,7 @@ impl ContributionRegistration {
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
             ContributionKind::Command(_) => ContributionStage::Command,
             ContributionKind::Projection(_) => ContributionStage::Projection,
+            ContributionKind::ResourceRead(_) => ContributionStage::ResourceRead,
         }
     }
 }

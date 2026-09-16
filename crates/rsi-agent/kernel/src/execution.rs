@@ -327,7 +327,7 @@ impl TurnExecution for AgentKernel {
                 .map(|entry| SessionFactBody::InputMessageEntered {
                     turn_id: claim.turn_id().clone(),
                     step_id: next_step.clone(),
-                    source: entered_message_source(&entry.message),
+                    source: entry.message.entered_source(),
                     content: entry.message.content.clone(),
                 }),
         );
@@ -667,18 +667,19 @@ impl TurnExecution for AgentKernel {
         if !context_checkpoints_enabled(&self.inner) {
             return Ok(None);
         }
-        let permits = u32::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES)
-            .map_err(|_| TurnError::Invariant("checkpoint bound exceeds semaphore range".into()))?;
-        let permit = Arc::clone(&self.inner.store_read_admission)
-            .acquire_many_owned(permits)
-            .await
-            .map_err(|_| TurnError::Invariant("Store-read admission closed".into()))?;
-        let checkpoint = match self.inner.store.read_context_checkpoint(session_id).await {
-            Ok(checkpoint) => checkpoint,
-            Err(StoreError::NotFound(_)) => None,
+        let checkpoint = store_reads::read(
+            &self.inner,
+            session_id,
+            MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
+            true,
+            |store, id| async move { store.read_context_checkpoint(&id).await },
+        )
+        .await;
+        let (checkpoint, _permit, _lease) = match checkpoint {
+            Ok(value) => value,
+            Err(StoreError::NotFound(_)) => return Ok(None),
             Err(error) => return Err(turn_store_error(error)),
         };
-        drop(permit);
         Ok(checkpoint.map(|checkpoint| ContextCheckpoint {
             header_fingerprint: checkpoint.header_fingerprint,
             through_seq: checkpoint.through_seq,

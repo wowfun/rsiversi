@@ -282,22 +282,19 @@ impl ContextFold {
                 })
                 .collect(),
         };
-        let payload_bytes = serde_json::to_vec(&payload)
+        let prefix = CHECKPOINT_MAGIC.len() + 32;
+        let mut writer = CheckpointWriter {
+            bytes: CHECKPOINT_MAGIC.to_vec(),
+            limit: MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
+        };
+        writer.bytes.resize(prefix, 0);
+        serde_json::to_writer(&mut writer, &payload)
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
+        let mut bytes = writer.bytes;
         let mut digest = Sha256::new();
         digest.update(CHECKPOINT_BINDING_DOMAIN);
-        digest.update(&payload_bytes);
-        let binding: [u8; 32] = digest.finalize().into();
-        let mut bytes =
-            Vec::with_capacity(CHECKPOINT_MAGIC.len() + binding.len() + payload_bytes.len());
-        bytes.extend_from_slice(CHECKPOINT_MAGIC);
-        bytes.extend_from_slice(&binding);
-        bytes.extend_from_slice(&payload_bytes);
-        if bytes.is_empty() || bytes.len() > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
-            return Err(ContextError::Invalid(
-                "encoded checkpoint exceeds its absolute byte bound".into(),
-            ));
-        }
+        digest.update(&bytes[prefix..]);
+        bytes[CHECKPOINT_MAGIC.len()..prefix].copy_from_slice(&digest.finalize());
         Ok(Arc::from(bytes))
     }
 
@@ -580,11 +577,6 @@ impl ContextFold {
             .system_message_bytes
             .checked_add(self.retained_message_bytes)
             .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
-        let turn_sizes = self
-            .turns
-            .iter()
-            .map(|turn| (turn.messages.len(), turn.message_bytes))
-            .collect::<Vec<_>>();
         let mut omitted = self.omitted_turns;
         let mut skipped_retained = 0_usize;
         loop {
@@ -630,7 +622,7 @@ impl ContextFold {
             if !turn.terminal {
                 return Err(ContextError::TooLarge);
             }
-            let (removed_messages, removed_bytes) = turn_sizes[skipped_retained];
+            let (removed_messages, removed_bytes) = (turn.messages.len(), turn.message_bytes);
             retained_messages = retained_messages
                 .checked_sub(removed_messages)
                 .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
@@ -664,27 +656,48 @@ impl ContextFold {
             if self.turns.front().is_none_or(|turn| !turn.terminal) {
                 break;
             }
-            let removed = self
-                .turns
-                .pop_front()
-                .expect("terminal front was observed above");
-            self.retained_messages = self
-                .retained_messages
-                .checked_sub(removed.messages.len())
-                .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
-            self.retained_message_bytes = self
-                .retained_message_bytes
-                .checked_sub(removed.message_bytes)
-                .ok_or_else(|| ContextError::Invalid("context byte count underflowed".into()))?;
-            self.omitted_turns = self
-                .omitted_turns
-                .checked_add(1)
-                .ok_or_else(|| ContextError::Invalid("omitted turn count overflowed".into()))?;
-            self.turn_index.remove(&removed.id);
-            self.base_ordinal = self
-                .base_ordinal
-                .checked_add(1)
-                .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
+            self.remove_oldest_turn()?;
+        }
+        Ok(())
+    }
+
+    // Called only after observing a terminal front; no active Turn is truncated.
+    fn remove_oldest_turn(&mut self) -> Result<()> {
+        let removed = self
+            .turns
+            .pop_front()
+            .expect("terminal front was observed above");
+        self.retained_messages = self
+            .retained_messages
+            .checked_sub(removed.messages.len())
+            .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
+        self.retained_message_bytes = self
+            .retained_message_bytes
+            .checked_sub(removed.message_bytes)
+            .ok_or_else(|| ContextError::Invalid("context byte count underflowed".into()))?;
+        self.omitted_turns = self
+            .omitted_turns
+            .checked_add(1)
+            .ok_or_else(|| ContextError::Invalid("omitted turn count overflowed".into()))?;
+        self.turn_index.remove(&removed.id);
+        self.base_ordinal = self
+            .base_ordinal
+            .checked_add(1)
+            .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
+        Ok(())
+    }
+
+    fn admit_message(&mut self, bytes: usize) -> Result<()> {
+        while self.retained_messages >= MAXIMUM_CONTEXT_MESSAGES
+            || bytes > MAXIMUM_CONTEXT_BYTES.saturating_sub(self.retained_message_bytes)
+        {
+            if self.semantic.is_some()
+                || self.retention_limits.is_none()
+                || self.turns.front().is_none_or(|turn| !turn.terminal)
+            {
+                return Err(ContextError::TooLarge);
+            }
+            self.remove_oldest_turn()?;
         }
         Ok(())
     }
@@ -747,7 +760,7 @@ impl ContextFold {
                 content,
                 ..
             } => {
-                let message = input_message(source, content)?;
+                let message = input_message(source, content, seq)?;
                 self.push_turn_message(turn_id, message)?;
             }
             SessionFactBody::ImageRequested {
@@ -947,6 +960,7 @@ impl ContextFold {
             ));
         }
         let message_bytes = encoded_message_bytes(&message)?;
+        self.admit_message(message_bytes)?;
         let retained_messages = self
             .retained_messages
             .checked_add(1)
@@ -997,8 +1011,9 @@ impl ContextFold {
             .get(turn_id)
             .copied()
             .ok_or_else(|| ContextError::Invalid("Fact references an unknown turn".into()))?;
-        let index = self.relative_index(index)?;
         let message_bytes = encoded_message_bytes(&message)?;
+        self.admit_message(message_bytes)?;
+        let index = self.relative_index(index)?;
         let retained_messages = self
             .retained_messages
             .checked_add(1)
@@ -1170,14 +1185,25 @@ fn tool_message(call_id: &str, result: &ToolResult) -> Result<Message> {
         .map_err(|error| ContextError::Invalid(error.to_string()))
 }
 
-fn input_message(source: &InputMessageSource, content: &[AgentMessageContent]) -> Result<Message> {
+fn input_message(
+    source: &InputMessageSource,
+    content: &[AgentMessageContent],
+    seq: u64,
+) -> Result<Message> {
     let content = content
         .iter()
-        .map(|content| match content {
+        .enumerate()
+        .map(|(index, content)| match content {
             AgentMessageContent::Text { text } => Ok(MessageContent::Text { text: text.clone() }),
             AgentMessageContent::Image { media } => {
                 media_descriptor(media).map(MessageContent::Image)
             }
+            AgentMessageContent::Reference { reference } => Ok(MessageContent::Text { text: format!(
+                "Referenced conversation data from Session {} through Fact {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
+                reference.metadata.source.session_id, reference.metadata.through_seq,
+                if reference.metadata.omissions.is_empty() { "" } else { " Earlier material was omitted by capture limits." },
+                reference.preview, serde_json::to_string(&reference.metadata.target.session_id).expect("Session identity"), seq, index,
+            ) }),
         })
         .collect::<Result<Vec<_>>>()?;
     match source {
@@ -1242,3 +1268,45 @@ pub enum ContextError {
 
 /// Context result.
 pub type Result<T> = std::result::Result<T, ContextError>;
+
+struct CheckpointWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+impl std::io::Write for CheckpointWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other(
+                "encoded checkpoint exceeds its absolute byte bound",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_encoding_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn capped_writer_rejects_before_extending_the_envelope() {
+        let mut writer = CheckpointWriter {
+            bytes: b"head".to_vec(),
+            limit: 8,
+        };
+        writer.write_all(b"body").unwrap();
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(writer.bytes, b"headbody");
+        let mut writer = CheckpointWriter {
+            bytes: b"head".to_vec(),
+            limit: 8,
+        };
+        assert!(writer.write_all(&vec![b'x'; 1024]).is_err());
+        assert_eq!(writer.bytes, b"head");
+    }
+}

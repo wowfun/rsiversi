@@ -38,13 +38,17 @@ catalog. Those historical versions become ordinary summary candidates. Additive
 instructions stay protected until an explicit replacement of their source;
 instructions from other sources retain their protection.
 
-Builder 2.4.0 binds newly selected source spans plus the exact previously
+Builder 2.5.0 renders frozen reference previews as user data with exact recorded
+read coordinates. It performs no CAS reads. It also binds newly selected source spans plus the exact previously
 installed summary. That prior is an inductive proof: it is usable only after
 its own sources and prior were validated in this same replay/fork selection.
 Transitive raw bindings are not copied into every descendant plan. Fully
 summarized completed Turns and their source metadata are released. The cold
-materialization bounds count projected messages (4,096 / 32 MiB), not Facts;
-raw source metadata shares the 4,096 cold retention ceiling. At 1,024 retained
+materialization bounds count projected messages (4,096 / 32 MiB), not Facts.
+Both fold modes admit messages against these absolute limits before retention,
+including when an active oldest Turn prevents eviction. Incremental non-semantic
+folds may first evict complete oldest Turns; active Turns are never truncated.
+Raw source metadata shares the 4,096 cold retention ceiling. At 1,024 retained
 sources, every subsequent planning opportunity requests compaction. Each plan
 selects at most 1,024 source Turns, oldest first. Selection stops before the
 encoded sources and selections exceed 240 KiB, reserving 16 KiB within the
@@ -124,3 +128,9 @@ across page boundaries, and finish exactly at `resolved_terminal_seq` before
 child Facts may be projected. The inherited interval must also contain only
 balanced completed turns at that boundary. The parent interval does not advance
 the child's Fact cursor or Fact-prefix digest.
+
+Checkpoint encoding writes through a private capped writer directly into its
+final envelope buffer. The complete envelope counts against the existing byte
+bound. The generic builder releases the copied opaque payload before allocating
+the final shared envelope. These allocation rules preserve the serialized format,
+binding checks and optional-cache failure behavior.

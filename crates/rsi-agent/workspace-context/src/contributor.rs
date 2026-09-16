@@ -224,11 +224,25 @@ impl PluginFactory for WorkspaceContributorFactory {
                 ),
             )
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let resource_lease = plan
+            .local::<ContributionRegistrarContract>()?
+            .register(
+                &context,
+                ContributionRegistration::new(
+                    ContributionId::new("rsi.workspace-skills").expect("static contribution"),
+                    0,
+                    ContributionKind::ResourceRead(Arc::new(skills::SkillResources(
+                        plan.local::<WorkspaceContextContract>()?,
+                    ))),
+                ),
+            )
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
             "withdraw workspace contribution",
             Box::new(move || {
                 Box::pin(async move {
                     drop(contribution_lease);
+                    drop(resource_lease);
                     drop(domain_lease);
                     Ok(())
                 })

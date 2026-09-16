@@ -96,6 +96,14 @@ impl SessionTargetClient {
             let request: wire::Attach =
                 serde_json::from_slice(input.as_bytes()).map_err(|_| invalid())?;
             request.session_id
+        } else if operation.id == Operation::CaptureReference.spec().id {
+            let request: wire::HandleRequest<wire::Attach> =
+                serde_json::from_slice(input.as_bytes()).map_err(|_| invalid())?;
+            request.target.validate().map_err(|_| invalid())?;
+            if request.input.session_id != self.session {
+                return Err(ApiError::Unauthorized);
+            }
+            request.target.session_id
         } else {
             // Inspect only the closed target envelope, without allocating a second
             // copy of potentially large Image or message content.

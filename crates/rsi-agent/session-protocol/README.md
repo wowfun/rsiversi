@@ -1,5 +1,21 @@
 # rsi-agent-session-protocol
 
+Human message content may include a frozen Session reference. The Agent-owned
+reference binds a bounded preview and immutable CAS envelope to the source and
+original target Header fingerprints. It is user data, never instruction authority.
+At most four references enter one message; each preview is at most 8 KiB and
+counts against the human text limit. The immutable envelope retains at most 1 MiB
+of exported text, its exact source horizon and omission metadata. Reference reads
+use recorded Session/Fact/content-index coordinates, never an arbitrary digest.
+Protocol validation establishes shape and size only. The
+[reference owner](../references/README.md) verifies CAS bytes, digest, metadata
+and the exact preview prefix before admission or a read; protocol validation
+alone is not proof of that binding.
+
+`AgentPath` owns its compact JSON number-array encoding and
+`AgentPath::MAXIMUM_JSON_BYTES`. Indexed storage consumers use that bound rather
+than deriving a second limit from the path's depth and segment representation.
+
 ModelIntent request evidence is an atomic Available or Unavailable package.
 Configuration, system and tools sections hold UTF-8 inline bytes or an exact
 earlier same-Session inline section reference (sequence, section, digest, length).
@@ -43,7 +59,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 13 is accepted; format 12 and all earlier formats are unsupported. The
+format 14 is accepted; format 13 and all earlier formats are unsupported. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 
@@ -83,7 +99,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 13), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 14), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
@@ -160,3 +176,8 @@ The protocol also owns the canonical rolling SHA-256 chain over serialized
 Facts. Context projection and Store append accounting share that algorithm but
 derive it independently from their own Fact inputs, so an opaque checkpoint
 cannot supply its own provenance proof.
+
+Reference envelope admission allows six encoded bytes per text/preview byte plus
+16 KiB of provenance. This includes worst-case JSON control-character escaping;
+decoded text and preview retain their independent 1 MiB and 8 KiB limits. Draft
+and recorded page requests share `validate_reference_page_bounds`.

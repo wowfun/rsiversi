@@ -45,13 +45,18 @@ impl WorkspaceSkillRequests {
 
     /// Recognizes the first token on the first nonempty line of direct-user text.
     pub fn push_text(&mut self, text: &str) -> Result<(), WorkspaceContextError> {
-        let Some(name) = text
+        let mut words = text
             .lines()
             .find(|line| !line.trim().is_empty())
-            .and_then(|line| line.split_whitespace().next())
-            .and_then(|token| token.strip_prefix('/'))
-            .filter(|name| valid_skill_name(name))
-        else {
+            .unwrap_or("")
+            .split_whitespace();
+        let token = words.next().unwrap_or("");
+        let name = if token == "/skill" {
+            words.next()
+        } else {
+            token.strip_prefix('/')
+        };
+        let Some(name) = name.filter(|name| valid_skill_name(name)) else {
             return Ok(());
         };
         if self.seen.contains(name) {

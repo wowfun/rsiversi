@@ -19,7 +19,7 @@ type HeadRow = (Option<String>, i64, i64, i64, i64, i64);
 
 fn head_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeadRow> {
     Ok((
-        row.get(0)?,
+        super::optional_text(row, 0, 256)?,
         row.get(1)?,
         row.get(2)?,
         row.get(3)?,

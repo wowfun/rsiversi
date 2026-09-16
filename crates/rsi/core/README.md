@@ -1,5 +1,9 @@
 # rsi
 
+The standard native TUI and Desktop application Profiles mount the shared
+Plugins workbench. Their application catalog registers its Local contract and
+factory, matching the browser Worker's ordinary registration path.
+
 The running Service registers the existing Agent-preset Settings definition in
 its own Settings owner and binds its composition catalog's default selection to
 that exact scope. A remote default-selection receipt therefore affects subsequent
@@ -497,3 +501,18 @@ current dispatcher with Local origin and one shared 64 MiB input budget. It hold
 only a weak reference to the Service owner. This adds no listener or invented
 DeviceId. HTTP application connections expose their already authenticated client.
 All three retain their existing connection cleanup and domain capabilities.
+
+Standard credential composition explicitly permits the config path's trusted
+first-component OS alias, using the same native Files policy as native-addon
+bootstrap. It preserves logical HostPaths and rejects links in the untouched
+suffix. Generic file credential stores remain strict unless their owner opts in.
+## Web retrieval integration
+
+Standard composition includes the default-off [retrieval owner](../../rsi-retrieval/README.md).
+Product composition sources merge its exact configuration Domain with other
+pre-seal inputs. Native Loader and generic Agent code do not own web policy.
+
+The integration composition source reuses its merged generation seed while the
+base seed, current MCP seed and retrieval flags are unchanged. Every snapshot
+still checks those owners before reuse, so cached bytes never substitute for
+current readiness or current executable authority.

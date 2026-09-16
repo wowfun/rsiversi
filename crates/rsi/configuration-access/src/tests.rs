@@ -533,3 +533,123 @@ async fn credential_write_survives_reply_loss_and_holds_the_revoke_fence() {
     devices.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[derive(Debug)]
+struct BlockingPlugins {
+    reads: std::sync::atomic::AtomicUsize,
+    entered: Semaphore,
+    release: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
+    fn plugins(
+        &self,
+        request: rsi_configuration_api::PluginStatusRequest,
+    ) -> Result<rsi_configuration_api::PluginStatusPage> {
+        use rsi_configuration_api::{PluginHealth, PluginStatusPage, PluginWatcher};
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.entered.add_permits(1);
+        let (lock, changed) = &self.release;
+        let _guard = changed
+            .wait_while(lock.lock().unwrap(), |released| !*released)
+            .unwrap();
+        Ok(PluginStatusPage {
+            desired_revision: "4".into(),
+            observed_revision: "7".into(),
+            health: PluginHealth::RestartRequired,
+            watcher: PluginWatcher::Faulted,
+            offset: request.offset,
+            total: 0,
+            next_offset: None,
+            plugins: vec![],
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_finishes() {
+    use rsi_configuration_api::ConfigurationOperation;
+    let runtime = settings().await;
+    let devices = devices().await;
+    let registered = devices.register("remote").await.unwrap();
+    let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
+    let owner = owner(
+        TestDomain::new("rsi.configuration.grants"),
+        devices.clone(),
+        &runtime,
+    )
+    .await;
+    let source = Arc::new(BlockingPlugins {
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        entered: Semaphore::new(0),
+        release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+    });
+    let registration = register_plugin_status(
+        runtime
+            .root()
+            .lookup_local::<ApiRegistrarContract>()
+            .unwrap()
+            .as_ref(),
+        owner.clone(),
+        source.clone(),
+    )
+    .unwrap();
+    let dispatch = runtime
+        .root()
+        .lookup_local::<ApiDispatchContract>()
+        .unwrap();
+    let spec = ConfigurationOperation::Plugins.spec();
+    let input = || {
+        ByteBudget::default()
+            .encode(&json!({"offset":0,"limit":32}), spec.maximum_request_bytes)
+            .unwrap()
+    };
+    let call = dispatch.admit(&spec.id, origin.clone()).unwrap();
+    assert!(matches!(
+        call.invoke(input()).await,
+        Err(ApiError::Unauthorized)
+    ));
+    assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+    owner
+        .set_grant(&CallOrigin::Local, registered.record.id.clone(), "0", true)
+        .unwrap()
+        .await
+        .unwrap();
+    let call = dispatch.admit(&spec.id, origin.clone()).unwrap();
+    let bytes = input();
+    let waiter = tokio::spawn(async move { call.invoke(bytes).await });
+    source.entered.acquire().await.unwrap().forget();
+    let revoke = owner
+        .set_grant(&CallOrigin::Local, registered.record.id, "1", false)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while owner.allowed(&origin) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(owner.snapshot().await.unwrap().revision, "1");
+    assert!(matches!(owner.admit(&origin), Err(ApiError::Unauthorized)));
+    {
+        let (lock, changed) = &source.release;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    let output = waiter.await.unwrap().unwrap();
+    let ApiOutput::Reply(message) = output else {
+        panic!("finite read")
+    };
+    let page: rsi_configuration_api::PluginStatusPage =
+        serde_json::from_slice(message.json.as_ref()).unwrap();
+    assert_eq!(page.observed_revision, "7");
+    assert_eq!(revoke.await.unwrap().revision, "2");
+    let call = dispatch.admit(&spec.id, origin).unwrap();
+    assert!(matches!(
+        call.invoke(input()).await,
+        Err(ApiError::Unauthorized)
+    ));
+    assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    registration.close().await;
+    owner.close().await;
+    devices.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}

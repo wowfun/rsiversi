@@ -12,6 +12,16 @@ plugin = "rsi.agent.workspace-context.contributor"
 
 [[steps]]
 kind = "plugin"
+id = "skills"
+plugin = "rsi.agent.workspace-context.tools"
+
+[[steps]]
+kind = "plugin"
+id = "references"
+plugin = "rsi.agent.references.tools"
+
+[[steps]]
+kind = "plugin"
 id = "time-context"
 plugin = "rsi.agent.time-context"
 
@@ -78,3 +88,13 @@ kind = "plugin"
 id = "files"
 plugin = "rsi.files.tools"
 enabled_rhai = "defines.standard_unix_files"
+
+[[steps]]
+kind = "plugin"
+id = "mcp-tools"
+plugin = "rsi.mcp.tools"
+
+[[steps]]
+kind = "plugin"
+id = "retrieval-tools"
+plugin = "rsi.retrieval.tools"

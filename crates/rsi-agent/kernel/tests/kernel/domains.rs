@@ -1,6 +1,7 @@
 use super::*;
 use rsi_agent_composition_protocol::{DomainCatalog, DomainDefinition, DomainHandle};
 use rsi_agent_session_protocol::{DomainIdentity, DomainRevision, MessageDelivery};
+use rsi_agent_turn_protocol::SessionProjections;
 
 #[derive(Debug)]
 struct DomainComposition {
@@ -15,6 +16,7 @@ impl AgentComposition for DomainComposition {
     async fn pin(
         &self,
         preset: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         assert_eq!(preset, self.pin.preset_id());
         Ok(self.pin.clone())
@@ -1584,4 +1586,77 @@ async fn evidence_byte_budget_accounts_for_the_complete_fact_and_domain_batch() 
         }
         run.stop().await;
     }
+}
+
+#[derive(Debug)]
+struct RecordingRestore {
+    pin: AgentCompositionPin,
+    seeds: Mutex<Vec<rsi_agent_composition_protocol::AgentGenerationSeed>>,
+}
+#[async_trait]
+impl AgentComposition for RecordingRestore {
+    async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
+        Ok(self.pin.preset_id().clone())
+    }
+    async fn pin(
+        &self,
+        preset: &AgentPresetId,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        assert_eq!(preset, self.pin.preset_id());
+        self.seeds.lock().unwrap().push(
+            seed.expect("cold selection must supply its saved baseline before pin")
+                .clone(),
+        );
+        Ok(self.pin.clone())
+    }
+}
+#[tokio::test]
+async fn cold_projection_and_resume_supply_original_baseline_before_composition_not_latest_state() {
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let session = run.claim.session_id().clone();
+    let baseline = store
+        .read_domain_states(&session, Some(1))
+        .await
+        .unwrap()
+        .states[0]
+        .snapshot
+        .clone();
+    let replacement = !baseline.state().value().as_bool().unwrap();
+    run.kernel
+        .commit_domains(
+            &run.claim,
+            run.mutation("changed-after-baseline", 1, replacement, vec![]),
+        )
+        .await
+        .unwrap();
+    run.kernel
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    run.stop().await;
+    let (composition, _) = domain_composition();
+    let recording = Arc::new(RecordingRestore {
+        pin: composition.pin.clone(),
+        seeds: Mutex::new(vec![]),
+    });
+    let kernel = AgentKernel::recover_with_clock(store, recording.clone(), Arc::new(FixedClock))
+        .await
+        .unwrap();
+    kernel.projection_snapshot(&session).await.unwrap();
+    kernel.prepare_resume(&session).await.unwrap();
+    assert_eq!(
+        kernel.domain_states(&session).await.unwrap()[0]
+            .snapshot
+            .state()
+            .value(),
+        &serde_json::json!(replacement)
+    );
+    let captures = recording.seeds.lock().unwrap();
+    assert!(captures.len() >= 2);
+    for seed in captures.iter() {
+        assert_eq!(seed.states(), std::slice::from_ref(&baseline));
+    }
+    drop(captures);
 }

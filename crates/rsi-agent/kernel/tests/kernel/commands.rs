@@ -91,6 +91,7 @@ impl AgentComposition for CommandComposition {
     async fn pin(
         &self,
         _: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let gate = self.gate.lock().unwrap().take();

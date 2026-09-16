@@ -34,6 +34,10 @@ pub(crate) enum Operation {
     Observe,
     Interactions,
     Projections,
+    Resource,
+    CaptureReference,
+    PreviewReference,
+    ReadReference,
     GoalControl,
     GoalStatus,
     GoalObserve,
@@ -49,7 +53,7 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 34] = [
         Self::Create,
         Self::Attach,
         Self::Recent,
@@ -67,6 +71,10 @@ impl Operation {
         Self::Observe,
         Self::Interactions,
         Self::Projections,
+        Self::Resource,
+        Self::CaptureReference,
+        Self::PreviewReference,
+        Self::ReadReference,
         Self::GoalControl,
         Self::GoalStatus,
         Self::GoalObserve,
@@ -102,6 +110,16 @@ impl Operation {
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
             Self::Interactions => ("interactions", Subscription, Read, 8192, INTERACTION_REPLY),
             Self::Projections => ("projections", Subscription, Read, 8192, PROJECTION_REPLY),
+            Self::Resource => (
+                "resource",
+                Data,
+                Read,
+                32 * 1024,
+                rsi_agent_session_protocol::MAXIMUM_SESSION_RESOURCE_BYTES + 64 * 1024,
+            ),
+            Self::CaptureReference => ("reference-capture", Data, Read, 8192, 64 * 1024),
+            Self::PreviewReference => ("reference-preview", Data, Read, 64 * 1024, 512 * 1024),
+            Self::ReadReference => ("reference-read", Data, Read, 8192, 512 * 1024),
             Self::GoalControl => ("goal-control", Data, Mutation, 32 * 1024, 16 * 1024),
             Self::GoalStatus => ("goal-status", Control, Read, 8192, 16 * 1024),
             Self::GoalObserve => ("goal-observe", Subscription, Read, 8192, 16 * 1024),
@@ -127,8 +145,9 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create => 4,
-                    Self::Submit | Self::MessageStatus | Self::Jobs => 2,
+                    Self::Create => 5,
+                    Self::Submit => 3,
+                    Self::MessageStatus | Self::Jobs => 2,
                     Self::Attach
                     | Self::Recent
                     | Self::DraftSnapshot
@@ -136,7 +155,7 @@ impl Operation {
                     | Self::History
                     | Self::Observe
                     | Self::Inspect
-                    | Self::ReadMessage => 3,
+                    | Self::ReadMessage => 4,
                     _ => 1,
                 },
             )
@@ -168,6 +187,14 @@ pub(crate) struct HandleReply<T> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Attach {
     pub session_id: SessionId,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReferencePreview {
+    pub reference: rsi_agent_session_protocol::FrozenReference,
+    pub offset: usize,
+    pub maximum: usize,
 }
 
 #[derive(Deserialize, Serialize)]

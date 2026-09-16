@@ -36,6 +36,10 @@ impl LocalContract for NativeAddonControlContract {
 }
 
 #[derive(Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent platform, cache and bootstrap ownership capabilities"
+)]
 pub(crate) struct NativeAddonFactory {
     pub(crate) paths: HostPaths,
     pub(crate) linux_tools: bool,
@@ -43,6 +47,8 @@ pub(crate) struct NativeAddonFactory {
     pub(crate) base: StandardAddonSet,
     pub(crate) application_cache: bool,
     pub(crate) require_service_owner: bool,
+    /// Bootstrap stages native catalogs before the Service's integration owners exist.
+    pub(crate) capture_service_inputs: bool,
     pub(crate) reserved: Arc<std::sync::OnceLock<std::collections::BTreeSet<String>>>,
 }
 
@@ -72,17 +78,25 @@ impl PluginFactory for SharedNativeAddonFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
-            .requiring_local::<rsi_service_host::ServiceOwnerContract>())
+            .requiring_local::<rsi_service_host::ServiceOwnerContract>()
+            .requiring_local::<rsi_mcp::McpOwnerContract>()
+            .requiring_local::<rsi_retrieval::RetrievalContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         self.staging
             .manager
             .retain_service_owner(plan.local::<rsi_service_host::ServiceOwnerContract>()?)?;
         plan.context()
-            .provide_local::<AgentCompositionSourceContract>(Arc::new(ServiceAgentSource {
-                manager: self.staging.manager.clone(),
-                presets: self.presets.clone(),
-            }))?;
+            .provide_local::<AgentCompositionSourceContract>(Arc::new(
+                crate::integration_source::SeededSource::new(
+                    Arc::new(ServiceAgentSource {
+                        manager: self.staging.manager.clone(),
+                        presets: self.presets.clone(),
+                    }),
+                    plan.local::<rsi_mcp::McpOwnerContract>()?,
+                    plan.local::<rsi_retrieval::RetrievalContract>()?,
+                ),
+            ))?;
         plan.context()
             .provide_local::<NativeAddonControlContract>(self.staging.control.clone())?;
         Ok(())
@@ -163,9 +177,14 @@ impl PluginFactory for NativeAddonFactory {
                 "native addon manager configuration must be null".into(),
             ));
         }
-        let prepared = PreparedActivation::new(ConfigValue::Null);
-        Ok(if self.require_service_owner {
-            prepared.requiring_local::<rsi_service_host::ServiceOwnerContract>()
+        let mut prepared = PreparedActivation::new(ConfigValue::Null);
+        if self.require_service_owner {
+            prepared = prepared.requiring_local::<rsi_service_host::ServiceOwnerContract>();
+        }
+        Ok(if self.capture_service_inputs {
+            prepared
+                .requiring_local::<rsi_mcp::McpOwnerContract>()
+                .requiring_local::<rsi_retrieval::RetrievalContract>()
         } else {
             prepared
         })
@@ -208,8 +227,18 @@ impl PluginFactory for NativeAddonFactory {
         let manager = receive.await.map_err(|_| {
             MetaError::Activation("native addon worker did not initialize".into())
         })??;
+        let source: Arc<dyn rsi_agent_composition::AgentCompositionSource> =
+            if self.capture_service_inputs {
+                Arc::new(crate::integration_source::SeededSource::new(
+                    manager.clone(),
+                    plan.local::<rsi_mcp::McpOwnerContract>()?,
+                    plan.local::<rsi_retrieval::RetrievalContract>()?,
+                ))
+            } else {
+                manager.clone()
+            };
         plan.context()
-            .provide_local::<AgentCompositionSourceContract>(manager.clone())?;
+            .provide_local::<AgentCompositionSourceContract>(source)?;
         let control: Arc<dyn NativeAddonControl> = Arc::new(Control {
             manager: manager.clone(),
             requests,

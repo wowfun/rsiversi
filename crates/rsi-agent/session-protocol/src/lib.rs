@@ -40,6 +40,8 @@ pub use command::{
 };
 mod domain;
 mod projection;
+mod reference;
+mod resource;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
     DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue, DomainStateView,
@@ -49,9 +51,22 @@ pub use projection::{
     MAXIMUM_PROJECTION_VALUE_BYTES, MAXIMUM_SESSION_PROJECTION_BYTES, MAXIMUM_SESSION_PROJECTIONS,
     ProjectionCursor, ProjectionEntry, ProjectionValue, SessionProjectionSnapshot,
 };
+pub use reference::{
+    FrozenReference, MAXIMUM_MESSAGE_REFERENCES, MAXIMUM_REFERENCE_PAGE_BYTES,
+    MAXIMUM_REFERENCE_PREVIEW_BYTES, MAXIMUM_REFERENCE_SCAN_BYTES, MAXIMUM_REFERENCE_SCAN_FACTS,
+    MAXIMUM_REFERENCE_SNAPSHOT_BYTES, MAXIMUM_REFERENCE_TEXT_BYTES, ReferenceBinding,
+    ReferenceMetadata, ReferenceOmission, ReferenceSnapshotEnvelope, ReferenceSnapshotRef,
+    validate_reference_page_bounds,
+};
+pub use reference::{ReferenceReadRequest, ReferenceTextPage};
+pub use resource::{
+    MAXIMUM_RESOURCE_ENTRIES, MAXIMUM_RESOURCE_TEXT_BYTES, MAXIMUM_SESSION_RESOURCE_BYTES,
+    SessionResourceDescriptor, SessionResourceRequest, SessionResourceResponse,
+    SessionResourceValue, ValidatedResourceRequest, ValidatedResourceResponse,
+};
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 13;
+pub const SESSION_FORMAT_VERSION: u32 = 14;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -172,6 +187,11 @@ impl<'de> Deserialize<'de> for AgentPath {
 }
 
 impl AgentPath {
+    /// Conservative byte bound for this path's compact JSON number-array encoding.
+    /// Reserves two brackets and each `u16` segment's decimal digits plus a comma.
+    pub const MAXIMUM_JSON_BYTES: usize =
+        2 + MAXIMUM_AGENT_TREE_DEPTH * (u16::MAX.ilog10() as usize + 2);
+
     /// Creates a root or bounded descendant path.
     pub fn new(segments: Vec<u16>) -> Result<Self> {
         if segments.len() > MAXIMUM_AGENT_TREE_DEPTH || segments.contains(&0) {
@@ -366,6 +386,8 @@ pub enum AgentMessageContent {
     Text { text: String },
     /// Immutable imported image reference.
     Image { media: MediaRef },
+    /// Immutable human-selected conversation data, with no instruction authority.
+    Reference { reference: FrozenReference },
 }
 
 /// Authority-neutral origin of one queued message.
@@ -506,6 +528,31 @@ pub struct AgentMessage {
 }
 
 impl AgentMessage {
+    /// Projects this message's identity and provenance into its model-visible input Fact.
+    pub fn entered_source(&self) -> InputMessageSource {
+        match &self.source {
+            AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
+                message_id: self.message_id.clone(),
+                source: source.clone(),
+            },
+            AgentMessageSource::Human => InputMessageSource::Human {
+                message_id: self.message_id.clone(),
+            },
+            AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
+                message_id: self.message_id.clone(),
+                source_session_id: source_session_id.clone(),
+            },
+            AgentMessageSource::Completion {
+                child_session_id,
+                activation_id,
+            } => InputMessageSource::Completion {
+                message_id: self.message_id.clone(),
+                child_session_id: child_session_id.clone(),
+                activation_id: activation_id.clone(),
+            },
+        }
+    }
+
     /// Revalidates content, route, and byte bounds at admission.
     pub fn validate(&self) -> Result<()> {
         if let AgentMessageSource::Continuation { source } = &self.source {
@@ -521,6 +568,16 @@ impl AgentMessage {
                     "continuation input changed its frozen payload or options".into(),
                 ));
             }
+        }
+        if !matches!(self.source, AgentMessageSource::Human)
+            && self
+                .content
+                .iter()
+                .any(|content| matches!(content, AgentMessageContent::Reference { .. }))
+        {
+            return Err(SessionError::Invalid(
+                "only direct human messages may contain frozen references".into(),
+            ));
         }
         let text_limit = if matches!(self.source, AgentMessageSource::Human) {
             MAXIMUM_TURN_TEXT_BYTES
@@ -549,6 +606,7 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
         )));
     }
     let mut text_bytes = 0_usize;
+    let mut reference_count = 0_usize;
     for block in content {
         match block {
             AgentMessageContent::Text { text } => {
@@ -560,7 +618,21 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
             AgentMessageContent::Image { media } => media
                 .validate()
                 .map_err(|error| SessionError::Invalid(error.to_string()))?,
+            AgentMessageContent::Reference { reference } => {
+                reference.validate()?;
+                reference_count += 1;
+                text_bytes = text_bytes
+                    .checked_add(reference.preview.len())
+                    .ok_or_else(|| {
+                        SessionError::Invalid("reference preview size overflowed".into())
+                    })?;
+            }
         }
+    }
+    if reference_count > MAXIMUM_MESSAGE_REFERENCES {
+        return Err(SessionError::Invalid(
+            "at most four references enter one message".into(),
+        ));
     }
     if text_bytes > text_limit {
         return Err(SessionError::TooLarge {
@@ -2175,6 +2247,15 @@ fn validate_entered_message(
     content: &[AgentMessageContent],
 ) -> Result<()> {
     source.validate()?;
+    if !matches!(source, InputMessageSource::Human { .. })
+        && content
+            .iter()
+            .any(|content| matches!(content, AgentMessageContent::Reference { .. }))
+    {
+        return Err(SessionError::Invalid(
+            "only direct human input may contain frozen references".into(),
+        ));
+    }
     if let InputMessageSource::Continuation { source, .. } = source {
         let [AgentMessageContent::Text { text }] = content else {
             return Err(SessionError::Invalid(

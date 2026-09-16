@@ -13,6 +13,9 @@ pub fn slash_command(text: &str) -> Option<(&str, &str)> {
     if text.starts_with('/') {
         return None;
     }
+    if text.split_whitespace().next() == Some("skill") {
+        return None;
+    }
     Some(
         text.split_once(char::is_whitespace)
             .map_or((text, ""), |(name, arguments)| (name, arguments.trim())),

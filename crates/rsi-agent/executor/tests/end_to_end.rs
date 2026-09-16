@@ -1140,6 +1140,7 @@ impl AgentComposition for CompositionFixture {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         let mut current = self.pin.lock().unwrap();
         if let Some(pin) = current.as_ref() {
@@ -1486,7 +1487,7 @@ impl BaseStack {
     async fn fresh(&self, header: SessionHeader) -> SubmitSession {
         let pin = self
             .composition
-            .pin(header.agent_preset_id())
+            .pin(header.agent_preset_id(), None)
             .await
             .unwrap();
         SubmitSession::Fresh(PreparedFreshSession::new(header, pin).unwrap())

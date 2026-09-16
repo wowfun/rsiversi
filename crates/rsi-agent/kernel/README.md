@@ -32,6 +32,12 @@ reads. Revocation prevents subsequent admission; an already admitted Store
 transaction may settle during the overlapping control operation. Pause waits
 for pending-only discard under the same Session submission admission, so a
 concurrently committed claim is observed as claimed before Pause returns.
+A fresh draft continuation lease retains its exact Header and composition through
+first mailbox publication and cold selection until released. Publishing that
+first entry must not replace the generation that authorized it. A lease armed
+from an already durable Session does not override current cold selection; changed
+generations still reject its old authority. Neither case waives complete Domain
+validation for execution.
 
 Durable turn scheduler and write-behind ordinary plugin. The Kernel is the sole
 owner of live session state, Fact sequencing, cancellation classification,
@@ -356,3 +362,22 @@ events do not copy it. Argument chunks expose an immutable prefix length per
 snapshot and append under their own short lock outside the global Kernel mutex.
 A divergent speculative append copies only that partial tail; ordinary streaming
 appends retain the same bounded chunk. No snapshot observes an unpublished suffix.
+
+Historical payload reads prepare validation before reserving materialization
+bytes. An admitted owned read task keeps its Store and byte/validation guards
+through actual Store completion and queued result ownership, even when its
+caller stops waiting. Observation transfers retained admission before releasing
+transient admission. Metadata-only reads do not acquire history proofs.
+The write-behind worker retains independent in-flight Session futures, at most
+one per resident Session and 256 overall. Completions and later ready batches
+continue while another Session waits. Shutdown drains accepted suffixes as well
+as already selected batches; the ordinary timeout leaves its owned drain alive.
+
+Cold composition reads the immutable first Domain baseline before selecting an
+Agent generation and passes its bounded opaque seed into composition. This order
+also applies to cold resource/projection reads. Execution admission validates the resulting
+catalog against durable Domain state; read-only projections retain their existing
+ability to ignore unrelated unavailable codecs. The Kernel never decodes an integration's manifest
+or installs Tools after the catalog is sealed. A new fork selects the current
+composition and applies the existing per-Domain fork policy; integrations whose
+catalog must stay with their selected generation reset to their initial state.

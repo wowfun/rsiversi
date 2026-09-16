@@ -148,6 +148,7 @@ impl AgentComposition for UnavailableComposition {
     async fn pin(
         &self,
         _preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         panic!("durable attachment must not pin a preset")
     }
@@ -199,6 +200,7 @@ impl AgentComposition for AvailableComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         AgentCompositionPin::new(
             preset_id.clone(),
@@ -224,6 +226,7 @@ impl AgentComposition for FailingComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         Err(AgentCompositionError::Unavailable {
             preset_id: preset_id.clone(),
@@ -1175,7 +1178,7 @@ async fn concurrent_submissions_reject_a_draft_expired_by_the_first_publication(
 async fn assert_competing_message_publication(change_created_at: bool, concurrent: bool) {
     let store = Arc::new(MemoryStore::new());
     let preset_id = AgentPresetId::new("image-preset").unwrap();
-    let composition = AvailableComposition.pin(&preset_id).await.unwrap();
+    let composition = AvailableComposition.pin(&preset_id, None).await.unwrap();
     let turns = Arc::new(CompetingPublicationTurns {
         store: store.clone(),
         resume_issuer: ResumeAdmissionIssuer::new(),
@@ -1388,7 +1391,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
         .await
         .unwrap();
     let composition = AvailableComposition
-        .pin(header.agent_preset_id())
+        .pin(header.agent_preset_id(), None)
         .await
         .unwrap();
     let turns = Arc::new(ConcurrentResumeTurns {
@@ -1935,6 +1938,7 @@ impl AgentComposition for PinTracker {
     async fn pin(
         &self,
         preset: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         AgentCompositionPin::new(

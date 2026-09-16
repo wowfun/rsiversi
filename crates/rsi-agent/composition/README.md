@@ -50,7 +50,12 @@ exact contribution catalog. Compilation, resolution and activation retain that
 snapshot even if the source publishes a replacement meanwhile. A failed snapshot
 query fails selection before Runtime mutation, including a cache hit.
 
-An unchanged Profile program and catalog identity reuse the published generation.
+An unchanged Profile program, catalog and seed identity reuse the published
+generation. Each preset retains separate current slots for fresh and restoring
+inputs, so alternating draft creation and cold resume does not reactivate both
+generations. A new program or executable catalog retires both cached slots;
+changing a seed replaces only its fresh/restoring slot. External pins retain
+their existing independent lifetime.
 Catalog identity includes every linked revision/native artifact digest and update
 mode, exact nominal Local/event bindings, and declared fresh Portable service
 keys. The pin digest combines the compiled program with this catalog identity;
@@ -90,3 +95,19 @@ receive the Scope root, while activation requires the existing
 It supplies `AgentCompositionContract`; it does
 not expose preset locations, the Tool registrar, a mutable Host catalog, or a
 resolver to Agent consumers.
+
+Before cache lookup, each build captures the selected generation seed together
+with the source catalog. Restored selection explicitly supplies the durable
+baseline in place of the current seed. The generation digest includes the exact
+seed SHA-256 and fresh/restoring mode; a saved external manifest therefore cannot reuse a
+catalog built for another manifest. The immutable seed is supplied inside the
+same fresh Local isolation as the registrars, before any Profile leaf activates.
+Unchanged definitions may share a pin only when these inputs also match.
+
+A valid executable source snapshot may explicitly mark only its current generation
+inputs unavailable with a static, redacted reason supplied by the source owner.
+Fresh builds report that reason before cache reuse. Restoration can
+still use its supplied saved seed with that executable catalog; unavailable code,
+compiler or native admission continues to reject both modes. This distinction
+allows an offline integration to restore saved definitions without treating a
+failed live discovery as an empty catalog.

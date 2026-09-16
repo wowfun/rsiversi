@@ -50,6 +50,14 @@ Kernel continuation admission provides live authority separately from durable
 state. Kernel also consumes the public Jobs status types to relay an executor's
 existing claim-bound read port; Jobs scope ownership stays with the executor.
 
+[`rsi-mcp`](../crates/rsi-mcp/README.md) owns operator-selected external protocol
+servers, finite frozen catalogs and connection retirement. It consumes Process,
+Sandbox, Credentials, Tools and generic Agent composition seeds.
+[`rsi-retrieval`](../crates/rsi-retrieval/README.md) owns model-selected public-web
+URL policy, bounded retrieval and attributed source results. Their configuration
+and model adapters remain above generic Agent and Meta contracts; neither moves
+network policy into Kernel or Context.
+
 The standard [`rsi`](../crates/rsi/README.md) product owns Base composition,
 applications, and the single local Service Host for one standard
 `HostPaths` identity. Its library owns product factories, product-owned Profile

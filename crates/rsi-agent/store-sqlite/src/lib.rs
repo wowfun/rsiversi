@@ -13,7 +13,7 @@ use rsi_agent_session_protocol::{
     SessionId, StepId, TurnId, advance_control_prefix_digest, advance_fact_prefix_digest,
 };
 use rsi_agent_store_protocol::{
-    AGENT_STORE_SCHEMA_VERSION, AgentCommitWatermark, AppendBatch, AppendCommit, AtomicAgentCommit,
+    AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, AtomicAgentCommit,
     AtomicAgentCommitResult, AtomicSessionAppend, CasObjectRef, MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
     MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
@@ -23,8 +23,8 @@ use rsi_agent_store_protocol::{
     StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
-    StoreRecentSessionCursor, StoreRecentSessionPage, StoreTurnBoundary, StoreTurnFactPage,
-    StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionWatermarks, StoreTurnBoundary,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
     validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -306,29 +306,42 @@ pub struct SqliteStore {
     inner: Arc<StoreInner>,
 }
 
+#[cfg(feature = "test-support")]
+type FactPagePause = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 struct StoreInner {
     connections: DatabaseConnections,
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
     validation_admission: Arc<Semaphore>,
+    pins: Mutex<BTreeMap<SessionId, std::sync::Weak<preparation::PinnedProof>>>,
+    pin_admission: Arc<Semaphore>,
+    pin_changed: tokio::sync::Notify,
     #[cfg(test)]
+    pin_entries_examined: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
     validation_runs: Arc<AtomicU64>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     validation_queue_ns: AtomicU64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     validation_work_ns: AtomicU64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fact_materializations: Arc<AtomicU64>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     control_decodes: AtomicU64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     validation_barrier: Mutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
             std::sync::mpsc::Receiver<()>,
         )>,
     >,
+    #[cfg(feature = "test-support")]
+    fact_page_barrier: Arc<Mutex<Option<FactPagePause>>>,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
@@ -348,6 +361,7 @@ struct ValidatedSessionCache {
     recent: VecDeque<SessionId>,
     reused: VecDeque<SessionId>,
     ghost: VecDeque<SessionId>,
+    proofs: BTreeMap<SessionId, Arc<preparation::ValidatedSessionProof>>,
 }
 
 impl ValidatedSessionCache {
@@ -369,9 +383,13 @@ impl ValidatedSessionCache {
         }
     }
 
-    fn insert(&mut self, session_id: SessionId) {
+    fn insert(&mut self, session_id: SessionId) -> Arc<preparation::ValidatedSessionProof> {
         if self.touch(&session_id) {
-            return;
+            return Arc::clone(
+                self.proofs
+                    .get(&session_id)
+                    .expect("cached Session has a proof"),
+            );
         }
         let returning = self
             .ghost
@@ -389,16 +407,20 @@ impl ValidatedSessionCache {
                 if self.ghost.len() == VALIDATED_SESSION_CACHE_CAPACITY {
                     self.ghost.pop_front();
                 }
+                self.proofs.remove(&evicted);
                 self.ghost.push_back(evicted);
-            } else {
-                self.reused.pop_front();
+            } else if let Some(evicted) = self.reused.pop_front() {
+                self.proofs.remove(&evicted);
             }
         }
+        let proof = Arc::new(preparation::ValidatedSessionProof);
+        self.proofs.insert(session_id.clone(), Arc::clone(&proof));
         if returning.is_some() {
             self.reused.push_back(session_id);
         } else {
             self.recent.push_back(session_id);
         }
+        proof
     }
 }
 
@@ -486,18 +508,25 @@ impl SqliteStore {
                 reader_admission: Arc::new(Semaphore::new(1)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
                 validation_admission: Arc::new(Semaphore::new(1)),
+                pins: Mutex::new(BTreeMap::new()),
+                pin_admission: Arc::new(Semaphore::new(VALIDATED_SESSION_CACHE_CAPACITY)),
+                pin_changed: tokio::sync::Notify::new(),
                 #[cfg(test)]
+                pin_entries_examined: AtomicU64::new(0),
+                #[cfg(any(test, feature = "test-support"))]
                 validation_runs: Arc::new(AtomicU64::new(0)),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 validation_queue_ns: AtomicU64::new(0),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 validation_work_ns: AtomicU64::new(0),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 control_decodes: AtomicU64::new(0),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 validation_barrier: Mutex::new(None),
+                #[cfg(feature = "test-support")]
+                fact_page_barrier: Arc::new(Mutex::new(None)),
                 cas_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
@@ -632,23 +661,30 @@ impl SqliteStore {
     }
 
     async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
-        if self.touch_validated_session(session_id) {
-            return Ok(());
+        self.session_proof(session_id).await.map(|_| ())
+    }
+
+    async fn session_proof(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<preparation::ValidatedSessionProof>> {
+        if let Some(proof) = self.inner.session_proof(session_id) {
+            return Ok(proof);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let queued = std::time::Instant::now();
         let permit = Arc::clone(&self.inner.validation_admission)
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io("SQLite validation admission closed".into()))?;
-        if self.touch_validated_session(session_id) {
-            return Ok(());
+        if let Some(proof) = self.inner.session_proof(session_id) {
+            return Ok(proof);
         }
         let candidate = session_id.clone();
         let owner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             owner.validation_queue_ns.fetch_add(
                 u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
@@ -659,20 +695,22 @@ impl SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let started = std::time::Instant::now();
             let validated = owner.validate_selected(&transaction, &candidate);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             owner.validation_work_ns.fetch_add(
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
             );
             validated?;
             transaction.commit().map_err(sql_error)?;
-            if let Ok(mut cache) = owner.validated_sessions.lock() {
-                cache.insert(candidate);
-            }
-            Ok(())
+            // Keep the actual successful proof locally even if the optional cache is poisoned or evicted.
+            let proof = owner.validated_sessions.lock().map_or_else(
+                |_| Arc::new(preparation::ValidatedSessionProof),
+                |mut cache| cache.insert(candidate),
+            );
+            Ok(proof)
         })
         .await
         .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
@@ -762,7 +800,13 @@ mod append;
 mod cas;
 mod domain;
 mod filesystem;
+mod preparation;
 mod session_store;
+mod suffix;
+#[cfg(feature = "test-support")]
+pub mod test_support;
+mod text;
+use text::{bounded_text, optional_text};
 mod validation;
 
 use append::{
@@ -772,8 +816,8 @@ use append::{
 };
 use cas::{
     decode_context_checkpoint, decode_json, decode_projected_json, decode_sha256, decode_u64,
-    encode_json, fact_index_kind, install_cas, io_error, read_cas_file, read_indexed_fact,
-    sql_error, sqlite_u64, sync_directory, validate_sha256,
+    encode_json, fact_index_kind, install_cas, io_error, read_indexed_fact, sql_error, sqlite_u64,
+    sync_directory, validate_sha256,
 };
 use filesystem::{
     acquire_existing_writer_lock, acquire_writer_lock, configure_reader, configure_writer,

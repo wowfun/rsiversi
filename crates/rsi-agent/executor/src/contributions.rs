@@ -177,7 +177,8 @@ impl Driver {
                         ContributionKind::ToolPolicy(_)
                         | ContributionKind::ToolSettlement(_)
                         | ContributionKind::Command(_)
-                        | ContributionKind::Projection(_) => {
+                        | ContributionKind::Projection(_)
+                        | ContributionKind::ResourceRead(_) => {
                             unreachable!("non-execution callbacks use their own dispatch")
                         }
                     }

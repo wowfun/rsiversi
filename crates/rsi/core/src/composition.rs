@@ -231,6 +231,19 @@ fn standard_agent_addon(
         Arc::new(rsi_agent_workspace_context::WorkspaceContributorFactory),
     )?;
     register(
+        "rsi.agent.workspace-context.tools",
+        Arc::new(rsi_agent_workspace_context::WorkspaceSkillToolsFactory),
+    )?;
+    register(
+        "rsi.agent.references.tools",
+        Arc::new(rsi_agent_references::ReferenceToolsFactory),
+    )?;
+    register("rsi.mcp.tools", Arc::new(rsi_mcp::McpToolsFactory))?;
+    register(
+        "rsi.retrieval.tools",
+        Arc::new(rsi_retrieval::RetrievalToolsFactory),
+    )?;
+    register(
         TIME_CONTEXT_FACTORY,
         Arc::new(rsi_agent_time_context::TimeContextFactory::default()),
     )?;
@@ -895,6 +908,7 @@ impl StandardComposition {
             base,
             application_cache: !require_service_owner,
             require_service_owner,
+            capture_service_inputs: false,
             reserved: Arc::new(std::sync::OnceLock::from(reserved)),
         })
     }
@@ -1303,6 +1317,7 @@ impl StandardComposition {
                     base: addons.clone(),
                     application_cache: false,
                     require_service_owner: true,
+                    capture_service_inputs: true,
                     reserved,
                 },
             )?;
@@ -1310,6 +1325,10 @@ impl StandardComposition {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One exhaustive projection keeps related state transitions and ownership visible together"
+    )]
     fn build_internal(
         &self,
         materialize_assets: bool,
@@ -1331,11 +1350,7 @@ impl StandardComposition {
         let preset_identity = presets.launch_identity();
         let scopes = ScopeRoot::new(ScopeRoot::MAXIMUM_ANCESTRY_DEPTH)
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
-        #[cfg(unix)]
         let agent_composition = AgentCompositionFactory::from_source_contract(scopes);
-        #[cfg(not(unix))]
-        let agent_composition =
-            AgentCompositionFactory::new(presets, agent_addons.agent_catalog()?, scopes);
         let mut builder = StandardAddonBuilder::new("rsi.standard.service");
         #[cfg(unix)]
         let reserved = Arc::new(std::sync::OnceLock::new());
@@ -1347,6 +1362,18 @@ impl StandardComposition {
             inspector.clone(),
         )?;
         register_contracts(&mut builder)?;
+        #[cfg(not(unix))]
+        register(
+            &mut builder,
+            "rsi.agent.catalog",
+            UpdateMode::RestartRequired,
+            crate::integration_source::SourceFactory(Arc::new(
+                rsi_agent_composition::AgentCompositionSnapshot::new(
+                    presets,
+                    agent_addons.agent_catalog()?,
+                ),
+            )),
+        )?;
         #[cfg(unix)]
         self.register_native_source(&mut builder, presets, &agent_addons, reserved.clone())?;
         register_factories(
@@ -1605,6 +1632,30 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        "rsi.mcp",
+        UpdateMode::RestartRequired,
+        rsi_mcp::McpFactory,
+    )?;
+    register(
+        builder,
+        "rsi.retrieval",
+        UpdateMode::RestartRequired,
+        rsi_retrieval::RetrievalFactory,
+    )?;
+    register(
+        builder,
+        "rsi.retrieval.api",
+        UpdateMode::RestartRequired,
+        crate::retrieval_api::RetrievalApiFactory,
+    )?;
+    register(
+        builder,
+        "rsi.mcp.api",
+        UpdateMode::RestartRequired,
+        crate::mcp_api::McpApiFactory,
+    )?;
+    register(
+        builder,
         COMMANDS_FACTORY,
         UpdateMode::Replayable,
         rsi_commands::CommandsFactory,
@@ -1703,6 +1754,12 @@ fn register_agent_ai_factories(
     )?;
     register(
         builder,
+        rsi_agent_presets::REFERENCES_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_agent_references::ReferencesFactory,
+    )?;
+    register(
+        builder,
         KERNEL_FACTORY,
         UpdateMode::Replayable,
         rsi_agent_kernel::KernelFactory,
@@ -1769,6 +1826,12 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<PermissionPresetsContract>()?;
     builder.register_local_contract::<SandboxContract>()?;
     builder.register_local_contract::<ProcessContract>()?;
+    builder.register_local_contract::<rsi_process::DuplexProcessContract>()?;
+    builder.register_local_contract::<rsi_mcp::McpContract>()?;
+    builder.register_local_contract::<rsi_mcp::McpOwnerContract>()?;
+    builder.register_local_contract::<rsi_retrieval::RetrievalContract>()?;
+    #[cfg(not(unix))]
+    builder.register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>()?;
     builder.register_local_contract::<rsi_process::ProcessOutputCacheContract>()?;
     builder.register_local_contract::<rsi_user_questions_protocol::UserQuestionsContract>()?;
     builder.register_local_contract::<CommandRuntimeContract>()?;
@@ -1786,12 +1849,14 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<LanguageRegistrarContract>()?;
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
+    builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
     builder.register_local_contract::<TurnServiceContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::TurnJobsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionContinuationsContract>()?;
     builder.register_local_contract::<rsi_goal::GoalControllerContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionCommandsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionProjectionsContract>()?;
+    builder.register_local_contract::<rsi_agent_turn_protocol::SessionResourcesContract>()?;
     builder.register_local_contract::<TurnExecutionContract>()?;
     builder.register_local_contract::<TurnFinalizationContract>()?;
     Ok(())
@@ -1867,6 +1932,10 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
                 Value::Null
             },
         ),
+        ProfileEntry::new("rsi-mcp", "rsi.mcp", Value::Null),
+        ProfileEntry::new("rsi-retrieval", "rsi.retrieval", Value::Null),
+        ProfileEntry::new("rsi-retrieval-api", "rsi.retrieval.api", Value::Null),
+        ProfileEntry::new("rsi-mcp-api", "rsi.mcp.api", Value::Null),
         ProfileEntry::new("rsi-jobs", JOBS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-session-jobs-finalizer",
@@ -1905,6 +1974,12 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
     entries.push(ProfileEntry::new(
         "rsi-native-addons",
         "rsi.native-addons",
+        Value::Null,
+    ));
+    #[cfg(not(unix))]
+    entries.push(ProfileEntry::new(
+        "rsi-agent-catalog",
+        "rsi.agent.catalog",
         Value::Null,
     ));
     if coding_tools {
@@ -2129,6 +2204,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One exhaustive projection keeps related state transitions and ownership visible together"
+    )]
     fn standard_agent_profile_compiles_to_exactly_the_platform_enabled_contributions() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
@@ -2169,6 +2248,8 @@ mod tests {
             [
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
+                "rsi.agent.workspace-context.tools",
+                "rsi.agent.references.tools",
                 TIME_CONTEXT_FACTORY,
                 TODO_FACTORY,
                 MODEL_SELECTION_FACTORY,
@@ -2182,6 +2263,8 @@ mod tests {
                 APPLY_PATCH_FACTORY,
                 QUESTION_TOOLS_FACTORY,
                 FILES_TOOLS_FACTORY,
+                "rsi.mcp.tools",
+                "rsi.retrieval.tools",
             ]
         );
         assert_eq!(
@@ -2195,6 +2278,8 @@ mod tests {
             [
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
+                "rsi.agent.workspace-context.tools",
+                "rsi.agent.references.tools",
                 TIME_CONTEXT_FACTORY,
                 TODO_FACTORY,
                 MODEL_SELECTION_FACTORY,
@@ -2203,7 +2288,9 @@ mod tests {
                 REPEAT_REMINDER_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
-                QUESTION_TOOLS_FACTORY
+                QUESTION_TOOLS_FACTORY,
+                "rsi.mcp.tools",
+                "rsi.retrieval.tools",
             ]
         );
 

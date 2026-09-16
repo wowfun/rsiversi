@@ -1,5 +1,16 @@
 use super::*;
 
+#[test]
+fn integrity_check_reports_the_actual_bounded_sqlite_failure() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE broken (value INTEGER CHECK(value > 0)); PRAGMA ignore_check_constraints = ON; INSERT INTO broken VALUES (-1); PRAGMA ignore_check_constraints = OFF;").unwrap();
+    let error = validation::validate_database(&connection).unwrap_err();
+    assert!(
+        matches!(&error, StoreError::Corrupt(message) if message.contains("CHECK constraint failed in broken")),
+        "{error}"
+    );
+}
+
 #[path = "tests/settlement.rs"]
 mod settlement;
 
@@ -8,6 +19,24 @@ mod selection_work;
 
 #[path = "tests/ready_metadata.rs"]
 mod ready_metadata;
+
+#[tokio::test]
+async fn bounded_reference_suffix_uses_the_1024_fact_limit_and_exact_horizon() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = seed_history(&store, "reference-suffix", 1100, 0).await;
+    let page = store
+        .read_fact_suffix(&session, 1024, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(page.through_seq, 1100);
+    assert_eq!(page.facts.len(), 1024);
+    assert_eq!(page.after_seq(), 76);
+    assert_eq!(page.facts.first().unwrap().seq(), 77);
+    assert_eq!(page.facts.last().unwrap().seq(), 1100);
+    assert!(!page.byte_limited);
+    page.validate(1024, 16 * 1024 * 1024).unwrap();
+}
 
 #[tokio::test]
 async fn factory_retains_only_safe_startup_facts_for_its_owner() {
@@ -378,6 +407,17 @@ fn validation_cache_ghosts_are_admission_hints_not_proofs() {
         assert_eq!(cache.len(), VALIDATED_SESSION_CACHE_CAPACITY);
         assert!(cache.ghost.len() <= VALIDATED_SESSION_CACHE_CAPACITY);
     }
+}
+
+#[test]
+fn cache_insertion_returns_the_retained_proof_and_reuses_it_on_hits() {
+    let id = SessionId::new("retained-proof").unwrap();
+    let mut cache = ValidatedSessionCache::default();
+    let first = cache.insert(id.clone());
+    assert!(Arc::ptr_eq(&first, &cache.proofs[&id]));
+    let second = cache.insert(id.clone());
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cache.len(), 1);
 }
 
 #[test]
@@ -1017,6 +1057,19 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
             .unwrap();
     }
     let count = || store.inner.fact_materializations.swap(0, Ordering::Relaxed);
+    let suffix = store
+        .read_fact_suffix(&id, 1024, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(suffix.facts.is_empty());
+    assert!(suffix.byte_limited);
+    assert_eq!(suffix.through_seq, 4);
+    assert_eq!(suffix.encoded_bytes, 0);
+    assert_eq!(
+        count(),
+        0,
+        "an oversized first suffix body must never materialize"
+    );
     let page = store.read_facts(&id, 0, 8).await.unwrap();
     assert_eq!(page.facts.len(), 2);
     assert_eq!(count(), 2);
@@ -1691,4 +1744,218 @@ async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
         assert_eq!(hot_misses, if cycle == 0 { 32 } else { 0 }, "cycle {cycle}");
         assert!(store.inner.validated_sessions.lock().unwrap().len() <= 256);
     }
+}
+
+#[tokio::test]
+async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..257 {
+        ids.push(seed_session(&store, &format!("pinned-{index}")).await);
+    }
+    let mut leases = Vec::new();
+    for id in &ids[..256] {
+        leases.push(store.prepare_session(id).await.unwrap());
+    }
+    assert_eq!(store.inner.pin_admission.available_permits(), 0);
+    let duplicate = store.prepare_session(&ids[0]).await.unwrap();
+    assert_eq!(store.inner.pin_admission.available_permits(), 0);
+    drop(duplicate);
+    let before = store.inner.validation_runs.load(Ordering::Relaxed);
+    for index in 0..512 {
+        seed_session(&store, &format!("churn-{index}")).await;
+    }
+    store.read_facts(&ids[0], 0, 1).await.unwrap();
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), before);
+    store.validate_session(&ids[256]).await.unwrap();
+    let (first, second) = {
+        let mut first = store.prepare_session(&ids[256]);
+        let mut second = store.prepare_session(&ids[256]);
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Trusted writes may advance this exact Session while its proof waits for capacity.
+        store
+            .append(AppendBatch {
+                session_id: ids[256].clone(),
+                expected_seq: 1,
+                header: None,
+                facts: vec![test_fact(2).into()],
+            })
+            .await
+            .unwrap();
+        drop(leases.pop());
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .unwrap();
+        (first.unwrap(), second.unwrap())
+    };
+    assert_eq!(store.inner.pin_admission.available_permits(), 0);
+    let page = store
+        .read_fact_suffix(&ids[256], 1, MAXIMUM_SESSION_FACT_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(page.through_seq, 2);
+    assert_eq!(page.facts[0].seq(), 2);
+    drop(first);
+    assert_eq!(store.inner.pin_admission.available_permits(), 0);
+    drop(second);
+    assert_eq!(store.inner.pin_admission.available_permits(), 1);
+    drop(leases);
+    // Inserting a new pin prunes every dead Weak, including unrelated slots.
+    let lease = store.prepare_session(&ids[0]).await.unwrap();
+    assert_eq!(store.inner.pins.lock().unwrap().len(), 1);
+    drop(store);
+    assert!(SqliteStore::open(root.path()).is_err());
+    drop(lease);
+    drop(SqliteStore::open(root.path()).unwrap());
+}
+
+#[tokio::test]
+async fn watermarks_are_one_cold_metadata_read_without_payload_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_history(&store, "scalar", 10, 500).await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let value = store.read_watermarks(&id).await.unwrap();
+    assert_eq!(
+        (value.durable_fact_seq, value.durable_control_seq),
+        (10, 500)
+    );
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
+    assert_eq!(store.inner.control_decodes.load(Ordering::Relaxed), 0);
+    assert_eq!(store.inner.fact_materializations.load(Ordering::Relaxed), 0);
+    assert!(matches!(
+        store
+            .read_watermarks(&SessionId::new("absent").unwrap())
+            .await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut leases = Vec::new();
+    for index in 0..VALIDATED_SESSION_CACHE_CAPACITY {
+        let id = seed_session(&store, &format!("pin-work-{index}")).await;
+        leases.push(store.prepare_session(&id).await.unwrap());
+    }
+    let id = SessionId::new("pin-work-0").unwrap();
+    store.inner.pin_entries_examined.store(0, Ordering::Relaxed);
+    for _ in 0..16 {
+        assert_eq!(store.read_facts(&id, 0, 1).await.unwrap().facts.len(), 1);
+    }
+    assert_eq!(store.inner.pin_entries_examined.load(Ordering::Relaxed), 16);
+}
+
+#[tokio::test]
+async fn prepared_proof_survives_its_own_validated_tail_advances() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "advancing-proof").await;
+    let lease = store.prepare_session(&id).await.unwrap();
+    let before = store.inner.validation_runs.load(Ordering::Relaxed);
+    for seq in 2..=5 {
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: seq - 1,
+                header: None,
+                facts: vec![test_fact(seq).into()],
+            })
+            .await
+            .unwrap();
+        let page = store
+            .read_fact_suffix(&id, 1, MAXIMUM_SESSION_FACT_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(page.through_seq, seq);
+        assert_eq!(page.facts[0].seq(), seq);
+        assert_eq!(
+            store.read_watermarks(&id).await.unwrap().durable_fact_seq,
+            seq
+        );
+    }
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), before);
+    drop(lease);
+}
+
+#[tokio::test]
+async fn scalar_watermarks_never_authorize_a_corrupt_session_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "unvalidated-cursors").await;
+    drop(store);
+    {
+        let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        db.execute(
+            "UPDATE sessions SET header_json='{}' WHERE session_id=?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    }
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert_eq!(
+        store.read_watermarks(&id).await.unwrap().durable_fact_seq,
+        1
+    );
+    let mut append = settlement::append(&id, 0);
+    append.expected_fact_seq = 1;
+    assert!(matches!(
+        store.commit_agent(settlement::commit(vec![append])).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let watermark = store.read_watermarks(&id).await.unwrap();
+    assert_eq!(
+        (watermark.durable_fact_seq, watermark.durable_control_seq),
+        (1, 0)
+    );
+}
+
+#[tokio::test]
+async fn unrelated_pin_notifications_preserve_distinct_session_waiter_order() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut ids = vec![];
+    for index in 0..258 {
+        ids.push(seed_session(&store, &format!("fair-pin-{index}")).await);
+    }
+    let mut leases = vec![];
+    for id in &ids[..256] {
+        leases.push(store.prepare_session(id).await.unwrap());
+    }
+    let mut first = store.prepare_session(&ids[256]);
+    let mut second = store.prepare_session(&ids[257]);
+    std::future::poll_fn(|cx| {
+        assert!(first.as_mut().poll(cx).is_pending());
+        assert!(second.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    store.inner.pin_changed.notify_waiters();
+    // A notification about a different Session must not put the first waiter last.
+    std::future::poll_fn(|cx| {
+        assert!(first.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(leases.pop());
+    let first_result =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx))).await;
+    assert!(
+        first_result.is_ready(),
+        "the earlier distinct-session waiter lost its FIFO position"
+    );
+    drop(first_result);
+    drop(second);
+    drop(leases);
 }

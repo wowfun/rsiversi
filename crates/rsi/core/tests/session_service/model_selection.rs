@@ -409,11 +409,13 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
     else {
         panic!("route available")
     };
-    assert_eq!(
-        description.config_generation(),
-        old_description.config_generation(),
-        "fixture restarts reuse a numeric generation"
-    );
+    // Runtime allocation order need not repeat across startup. The semantic
+    // profile must still invalidate context if that numeric generation collides.
+    let mut same_number = serde_json::to_value(description).unwrap();
+    same_number["config_generation"] = old_description.config_generation().into();
+    let same_number: rsi_ai_protocol::LanguageModelDescription =
+        serde_json::from_value(same_number).unwrap();
+    assert_ne!(same_number, old_description);
     assert!(read.summary.last_context.is_none());
     assert_eq!(read.summary.tokens, first.summary.tokens);
     run_message_to_terminal(&handle, "new-capacity").await;

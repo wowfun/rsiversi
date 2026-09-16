@@ -1,5 +1,17 @@
 # rsi-agent-composition-protocol
 
+Finite resource requests enter the generation driver as validated opaque values.
+The driver validates contribution output and measures its complete response once,
+returning an immutable proof with its encoded size. Local retention transfers
+that proof without revalidation; a wire decoder establishes a new proof after
+decoding untrusted bytes.
+
+Resource contributions provide finite list/read operations outside execution.
+The driver retains the selected composition pin and supplies the actual Header
+on every call. They have no mutation, subscription or generic service lookup
+authority. Requests and results are bounded before crossing the callback
+boundary, cancellation propagates to the owner, and Projection remains pure.
+
 Tool settlement contributions are synchronous and effect-free. They receive
 the exact ToolIntent, its retained result, the immutable Header and bounded
 current domain snapshots, and return only typed domain proposals. They receive
@@ -160,3 +172,14 @@ deadline; cancellation drops unfinished callbacks. As with other linked Rust
 callbacks, a blocking poll cannot be preempted. All callbacks run outside
 registration, Session mutation and lifecycle locks. Projection values are
 derived and never written back as domain state or used as mutation authority.
+
+A bounded `AgentGenerationSeed` carries structurally validated opaque Domain
+snapshots into composition before private registrars and plugin activation. Fresh
+builds use the source snapshot's current seed; restoring builds receive the stored
+Session baseline explicitly. The seed is at most 64 sorted domains and 1 MiB in
+aggregate, with the existing 256 KiB per-state limit. Construction computes one
+SHA-256 over its canonical JSON, including exact number text and object order.
+Clones and equality reuse that immutable identity without serializing payloads. `AgentGenerationInputsContract`
+is isolated within the hidden generation. Each consuming plugin decodes its own
+state using its Domain codec before declaring Tools or callbacks. The Kernel
+neither interprets provider payloads nor mutates an already sealed catalog.

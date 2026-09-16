@@ -112,7 +112,10 @@ async fn native_pin_outlives_shutdown_waiter_and_drains_after_release() {
         .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
         .unwrap();
     let pinned = service
-        .pin(&rsi_agent_presets::AgentPresetId::new("native").unwrap())
+        .pin(
+            &rsi_agent_presets::AgentPresetId::new("native").unwrap(),
+            None,
+        )
         .await
         .unwrap();
     drop(service);
@@ -175,7 +178,7 @@ async fn standard_source_stages_before_pin_and_switches_real_native_code_only_af
         .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
         .unwrap();
     let id = rsi_agent_presets::AgentPresetId::new("native").unwrap();
-    let old = service.pin(&id).await.unwrap();
+    let old = service.pin(&id, None).await.unwrap();
     assert_eq!(
         old.tools().definitions()[0].description(),
         "Native fixture tool"
@@ -185,11 +188,11 @@ async fn standard_source_stages_before_pin_and_switches_real_native_code_only_af
     assert!(!control.refresh().await.unwrap().changed);
     assert_eq!(
         old.source_digest(),
-        service.pin(&id).await.unwrap().source_digest()
+        service.pin(&id, None).await.unwrap().source_digest()
     );
     store.enable("fixture.addon").unwrap();
     wait_health(control.as_ref(), NativeAddonHealth::Ready).await;
-    let new = service.pin(&id).await.unwrap();
+    let new = service.pin(&id, None).await.unwrap();
     assert_ne!(old.source_digest(), new.source_digest());
     assert_eq!(
         new.tools().definitions()[0].description(),

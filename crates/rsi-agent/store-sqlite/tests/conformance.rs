@@ -1532,6 +1532,14 @@ async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
         store.read_cas(&reference).await,
         Err(StoreError::Corrupt(_))
     ));
+    // The caller's recorded length is the physical-read ceiling, before hashing.
+    std::fs::write(
+        root.path().join("cas").join(&reference.sha256),
+        vec![b'x'; 1024 * 1024],
+    )
+    .unwrap();
+    let failure = store.read_cas(&reference).await.unwrap_err();
+    assert!(failure.to_string().contains("exceeds 9 bytes"), "{failure}");
     drop(store);
     assert_eq!(std::fs::read(unrelated).unwrap(), b"user-owned");
 }

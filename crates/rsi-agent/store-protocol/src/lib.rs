@@ -7,10 +7,10 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentMessage, AgentMessageSource, AgentPath,
-    ForkTurnSelection, InputMessageSource, MAXIMUM_DURABLE_AGENT_TREE_NODES,
-    MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId,
-    MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId, TurnId,
-    validate_control_sequence, validate_fact_sequence,
+    ForkTurnSelection, MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ,
+    MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId, MessageTarget, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, validate_control_sequence,
+    validate_fact_sequence,
 };
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
@@ -21,14 +21,16 @@ use thiserror::Error;
 
 mod domain;
 mod evidence;
+mod suffix;
 pub use domain::{
     StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
     domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
+pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 20;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 21;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -71,27 +73,7 @@ pub fn validate_message_claim_fact(
     minimum_entered_fact_seq: u64,
     fact: Option<&SessionFact>,
 ) -> Result<()> {
-    let expected_source = match &message.source {
-        AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
-            message_id: message.message_id.clone(),
-            source: source.clone(),
-        },
-        AgentMessageSource::Human => InputMessageSource::Human {
-            message_id: message.message_id.clone(),
-        },
-        AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
-            message_id: message.message_id.clone(),
-            source_session_id: source_session_id.clone(),
-        },
-        AgentMessageSource::Completion {
-            child_session_id,
-            activation_id,
-        } => InputMessageSource::Completion {
-            message_id: message.message_id.clone(),
-            child_session_id: child_session_id.clone(),
-            activation_id: activation_id.clone(),
-        },
-    };
+    let expected_source = message.entered_source();
     let Some(fact) = fact.filter(|fact| fact.seq() >= minimum_entered_fact_seq) else {
         return Err(StoreError::Invalid(
             "mailbox claim must reference a newly appended input Fact".into(),
@@ -576,7 +558,7 @@ impl StoreWaitingActivationPage {
 
 /// Durable Fact/control watermarks for one touched session.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentCommitWatermark {
+pub struct StoreSessionWatermarks {
     /// Exact touched session.
     pub session_id: SessionId,
     /// Fact watermark after commit.
@@ -589,7 +571,7 @@ pub struct AgentCommitWatermark {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtomicAgentCommitResult {
     /// Watermarks in request order.
-    pub sessions: Vec<AgentCommitWatermark>,
+    pub sessions: Vec<StoreSessionWatermarks>,
 }
 
 /// One bounded contiguous durable Agent-control page.
@@ -1670,9 +1652,47 @@ impl CasObjectRef {
     }
 }
 
+/// Keeps a successful session validation available through a dependent operation.
+/// Dropping the caller must not release this lease while dispatched work still uses it.
+pub struct SessionValidationLease {
+    _keepalive: Box<dyn Send + Sync>,
+}
+
+impl SessionValidationLease {
+    /// Retains an adapter-owned proof and its resource owner without exposing either.
+    pub fn new(keepalive: impl Send + Sync + 'static) -> Self {
+        Self {
+            _keepalive: Box::new(keepalive),
+        }
+    }
+}
+
+impl fmt::Debug for SessionValidationLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionValidationLease")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
+    /// Validates the selected history and retains its proof through dependent reads.
+    /// Call before acquiring a payload materialization reservation.
+    async fn prepare_session(&self, session_id: &SessionId) -> Result<SessionValidationLease>;
+    /// Reads both durable cursors from one metadata snapshot without replaying history.
+    async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks>;
+
+    /// Captures a current suffix and full prefix digest in one read transaction.
+    /// The first body and every later body must fit remaining bytes before copying.
+    async fn read_fact_suffix(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<StoreFactSuffix>;
+
     /// Atomically creates a session if needed and appends one nonterminal Fact suffix.
     /// Terminals require `commit_agent` with their exact control boundary.
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit>;
@@ -2048,7 +2068,7 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsi_agent_session_protocol::{AgentMessageContent, AgentMessageSource, MessageOptions};
+    use rsi_agent_session_protocol::{AgentMessageContent, MessageOptions};
 
     fn cancellation_fact(sequence: u64) -> SessionFact {
         SessionFact::new(

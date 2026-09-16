@@ -69,6 +69,133 @@ fn context(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One catalog exercises flags, trust and changing source bytes together"
+)]
+async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
+    use rsi_agent_session_protocol::SessionResourceValue;
+    use rsi_agent_workspace_context::SkillAudience;
+    use tokio_util::sync::CancellationToken;
+    let temp = tempfile::tempdir().unwrap();
+    let user = temp.path().join("user");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    write_skill(
+        &user,
+        "manual",
+        "manual",
+        "manual\ndisable-model-invocation: true",
+        "HUMAN ONLY",
+    );
+    write_skill(
+        &user,
+        "automatic",
+        "automatic",
+        "automatic\nuser-invocable: false",
+        "MODEL ONLY",
+    );
+    write_skill(
+        &project.join(".agents/skills"),
+        "project",
+        "project",
+        "project",
+        "PROJECT BODY",
+    );
+    write_skill(
+        &project.join(".agents/skills"),
+        "manual",
+        "manual",
+        "shadow",
+        "SHADOW",
+    );
+    let source = context(None, vec![user.clone()]);
+    let untrusted = header(&project, WorkspaceTrust::Untrusted);
+    let trusted = header(&project, WorkspaceTrust::Trusted);
+    let human = source
+        .skills(
+            &trusted,
+            None,
+            SkillAudience::Human,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let SessionResourceValue::List { entries } = human else {
+        panic!("catalog")
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["manual", "project"]
+    );
+    assert!(!entries[0].model_readable);
+    for (name, audience, header) in [
+        ("manual", SkillAudience::Model, &trusted),
+        ("automatic", SkillAudience::Human, &trusted),
+        ("project", SkillAudience::Model, &untrusted),
+        ("../manual", SkillAudience::Human, &trusted),
+    ] {
+        assert!(
+            source
+                .skills(header, Some(name), audience, CancellationToken::new())
+                .await
+                .is_err()
+        );
+    }
+    let before = source
+        .skills(
+            &untrusted,
+            Some("automatic"),
+            SkillAudience::Model,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let SessionResourceValue::Read { text, .. } = &before else {
+        panic!("body")
+    };
+    assert!(text.contains("MODEL ONLY"));
+    write_skill(
+        &user,
+        "automatic",
+        "automatic",
+        "automatic\nuser-invocable: false",
+        "UPDATED BODY",
+    );
+    let after = source
+        .skills(
+            &untrusted,
+            Some("automatic"),
+            SkillAudience::Model,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let SessionResourceValue::Read { text: updated, .. } = after else {
+        panic!("body")
+    };
+    assert!(updated.contains("UPDATED BODY"));
+    assert!(text.contains("MODEL ONLY"));
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        source
+            .skills(&trusted, None, SkillAudience::Human, cancelled)
+            .await
+            .is_err()
+    );
+    let explicit = WorkspaceSkillRequests::from_messages(&[&human_message_for_alias()]).unwrap();
+    assert_eq!(explicit.names(), &["manual"]);
+}
+
+fn human_message_for_alias() -> AgentMessage {
+    human("/skill manual retain these arguments")
+}
+
+#[tokio::test]
 async fn untrusted_workspace_omits_every_project_controlled_source() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");

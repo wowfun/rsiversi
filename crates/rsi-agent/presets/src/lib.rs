@@ -36,6 +36,10 @@ pub use source::{AgentPresetProfileCompiler, MAX_PROFILE_HEALTH_REASON_BYTES};
 
 /// Linked factory key for the `SQLite` Agent Store.
 pub const SQLITE_STORE_FACTORY: &str = "rsi.agent.store.sqlite";
+/// Linked factory key for immutable conversation reference reads.
+pub const REFERENCES_FACTORY: &str = "rsi.agent.references";
+/// Stable reference-reader instance within the Session Agent fragment.
+pub const SESSION_REFERENCES_INSTANCE: &str = "agent-references";
 /// Linked factory key for the durable Agent Kernel.
 pub const KERNEL_FACTORY: &str = "rsi.agent.kernel";
 /// Linked factory key for the sequential Agent executor.
@@ -123,6 +127,7 @@ pub fn session_fragment(config: &SessionAgentConfig) -> ProfileFragment {
                 SQLITE_STORE_FACTORY,
                 json!({ "root": config.store_root }),
             ),
+            ProfileEntry::new(SESSION_REFERENCES_INSTANCE, REFERENCES_FACTORY, Value::Null),
             ProfileEntry::new(SESSION_KERNEL_INSTANCE, KERNEL_FACTORY, Value::Null),
             ProfileEntry::new(
                 SESSION_EXECUTOR_INSTANCE,

@@ -252,6 +252,7 @@ impl Transcript {
             let text = match item {
                 AgentMessageContent::Text { text } => text.as_str(),
                 AgentMessageContent::Image { .. } => "[Image]",
+                AgentMessageContent::Reference { reference } => reference.preview.as_str(),
             };
             let key = format!("{key}:{index}");
             if let Some(fact) = fact {
@@ -260,6 +261,7 @@ impl Transcript {
                 let field = match item {
                     AgentMessageContent::Text { .. } => FactField::InputText { index },
                     AgentMessageContent::Image { .. } => FactField::InputImage { index },
+                    AgentMessageContent::Reference { .. } => FactField::InputReference { index },
                 };
                 let source = SourceRef { seq, field };
                 let image = rsi_conversation::MediaSource::select(fact, source)

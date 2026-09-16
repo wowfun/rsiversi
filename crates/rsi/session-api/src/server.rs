@@ -245,6 +245,32 @@ fn handle_operations(
     }
     vec![
         add!(
+            CaptureReference,
+            |owner, request: wire::Attach| async move {
+                owner.capture_reference(request.session_id).await
+            }
+        ),
+        add!(
+            PreviewReference,
+            |owner, request: wire::ReferencePreview| async move {
+                owner
+                    .preview_reference(request.reference, request.offset, request.maximum)
+                    .await
+            }
+        ),
+        add!(
+            ReadReference,
+            |owner, request: rsi_agent_session_protocol::ReferenceReadRequest| async move {
+                owner.read_recorded_reference(request).await
+            }
+        ),
+        add!(
+            Resource,
+            |owner, request: rsi_agent_session_protocol::SessionResourceRequest| async move {
+                owner.read_resource(request).await
+            }
+        ),
+        add!(
             PeekJob,
             |owner, request: rsi_agent_turn_protocol::JobPreviewRequest| async move {
                 request.validate().map_err(|error| {

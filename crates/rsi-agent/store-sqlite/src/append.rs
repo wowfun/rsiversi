@@ -1,11 +1,12 @@
+use super::bounded_text;
 use super::{
-    ActivationId, AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AgentMessage,
-    AgentMessageSource, AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
-    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId,
-    MessageTarget, OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, StepId, StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot,
-    StoreError, StoreFactTurnRole, StoreReadyMessage, Transaction, TurnId,
+    ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
+    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection, EMPTY_CONTROL_PREFIX_DIGEST,
+    EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
+    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
+    OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
+    StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
+    StoreFactTurnRole, StoreReadyMessage, StoreSessionWatermarks, Transaction, TurnId,
     advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
     decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
     sql_error, sqlite_u64, validate_message_claim_fact,
@@ -58,7 +59,7 @@ pub(super) fn validate_sqlite_quiescence_guard(
 pub(super) fn apply_atomic_sqlite_append(
     transaction: &Transaction<'_>,
     append: AtomicSessionAppend,
-) -> Result<AgentCommitWatermark> {
+) -> Result<StoreSessionWatermarks> {
     let existing = transaction
         .query_row(
             "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
@@ -121,7 +122,7 @@ pub(super) fn apply_atomic_sqlite_append(
         .query_row(
             "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [append.session_id.as_str()],
-            |row| row.get::<_, String>(0),
+            |row| bounded_text(row, 0, 64),
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
@@ -159,7 +160,7 @@ pub(super) fn apply_atomic_sqlite_append(
         .query_row(
             "SELECT control_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [append.session_id.as_str()],
-            |row| row.get::<_, String>(0),
+            |row| bounded_text(row, 0, 64),
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("control-prefix digest", &digest))?;
@@ -228,7 +229,7 @@ pub(super) fn apply_atomic_sqlite_append(
             "SQLite lost an atomic Agent commit predicate".into(),
         ));
     }
-    Ok(AgentCommitWatermark {
+    Ok(StoreSessionWatermarks {
         session_id: append.session_id,
         durable_fact_seq,
         durable_control_seq,
@@ -1172,7 +1173,7 @@ pub(super) fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBat
         .query_row(
             "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [batch.session_id.as_str()],
-            |row| row.get::<_, String>(0),
+            |row| bounded_text(row, 0, 64),
         )
         .map_err(sql_error)?;
     let mut fact_prefix_digest = decode_sha256("Fact-prefix digest", &previous)?;

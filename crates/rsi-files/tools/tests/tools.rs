@@ -104,10 +104,20 @@ async fn call(
         .await
 }
 async fn fixture() -> (Runtime, Arc<dyn ToolRuntime>) {
+    fixture_with_inspection(false).await
+}
+async fn fixture_with_inspection(inspect: bool) -> (Runtime, Arc<dyn ToolRuntime>) {
     let runtime = Runtime::default();
     runtime
         .root()
-        .apply(linked("files", rsi_files::FilesFactory), Value::Null)
+        .apply(
+            if inspect {
+                linked("files", InspectFiles)
+            } else {
+                linked("files", rsi_files::FilesFactory)
+            },
+            Value::Null,
+        )
         .await
         .unwrap();
     runtime
@@ -367,6 +377,222 @@ async fn listed_non_utf8_filename_can_be_read_through_the_exact_byte_argument() 
     .await
     .unwrap();
     assert_eq!(file.value["bytes_hex"], hex::encode("exact"));
+    drop(tools);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn present_checks_regular_files_with_pinned_read_authority_and_releases_every_token() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("cwd")).unwrap();
+    std::fs::write(root.join("cwd/report.txt"), "first").unwrap();
+    std::fs::write(root.join("report.txt"), "wrong root").unwrap();
+    std::os::unix::fs::symlink(root.join("report.txt"), root.join("cwd/link")).unwrap();
+    let (runtime, tools) = fixture().await;
+    let planner = Arc::new(Planner::default());
+    for args in [
+        json!({"files":[]}),
+        json!({"files":vec![json!({"path":"report.txt"});9]}),
+        json!({"files":[{"path":"../report.txt"}]}),
+        json!({"files":[{"path":"/report.txt"}]}),
+        json!({"files":[{"path":"report.txt","path_hex":"ff"}]}),
+        json!({"files":[{"path":"report.txt","description":"界".repeat(86)}]}),
+        json!({"files":[{"path":"report.txt","description":"\u{1b}unsafe"}]}),
+        json!({"files":[{"path":"report.txt","description":"safe\u{202e}txt.exe"}]}),
+        json!({"files":[{"path":"report.txt","description":"\u{2066}hidden\u{2069}"}]}),
+        json!({"files":[{"path":"report.txt"}],"workspace":"/"}),
+    ] {
+        assert!(
+            call(
+                tools.as_ref(),
+                "present",
+                args,
+                start(&root, SandboxMode::ReadOnly, planner.clone())
+            )
+            .await
+            .unwrap()
+            .is_error
+        );
+    }
+    assert!(
+        planner.scopes.lock().unwrap().is_empty(),
+        "reject malformed declarations before Sandbox admission"
+    );
+    for path in ["link", "missing", "."] {
+        assert!(
+            call(
+                tools.as_ref(),
+                "present",
+                json!({"files":[{"path":path}]}),
+                start(&root, SandboxMode::DangerFullAccess, planner.clone())
+            )
+            .await
+            .unwrap()
+            .is_error
+        );
+    }
+    let mut first = None;
+    for iteration in 0..=MAXIMUM_FILE_TOKENS {
+        let result = call(
+            tools.as_ref(),
+            "present",
+            json!({"files":[{"path_hex":hex::encode("report.txt"),"description":"报告"}]}),
+            start(&root, SandboxMode::ReadOnly, planner.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+        let declared =
+            rsi_files_tools::PresentedFilesV1::decode(&result.value["presented"]).unwrap();
+        assert_eq!(declared.files[0].path_hex.as_bytes(), b"report.txt");
+        assert_eq!(declared.files[0].length, if iteration == 0 { 5 } else { 7 });
+        assert!(result.enforcement.is_empty());
+        if iteration == 0 {
+            first = Some(result);
+            std::fs::write(root.join("cwd/report.txt"), "changed").unwrap();
+        }
+    }
+    assert_eq!(
+        first.unwrap().value["presented"]["files"][0]["length"],
+        5,
+        "recorded declaration remains unchanged"
+    );
+    let cancelled = start(&root, SandboxMode::ReadOnly, planner.clone());
+    cancelled.cancellation.cancel();
+    assert!(
+        call(
+            tools.as_ref(),
+            "present",
+            json!({"files":[{"path":"report.txt"}]}),
+            cancelled
+        )
+        .await
+        .is_err()
+    );
+    drop(tools);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+// Enforce the one-live-token behavior at the actual contribution/provider seam.
+#[derive(Debug)]
+struct InspectFiles;
+#[async_trait]
+impl PluginFactory for InspectFiles {
+    fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(Value::Null))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let inner = Arc::new(rsi_files::LocalFiles::new().unwrap());
+        let cleanup = inner.clone();
+        plan.defer(
+            "close files",
+            Box::new(move || {
+                Box::pin(async move {
+                    cleanup.close().await;
+                    Ok(())
+                })
+            }),
+        )?;
+        let service = Arc::new(OneTokenFiles {
+            inner,
+            held: Mutex::new(None),
+        });
+        let supply = plan.context().provide_local::<FilesContract>(service)?;
+        plan.defer(
+            "release inspected files",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
+}
+#[derive(Debug)]
+struct OneTokenFiles {
+    inner: Arc<dyn rsi_files_protocol::Files>,
+    held: Mutex<Option<rsi_files_protocol::FileToken>>,
+}
+#[async_trait]
+impl rsi_files_protocol::Files for OneTokenFiles {
+    fn release_caller(&self, caller: &rsi_files_protocol::FilesCaller) {
+        self.inner.release_caller(caller);
+        self.held.lock().unwrap().take();
+    }
+    fn describe(
+        &self,
+        binding: &rsi_files_protocol::FilesBinding,
+        token: &rsi_files_protocol::FileToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::OpenedFile> {
+        self.inner.describe(binding, token)
+    }
+    async fn open(
+        &self,
+        binding: rsi_files_protocol::FilesBinding,
+        path: rsi_files_protocol::RelativePath,
+        kind: rsi_files_protocol::FileKind,
+        cancellation: CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::OpenedFile> {
+        assert!(
+            self.held.lock().unwrap().is_none(),
+            "present must release the previous token before another open"
+        );
+        let opened = self.inner.open(binding, path, kind, cancellation).await?;
+        *self.held.lock().unwrap() = Some(opened.token.clone());
+        Ok(opened)
+    }
+    async fn read(
+        &self,
+        _: rsi_files_protocol::FilesBinding,
+        _: rsi_files_protocol::FileToken,
+        _: u64,
+        _: usize,
+        _: CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::FilePage> {
+        panic!("present must not read contents")
+    }
+    async fn list(
+        &self,
+        _: rsi_files_protocol::FilesBinding,
+        _: rsi_files_protocol::FileToken,
+        _: usize,
+        _: usize,
+        _: CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::DirectoryPage> {
+        panic!("present must not enumerate")
+    }
+    fn release(
+        &self,
+        binding: &rsi_files_protocol::FilesBinding,
+        token: &rsi_files_protocol::FileToken,
+    ) -> rsi_files_protocol::Result<()> {
+        self.inner.release(binding, token)?;
+        assert_eq!(self.held.lock().unwrap().take().as_ref(), Some(token));
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn present_releases_each_metadata_token_before_opening_the_next_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("cwd")).unwrap();
+    std::fs::write(root.join("cwd/file"), "body").unwrap();
+    let (runtime, tools) = fixture_with_inspection(true).await;
+    let result = call(
+        tools.as_ref(),
+        "present",
+        json!({"files":vec![json!({"path":"file"});8]}),
+        start(&root, SandboxMode::ReadOnly, Arc::new(Planner::default())),
+    )
+    .await
+    .unwrap();
+    assert!(!result.is_error);
+    assert_eq!(
+        result.value["presented"]["files"].as_array().unwrap().len(),
+        8
+    );
     drop(tools);
     assert!(runtime.shutdown().await.is_clean());
 }

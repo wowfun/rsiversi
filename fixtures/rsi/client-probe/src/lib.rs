@@ -14,12 +14,20 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub async fn run_probe() -> Result<String, JsValue> {
-    let header = r#"{"format_version":12,"session_id":"browser-header","created_at_ms":1788778132168,"canonical_cwd":"/workspace","workspace_trust":"untrusted","agent_preset_id":"standard","settings":{"settings_id":"standard","system_prompt":"You are a careful coding agent.","default_model":{"deployment":"fixture","model":"fixture-model"},"sandbox":"workspace-write","require_approval":false,"turn_budget":{"maximum_elapsed_ms":1800000,"maximum_provider_attempts":64,"maximum_tool_calls":256,"maximum_generated_records":65536,"maximum_generated_record_bytes":67108864}},"fork_origin":null}"#;
-    let decoded: rsi_agent_session_protocol::SessionHeader = serde_json::from_str(header)
+    let settings = serde_json::from_value(serde_json::json!({"settings_id": "standard", "system_prompt": "You are a careful coding agent.", "default_model": {"deployment": "fixture", "model": "fixture-model"}, "sandbox": "workspace-write", "require_approval": false, "turn_budget": {"maximum_elapsed_ms": 1800000, "maximum_provider_attempts": 64, "maximum_tool_calls": 256, "maximum_generated_records": 65536, "maximum_generated_record_bytes": 67108864}})).unwrap();
+    let header = rsi_agent_session_protocol::SessionHeader::new(
+        rsi_agent_session_protocol::SessionId::new("browser-header").unwrap(),
+        1_788_778_132_168,
+        "/workspace",
+        rsi_agent_session_protocol::AgentPresetId::new("standard").unwrap(),
+        settings,
+    ).unwrap();
+    let header = serde_json::to_string(&header).unwrap();
+    let decoded: rsi_agent_session_protocol::SessionHeader = serde_json::from_str(&header)
         .map_err(|error| JsValue::from_str(&format!("durable header decode: {error}")))?;
     assert_eq!(decoded.created_at_ms(), 1_788_778_132_168);
     for path in ["/workspace", r"C:\workspace", r"\\server\share\workspace", r"\\?\C:\workspace"] {
-        let mut value: serde_json::Value = serde_json::from_str(header).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&header).unwrap();
         value["canonical_cwd"] = path.into();
         serde_json::from_value::<rsi_agent_session_protocol::SessionHeader>(value).unwrap();
         let request = rsi_approval_protocol::ApprovalRequest {

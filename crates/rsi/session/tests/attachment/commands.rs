@@ -82,6 +82,7 @@ impl AgentComposition for Composition {
     async fn pin(
         &self,
         preset: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         if preset.as_str() == "missing" {
             return Err(AgentCompositionError::InvalidInput("missing preset".into()));

@@ -6,13 +6,16 @@ pub(super) async fn read_facts_bounded(
     after_seq: u64,
     requested_limit: usize,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreFactPage, StoreError> {
-    let (effective_limit, permit) = acquire_store_read(inner, requested_limit).await?;
-    let result = inner
-        .store
-        .read_facts(session_id, after_seq, effective_limit)
-        .await;
-    drop(permit);
-    result
+    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
+    let (page, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        bytes,
+        true,
+        move |store, id| async move { store.read_facts(&id, after_seq, limit).await },
+    )
+    .await?;
+    Ok(page)
 }
 
 pub(super) async fn read_controls_bounded(
@@ -21,13 +24,16 @@ pub(super) async fn read_controls_bounded(
     after_seq: u64,
     requested_limit: usize,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreControlPage, StoreError> {
-    let (effective_limit, permit) = acquire_store_read(inner, requested_limit).await?;
-    let result = inner
-        .store
-        .read_controls(session_id, after_seq, effective_limit)
-        .await;
-    drop(permit);
-    result
+    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
+    let (page, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        bytes,
+        true,
+        move |store, id| async move { store.read_controls(&id, after_seq, limit).await },
+    )
+    .await?;
+    Ok(page)
 }
 
 pub(super) async fn read_domain_states_bounded(
@@ -35,14 +41,14 @@ pub(super) async fn read_domain_states_bounded(
     session_id: &SessionId,
     at_control_seq: Option<u64>,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreDomainStatePage, StoreError> {
-    // A complete domain set and its decode scratch fit below the existing single-record reservation.
-    let (_, permit) = acquire_store_read(inner, 1).await?;
-    let result = inner
-        .store
-        .read_domain_states(session_id, at_control_seq)
-        .await;
-    drop(permit);
-    let page = result?;
+    let (page, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_FACT_BYTES,
+        true,
+        move |store, id| async move { store.read_domain_states(&id, at_control_seq).await },
+    )
+    .await?;
     page.validate()?;
     if page.selected_control_seq != at_control_seq.unwrap_or(page.durable_control_seq) {
         return Err(StoreError::Corrupt(
@@ -57,15 +63,17 @@ pub(super) async fn read_domain_request_bounded(
     session_id: &SessionId,
     request_id: &rsi_agent_session_protocol::DomainRequestId,
 ) -> TurnResult<Option<rsi_agent_turn_protocol::DomainMutationReceipt>> {
-    let (_, permit) = acquire_store_read(inner, 1)
-        .await
-        .map_err(turn_store_error)?;
-    let result = inner
-        .store
-        .read_domain_request(session_id, request_id)
-        .await;
-    drop(permit);
-    let Some(record) = result.map_err(turn_store_error)? else {
+    let selected = request_id.clone();
+    let (record, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_FACT_BYTES,
+        true,
+        move |store, id| async move { store.read_domain_request(&id, &selected).await },
+    )
+    .await
+    .map_err(turn_store_error)?;
+    let Some(record) = record else {
         return Ok(None);
     };
     let receipt = rsi_agent_turn_protocol::DomainMutationReceipt::new(session_id.clone(), record)?;
@@ -223,16 +231,16 @@ pub(super) async fn scan_durable_messages(
     // One mailbox page contains at most 32 MiB of pending message payload plus
     // one selected message and bounded index metadata, below one maximum-Fact
     // reservation. Keep that reservation through decoding and validation.
-    let permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_FACT_BYTES)
-        .await
-        .map_err(turn_store_error)?;
-    let mailbox = inner
-        .store
-        .read_agent_mailbox(session_id, selected_id)
-        .await
-        .map_err(turn_store_error);
-    drop(permit);
-    let mailbox = mailbox?;
+    let selected_id = selected_id.cloned();
+    let (mailbox, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_FACT_BYTES,
+        true,
+        move |store, id| async move { store.read_agent_mailbox(&id, selected_id.as_ref()).await },
+    )
+    .await
+    .map_err(turn_store_error)?;
     let pending_count = mailbox.pending_count;
     let pending = mailbox
         .pending
@@ -315,30 +323,6 @@ pub(super) fn message_receipt(
         accepted_control_seq: entry.accepted_control_seq,
         observed_fact_seq,
         state: entry.state.clone(),
-    }
-}
-
-pub(super) fn entered_message_source(message: &AgentMessage) -> InputMessageSource {
-    match &message.source {
-        AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
-            message_id: message.message_id.clone(),
-            source: source.clone(),
-        },
-        AgentMessageSource::Human => InputMessageSource::Human {
-            message_id: message.message_id.clone(),
-        },
-        AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
-            message_id: message.message_id.clone(),
-            source_session_id: source_session_id.clone(),
-        },
-        AgentMessageSource::Completion {
-            child_session_id,
-            activation_id,
-        } => InputMessageSource::Completion {
-            message_id: message.message_id.clone(),
-            child_session_id: child_session_id.clone(),
-            activation_id: activation_id.clone(),
-        },
     }
 }
 
@@ -515,10 +499,12 @@ pub(super) async fn control_tail(
     inner: &Arc<KernelInner>,
     session_id: &SessionId,
 ) -> TurnResult<u64> {
-    Ok(read_controls_bounded(inner, session_id, 0, 1)
+    Ok(inner
+        .store
+        .read_watermarks(session_id)
         .await
         .map_err(turn_store_error)?
-        .durable_seq)
+        .durable_control_seq)
 }
 
 pub(super) async fn read_turn_facts_bounded(
@@ -528,13 +514,12 @@ pub(super) async fn read_turn_facts_bounded(
     after_seq: u64,
     requested_limit: usize,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreTurnFactPage, StoreError> {
-    let (effective_limit, permit) = acquire_store_read(inner, requested_limit).await?;
-    let result = inner
-        .store
-        .read_turn_facts(session_id, turn_id, after_seq, effective_limit)
-        .await;
-    drop(permit);
-    result
+    let turn_id = turn_id.clone();
+    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
+    let (page, _permit, _lease) = store_reads::read(inner, session_id, bytes, true, move |store, id| async move {
+        store.read_turn_facts(&id, &turn_id, after_seq, limit).await
+    }).await?;
+    Ok(page)
 }
 
 pub(super) async fn read_turn_boundary_bounded(
@@ -542,36 +527,31 @@ pub(super) async fn read_turn_boundary_bounded(
     session_id: &SessionId,
     turn_id: &TurnId,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreTurnBoundary, StoreError> {
-    let permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_FACT_BYTES).await?;
-    let result = inner.store.read_turn_boundary(session_id, turn_id).await;
-    drop(permit);
-    result
+    let turn_id = turn_id.clone();
+    let (boundary, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_FACT_BYTES,
+        true,
+        move |store, id| async move { store.read_turn_boundary(&id, &turn_id).await },
+    )
+    .await?;
+    Ok(boundary)
 }
 
 pub(super) async fn read_validated_header_bounded(
     inner: &KernelInner,
     session_id: &SessionId,
 ) -> std::result::Result<SessionHeader, StoreError> {
-    let permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_HEADER_BYTES).await?;
-    inner.store.validate_session(session_id).await?;
-    let result = inner.store.header(session_id).await;
-    drop(permit);
-    result
-}
-
-pub(super) async fn acquire_store_read(
-    inner: &KernelInner,
-    requested_limit: usize,
-) -> std::result::Result<(usize, tokio::sync::OwnedSemaphorePermit), StoreError> {
-    let (effective_limit, reservation) = if requested_limit == 1 {
-        (1, MAXIMUM_SESSION_FACT_BYTES)
-    } else if inner.limits.maximum_store_read_bytes >= MAXIMUM_STORE_BATCH_BYTES {
-        (requested_limit, MAXIMUM_STORE_BATCH_BYTES)
-    } else {
-        (1, MAXIMUM_SESSION_FACT_BYTES)
-    };
-    let permit = acquire_store_read_bytes(inner, reservation).await?;
-    Ok((effective_limit, permit))
+    let (header, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_HEADER_BYTES,
+        true,
+        |store, id| async move { store.header(&id).await },
+    )
+    .await?;
+    Ok(header)
 }
 
 pub(super) async fn acquire_store_read_bytes(
@@ -601,12 +581,11 @@ pub(super) async fn read_observed_facts(
     } else {
         MAXIMUM_FACTS_PER_READ
     };
-    let (limit, _read) = acquire_store_read(inner, requested)
-        .await
-        .map_err(turn_store_error)?;
-    let page = inner
-        .store
-        .read_facts(session, cursor, limit)
+    let (limit, bytes) = store_reads::page_limit(inner, requested);
+    let (page, _read, _lease) =
+        store_reads::read(inner, session, bytes, true, move |store, id| async move {
+            store.read_facts(&id, cursor, limit).await
+        })
         .await
         .map_err(turn_store_error)?;
     if page.after_seq != cursor || page.facts.len() > limit {
@@ -637,12 +616,11 @@ async fn read_observed_controls(
     } else {
         MAXIMUM_FACTS_PER_READ
     };
-    let (limit, _read) = acquire_store_read(inner, requested)
-        .await
-        .map_err(turn_store_error)?;
-    let page = inner
-        .store
-        .read_controls(session, cursor, limit)
+    let (limit, bytes) = store_reads::page_limit(inner, requested);
+    let (page, _read, _lease) =
+        store_reads::read(inner, session, bytes, true, move |store, id| async move {
+            store.read_controls(&id, cursor, limit).await
+        })
         .await
         .map_err(turn_store_error)?;
     if page.after_seq != cursor || page.records.len() > limit {
@@ -884,6 +862,13 @@ pub(super) async fn read_header_bounded(
     inner: &KernelInner,
     session_id: &SessionId,
 ) -> std::result::Result<SessionHeader, StoreError> {
-    let _permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_HEADER_BYTES).await?;
-    inner.store.header(session_id).await
+    let (header, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        MAXIMUM_SESSION_HEADER_BYTES,
+        false,
+        |store, id| async move { store.header(&id).await },
+    )
+    .await?;
+    Ok(header)
 }

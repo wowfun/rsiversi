@@ -8,6 +8,8 @@ use rsi_api_protocol::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
+mod exa;
+pub use exa::*;
 
 /// Closed grant operation identities and their exact admission policy.
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +20,8 @@ pub enum ConfigurationOperation {
     Grants,
     /// Local expected-revision grant or revocation.
     SetGrant,
+    /// Flat, redacted plugin status; its handler also requires a configuration grant.
+    Plugins,
 }
 impl ConfigurationOperation {
     /// Returns the exact negotiated wire contract.
@@ -28,6 +32,11 @@ impl ConfigurationOperation {
         let (name, access, effect) = match self {
             Self::Status => (
                 "status",
+                OperationAccess::Authenticated,
+                OperationEffect::Read,
+            ),
+            Self::Plugins => (
+                "plugins",
                 OperationAccess::Authenticated,
                 OperationEffect::Read,
             ),
@@ -168,6 +177,11 @@ impl ConfigurationClient {
 }
 
 mod discovery;
+mod plugins;
+pub use plugins::{
+    PluginHealth, PluginLifecycle, PluginObservation, PluginStatusPage, PluginStatusRequest,
+    PluginStatusRow, PluginStatusSource, PluginWatcher,
+};
 mod providers;
 pub use discovery::{DiscoveryRequest, DiscoverySnapshot};
 pub use providers::{
@@ -175,3 +189,6 @@ pub use providers::{
 };
 mod credentials;
 pub use credentials::{CredentialOperation, CredentialReceipt, ProviderCredentialsClient};
+
+mod mcp;
+pub use mcp::*;

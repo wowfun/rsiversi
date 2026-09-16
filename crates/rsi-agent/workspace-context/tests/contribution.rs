@@ -48,6 +48,17 @@ struct Source {
 }
 #[async_trait]
 impl WorkspaceContext for Source {
+    async fn skills(
+        &self,
+        _: &SessionHeader,
+        _: Option<&str>,
+        _: rsi_agent_workspace_context::SkillAudience,
+        _: CancellationToken,
+    ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError> {
+        Ok(rsi_agent_session_protocol::SessionResourceValue::List {
+            entries: Vec::new(),
+        })
+    }
     async fn snapshot(
         &self,
         _: &SessionHeader,
@@ -250,7 +261,7 @@ impl Fixture {
                 PreparedFreshSession::new(
                     self.header(id),
                     self.service
-                        .pin(&AgentPresetId::new("test-agent").unwrap())
+                        .pin(&AgentPresetId::new("test-agent").unwrap(), None)
                         .await
                         .unwrap(),
                 )
@@ -290,7 +301,7 @@ async fn enter(kernel: &AgentKernel, claim: &TurnClaim, request: &str) -> usize 
     let mut batch = ContributionBatch::default();
     for entry in pin.contributions().entries() {
         let ContributionKind::Context(callback) = entry.kind() else {
-            panic!("workspace callback");
+            continue;
         };
         let output = callback.contribute(&context, token.clone()).await.unwrap();
         batch
@@ -576,7 +587,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
                     parent_header,
                     fixture
                         .service
-                        .pin(&AgentPresetId::new("test-agent").unwrap())
+                        .pin(&AgentPresetId::new("test-agent").unwrap(), None)
                         .await
                         .unwrap(),
                 )

@@ -32,8 +32,10 @@ mod budget;
 mod requests;
 pub use requests::WorkspaceSkillRequests;
 mod contributor;
+mod skills;
 use budget::{SnapshotBudget, SnapshotOwner};
 pub use contributor::WorkspaceContributorFactory;
+pub use skills::{SkillAudience, WorkspaceSkillToolsFactory};
 
 /// Maximum bytes read from one instruction or skill source.
 pub const MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
@@ -94,6 +96,14 @@ pub enum WorkspaceContextError {
 /// Process-local trust-aware workspace context source.
 #[async_trait]
 pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
+    /// Reads an explicitly selected skill or its catalog under independent invocation flags.
+    async fn skills(
+        &self,
+        header: &SessionHeader,
+        id: Option<&str>,
+        audience: SkillAudience,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError>;
     /// Reads one complete bounded snapshot for the exact Header and selected skill names.
     async fn snapshot(
         &self,
@@ -287,6 +297,34 @@ const fn default_true() -> bool {
 
 #[async_trait]
 impl WorkspaceContext for LocalWorkspaceContext {
+    async fn skills(
+        &self,
+        header: &SessionHeader,
+        id: Option<&str>,
+        audience: SkillAudience,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError> {
+        if id.is_some_and(|id| !valid_skill_name(id)) {
+            return Err(WorkspaceContextError::Invalid("invalid skill name".into()));
+        }
+        let stop = self.owner.cancellation.child_token();
+        let _guard = stop.clone().drop_guard();
+        let lease = cancellation
+            .run_until_cancelled(self.owner.acquire())
+            .await
+            .ok_or(WorkspaceContextError::Closed)??;
+        let config = Arc::clone(&self.config);
+        let cwd = PathBuf::from(header.canonical_cwd());
+        let budget = SnapshotBudget::new(&config, &cwd, stop)?;
+        let trust = header.workspace_trust();
+        let id = id.map(str::to_owned);
+        cancellation
+            .run_until_cancelled(lease.run(move || {
+                skills::read_skills(&config, &cwd, trust, id.as_deref(), audience, budget)
+            }))
+            .await
+            .ok_or(WorkspaceContextError::Closed)?
+    }
     async fn snapshot(
         &self,
         header: &SessionHeader,
@@ -327,20 +365,8 @@ fn snapshot_with_budget(
     mut budget: SnapshotBudget,
 ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
     let mut complete = true;
-    let project_root = if workspace_trust == WorkspaceTrust::Trusted {
-        find_project_root(cwd, &mut complete)
-    } else {
-        None
-    };
-    let project_authority = project_root.as_deref().and_then(|root| {
-        ProjectAuthority::open(root).map_or_else(
-            |_| {
-                complete = false;
-                None
-            },
-            |authority| Some(Arc::new(authority)),
-        )
-    });
+    let (project_root, project_authority) =
+        skills::project_boundary(cwd, workspace_trust, &mut complete);
     let instructions = read_instructions(
         config,
         cwd,
@@ -349,29 +375,13 @@ fn snapshot_with_budget(
         &budget,
         &mut complete,
     )?;
-    let mut skills = BTreeMap::new();
-    let mut inspected = 0_usize;
-    for root in &config.user_skill_roots {
-        discover_skills(
-            root,
-            None,
-            &mut skills,
-            &mut inspected,
-            &mut complete,
-            &mut budget,
-        )?;
-    }
-    if let (Some(root), Some(authority)) = (&project_root, &project_authority) {
-        discover_skills(
-            &root.join(".agents/skills"),
-            Some(authority),
-            &mut skills,
-            &mut inspected,
-            &mut complete,
-            &mut budget,
-        )?;
-    }
-    let selected = skills.into_values().collect::<Vec<_>>();
+    let selected = skills::discover_selected(
+        config,
+        project_root.as_deref(),
+        project_authority.as_ref(),
+        &mut complete,
+        &mut budget,
+    )?;
     let skill_catalog = render_skill_catalog(&selected);
     let mut invocations = Vec::new();
     for name in invoked_names {
@@ -818,7 +828,7 @@ fn render_skill_catalog(skills: &[SelectedSkill]) -> Option<String> {
         return None;
     }
     let mut rendered = String::from(
-        "Available skills are summaries only. Load or directly invoke the exact selected skill before following it:\n<available_skills>\n",
+        "Available skills are summaries only. Use skill_read with the exact selected name to load its instructions before following them:\n<available_skills>\n",
     );
     for skill in visible {
         let description = skill.description.chars().take(500).collect::<String>();

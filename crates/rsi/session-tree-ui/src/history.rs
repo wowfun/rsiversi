@@ -299,6 +299,7 @@ fn sources(fact: &SessionFact) -> Vec<SourceRef> {
                 match item {
                     AgentMessageContent::Text { .. } => FactField::InputText { index },
                     AgentMessageContent::Image { .. } => FactField::InputImage { index },
+                    AgentMessageContent::Reference { .. } => FactField::InputReference { index },
                 }
             })
             .collect(),

@@ -16,12 +16,12 @@ use rsi_agent_composition_protocol::{
 use rsi_agent_session_protocol::{
     ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentMessage,
     AgentMessageContent, AgentMessageSource, AgentPath, BudgetDimension, EffectId, EffectKind,
-    ForkOrigin, InputMessageSource, MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
-    MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES,
-    MAXIMUM_RUNNING_AGENT_TREE_NODES, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
-    MAXIMUM_TURN_TEXT_BYTES, MessageDiscardReason, MessageId, MessageOptions, MessageTarget,
-    SessionFact, SessionFactBody, SessionHeader, SessionId, StepOutcome, TurnBudget, TurnId,
-    TurnOutcome, WaitResumeCause, validate_identifier,
+    ForkOrigin, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_DURABLE_AGENT_TREE_NODES,
+    MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_RUNNING_AGENT_TREE_NODES,
+    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES, MAXIMUM_TURN_TEXT_BYTES,
+    MessageDiscardReason, MessageId, MessageOptions, MessageTarget, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, StepOutcome, TurnBudget, TurnId, TurnOutcome, WaitResumeCause,
+    validate_identifier,
 };
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
@@ -810,9 +810,11 @@ mod jobs;
 mod lifecycle;
 mod notifications;
 mod projection;
+mod resource;
 use notifications::{SessionWatch, SessionWatchHub};
 mod observation;
 mod recovery;
+mod store_reads;
 mod tool_origin;
 mod turn_service;
 mod turn_state;
@@ -821,10 +823,9 @@ use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path,
     bounded_step_message_prefix, completion_message, completion_message_id,
     context_checkpoints_enabled, control_tail, descendant_session_ids, durable_observation_next,
-    entered_message_source, fill_observation_page, list_agent_descendants,
-    list_direct_agent_children, message_receipt, observation_next, observe_agent_wait_change,
-    read_controls_bounded, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
-    read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    fill_observation_page, list_agent_descendants, list_direct_agent_children, message_receipt,
+    observation_next, observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header,
+    read_header_bounded, read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
     read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{
@@ -1042,10 +1043,29 @@ impl PluginFactory for KernelFactory {
                 return Err(error);
             }
         };
+        let resources_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionResourcesContract>(Arc::new(
+                kernel.clone(),
+            )) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(jobs_supply);
+                drop(continuations_supply);
+                drop(projections_supply);
+                drop(commands_supply);
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
         plan.defer(
             "shutdown Agent Kernel",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(resources_supply);
                     drop(jobs_supply);
                     drop(continuations_supply);
                     drop(projections_supply);

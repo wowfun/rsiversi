@@ -93,7 +93,7 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
         .lookup_local::<AgentCompositionContract>()
         .unwrap();
     let id = AgentPresetId::new("native").unwrap();
-    let old = service.pin(&id).await.unwrap();
+    let old = service.pin(&id, None).await.unwrap();
     assert_eq!(
         old.tools().definitions()[0].description(),
         "Native fixture tool"
@@ -104,12 +104,12 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
     assert!(!manager.refresh().unwrap().changed);
     assert_eq!(
         old.source_digest(),
-        service.pin(&id).await.unwrap().source_digest()
+        service.pin(&id, None).await.unwrap().source_digest()
     );
     store.enable("fixture.addon").unwrap();
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     manager.refresh().unwrap();
-    let new = service.pin(&id).await.unwrap();
+    let new = service.pin(&id, None).await.unwrap();
     assert_ne!(old.source_digest(), new.source_digest());
     assert_eq!(
         new.tools().definitions()[0].description(),
@@ -135,10 +135,10 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
             == FactoryIdentity::native(record.plugin(), record.artifact_sha256())));
     }
     store.disable("fixture.addon").unwrap();
-    assert!(service.pin(&id).await.is_err());
+    assert!(service.pin(&id, None).await.is_err());
     manager.refresh().unwrap();
     assert!(
-        service.pin(&id).await.is_err(),
+        service.pin(&id, None).await.is_err(),
         "removed factory must also leave the compiler allowlist"
     );
     assert_eq!(

@@ -34,3 +34,7 @@ Run `npm ci --ignore-scripts`, install Chromium/Firefox through Playwright, then
 `npm test`. The Rust target is `wasm32-unknown-unknown`; wasm-bindgen CLI must be
 0.2.127. `RSI_WASM_BINDGEN` selects an explicit matching executable. This fixture
 owns its Cargo and npm lockfiles and never reads user state or credentials.
+
+The valid durable Header fixture is constructed through the current Session
+protocol and serialized before decoding. Rejection of obsolete durable formats
+belongs to protocol tests, independently of controller acceptance.

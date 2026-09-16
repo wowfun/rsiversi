@@ -317,10 +317,7 @@ impl TurnService for AgentKernel {
             }
             MessageState::Pending => {}
         }
-        let expected_fact_seq = read_facts_bounded(&self.inner, session_id, 0, 1)
-            .await
-            .map_err(turn_store_error)?
-            .durable_seq;
+        let expected_fact_seq = scan.durable_fact_seq;
         let control = AgentControlRecord::new(
             scan.durable_control_seq
                 .checked_add(1)
@@ -687,12 +684,9 @@ async fn commit_wait_control(
 ) -> std::result::Result<(), super::human_wait::WaitControlError> {
     let session_id = caller.session_id().clone();
     kernel.fence_pending_terminal(&session_id).await?;
-    let expected_fact_seq = read_facts_bounded(&kernel.inner, &session_id, 0, 1)
-        .await?
-        .durable_seq;
-    let expected_control_seq = read_controls_bounded(&kernel.inner, &session_id, 0, 1)
-        .await?
-        .durable_seq;
+    let watermarks = kernel.inner.store.read_watermarks(&session_id).await?;
+    let expected_fact_seq = watermarks.durable_fact_seq;
+    let expected_control_seq = watermarks.durable_control_seq;
     let control = AgentControlRecord::new(
         expected_control_seq
             .checked_add(1)
@@ -1140,7 +1134,7 @@ impl AgentKernel {
         fact_bodies.push(SessionFactBody::InputMessageEntered {
             turn_id: request.turn_id.clone(),
             step_id: request.step_id.clone(),
-            source: entered_message_source(&entry.message),
+            source: entry.message.entered_source(),
             content: entry.message.content.clone(),
         });
         let facts = fact_bodies
@@ -1435,7 +1429,7 @@ impl AgentKernel {
         let composition = self
             .inner
             .composition
-            .pin(child_header.agent_preset_id())
+            .pin(child_header.agent_preset_id(), None)
             .await
             .map_err(turn_composition_error)?;
         let mut prepared =

@@ -1,5 +1,11 @@
 # rsi-agent-store-protocol
 
+Finite suffix capture returns a read-time Fact horizon and prefix digest from
+the same metadata snapshot as its bounded backward page. The caller supplies
+count and encoded-byte limits; providers check lengths before copying bodies,
+including the first body. An oversized last Fact yields an empty omitted suffix.
+This mechanical operation performs no conversation export or reference policy.
+
 Evidence originals are resolved by exact Session and Fact sequence. The shared
 resolver accepts only a ModelIntent's original inline section with matching
 section, digest and byte length; reference chains are rejected. Consumers may
@@ -7,7 +13,7 @@ cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
 
-Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (20). Schema 19
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (21). Schema 20
 and earlier versions are rejected before recovery or writes; there is no implicit
 migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.
@@ -199,3 +205,14 @@ or index row; SQLite verification independently rechecks historical starts.
 Inspection's pending-message metadata carries the immutable promotion capability
 (Completion source or steering intent bound to a Turn), so a promoted Completion remains a valid
 next-Turn route without materializing its payload.
+
+## Prepared reads and scalar watermarks
+
+`prepare_session` returns an opaque `SessionValidationLease` that keeps the
+selected Session's successful mechanical validation available through ordinary
+cache eviction. It grants no execution authority or snapshot isolation. Trusted
+Store mutations preserve that proof within the same Store ownership lifetime.
+`read_watermarks` reads one simultaneous pair of durable Fact/control cursors
+without validating history or decoding payloads. Consumers use those cursors for
+CAS; commits and indexed history operations retain their validation obligations.
+`StoreSessionWatermarks` represents both a read snapshot and committed cursors.

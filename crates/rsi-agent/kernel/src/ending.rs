@@ -109,7 +109,10 @@ impl AgentKernel {
             .map(Arc::new)
             .collect::<Vec<_>>();
         let terminal = facts.last().expect("ending has one terminal").clone();
-        let controls = read_controls_bounded(&self.inner, claim.session_id(), 0, 1)
+        let controls = self
+            .inner
+            .store
+            .read_watermarks(claim.session_id())
             .await
             .map_err(turn_store_error)?;
         let lease = self.retain_terminal_mutation(claim)?;
@@ -124,7 +127,7 @@ impl AgentKernel {
                     sessions: vec![AtomicSessionAppend {
                         session_id: claim.session_id().clone(),
                         expected_fact_seq: live,
-                        expected_control_seq: controls.durable_seq,
+                        expected_control_seq: controls.durable_control_seq,
                         header: None,
                         facts,
                         controls: vec![],

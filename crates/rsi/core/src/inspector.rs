@@ -7,6 +7,8 @@ use rsi_meta::{
 };
 use rsi_meta_profile::{ProfileControlContract, ProfileSnapshot, ProfileStatus};
 use std::sync::{Arc, OnceLock};
+#[path = "plugin_status.rs"]
+mod plugin_status;
 
 #[derive(Debug, Default)]
 pub(crate) struct InspectorFactory {
@@ -45,7 +47,9 @@ impl PluginFactory for InspectorFactory {
                 "Inspector requires frozen declarations and null configuration".into(),
             ));
         }
-        Ok(PreparedActivation::new(ConfigValue::Null).requiring_local::<ApiRegistrarContract>())
+        Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<ApiRegistrarContract>()
+            .requiring_local::<rsi_configuration_access::ConfigurationAccessContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let source = Arc::new(Source {
@@ -56,13 +60,31 @@ impl PluginFactory for InspectorFactory {
                 .ok_or_else(|| MetaError::Activation("Inspector declarations unavailable".into()))?
                 .clone(),
         });
-        let api = InspectorApi::register(plan.local::<ApiRegistrarContract>()?.as_ref(), source)
-            .map_err(|_| MetaError::Activation("Inspector registration failed".into()))?;
+        let api = InspectorApi::register(
+            plan.local::<ApiRegistrarContract>()?.as_ref(),
+            source.clone(),
+        )
+        .map_err(|_| MetaError::Activation("Inspector registration failed".into()))?;
         plan.defer(
             "close local Inspector",
             Box::new(move || {
                 Box::pin(async move {
                     api.close().await;
+                    Ok(())
+                })
+            }),
+        )?;
+        let status = rsi_configuration_access::register_plugin_status(
+            plan.local::<ApiRegistrarContract>()?.as_ref(),
+            plan.local::<rsi_configuration_access::ConfigurationAccessContract>()?,
+            source,
+        )
+        .map_err(|_| MetaError::Activation("Plugin status registration failed".into()))?;
+        plan.defer(
+            "close configuration plugin status",
+            Box::new(move || {
+                Box::pin(async move {
+                    status.close().await;
                     Ok(())
                 })
             }),

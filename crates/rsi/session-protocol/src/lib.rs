@@ -32,12 +32,14 @@ mod interactions;
 mod jobs;
 pub use jobs::{JobsCollection, JobsRetention, JobsSnapshot};
 mod projections;
+mod resources;
 pub use interactions::{
     InteractionCollection, InteractionRetention, InteractionSnapshot, InteractionStream,
 };
 pub use projections::{
     ProjectionCollection, ProjectionRetention, ProjectionSnapshot, ProjectionStream,
 };
+pub use resources::{ResourceCollection, ResourceRetention, ResourceSnapshot};
 
 /// Coalesced bounded live Goal snapshots with Session-domain or API item failures.
 pub type GoalStream = std::pin::Pin<
@@ -162,6 +164,11 @@ pub struct SelectDraftPreset {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionInput {
+    /// Immutable captured conversation data, verified before durable admission.
+    Reference {
+        /// Exact server-captured descriptor, retained unchanged for retries.
+        reference: rsi_agent_session_protocol::FrozenReference,
+    },
     /// Safe UTF-8 text entering model context directly.
     Text {
         /// Exact text bytes.
@@ -183,8 +190,20 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
     }
     let mut text_bytes = 0_usize;
     let mut image_bytes = 0_usize;
+    let mut references = 0_usize;
     for block in content {
         match block {
+            SessionInput::Reference { reference } => {
+                reference
+                    .validate()
+                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                references += 1;
+                text_bytes = text_bytes
+                    .checked_add(reference.preview.len())
+                    .ok_or_else(|| {
+                        SessionError::Invalid("reference preview bytes overflowed".into())
+                    })?;
+            }
             SessionInput::Text { text } => {
                 if text.is_empty()
                     || text.len() > rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES
@@ -213,6 +232,11 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
                 })?;
             }
         }
+    }
+    if references > rsi_agent_session_protocol::MAXIMUM_MESSAGE_REFERENCES {
+        return Err(SessionError::Invalid(
+            "at most four references enter one message".into(),
+        ));
     }
     if text_bytes > rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES {
         return Err(SessionError::Invalid(format!(
@@ -335,6 +359,40 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Reads one recorded reference in this Session or its actual inherited parent interval.
+    async fn read_recorded_reference(
+        &self,
+        request: rsi_agent_session_protocol::ReferenceReadRequest,
+    ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _ = request;
+        Err(SessionError::NotFound("Session reference owner".into()))
+    }
+    /// Freezes a durable source conversation for this handle's actual Header.
+    async fn capture_reference(
+        &self,
+        source: SessionId,
+    ) -> Result<rsi_agent_session_protocol::FrozenReference> {
+        let _ = source;
+        Err(SessionError::NotFound("Session reference owner".into()))
+    }
+    /// Reads frozen draft reference contents with the original target binding.
+    async fn preview_reference(
+        &self,
+        reference: rsi_agent_session_protocol::FrozenReference,
+        offset: usize,
+        maximum: usize,
+    ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _ = (reference, offset, maximum);
+        Err(SessionError::NotFound("Session reference owner".into()))
+    }
+    /// Performs an optional finite read through this Session's composition.
+    async fn read_resource(
+        &self,
+        request: rsi_agent_session_protocol::SessionResourceRequest,
+    ) -> Result<ResourceSnapshot> {
+        let _ = request;
+        Err(SessionError::NotFound("Session resources".into()))
+    }
     /// Peeks one bounded current-claim process tail without consuming results.
     async fn peek_job(
         &self,

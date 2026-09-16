@@ -6,6 +6,16 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn agent_path_compact_encoding_fits_its_protocol_owned_byte_bound() {
+    for depth in 0..=MAXIMUM_AGENT_TREE_DEPTH {
+        let path = AgentPath::new(vec![u16::MAX; depth]).unwrap();
+        let encoded = serde_json::to_vec(&path).unwrap();
+        assert!(encoded.len() <= AgentPath::MAXIMUM_JSON_BYTES);
+        assert_eq!(serde_json::from_slice::<AgentPath>(&encoded).unwrap(), path);
+    }
+}
+
+#[test]
 fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
     let plan = json!({
         "version":1,"session":"session","builder":{"id":"builder","semantic_version":"2.3.0","config_sha256":"a".repeat(64)},
@@ -110,7 +120,7 @@ fn continuation_input_and_mailbox_decode_reject_invalid_bounds_and_changed_text(
         },
         text_sha256: input.text_sha256(),
     };
-    assert_source_kind_projection(&source);
+    assert_source_kind_projection(&source, &input.text);
     let record = AgentControlRecord::new(
         2,
         1,
@@ -963,7 +973,7 @@ fn terminal_control_rejects_a_zero_fact_reference_on_construction_and_decode() {
     assert!(serde_json::from_value::<AgentControlRecord>(encoded).is_err());
 }
 
-fn assert_source_kind_projection(source: &ContinuationSource) {
+fn assert_source_kind_projection(source: &ContinuationSource, text: &str) {
     for (source, kind, tag) in [
         (
             AgentMessageSource::Human,
@@ -993,6 +1003,33 @@ fn assert_source_kind_projection(source: &ContinuationSource) {
             "continuation",
         ),
     ] {
+        let mut message = AgentMessage {
+            message_id: MessageId::new("entered-projection").unwrap(),
+            source: source.clone(),
+            content: vec![AgentMessageContent::Text { text: text.into() }],
+            options: MessageOptions::default(),
+        };
+        message.validate().unwrap();
+        let entered = message.entered_source();
+        let mut expected = serde_json::to_value(&source).unwrap();
+        expected
+            .as_object_mut()
+            .unwrap()
+            .insert("message_id".into(), serde_json::json!("entered-projection"));
+        assert_eq!(serde_json::to_value(&entered).unwrap(), expected);
+        SessionFactBody::InputMessageEntered {
+            turn_id: TurnId::new("entered-turn").unwrap(),
+            step_id: StepId::new("entered-step").unwrap(),
+            source: entered,
+            content: message.content.clone(),
+        }
+        .validate()
+        .unwrap();
+        message.content.clear();
+        assert!(
+            message.validate().is_err(),
+            "projection must not replace independent message admission"
+        );
         assert_eq!(source.kind(), kind);
         let wire = serde_json::to_value(&source).unwrap();
         assert_eq!(wire["type"], tag);
@@ -1003,5 +1040,54 @@ fn assert_source_kind_projection(source: &ContinuationSource) {
                 .kind(),
             kind
         );
+    }
+}
+
+#[test]
+fn reference_envelope_bound_admits_worst_case_json_escaping_and_rejects_excess() {
+    let text = "\u{0001}".repeat(MAXIMUM_REFERENCE_TEXT_BYTES);
+    let binding = ReferenceBinding {
+        session_id: SessionId::new("bound").unwrap(),
+        header_sha256: "a".repeat(64),
+    };
+    let envelope = ReferenceSnapshotEnvelope {
+        version: 1,
+        metadata: ReferenceMetadata {
+            source: binding.clone(),
+            target: binding,
+            through_seq: 1,
+            fact_prefix_sha256: "b".repeat(64),
+            scanned_after_seq: 0,
+            retained_after_seq: 0,
+            retained_through_seq: 1,
+            scanned_bytes: 1,
+            text_bytes: text.len(),
+            omissions: vec![],
+        },
+        preview: text[..MAXIMUM_REFERENCE_PREVIEW_BYTES].into(),
+        text,
+    };
+    envelope.validate().unwrap();
+    let encoded = serde_json::to_vec(&envelope).unwrap();
+    assert!(encoded.len() > 6 * MAXIMUM_REFERENCE_TEXT_BYTES);
+    assert!(encoded.len() <= MAXIMUM_REFERENCE_SNAPSHOT_BYTES);
+    assert!(
+        ReferenceSnapshotRef {
+            sha256: "a".repeat(64),
+            byte_len: (MAXIMUM_REFERENCE_SNAPSHOT_BYTES + 1) as u64
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        validate_reference_page_bounds(MAXIMUM_REFERENCE_TEXT_BYTES, MAXIMUM_REFERENCE_PAGE_BYTES)
+            .is_ok()
+    );
+    for (offset, maximum) in [
+        (MAXIMUM_REFERENCE_TEXT_BYTES + 1, 4),
+        (0, 3),
+        (0, MAXIMUM_REFERENCE_PAGE_BYTES + 1),
+    ] {
+        assert!(validate_reference_page_bounds(offset, maximum).is_err());
     }
 }

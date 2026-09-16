@@ -1,7 +1,7 @@
 # rsi-files-tools
 
 `FilesToolsFactory` is an ordinary Agent contribution. It registers `file_read`
-and `directory_list` through the staged Tool registrar and consumes the independent
+and `directory_list`, plus `present`, through the staged Tool registrar and consumes the independent
 Files reader. It does not call the human Files API or consult WorkspaceTrust.
 The existing Tool catalog gate, resolved Turn policy and approval owner remain
 in force. A read-only operation does not imply approval exemption.
@@ -28,3 +28,13 @@ bytes, model-facing text includes the exact hex too. Directory entries retain
 exact cwd-relative hex paths for later Tool calls, including unrepresentable
 filenames. These contents remain untrusted data, never project instructions.
 No process enforcement stamp is fabricated for a read.
+
+`present` validates all requested regular files before returning one complete
+`PresentedFiles` value (version 1). It accepts one to eight cwd-relative paths,
+each with an optional description of at most 256 UTF-8 bytes. Descriptions reject
+control characters and explicit Unicode bidirectional controls; ordinary joiners
+and multilingual text remain available. The value records
+exact path bytes and captured length, with a 160 KiB encoded ceiling. Each metadata
+token is released before opening the next file, so one invocation retains at most
+one token while inspecting its declaration. It declares
+current files; it neither snapshots contents nor grants later human access.

@@ -8,6 +8,16 @@ requested membership. Malformed or lost mutation replies remain unknown;
 this client never replays a grant change. Endpoint implementations and durable
 policy belong to the [configuration owner](../configuration-access/README.md).
 
+`configuration/plugins/1` is a separate grant-gated read. Pages contain at most
+64 flat instance/plugin identities and closed observed lifecycle states, within
+64 KiB; at most 8,192 desired/observed identities are represented. The desired
+tree revision and observed Profile-status revision are distinct decimal strings.
+No configurations, raw errors, source paths, Runtime graph or dependency keys
+are present. Pagination must restart if either revision changes. Disabled,
+unobserved and active are separate states; configuration alone proves no running
+generation. The client validates the echoed offset, complete page progress and
+bounded identifiers before exposing a result.
+
 Managed-provider operations carry at most 64 exact provider definitions within
 1 MiB. Definition kinds are closed; each concrete provider remains the authority
 for its configuration shape. Desired and applied revisions are distinct. Reads
@@ -38,3 +48,16 @@ reply encoder/transport. Provider parsers validate candidate semantics; the clie
 checks the echoed request identity and candidate semantics after bounded decoding.
 Typed intermediate snapshots are neither revalidated nor serialized merely to
 measure them. Field/count bounds alone do not bound JSON-escaped reply size.
+
+MCP configuration uses separate finite `mcp-configuration.* / 1` operations.
+Status, explicit refresh and credential setup each require a held configuration
+grant in their Host handlers. Status contains closed readiness/error categories,
+transport kind, epochs, last verified digests and bounded Tool name choices, without
+URLs, commands, environment values or server instructions. A remote caller can
+refresh HTTP endpoints; refreshing a stdio endpoint requires Local origin.
+Credential actions bind both server identity and the exact current owner-local
+reference. Secret writes have independent receipts and are never replayed.
+Exa credential operations are a fixed owner-scoped status/set/unset contract.
+Every Host handler retains the actual Configuration grant through completion.
+Receipts contain no secret or local store path, and never enable Tools or submit
+a search. The fixed `rsi.retrieval/exa` binding is not an AI provider slot.

@@ -27,7 +27,7 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-agent-context = { path = "../context" }
-rsi-agent-store-sqlite = { path = "../store-sqlite" }
+rsi-agent-store-sqlite = { path = "../store-sqlite", features = ["test-support"] }
 tempfile.workspace = true
 rsi-agent-testkit = { path = "../testkit" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

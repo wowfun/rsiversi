@@ -39,10 +39,13 @@ mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::probe_service_host;
 mod composition;
+mod integration_source;
 mod local_api_client;
 mod local_host;
+mod mcp_api;
 #[cfg(unix)]
 mod native_addons;
+mod retrieval_api;
 #[cfg(unix)]
 pub use native_addons::{
     MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,

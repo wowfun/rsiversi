@@ -18,6 +18,8 @@ pub enum FactField {
     InputText { index: u16 },
     /// One entered message's image reference.
     InputImage { index: u16 },
+    /// Exact inline text preview of one frozen user reference.
+    InputReference { index: u16 },
     /// One assistant text delta.
     ModelText,
     /// One reasoning delta.
@@ -64,6 +66,7 @@ impl<'de> Deserialize<'de> for FactField {
             ("turn_input", None) => Self::TurnInput,
             ("input_text", Some(index)) => Self::InputText { index },
             ("input_image", Some(index)) => Self::InputImage { index },
+            ("input_reference", Some(index)) => Self::InputReference { index },
             ("model_text", None) => Self::ModelText,
             ("model_reasoning", None) => Self::ModelReasoning,
             ("model_tool_arguments", None) => Self::ModelToolArguments,
@@ -119,6 +122,7 @@ fn order(field: FactField) -> (u8, u16, u8) {
         FactField::TurnInput => (0, 0, 0),
         FactField::InputText { index } => (1, index, 0),
         FactField::InputImage { index } => (1, index, 1),
+        FactField::InputReference { index } => (1, index, 2),
         FactField::ModelText => (2, 0, 0),
         FactField::ModelReasoning => (3, 0, 0),
         FactField::ModelToolArguments => (4, 0, 0),
@@ -189,11 +193,25 @@ impl FieldValue<'_> {
 }
 
 /// Selects only an exact matching source; missing or variant-mismatched fields are unavailable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One exhaustive Fact-field selector keeps source ownership in one place."
+)]
 pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<'_>> {
     if fact.seq() != source.seq {
         return None;
     }
     let text = match (fact.body(), source.field) {
+        (
+            SessionFactBody::InputMessageEntered { content, .. },
+            FactField::InputReference { index },
+        ) => {
+            let AgentMessageContent::Reference { reference } = content.get(usize::from(index))?
+            else {
+                return None;
+            };
+            &reference.preview
+        }
         (SessionFactBody::InputMessageEntered { content, .. }, FactField::InputText { index }) => {
             let AgentMessageContent::Text { text } = content.get(usize::from(index))? else {
                 return None;

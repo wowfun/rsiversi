@@ -6,16 +6,29 @@ their API failure category. Clients may show setup without treating data or Stor
 failures as missing configuration.
 
 
-The current Session format is 13. Operations carrying changed Header, Fact or
-message shapes negotiate their own versions: create v4; submit v2; attach,
+The current Session format is 14. Operations carrying changed Header, Fact or
+message shapes negotiate their own versions: create v5; submit v3; attach,
 recent, draft-snapshot, select-preset, history, observe, inspect and read-message
-v3. Message-status remains v2. Metrics is a read-only v1 operation returning a
+v4. Message-status remains v2. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.
 Evidence is a read-only v1 operation: one exact request section, at most 256 KiB
 decoded source per page and a 2 MiB encoded response ceiling. Clients revalidate
 source identity, byte offsets, UTF-8 progress and package-level unavailability.
 Other schemas retain their existing versions. ModelEvent purpose tags remain
 present in bounded partial history and observation payloads.
+
+Reference-capture, reference-preview and reference-read are authenticated finite
+Data/Read v1 operations. Capture binds a durable source to the target's actual
+Header. Preview accepts that immutable draft descriptor; recorded reads accept
+only exact Session/Fact/content-index coordinates in the current or inherited
+direct-parent interval. Clients validate target and source binding, request echo,
+preview bytes, page offsets and progress. Requests and responses fit their
+explicit 8/64 KiB input and 64/512 KiB output ceilings. Capture may leave an
+unsubmitted immutable CAS object after cancellation under retain-all ownership.
+The authenticated Session service is the authority for CAS contents. Page checks
+detect malformed or mismatched responses; they do not authenticate arbitrary
+tail bytes against the envelope digest independently of that service. Pages
+carry neither the full envelope nor a cryptographic range proof.
 
 Ordinary endpoint and client plugins expose the Session domain through registered
 versioned operations. The server consumes the shared Session service and its
@@ -34,6 +47,10 @@ The grant preserves that handle's domain authority: approval answers may name
 the attached Session or a descendant in its current Agent tree. The Session
 service validates that membership and the exact owner/approval tuple; unrelated
 owners are rejected. Cancellation and commands remain scoped by that handle.
+Reference capture through this narrowed grant may use only the bound Session as
+its source. Cross-Session capture requires the full application connection;
+knowing a source Session ID does not extend a contribution's read authority.
+Preview and recorded reads retain their exact target and inherited-input checks.
 `SessionClient::attach_target` consumes this smaller catalog and returns only the
 attached handle. Exporters retain normal domain receipts and never replay a call.
 
@@ -127,3 +144,9 @@ target envelope and maximum JSON escaping of the 4 KiB diagnostic.
 
 Live-preview admission uses a monotonic native/browser clock; deterministic tests
 pass the observation time explicitly without sleeping or requiring a Tokio timer.
+
+The finite `resource` operation reads the selected Session's pinned resource
+catalog or one resource preview. Requests and replies use the validated resource
+protocol, require the Session read grant, and retain generation-bound identities.
+The narrowed Session-target adapter exposes this operation only for its bound
+Session; discovery and previews neither submit a Turn nor authorize execution.

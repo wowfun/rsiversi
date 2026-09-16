@@ -22,7 +22,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.4.0",
+                "2.5.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),

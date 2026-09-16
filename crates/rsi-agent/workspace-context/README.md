@@ -1,5 +1,12 @@
 # rsi-agent-workspace-context
 
+Explicit skill discovery and body reads use the same trust, precedence and
+identity validation as before-step snapshots. Human discovery and preview
+require user-invocable; the skill_read Tool requires model-invocable and derives
+its Header from AgentCallerAuthority. These independent flags apply equally to
+user and project roots. The read operation does not generate invocation Facts.
+All filesystem work shares the snapshot owner's admission and lifetime.
+
 This package owns bounded filesystem discovery for model-visible workspace
 instructions and skills. Its global snapshot service owns filesystem discovery;
 its Agent-only contributor owns direct-user invocation interpretation, digest

@@ -1,5 +1,10 @@
 # rsi-session-protocol
 
+Reference capture freezes a durable source Session's bounded conversation text
+for this target's actual Header before send. SessionInput::Reference carries the
+returned Agent-owned FrozenReference unchanged. Submit verifies the complete CAS
+envelope and original-target binding; an exact retry never recaptures the source.
+
 `SessionHandle::peek_job` is a required read-only current-claim operation. A
 Session API client generation admits at most two in-flight peeks and four starts
 per second. The server independently bounds concurrent peeks to two; it does not

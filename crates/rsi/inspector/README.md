@@ -12,7 +12,10 @@ this adapter projects those values without configurations, source paths, raw
 failure strings, effect labels or service values. Runtime pages use Meta's Fiber
 cursor and per-collection limits. Profile and frozen factory pages use bounded
 integer offsets, at most 128 rows per request. Profile rows are preorder entries
-with parent identities; disabled nodes remain visible. Native inspection reports
+with parent identities; disabled nodes remain visible. Profile output also pages
+its observed instances separately from the
+desired tree, with closed lifecycle states. A desired enabled node alone is not
+evidence that a generation is active. Native inspection reports
 selection identities and actual Loader resource counts, including retained
 failures. A missing native manager is explicitly unavailable.
 

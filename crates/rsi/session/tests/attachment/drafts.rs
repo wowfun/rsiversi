@@ -119,13 +119,14 @@ impl AgentComposition for Preparation {
     async fn pin(
         &self,
         preset: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         if let Some(release) = &self.release {
             release.acquire().await.unwrap().forget();
         }
-        PinTracker(self.leases.clone()).pin(preset).await
+        PinTracker(self.leases.clone()).pin(preset, None).await
     }
 }
 

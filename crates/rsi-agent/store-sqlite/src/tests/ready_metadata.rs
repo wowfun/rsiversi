@@ -41,6 +41,40 @@ async fn ready_fixture(store: &SqliteStore) -> SessionId {
 }
 
 #[tokio::test]
+async fn inspection_rejects_corrupt_scalar_text_without_filtering_pending_messages() {
+    for corruption in [
+        "UPDATE agent_messages SET message_id = printf('%1000000s', '') WHERE message_id = 'message-2'",
+        "UPDATE agent_messages SET delivery = printf('%1000000s', '') WHERE message_id = 'message-2'",
+        "UPDATE agent_messages SET target = CAST(X'ff' AS TEXT) WHERE message_id = 'message-2'",
+        "UPDATE agent_messages SET bound_turn_id = printf('%1000000s', '') WHERE message_id = 'message-2'",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let id = ready_fixture(&store).await;
+        let before = store.inspect_session(&id).await.unwrap();
+        assert_eq!(before.pending.len(), 3);
+        assert!(
+            before
+                .pending
+                .iter()
+                .all(|message| message.bound_turn_id.is_none())
+        );
+        let database = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        database
+            .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        database.execute_batch(corruption).unwrap();
+        assert!(
+            matches!(
+                store.inspect_session(&id).await,
+                Err(StoreError::Corrupt(_))
+            ),
+            "{corruption}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn ready_projection_bounds_source_and_rejects_corrupt_lookahead_without_filtering() {
     for corruption in [
         "DELETE FROM agent_messages WHERE message_id = 'message-2'",
@@ -136,7 +170,7 @@ fn exact_schema_rejects_missing_or_changed_waiting_predicate() {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            20
+            21
         );
         connection
             .execute_batch("DROP INDEX active_activations_waiting")

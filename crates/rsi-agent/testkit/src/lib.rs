@@ -14,9 +14,9 @@ use rsi_agent_session_protocol::{
     fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
-    AgentActivationGuard, AgentCommitWatermark, AppendBatch, AppendCommit, AtomicAgentCommit,
-    AtomicAgentCommitResult, AtomicSessionAppend, CasObjectRef, MAXIMUM_STORE_BATCH_FACTS,
-    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
+    AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
+    AtomicSessionAppend, CasObjectRef, MAXIMUM_STORE_BATCH_FACTS, MAXIMUM_STORE_CAS_BYTES,
+    MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
     StoreActivationPhase, StoreActiveActivation, StoreAgentChild, StoreAgentChildPage,
     StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
@@ -24,9 +24,10 @@ use rsi_agent_store_protocol::{
     StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
-    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
-    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
-    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreSessionWatermarks,
+    StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint,
+    WriteContextCheckpoint, validate_message_claim_fact, validate_read_limit,
+    validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde_json::Value;
@@ -38,7 +39,7 @@ use std::sync::{Arc, Mutex};
 /// Deterministic in-memory implementation of the mechanical Store seam.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
-    inner: Mutex<MemoryState>,
+    inner: Arc<Mutex<MemoryState>>,
     fail_appends: AtomicUsize,
     fork_boundary_resolutions: AtomicUsize,
     fail_agent_children: Mutex<Option<SessionId>>,

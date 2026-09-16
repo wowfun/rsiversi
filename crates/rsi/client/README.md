@@ -1,5 +1,9 @@
 # rsi-client
 
+`SessionController::completion_catalog` assembles Session commands and human
+skills with one collision policy and diagnostic. Applications supply their own
+reserved command names and retain ownership of display limits and retry controls.
+
 The controller shares its existing retained projection snapshot with contribution
 models through a coalesced watch; this adds no Session projection observer and
 holds only a clone of the same byte lease. One optional live Goal observer belongs

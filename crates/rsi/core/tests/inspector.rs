@@ -48,6 +48,10 @@ impl ApiClient for Local {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One sequential public-seam scenario preserves causality and exact evidence"
+)]
 async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -107,6 +111,44 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     let client = InspectorClient::new(local.clone()).unwrap();
     assert_runtime_pages(&client, &root).await;
     assert_declaration_pages(&client).await;
+    let configuration = rsi_configuration_api::ConfigurationClient::new(local.clone()).unwrap();
+    let mut offset = 0;
+    let mut saw_visible = false;
+    let mut saw_disabled = false;
+    loop {
+        let page = configuration
+            .plugins(rsi_configuration_api::PluginStatusRequest { offset, limit: 3 })
+            .await
+            .unwrap();
+        let encoded = serde_json::to_string(&page).unwrap();
+        for private in [
+            "do-not-serialize-config",
+            "disabled-config",
+            &root.to_string_lossy(),
+        ] {
+            assert!(!encoded.contains(private));
+        }
+        for row in page.plugins {
+            if row.instance == "visible" {
+                assert!(row.enabled);
+                assert_eq!(
+                    row.observed.as_ref().unwrap().state,
+                    rsi_configuration_api::PluginLifecycle::Active
+                );
+                saw_visible = true;
+            }
+            if row.instance == "disabled-child" {
+                assert!(!row.enabled);
+                assert!(row.observed.is_none());
+                saw_disabled = true;
+            }
+        }
+        let Some(next) = page.next_offset else {
+            break;
+        };
+        offset = next;
+    }
+    assert!(saw_visible && saw_disabled);
     #[cfg(unix)]
     {
         let native = client.native().await.unwrap();
@@ -193,6 +235,27 @@ async fn assert_declaration_pages(client: &InspectorClient) {
         offset = usize::try_from(next).unwrap();
     }
     assert!(disabled);
+    let mut offset = 0;
+    let mut active = false;
+    loop {
+        let page = client
+            .profile(&PageRequest { offset, limit: 2 })
+            .await
+            .unwrap();
+        assert!(page["status_revision"].is_string());
+        for row in page["observed"].as_array().unwrap() {
+            active |= row["id"] == "visible" && row["state"] == "active";
+            assert_ne!(row["id"], "disabled-child");
+        }
+        let Some(next) = page["observed_next_offset"].as_u64() else {
+            break;
+        };
+        offset = usize::try_from(next).unwrap();
+    }
+    assert!(
+        active,
+        "enabled configuration must be accompanied by an actual lifecycle observation"
+    );
     let mut offset = 0;
     let mut factories = Vec::new();
     loop {

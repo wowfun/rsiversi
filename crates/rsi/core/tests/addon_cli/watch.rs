@@ -195,14 +195,17 @@ fn disable_during_build_keeps_install_receipt_without_reenabling() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     setup(&root);
-    let mut watch = Watching::start(&root, true, &["--enable"]);
-    assert_eq!(watch.event()["enabled"]["revision"], "2");
-    fs::write(root.join("input"), b"B").unwrap();
+    // Install the blocking script before watching, then trigger one watched edit.
+    // Separate input/script edits can legitimately emit a source-conflict notice.
     fs::write(
         root.join("build.sh"),
-        "touch building\nwhile [ ! -f release ]; do sleep 0.02; done\ncp input artifact.bin\n",
+        "if [ -f block ]; then touch building; while [ ! -f release ]; do sleep 0.02; done; fi\ncp input artifact.bin\n",
     )
     .unwrap();
+    let mut watch = Watching::start(&root, true, &["--enable"]);
+    assert_eq!(watch.event()["enabled"]["revision"], "2");
+    fs::write(root.join("block"), []).unwrap();
+    fs::write(root.join("input"), b"B").unwrap();
     let until = Instant::now() + Duration::from_secs(8);
     while !root.join("building").exists() {
         assert!(Instant::now() < until, "second build did not start");
@@ -212,7 +215,7 @@ fn disable_during_build_keeps_install_receipt_without_reenabling() {
     assert_eq!(store.disable("fixture.watch").unwrap().revision, 3);
     fs::write(root.join("release"), []).unwrap();
     let report = watch.event();
-    assert_eq!(report["status"], "succeeded");
+    assert_eq!(report["status"], "succeeded", "{report}");
     assert_eq!(report["installed"]["revision"], "4");
     assert!(report["enabled"].is_null());
     assert_eq!(report["enable_error"], "native addon source changed");

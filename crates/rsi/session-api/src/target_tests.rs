@@ -29,6 +29,10 @@ impl ApiHandler for Handler {
     }
 }
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One public dispatch scenario preserves actual handler call counts"
+)]
 async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocation() {
     let runtime = rsi_meta::Runtime::default();
     let registry = Arc::new(rsi_api::ApiRegistry::new(runtime.execution().clone()));
@@ -56,11 +60,28 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         SessionId::new("allowed").unwrap(),
     )
     .unwrap();
-    assert_eq!(local.operations().len(), 28); // Includes own/tree metrics, evidence and non-consuming process previews.
+    assert_eq!(local.operations().len(), 32); // Includes composition resources and three reference reads.
+    assert!(local.operations().contains(&Operation::Resource.spec()));
+    for operation in [
+        Operation::CaptureReference,
+        Operation::PreviewReference,
+        Operation::ReadReference,
+    ] {
+        assert!(local.operations().contains(&operation.spec()));
+    }
+    let local = Arc::new(local);
     let client =
-        SessionTargetClient::new(Arc::new(local), SessionId::new("allowed").unwrap()).unwrap();
+        SessionTargetClient::new(local.clone(), SessionId::new("allowed").unwrap()).unwrap();
     let target = |id: &str| serde_json::json!({"session_id":id,"header_key":"a".repeat(64)});
     let requests = [
+        (
+            Operation::CaptureReference,
+            serde_json::json!({"target":target("allowed"),"input":{"session_id":"other"}}),
+        ),
+        (
+            Operation::Resource,
+            serde_json::json!({"target":target("other"),"input":{"kind":"sources"}}),
+        ),
         (Operation::Attach, serde_json::json!({"session_id":"other"})),
         (
             Operation::Submit,
@@ -83,13 +104,15 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
             serde_json::json!({"target":{"session_id":"allowed","header_key":"a".repeat(64),"origin":"local"},"input":{}}),
         ),
     ];
-    for (operation, request) in requests {
-        let operation = operation.spec();
-        let input = client
-            .input_budget(operation.class)
-            .encode(&request, operation.maximum_request_bytes)
-            .unwrap();
-        assert!(client.call(&operation, input).await.is_err());
+    for api in [&client as &dyn ApiClient, local.as_ref()] {
+        for (operation, request) in &requests {
+            let operation = operation.spec();
+            let input = api
+                .input_budget(operation.class)
+                .encode(&request, operation.maximum_request_bytes)
+                .unwrap();
+            assert!(api.call(&operation, input).await.is_err());
+        }
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for (operation, request) in [
@@ -101,6 +124,10 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
             Operation::Submit,
             serde_json::json!({"target":target("allowed"),"input":{}}),
         ),
+        (
+            Operation::CaptureReference,
+            serde_json::json!({"target":target("allowed"),"input":{"session_id":"allowed"}}),
+        ),
     ] {
         let operation = operation.spec();
         let input = client
@@ -109,7 +136,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
             .unwrap();
         assert!(client.call(&operation, input).await.is_ok());
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     device.revoked.cancel();
     let operation = Operation::Attach.spec();
     let input = client
@@ -123,7 +150,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         client.call(&operation, input).await,
         Err(ApiError::Unauthorized)
     ));
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     for registration in registrations {
         registration.close().await;
     }

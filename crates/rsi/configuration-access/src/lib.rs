@@ -29,6 +29,8 @@ use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 
 mod credentials;
 mod endpoint;
+mod plugins;
+pub use plugins::register_plugin_status;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +155,23 @@ impl ConfigurationAccess {
             _token: gate.admit()?,
             _capacity: permit,
         })
+    }
+
+    /// Retains actual configuration admission through owned asynchronous completion.
+    /// Losing the reply does not release the grant or operation capacity early.
+    pub fn retained<T: Send + 'static>(
+        self: &Arc<Self>,
+        origin: &CallOrigin,
+        future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<BoxFuture<'static, Result<T>>> {
+        let lease = self.admit(origin)?;
+        let task = self.execution.spawn(self.tasks.track_future(async move {
+            let _lease = lease;
+            future.await
+        }));
+        Ok(Box::pin(async move {
+            task.await.map_err(|_| ApiError::OutcomeUnknown)?
+        }))
     }
 
     /// Reports effective current-generation authority without granting it.
@@ -356,7 +375,7 @@ impl SettingsMutationPolicy for ConfigurationAccess {
         let lease = self.admit(origin)?;
         if matches!(origin, CallOrigin::Device(_)) {
             match namespace {
-                "rsi.agent" | "rsi.client" => {}
+                "rsi.agent" | "rsi.client" | "rsi.mcp" | "rsi.retrieval" => {}
                 "rsi.agent-presets" => {
                     let value = replacement.ok_or(ApiError::Unauthorized)?;
                     let current = self

@@ -1,0 +1,18 @@
+[package]
+name = "rsi-retrieval-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

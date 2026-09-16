@@ -19,6 +19,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+mod present;
+pub use present::{MAXIMUM_PRESENTED_FILES_BYTES, PresentedFile, PresentedFilesV1};
+
 /// Ordinary staged contribution of read-only filesystem Tools.
 #[derive(Clone, Debug, Default)]
 pub struct FilesToolsFactory;
@@ -51,7 +54,7 @@ impl PluginFactory for FilesToolsFactory {
     }
 }
 fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolRegistration>> {
-    [FileKind::File, FileKind::Directory].into_iter().map(|kind| {
+    let mut entries = [FileKind::File, FileKind::Directory].into_iter().map(|kind| {
         let (name, description, maximum) = match kind {
             FileKind::File => ("file_read", format!("Read one fresh byte page from a regular file beneath the current workspace. path is cwd-relative UTF-8; path_hex is its exact byte alternative. No symlinks or parent traversal. offset is zero-based bytes; maximum defaults to {PREFERRED_FILE_PAGE_BYTES}."), MAXIMUM_FILE_PAGE_BYTES),
             FileKind::Directory => ("directory_list", format!("Read one page of a fresh directory snapshot beneath the current workspace. path or path_hex is cwd-relative; omit both to list cwd. Symlinks and special files are not readable. offset is zero-based entries; maximum defaults to {PREFERRED_DIRECTORY_PAGE_ENTRIES}. Later calls observe a fresh snapshot."), MAXIMUM_DIRECTORY_PAGE_ENTRIES),
@@ -64,7 +67,21 @@ fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolR
         }, "not":{"required":["path","path_hex"]}, "additionalProperties":false});
         if kind == FileKind::File { schema["anyOf"] = json!([{"required":["path"]},{"required":["path_hex"]}]); }
         Ok(ToolRegistration { definition: ToolDefinition::new(name, description, schema)?.with_scheduling(ToolScheduling::ParallelSafe), timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 }, executor: Arc::new(ReadTool { files: files.clone(), kind }) })
-    }).collect()
+    }).collect::<rsi_tools_protocol::Result<Vec<_>>>()?;
+    entries.push(present::registration(files.clone())?);
+    Ok(entries)
+}
+
+fn workspace_path(
+    prefix: &RelativePath,
+    relative: &RelativePath,
+) -> rsi_files_protocol::Result<RelativePath> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    if !bytes.is_empty() && !relative.as_bytes().is_empty() {
+        bytes.push(b'/');
+    }
+    bytes.extend_from_slice(relative.as_bytes());
+    RelativePath::new(&bytes)
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,12 +172,7 @@ impl ToolExecutor for ReadTool {
             Ok(value) => value,
             Err(failure) => return error(&failure),
         };
-        let mut bytes = prefix.as_bytes().to_vec();
-        if !bytes.is_empty() && !relative.as_bytes().is_empty() {
-            bytes.push(b'/');
-        }
-        bytes.extend_from_slice(relative.as_bytes());
-        let path = match RelativePath::new(&bytes) {
+        let path = match workspace_path(&prefix, &relative) {
             Ok(value) => value,
             Err(failure) => return error(&failure),
         };

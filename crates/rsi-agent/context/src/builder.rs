@@ -290,6 +290,7 @@ impl ModelContextState {
         bytes.extend_from_slice(&length);
         bytes.extend_from_slice(&metadata);
         bytes.extend_from_slice(&payload);
+        drop(payload);
         Ok(bytes.into())
     }
 

@@ -554,7 +554,24 @@ impl Transcript {
                     _ => return,
                 };
                 for (index, content) in content.iter().enumerate() {
-                    if let AgentMessageContent::Image { media } = content {
+                    if let AgentMessageContent::Reference { reference } = content {
+                        self.add(
+                            key.clone(),
+                            title,
+                            role,
+                            Piece::new(
+                                Source {
+                                    seq,
+                                    field: FactField::InputReference {
+                                        index: u16::try_from(index).expect("bounded content"),
+                                    },
+                                },
+                                &reference.preview,
+                                0,
+                                WINDOW,
+                            ),
+                        );
+                    } else if let AgentMessageContent::Image { media } = content {
                         let source = Source {
                             seq,
                             field: FactField::InputImage {

@@ -5,6 +5,12 @@ adapter owns their plugin identity. The SQLite Store, Kernel, and executor each
 export their own factory; the product composition root assigns stable plugin
 and instance identities and places them in a Profile.
 
+The reference owner captures bounded conversation data and verifies immutable
+CAS envelopes. Its model adapter uses the live Tool caller's Header; the product
+supplies the actual target Header for human capture and admission. The Context
+builder renders only the frozen preview and exact recorded read coordinates.
+The mechanical Store owns atomic suffix horizons and pre-body byte bounds.
+
 The durable boundary is deliberately narrower than the runtime boundary.
 `rsi-agent-session-protocol` owns validated session identities, the immutable
 session header, and append-only Facts. `rsi-agent-store-protocol` owns only the
@@ -57,12 +63,13 @@ per-Session submission admission serializes every speculative suffix mutation
 with direct Agent-control commits and remains held until a successful direct
 commit is reflected into resident state. A durable Store prefix therefore
 cannot advance past a concurrently retained speculative suffix. The single
-write-behind worker scans for eligible ordered batches when notified or
-after a 200 ms idle interval; Store admission and I/O determine when a selected
-batch commits, while an explicit flush is the durability barrier.
-After each actual scan, the next periodic deadline is rebased to at least 200 ms
-after the current clock so a Store cycle slower than the interval cannot turn
-missed ticks into an unbounded catch-up spin.
+write-behind worker independently drives one eligible ordered batch per resident
+Session. Wake selection is fair between completion, notification, timer and stop.
+A completion replenishes only that Session; notifications and a 200 ms
+idle timer prepare all eligible batches under one state lock. Store admission and
+I/O determine when a selected batch commits, while an explicit flush is the
+durability barrier. Each timer wake rebases its next deadline to at least 200 ms
+after the current clock, preventing missed ticks from causing a catch-up spin.
 Every durable commit is a contiguous prefix of the already-published live
 stream, except that the sole terminal Fact enters observation only with the
 commit that makes its complete prefix durable. A flush failure puts the affected

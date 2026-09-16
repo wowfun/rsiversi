@@ -1015,7 +1015,12 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         .await
         .unwrap();
     let third = third.wait_with_output().await.unwrap();
-    assert!(third.status.success());
+    assert!(
+        third.status.success(),
+        "stdin invocation {:?}: {}",
+        third.status,
+        String::from_utf8_lossy(&third.stderr)
+    );
     assert_eq!(third.stdout, b"hello\n");
     assert!(
         String::from_utf8(third.stderr)
@@ -1135,6 +1140,10 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One sequential public-seam scenario preserves causality and exact evidence"
+)]
 async fn built_binary_runs_the_complete_real_coding_tool_flow() {
     let (endpoint, calls, requests, server) = tool_server().await;
     let fixture = fixture(&endpoint);
@@ -1189,8 +1198,11 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "job_output",
             "list_agents",
             "output_read",
+            "present",
+            "reference_read",
             "report_goal",
             "send_message",
+            "skill_read",
             "spawn_agent",
             "todo_write",
             "wait_agent",

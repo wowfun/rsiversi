@@ -51,7 +51,7 @@ pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
                 [table],
-                |row| row.get::<_, String>(0),
+                |row| bounded_text(row, 0, expected_sql.len()),
             )
             .map_err(sql_error)?;
         if observed_sql != *expected_sql {
@@ -74,7 +74,7 @@ pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
                 [index],
-                |row| row.get::<_, String>(0),
+                |row| bounded_text(row, 0, expected_sql.len()),
             )
             .map_err(sql_error)?;
         if observed_sql != *expected_sql {
@@ -113,7 +113,7 @@ pub(super) fn user_tables(connection: &Connection) -> Result<BTreeSet<String>> {
         )
         .map_err(sql_error)?;
     statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| bounded_text(row, 0, 256))
         .map_err(sql_error)?
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(sql_error)
@@ -127,7 +127,7 @@ pub(super) fn user_indexes(connection: &Connection) -> Result<BTreeSet<String>> 
         )
         .map_err(sql_error)?;
     statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| bounded_text(row, 0, 256))
         .map_err(sql_error)?
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(sql_error)
@@ -184,10 +184,14 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
             [session_id.as_str()],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    bounded_text(row, 0, 256)?,
+                    bounded_text(row, 1, 256)?,
+                    bounded_text(
+                        row,
+                        2,
+                        rsi_agent_session_protocol::AgentPath::MAXIMUM_JSON_BYTES,
+                    )?,
+                    bounded_text(row, 3, 256)?,
                 ))
             },
         )
@@ -218,7 +222,7 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
         .query_row(
             "SELECT parent_session_id FROM active_activations WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| row.get::<_, Option<String>>(0),
+            |row| optional_text(row, 0, 256),
         )
         .optional()
         .map_err(sql_error)?;
@@ -373,7 +377,13 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
 
 pub(super) fn validate_database(connection: &Connection) -> Result<()> {
     let integrity = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .query_row("PRAGMA integrity_check", [], |row| {
+            bounded_text(
+                row,
+                0,
+                rsi_agent_session_protocol::MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
+            )
+        })
         .map_err(sql_error)?;
     if integrity != "ok" {
         return Err(StoreError::Corrupt(format!(
@@ -862,11 +872,11 @@ impl ActivationProjection {
         let rows = statement
             .query_map([selected.as_str()], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
+                    bounded_text(row, 0, 256)?,
+                    bounded_text(row, 1, 256)?,
+                    optional_text(row, 2, 256)?,
+                    optional_text(row, 3, 256)?,
+                    bounded_text(row, 4, 32)?,
                     row.get::<_, Option<i64>>(5)?,
                 ))
             })
@@ -928,7 +938,7 @@ pub(super) fn validate_canonical_fact_prefix(
         .query_row(
             "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| row.get::<_, String>(0),
+            |row| bounded_text(row, 0, 64),
         )
         .map_err(sql_error)?;
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
@@ -950,8 +960,8 @@ pub(super) fn validate_canonical_fact_prefix(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
-        let turn_id = row.get::<_, String>(1).map_err(sql_error)?;
-        let fact_kind = row.get::<_, String>(2).map_err(sql_error)?;
+        let turn_id = bounded_text(row, 1, 256).map_err(sql_error)?;
+        let fact_kind = bounded_text(row, 2, 8).map_err(sql_error)?;
         let fact: SessionFact = decode_projected_json(
             "session Fact",
             (
@@ -983,7 +993,7 @@ pub(super) fn validate_canonical_fact_prefix(
                         fact.body().turn_id().as_str(),
                         sqlite_u64("turn terminal sequence", fact.seq())?,
                     ],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| optional_text(row, 0, 64),
                 )
                 .optional()
                 .map_err(sql_error)?
@@ -1017,7 +1027,7 @@ pub(super) fn validate_canonical_control_prefix(
         .query_row(
             "SELECT control_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| row.get::<_, String>(0),
+            |row| bounded_text(row, 0, 64),
         )
         .map_err(sql_error)?;
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
@@ -1193,12 +1203,12 @@ impl ReadyProjection {
             statement
                 .query_map([selected.as_str()], |row| {
                     Ok((
-                        (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                        (bounded_text(row, 0, 256)?, bounded_text(row, 1, 256)?),
                         (
-                            row.get::<_, String>(2)?,
+                            bounded_text(row, 2, 256)?,
                             row.get::<_, i64>(3)?,
                             row.get::<_, i64>(4)?,
-                            row.get::<_, String>(5)?,
+                            bounded_text(row, 5, 16)?,
                         ),
                     ))
                 })

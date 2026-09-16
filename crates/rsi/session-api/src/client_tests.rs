@@ -9,6 +9,8 @@ mod draft;
 mod jobs;
 #[path = "client_tests/projections.rs"]
 mod projections;
+#[path = "client_tests/resources.rs"]
+mod resources;
 use futures_util::{StreamExt as _, stream};
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessageContent, AgentMessageSource,

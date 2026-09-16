@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 mod contributions;
 #[path = "composition/domains.rs"]
 mod domains;
+#[path = "composition/seeds.rs"]
+mod seeds;
 #[path = "composition/snapshots.rs"]
 mod snapshots;
 
@@ -633,7 +635,9 @@ async fn concurrent_same_digest_pins_build_one_generation() {
     for _ in 0..16 {
         let service = Arc::clone(&fixture.service);
         let id = fixture.id.clone();
-        tasks.push(tokio::spawn(async move { service.pin(&id).await.unwrap() }));
+        tasks.push(tokio::spawn(async move {
+            service.pin(&id, None).await.unwrap()
+        }));
     }
     let mut pins = Vec::new();
     for task in tasks {
@@ -666,7 +670,7 @@ async fn generation_requires_an_explicit_context_builder() {
             .lookup_local::<rsi_agent_context::ModelContextBuilderContract>()
             .is_some()
     );
-    let rejected = fixture.service.pin(&fixture.id).await.is_err();
+    let rejected = fixture.service.pin(&fixture.id, None).await.is_err();
     fixture.stop().await;
     assert!(
         rejected,
@@ -677,12 +681,12 @@ async fn generation_requires_an_explicit_context_builder() {
 #[tokio::test]
 async fn duplicate_context_builder_rolls_back_candidate_and_preserves_current_pin() {
     let fixture = Fixture::new(&profile("a")).await;
-    let original = fixture.service.pin(&fixture.id).await.unwrap();
+    let original = fixture.service.pin(&fixture.id, None).await.unwrap();
     fixture.replace_source(&format!(
         "{}\n[[steps]]\nkind = \"plugin\"\nid = \"duplicate-context\"\nplugin = \"test.context\"\n",
         profile("b")
     ));
-    assert!(fixture.service.pin(&fixture.id).await.is_err());
+    assert!(fixture.service.pin(&fixture.id, None).await.is_err());
     assert_eq!(fixture.probe.active("b"), 0);
     assert_eq!(fixture.probe.active("a"), 1);
     assert_eq!(
@@ -701,7 +705,9 @@ async fn builds_across_presets_never_exceed_the_global_limit() {
     for id in &fixture.ids {
         let service = Arc::clone(&fixture.service);
         let id = id.clone();
-        tasks.push(tokio::spawn(async move { service.pin(&id).await.unwrap() }));
+        tasks.push(tokio::spawn(async move {
+            service.pin(&id, None).await.unwrap()
+        }));
     }
 
     fixture.gate.wait_entered(MAXIMUM_CONCURRENT_BUILDS).await;
@@ -732,7 +738,7 @@ async fn dropping_a_build_future_rolls_back_its_scope_and_profile_fibers() {
     let baseline_fibers = fixture.runtime.resource_snapshot().fibers.current;
     let service = Arc::clone(&fixture.service);
     let id = fixture.ids[0].clone();
-    let build = tokio::spawn(async move { service.pin(&id).await });
+    let build = tokio::spawn(async move { service.pin(&id, None).await });
 
     fixture.gate.wait_entered(1).await;
     assert!(
@@ -761,10 +767,13 @@ async fn dropping_a_build_future_rolls_back_its_scope_and_profile_fibers() {
     );
 
     fixture.gate.release.cancel();
-    let retry = tokio::time::timeout(Duration::from_secs(2), fixture.service.pin(&fixture.ids[0]))
-        .await
-        .expect("a cancelled build left later admission stuck")
-        .expect("a cancelled build poisoned the preset row or Tool stage capacity");
+    let retry = tokio::time::timeout(
+        Duration::from_secs(2),
+        fixture.service.pin(&fixture.ids[0], None),
+    )
+    .await
+    .expect("a cancelled build left later admission stuck")
+    .expect("a cancelled build poisoned the preset row or Tool stage capacity");
     drop(retry);
 
     fixture.stop().await;
@@ -775,7 +784,7 @@ async fn provider_shutdown_cancels_and_joins_an_inflight_generation_build() {
     let fixture = BuildFixture::new(1).await;
     let service = Arc::clone(&fixture.service);
     let id = fixture.ids[0].clone();
-    let build = tokio::spawn(async move { service.pin(&id).await });
+    let build = tokio::spawn(async move { service.pin(&id, None).await });
     fixture.gate.wait_entered(1).await;
 
     let cleanup = tokio::time::timeout(Duration::from_secs(2), fixture.composition_fiber.dispose())
@@ -801,11 +810,11 @@ async fn failed_idle_preset_rows_cannot_exhaust_healthy_preset_admission() {
     for index in 0..MAXIMUM_CURRENT_PRESETS {
         let id = AgentPresetId::new(format!("missing-{index}")).unwrap();
         assert!(matches!(
-            fixture.service.pin(&id).await,
+            fixture.service.pin(&id, None).await,
             Err(AgentCompositionError::Unavailable { .. })
         ));
     }
-    let healthy = fixture.service.pin(&fixture.id).await.unwrap();
+    let healthy = fixture.service.pin(&fixture.id, None).await.unwrap();
     assert_eq!(healthy.tools().definitions()[0].name(), "probe-a");
     drop(healthy);
 
@@ -815,9 +824,9 @@ async fn failed_idle_preset_rows_cannot_exhaust_healthy_preset_admission() {
 #[tokio::test]
 async fn changed_source_publishes_b_while_a_pin_stays_active() {
     let fixture = Fixture::new(&profile("a")).await;
-    let a = fixture.service.pin(&fixture.id).await.unwrap();
+    let a = fixture.service.pin(&fixture.id, None).await.unwrap();
     fixture.replace_source(&profile("b"));
-    let b = fixture.service.pin(&fixture.id).await.unwrap();
+    let b = fixture.service.pin(&fixture.id, None).await.unwrap();
 
     assert_ne!(a.source_digest(), b.source_digest());
     assert_eq!(a.tools().definitions()[0].name(), "probe-a");
@@ -834,17 +843,17 @@ async fn changed_source_publishes_b_while_a_pin_stays_active() {
 #[tokio::test]
 async fn failed_replacement_returns_error_without_replacing_cached_generation() {
     let fixture = Fixture::new(&profile("a")).await;
-    let a = fixture.service.pin(&fixture.id).await.unwrap();
+    let a = fixture.service.pin(&fixture.id, None).await.unwrap();
     fixture.replace_source(&failing_profile("b"));
     assert!(matches!(
-        fixture.service.pin(&fixture.id).await,
+        fixture.service.pin(&fixture.id, None).await,
         Err(AgentCompositionError::Unavailable { .. })
     ));
     assert_eq!(fixture.probe.active("a"), 1);
     assert_eq!(fixture.probe.active("b"), 0);
 
     fixture.replace_source(&profile("a"));
-    let restored = fixture.service.pin(&fixture.id).await.unwrap();
+    let restored = fixture.service.pin(&fixture.id, None).await.unwrap();
     assert_eq!(a.source_digest(), restored.source_digest());
     assert_eq!(fixture.probe.activations.load(Ordering::Acquire), 1);
 
@@ -855,11 +864,11 @@ async fn failed_replacement_returns_error_without_replacing_cached_generation() 
 #[tokio::test]
 async fn deleting_current_source_returns_error_instead_of_falling_back() {
     let fixture = Fixture::new(&profile("a")).await;
-    let a = fixture.service.pin(&fixture.id).await.unwrap();
+    let a = fixture.service.pin(&fixture.id, None).await.unwrap();
     fs::remove_file(&fixture.source).unwrap();
 
     assert!(matches!(
-        fixture.service.pin(&fixture.id).await,
+        fixture.service.pin(&fixture.id, None).await,
         Err(AgentCompositionError::Unavailable { .. })
     ));
     assert_eq!(fixture.probe.active("a"), 1);
@@ -871,9 +880,9 @@ async fn deleting_current_source_returns_error_instead_of_falling_back() {
 #[tokio::test]
 async fn superseded_generation_is_disposed_after_its_last_pin_drops() {
     let fixture = Fixture::new(&profile("a")).await;
-    let a = fixture.service.pin(&fixture.id).await.unwrap();
+    let a = fixture.service.pin(&fixture.id, None).await.unwrap();
     fixture.replace_source(&profile("b"));
-    let b = fixture.service.pin(&fixture.id).await.unwrap();
+    let b = fixture.service.pin(&fixture.id, None).await.unwrap();
 
     assert_eq!(fixture.probe.active("a"), 1);
     drop(a);
@@ -893,7 +902,7 @@ async fn unknown_factory_is_rejected_before_any_runtime_mutation() {
     let before = fixture.runtime.snapshot();
     let resources = fixture.runtime.resource_snapshot();
 
-    let error = fixture.service.pin(&fixture.id).await.unwrap_err();
+    let error = fixture.service.pin(&fixture.id, None).await.unwrap_err();
     assert_eq!(
         error,
         AgentCompositionError::Unavailable {
@@ -911,7 +920,7 @@ async fn unknown_factory_is_rejected_before_any_runtime_mutation() {
 #[tokio::test]
 async fn provider_shutdown_waits_for_the_last_external_pin_before_disposing_its_scope() {
     let fixture = Fixture::new(&profile("a")).await;
-    let pin = fixture.service.pin(&fixture.id).await.unwrap();
+    let pin = fixture.service.pin(&fixture.id, None).await.unwrap();
     assert_eq!(fixture.probe.active("a"), 1);
 
     let composition_fiber = fixture.composition_fiber.clone();
@@ -924,7 +933,7 @@ async fn provider_shutdown_waits_for_the_last_external_pin_before_disposing_its_
     );
     assert_eq!(fixture.probe.active("a"), 1);
     assert!(matches!(
-        fixture.service.pin(&fixture.id).await,
+        fixture.service.pin(&fixture.id, None).await,
         Err(AgentCompositionError::ShuttingDown)
     ));
 

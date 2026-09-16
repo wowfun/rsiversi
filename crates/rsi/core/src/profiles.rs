@@ -526,6 +526,10 @@ id = "setup"
 plugin = "rsi.workbench.setup"
 [[steps]]
 kind = "plugin"
+id = "plugins"
+plugin = "rsi.workbench.plugins"
+[[steps]]
+kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]

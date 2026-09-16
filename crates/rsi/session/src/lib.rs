@@ -34,7 +34,10 @@ mod interactions;
 mod plugin;
 mod projections;
 mod reads;
+mod references;
+mod resources;
 pub use plugin::SessionFactory;
+use references::map_reference_error;
 
 use rsi_session_protocol::{
     AgentSettingsSource, CreateSession, InteractionRetention, RecentSessionCursor,
@@ -46,6 +49,9 @@ use rsi_session_protocol::{
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
+    references: Option<Arc<rsi_agent_references::References>>,
+    resource_retention: rsi_session_protocol::ResourceRetention,
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
@@ -81,6 +87,21 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Supplies the bounded immutable conversation reference owner.
+    #[must_use]
+    pub fn with_references(mut self, references: Arc<rsi_agent_references::References>) -> Self {
+        self.references = Some(references);
+        self
+    }
+    /// Supplies the independent finite resource reader from the owning Kernel.
+    #[must_use]
+    pub fn with_resources(
+        mut self,
+        resources: Arc<dyn rsi_agent_turn_protocol::SessionResources>,
+    ) -> Self {
+        self.resources = Some(resources);
+        self
+    }
     /// Creates one local adapter from already-owned Host dependencies.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -98,6 +119,9 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            resources: None,
+            references: None,
+            resource_retention: rsi_session_protocol::ResourceRetention::default(),
             goals: None,
             jobs: None,
             jobs_retention: rsi_session_protocol::JobsRetention::default(),
@@ -160,6 +184,9 @@ impl LocalSessionService {
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
+            references: self.references.clone(),
+            resources: self.resources.clone(),
+            resource_retention: self.resource_retention.clone(),
             goals: self.goals.clone(),
             continuations: self.continuations.clone(),
             jobs: self.jobs.clone(),
@@ -355,6 +382,9 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    references: Option<Arc<rsi_agent_references::References>>,
+    resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
+    resource_retention: rsi_session_protocol::ResourceRetention,
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
@@ -515,6 +545,17 @@ impl LocalSessionHandle {
                         .map_err(|error| map_media_error(&error))?;
                     AgentMessageContent::Image { media }
                 }
+                SessionInput::Reference { reference } => {
+                    self.reference_owner()?
+                        .verify(
+                            header.clone(),
+                            reference.clone(),
+                            self.projection_stopped.clone(),
+                        )
+                        .await
+                        .map_err(map_reference_error)?;
+                    AgentMessageContent::Reference { reference }
+                }
             });
         }
         let message = AgentMessage {
@@ -536,6 +577,56 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn read_recorded_reference(
+        &self,
+        request: rsi_agent_session_protocol::ReferenceReadRequest,
+    ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        let header = self.header_snapshot().await?;
+        self.reference_owner()?
+            .read_recorded((*header).clone(), request, self.projection_stopped.clone())
+            .await
+            .map_err(map_reference_error)
+    }
+    async fn capture_reference(
+        &self,
+        source: SessionId,
+    ) -> Result<rsi_agent_session_protocol::FrozenReference> {
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        let header = self.header_snapshot().await?;
+        self.reference_owner()?
+            .capture(source, (*header).clone(), self.projection_stopped.clone())
+            .await
+            .map_err(map_reference_error)
+    }
+    async fn preview_reference(
+        &self,
+        reference: rsi_agent_session_protocol::FrozenReference,
+        offset: usize,
+        maximum: usize,
+    ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        let header = self.header_snapshot().await?;
+        self.reference_owner()?
+            .preview(
+                (*header).clone(),
+                reference,
+                offset,
+                maximum,
+                self.projection_stopped.clone(),
+            )
+            .await
+            .map_err(map_reference_error)
+    }
+    async fn read_resource(
+        &self,
+        request: rsi_agent_session_protocol::SessionResourceRequest,
+    ) -> Result<rsi_session_protocol::ResourceSnapshot> {
+        self.resource_read(request).await
+    }
     async fn peek_job(
         &self,
         request: rsi_agent_turn_protocol::JobPreviewRequest,

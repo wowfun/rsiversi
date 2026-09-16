@@ -30,6 +30,12 @@ also rejects further admission through previously authenticated origins; it does
 not undo already admitted operations. Retirement closes all admission and
 drains retained grant writes and configuration leases. No secret is stored here.
 
+The finite plugin-status read uses the same eight-slot ConfigurationAccess
+admission and holds its lease through source observation. Ungranted or revoked
+origins fail before the source runs. Grant revocation and owner retirement drain
+these reads along with admitted configuration writes. Its response contains only
+the closed redacted Configuration API projection; inspector.* remains Local.
+
 The same plugin exposes redacted credential status and separately receipted
 set/unset operations for the three closed managed provider owner identities.
 There is no remote resolve operation. Status is authenticated; mutations require
@@ -46,3 +52,9 @@ reports `Capacity`: the write was not published and may be retried. Unknown
 publication outcomes remain `OutcomeUnknown` and must be reconciled before any
 new mutation. The domain payload preserves a known failure through the API's
 mutation dispatcher, which treats an ordinary `Backend` error as uncertain.
+
+`retained` keeps a granted operation's admission and capacity until its owned work
+finishes, including after reply loss. Credential writes and MCP connection refresh
+use this seam. The `rsi.mcp` Settings namespace admits HTTP configuration only in
+its owning validator; Local stdio is kept in the Host Profile and is absent from
+remotely readable Settings values.

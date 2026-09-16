@@ -23,6 +23,10 @@ fn artifact() -> std::path::PathBuf {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One sequential public-seam scenario preserves causality and exact evidence"
+)]
 async fn real_native_addon_keeps_provenance_and_executes_through_the_standard_agent_pin() {
     let root = tempfile::tempdir().unwrap();
     let config = root.path().join("config");
@@ -76,21 +80,36 @@ config = { service = "fixture.native.tools" }
         .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
         .unwrap();
     let pin = service
-        .pin(&rsi_agent_presets::AgentPresetId::new("native").unwrap())
+        .pin(
+            &rsi_agent_presets::AgentPresetId::new("native").unwrap(),
+            None,
+        )
         .await
         .unwrap();
-    let inspected = host
-        .inspect(rsi_meta::InspectionRequest {
-            maximum_fibers: 64,
-            ..Default::default()
-        })
-        .unwrap();
-    assert!(
-        inspected
+    let mut after = None;
+    let mut found = false;
+    for _ in 0..16 {
+        let inspected = host
+            .inspect(rsi_meta::InspectionRequest {
+                after,
+                maximum_fibers: rsi_meta::MAXIMUM_INSPECTION_FIBERS,
+                ..Default::default()
+            })
+            .unwrap();
+        found |= inspected
             .fibers
             .iter()
-            .any(|fiber| fiber.factory == identity)
+            .any(|fiber| fiber.factory == identity);
+        after = inspected.next_after;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert!(
+        after.is_none(),
+        "bounded inspection did not exhaust membership"
     );
+    assert!(found);
     assert_eq!(pin.tools().definitions().len(), 2);
     verify_echo(&pin, &host, root.path()).await;
     drop((pin, service));

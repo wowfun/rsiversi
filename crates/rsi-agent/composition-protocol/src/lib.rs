@@ -12,6 +12,8 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod seed;
+pub use seed::{AgentGenerationInputs, AgentGenerationInputsContract, AgentGenerationSeed};
 mod command;
 mod contribution;
 pub use command::{
@@ -21,6 +23,7 @@ pub use command::{
 };
 mod domain;
 mod projection;
+mod resource;
 pub use contribution::{
     ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
     ContributionError, ContributionFactPage, ContributionFactReader, ContributionHorizon,
@@ -36,6 +39,7 @@ pub use domain::{
     DomainRegistration, ValidatedDomainProposal,
 };
 pub use projection::{SessionProjection, SessionProjectionAdapter, SessionProjectionContext};
+pub use resource::{SessionResourceAdapter, SessionResourceReader};
 
 /// Opaque lifetime owner retained by one composition pin.
 pub trait AgentGenerationOwner: fmt::Debug + Send + Sync + 'static {}
@@ -154,13 +158,19 @@ pub trait AgentComposition: fmt::Debug + Send + Sync + 'static {
     /// after provider admission closes.
     async fn default_preset_id(&self) -> Result<AgentPresetId>;
 
-    /// Resolves and pins the current healthy generation for one preset.
+    /// Resolves and pins one healthy generation for a preset.
+    /// `None` selects current source inputs; `Some` restores the saved baseline
+    /// before plugins declare and seal their generation's catalog.
     ///
     /// # Errors
     ///
     /// Returns the closed [`AgentCompositionError`] class for invalid identity,
     /// unavailable source, exhausted capacity, or provider shutdown.
-    async fn pin(&self, preset_id: &AgentPresetId) -> Result<AgentCompositionPin>;
+    async fn pin(
+        &self,
+        preset_id: &AgentPresetId,
+        seed: Option<&AgentGenerationSeed>,
+    ) -> Result<AgentCompositionPin>;
 }
 
 /// Nominal Local contract for [`AgentComposition`].
@@ -276,7 +286,9 @@ impl AgentSessionDraft {
         header: SessionHeader,
         composition_service: Arc<dyn AgentComposition>,
     ) -> Result<Self> {
-        let composition = composition_service.pin(header.agent_preset_id()).await?;
+        let composition = composition_service
+            .pin(header.agent_preset_id(), None)
+            .await?;
         if composition.preset_id() != header.agent_preset_id() {
             return Err(AgentCompositionError::InvalidInput(
                 "Agent composition returned a different preset identity".into(),
@@ -384,7 +396,7 @@ impl AgentSessionDraft {
         let header = self.header.clone();
         async move {
             next?;
-            let composition = service.pin(&preset_id).await?;
+            let composition = service.pin(&preset_id, None).await?;
             if composition.preset_id() != &preset_id {
                 return Err(AgentCompositionError::InvalidInput(
                     "Agent composition returned a different preset identity".into(),

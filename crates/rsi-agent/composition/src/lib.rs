@@ -17,8 +17,9 @@ pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
-    ContributionCatalog, ContributionRegistrar, ContributionRegistrarContract, DomainCatalog,
-    DomainRegistrar, DomainRegistrarContract,
+    AgentGenerationInputs, AgentGenerationInputsContract, ContributionCatalog,
+    ContributionRegistrar, ContributionRegistrarContract, DomainCatalog, DomainRegistrar,
+    DomainRegistrarContract,
 };
 use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
@@ -176,8 +177,9 @@ impl AgentComposition for CompositionService {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        self.state.pin(preset_id).await
+        self.state.pin(preset_id, seed).await
     }
 }
 
@@ -216,7 +218,7 @@ struct CompositionInner {
 #[derive(Debug, Default)]
 struct PresetRow {
     build: Arc<AsyncMutex<()>>,
-    current: Mutex<Option<Arc<Generation>>>,
+    current: Mutex<[Option<Arc<Generation>>; 2]>,
 }
 
 impl PresetRow {
@@ -226,7 +228,8 @@ impl PresetRow {
                 .current
                 .lock()
                 .expect("composition row poisoned")
-                .is_none()
+                .iter()
+                .all(Option::is_none)
     }
 }
 
@@ -557,6 +560,7 @@ impl CompositionState {
     async fn pin(
         self: &Arc<Self>,
         preset_id: &AgentPresetId,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         let row = self.row(preset_id)?;
         let singleflight = tokio::select! {
@@ -577,6 +581,16 @@ impl CompositionState {
             .source
             .snapshot()
             .map_err(|_| unavailable(preset_id, "Agent catalog snapshot unavailable"))?;
+        let inputs = Arc::new(AgentGenerationInputs {
+            seed: match seed {
+                Some(seed) => seed.clone(),
+                None => snapshot
+                    .seeds
+                    .clone()
+                    .map_err(|reason| unavailable(preset_id, reason))?,
+            },
+            restoring: seed.is_some(),
+        });
         let presets = snapshot.presets.clone();
         let compile_preset_id = preset_id.clone();
         let compilation = blocking_with_build_admission(
@@ -601,11 +615,14 @@ impl CompositionState {
             row.current
                 .lock()
                 .expect("composition row poisoned")
-                .as_ref()
-                .filter(|generation| {
-                    generation
-                        .identity
-                        .matches(candidate.source_digest(), &snapshot.contributions)
+                .iter()
+                .flatten()
+                .find(|generation| {
+                    generation.identity.matches(
+                        candidate.source_digest(),
+                        &snapshot.contributions,
+                        &inputs,
+                    )
                 })
                 .cloned()
         };
@@ -619,6 +636,7 @@ impl CompositionState {
         let identity = snapshot::GenerationIdentity::new(
             generation_plan.source_digest(),
             Arc::clone(&snapshot.contributions),
+            &inputs,
         );
         let cancellation = self.shutdown.child_token();
         let mut cancel_on_drop = CancelBuildOnDrop::new(cancellation.clone());
@@ -630,6 +648,7 @@ impl CompositionState {
                     &build_preset_id,
                     generation_plan,
                     snapshot.contributions.clone(),
+                    inputs,
                     singleflight,
                     build_slot,
                     cancellation,
@@ -644,11 +663,16 @@ impl CompositionState {
             .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Both owned admission permits and the cancellation token must cross the staging boundary."
+    )]
     async fn build_unpublished_generation(
         self: &Arc<Self>,
         preset_id: &AgentPresetId,
         generation_plan: ProfileGenerationPlan,
         catalog: Arc<AgentContributionCatalog>,
+        inputs: Arc<AgentGenerationInputs>,
         singleflight: OwnedMutexGuard<()>,
         build_slot: OwnedSemaphorePermit,
         cancellation: CancellationToken,
@@ -684,6 +708,7 @@ impl CompositionState {
             .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<DomainRegistrarContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<ContributionRegistrarContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<AgentGenerationInputsContract>())
             .and_then(|(context, _)| catalog.isolate(context))
         {
             Ok(context) => context,
@@ -703,6 +728,7 @@ impl CompositionState {
                     env!("CARGO_PKG_VERSION"),
                     UpdateMode::RestartRequired,
                     Arc::new(AgentRegistrarFactory {
+                        inputs,
                         registrar: unpublished.registrar(),
                         domains: unpublished.domain_stage.registrar(),
                         contributions: unpublished.contribution_stage.registrar(),
@@ -828,11 +854,19 @@ impl CompositionState {
                     contributions,
                     owner,
                 });
-                let previous = row
-                    .current
-                    .lock()
-                    .expect("composition row poisoned")
-                    .replace(Arc::clone(&generation));
+                let mut current = row.current.lock().expect("composition row poisoned");
+                let mut previous = Vec::new();
+                for slot in current.iter_mut() {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|old| !old.identity.same_source(&generation.identity))
+                    {
+                        previous.extend(slot.take());
+                    }
+                }
+                previous.extend(
+                    current[generation.identity.cache_slot()].replace(Arc::clone(&generation)),
+                );
                 Ok((generation, previous))
             }
         };
@@ -879,7 +913,10 @@ impl CompositionState {
             let current = inner
                 .rows
                 .values()
-                .filter_map(|row| row.current.lock().expect("composition row poisoned").take())
+                .flat_map(|row| {
+                    std::mem::take(&mut *row.current.lock().expect("composition row poisoned"))
+                })
+                .flatten()
                 .collect::<Vec<_>>();
             inner.rows.clear();
             current
@@ -929,6 +966,7 @@ where
 
 #[derive(Debug)]
 struct AgentRegistrarFactory {
+    inputs: Arc<AgentGenerationInputs>,
     registrar: Arc<dyn ToolRegistrar>,
     domains: Arc<dyn DomainRegistrar>,
     contributions: Arc<dyn ContributionRegistrar>,
@@ -949,6 +987,9 @@ impl PluginFactory for AgentRegistrarFactory {
         let supply = plan
             .context()
             .provide_local::<ToolRegistrarContract>(Arc::clone(&self.registrar))?;
+        let input_supply = plan
+            .context()
+            .provide_local::<AgentGenerationInputsContract>(self.inputs.clone())?;
         let domain_supply = plan
             .context()
             .provide_local::<DomainRegistrarContract>(Arc::clone(&self.domains))?;
@@ -962,6 +1003,7 @@ impl PluginFactory for AgentRegistrarFactory {
                     drop(supply);
                     drop(domain_supply);
                     drop(contribution_supply);
+                    drop(input_supply);
                     Ok(())
                 })
             }),

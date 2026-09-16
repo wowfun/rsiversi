@@ -162,7 +162,11 @@ async fn independent_addon_owns_draft_state_policy_generations_and_cold_recovery
     let generation_b = generation(&new).await;
     assert_ne!(generation_a, generation_b);
     assert_eq!(generation(&old).await, generation_a);
-    assert_eq!(evidence.live_tools.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        evidence.live_tools.load(Ordering::SeqCst),
+        3,
+        "the held A pin and the fresh/restoring B cache slots have independent lifetimes"
+    );
     evidence.release.notify_one();
     waiter.await.unwrap();
     assert_tool_label(&old, "A").await;
@@ -179,7 +183,11 @@ async fn independent_addon_owns_draft_state_policy_generations_and_cold_recovery
         .await
         .unwrap();
     assert!(!enabled(&recovered).await);
-    assert_eq!(generation(&recovered).await, generation_b);
+    // Cold restoration includes saved Domain inputs and restoration mode. Its
+    // identity differs from the fresh B generation; the echo below proves that
+    // the current B code still runs against the original durable state.
+    assert_ne!(generation(&recovered).await, generation_a);
+    assert_ne!(generation(&recovered).await, generation_b);
     let child = restarted
         .session_service()
         .unwrap()

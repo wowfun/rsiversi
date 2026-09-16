@@ -2,6 +2,8 @@ use async_trait::async_trait;
 
 #[path = "contracts/projection.rs"]
 mod projection;
+#[path = "contracts/resource.rs"]
+mod resource;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionError, AgentCompositionPin, AgentSessionDraft,
 };
@@ -72,6 +74,7 @@ impl AgentComposition for FakeComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         if self.failures.lock().unwrap().contains(preset_id) {
             return Err(AgentCompositionError::Unavailable {

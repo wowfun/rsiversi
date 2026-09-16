@@ -248,49 +248,77 @@ impl AgentKernel {
     }
 
     pub(super) async fn flush_loop(self, mut next_tick: Instant) {
+        let mut running = futures_util::stream::FuturesUnordered::new();
+        let mut stopping = false;
+        let mut scan = true;
         loop {
-            tokio::select! {
-                () = tokio::time::sleep_until(next_tick) => {},
-                () = self.inner.flush_requested.notified() => {},
-                () = self.inner.stop_worker.cancelled() => break,
+            if scan {
+                let batches = {
+                    let mut state = lock_state(&self.inner);
+                    state
+                        .sessions
+                        .iter_mut()
+                        .filter_map(|(id, session)| Self::prepare_flush_batch(id, session))
+                        .collect::<Vec<_>>()
+                };
+                for batch in batches {
+                    running.push(self.flush_prepared(batch));
+                }
+                scan = false;
             }
-            self.flush_ready_sessions().await;
-            next_tick = rebase_write_behind_tick(next_tick, Instant::now());
+            // One in-flight suffix per resident Session; the existing resident and
+            // pending-byte limits bound this set even when cold sessions wait.
+            debug_assert!(running.len() <= MAXIMUM_ACTIVE_SESSIONS);
+            if stopping && running.is_empty() {
+                let pending = lock_state(&self.inner).sessions.values().any(|session| {
+                    !session.pending.is_empty() && session.permanent_flush_error.is_none()
+                });
+                if !pending {
+                    break;
+                }
+            }
+            tokio::select! {
+                // Fair selection also lets new dirty Sessions and shutdown progress
+                // while a hot Session repeatedly completes immediately.
+                Some(id) = running.next(), if !running.is_empty() => {
+                    let batch = lock_state(&self.inner).sessions.get_mut(&id)
+                        .and_then(|session| Self::prepare_flush_batch(&id, session));
+                    if let Some(batch) = batch { running.push(self.flush_prepared(batch)); }
+                },
+                () = self.inner.stop_worker.cancelled(), if !stopping => { stopping = true; scan = true; },
+                () = tokio::time::sleep_until(next_tick) => {
+                    next_tick = rebase_write_behind_tick(next_tick, Instant::now());
+                    scan = true;
+                },
+                () = self.inner.flush_requested.notified() => { scan = true; },
+            }
         }
     }
 
-    pub(super) async fn flush_ready_sessions(&self) {
-        let session_ids = {
-            let state = lock_state(&self.inner);
-            state.sessions.keys().cloned().collect::<Vec<_>>()
+    async fn flush_prepared(&self, prepared: PreparedFlushBatch) -> SessionId {
+        let session_id = prepared.session_id.clone();
+        let (batch, baseline) = prepared.into_store_batch();
+        let created_root = batch.header.as_ref().map(|header| {
+            header
+                .fork_origin()
+                .map_or(header.session_id(), |origin| &origin.root_session_id)
+                .clone()
+        });
+        let result = if baseline.is_some() || batch.facts.iter().any(|fact| is_terminal_fact(fact))
+        {
+            self.flush_control_batch(batch, baseline).await
+        } else {
+            self.inner.store.append(batch).await
         };
-        for session_id in session_ids {
-            let Some(prepared) = self.prepare_flush_batch(&session_id) else {
-                continue;
-            };
-            let (batch, baseline) = prepared.into_store_batch();
-            let created_root = batch.header.as_ref().map(|header| {
-                header
-                    .fork_origin()
-                    .map_or(header.session_id(), |origin| &origin.root_session_id)
-                    .clone()
-            });
-            let result =
-                if baseline.is_some() || batch.facts.iter().any(|fact| is_terminal_fact(fact)) {
-                    self.flush_control_batch(batch, baseline).await
-                } else {
-                    self.inner.store.append(batch).await
-                };
-            if result.is_ok() {
-                self.inner.session_changes.committed(&session_id);
-            }
-            // Creation may have committed before its acknowledgement was lost.
-            // Membership notifications carry only a requery hint, as in commit_agent.
-            if let Some(root) = created_root {
-                self.inner.session_changes.created_in_tree(&root);
-            }
-            self.complete_flush(&session_id, result);
+        if result.is_ok() {
+            self.inner.session_changes.committed(&session_id);
         }
+        // Creation may have committed before its acknowledgement was lost.
+        if let Some(root) = created_root {
+            self.inner.session_changes.created_in_tree(&root);
+        }
+        self.complete_flush(&session_id, result);
+        session_id
     }
 
     async fn flush_control_batch(
@@ -303,9 +331,11 @@ impl AgentKernel {
         let control_seq = if batch.header.is_some() {
             0
         } else {
-            read_controls_bounded(&self.inner, &batch.session_id, 0, 1)
+            self.inner
+                .store
+                .read_watermarks(&batch.session_id)
                 .await?
-                .durable_seq
+                .durable_control_seq
         };
         let committed = self
             .inner
@@ -355,9 +385,10 @@ impl AgentKernel {
         Ok(())
     }
 
-    pub(super) fn prepare_flush_batch(&self, session_id: &SessionId) -> Option<PreparedFlushBatch> {
-        let mut state = lock_state(&self.inner);
-        let session = state.sessions.get_mut(session_id)?;
+    fn prepare_flush_batch(
+        session_id: &SessionId,
+        session: &mut SessionRuntime,
+    ) -> Option<PreparedFlushBatch> {
         if session.flush_inflight
             || session.pending.is_empty()
             || session.permanent_flush_error.is_some()
@@ -414,7 +445,6 @@ impl AgentKernel {
         session_id: &SessionId,
         result: std::result::Result<rsi_agent_store_protocol::AppendCommit, StoreError>,
     ) {
-        let mut request_more = false;
         let mut enqueue_after_commit = false;
         let mut claim_available = false;
         let mut pruned_turns = Vec::new();
@@ -433,7 +463,6 @@ impl AgentKernel {
                         apply_committed_flush(session, commit, &self.inner.process_pending_bytes);
                     released_process_capacity = true;
                     enqueue_after_commit = true;
-                    request_more = !session.pending.is_empty();
                     evict_session = session.admission_reservations == 0
                         && session.turns.is_empty()
                         && session.pending.is_empty();
@@ -496,9 +525,6 @@ impl AgentKernel {
         }
         if released_process_capacity || latched_permanent_failure {
             self.inner.process_pending_changed.notify_waiters();
-        }
-        if request_more {
-            self.inner.flush_requested.notify_one();
         }
     }
 
@@ -845,16 +871,64 @@ impl AgentKernel {
         }
     }
 
+    pub(super) async fn pin_cold_composition(
+        &self,
+        header: &SessionHeader,
+    ) -> TurnResult<AgentCompositionPin> {
+        let continuation = self
+            .inner
+            .continuations
+            .lock()
+            .expect("continuation registry poisoned")
+            .get(header.session_id())
+            .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade);
+        if let Some(lease) = continuation.filter(|lease| lease.binding().initial_input.is_some()) {
+            let (retained_header, composition) = self.inner.continuation_issuer.inspect(&lease)?;
+            if retained_header != header {
+                return Err(TurnError::ContinuationDisarmed);
+            }
+            return Ok(composition.clone());
+        }
+        let baseline = observation::read_controls_bounded(&self.inner, header.session_id(), 0, 1)
+            .await
+            .map_err(turn_store_error)?;
+        let states = baseline
+            .records
+            .first()
+            .and_then(|record| match record.body() {
+                AgentControlRecordBody::DomainStateCommitted { commit }
+                    if matches!(
+                        commit.source(),
+                        rsi_agent_session_protocol::DomainMutationSource::Baseline
+                    ) =>
+                {
+                    Some(
+                        commit
+                            .updates()
+                            .iter()
+                            .map(|update| update.snapshot().clone())
+                            .collect(),
+                    )
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(states)
+            .map_err(turn_composition_error)?;
+        let composition = self
+            .inner
+            .composition
+            .pin(header.agent_preset_id(), Some(&seed))
+            .await
+            .map_err(turn_composition_error)?;
+        Ok(composition)
+    }
+
     async fn prepare_cold_composition(
         &self,
         header: &SessionHeader,
     ) -> TurnResult<AgentCompositionPin> {
-        let composition = self
-            .inner
-            .composition
-            .pin(header.agent_preset_id())
-            .await
-            .map_err(turn_composition_error)?;
+        let composition = self.pin_cold_composition(header).await?;
         let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
             .await
             .map_err(turn_store_error)?;

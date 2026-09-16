@@ -29,6 +29,7 @@ mod preview;
 
 #[derive(Debug)]
 pub(super) struct State {
+    resources: rsi_session_protocol::ResourceRetention,
     pub api: Arc<dyn ApiClient>,
     pub observations: ObservationRetention,
     pub interactions: InteractionRetention,
@@ -63,6 +64,7 @@ impl SessionClient {
     fn from_api(api: Arc<dyn ApiClient>) -> Self {
         Self {
             state: Arc::new(State {
+                resources: rsi_session_protocol::ResourceRetention::default(),
                 api,
                 observations: ObservationRetention::default(),
                 interactions: InteractionRetention::default(),
@@ -93,6 +95,33 @@ impl SessionClient {
             })),
         }))
     }
+}
+fn validate_reference_page(
+    operation: Operation,
+    page: &rsi_agent_session_protocol::ReferenceTextPage,
+    offset: usize,
+    maximum: usize,
+) -> rsi_session_protocol::Result<()> {
+    page.validate().map_err(|_| malformed(operation))?;
+    let requested = offset.min(page.reference.metadata.text_bytes);
+    if page.text.len() > maximum
+        || page.offset < requested
+        || page.offset > requested.saturating_add(3)
+        || (page.has_more && page.text.is_empty())
+    {
+        return Err(malformed(operation));
+    }
+    if page.offset < page.reference.preview.len() {
+        let end = page.next_offset.min(page.reference.preview.len());
+        if !page.reference.preview.is_char_boundary(page.offset)
+            || !page.reference.preview.is_char_boundary(end)
+            || page.text.as_bytes().get(..end - page.offset)
+                != Some(&page.reference.preview.as_bytes()[page.offset..end])
+        {
+            return Err(malformed(operation));
+        }
+    }
+    Ok(())
 }
 pub(super) fn malformed(operation: Operation) -> SessionError {
     SessionError::Api(if operation.spec().effect == OperationEffect::Mutation {
@@ -326,6 +355,105 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn capture_reference(
+        &self,
+        source: SessionId,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::FrozenReference> {
+        let handle = self.frozen();
+        let reference: rsi_agent_session_protocol::FrozenReference = handle
+            .call(
+                Operation::CaptureReference,
+                &wire::Attach {
+                    session_id: source.clone(),
+                },
+            )
+            .await?;
+        reference
+            .validate()
+            .map_err(|_| malformed(Operation::CaptureReference))?;
+        if reference.metadata.source.session_id != source
+            || reference.metadata.target.session_id != handle.session_id
+            || reference.metadata.target.header_sha256 != handle.target().header_key
+        {
+            return Err(malformed(Operation::CaptureReference));
+        }
+        Ok(reference)
+    }
+    async fn preview_reference(
+        &self,
+        reference: rsi_agent_session_protocol::FrozenReference,
+        offset: usize,
+        maximum: usize,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        reference
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        rsi_agent_session_protocol::validate_reference_page_bounds(offset, maximum)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let handle = self.frozen();
+        if reference.metadata.target.session_id != handle.session_id
+            || reference.metadata.target.header_sha256 != handle.target().header_key
+        {
+            return Err(SessionError::Invalid(
+                "reference belongs to another target Header".into(),
+            ));
+        }
+        let page: rsi_agent_session_protocol::ReferenceTextPage = handle
+            .call(
+                Operation::PreviewReference,
+                &wire::ReferencePreview {
+                    reference: reference.clone(),
+                    offset,
+                    maximum,
+                },
+            )
+            .await?;
+        validate_reference_page(Operation::PreviewReference, &page, offset, maximum)?;
+        if page.recorded.is_some() || page.reference != reference {
+            return Err(malformed(Operation::PreviewReference));
+        }
+        Ok(page)
+    }
+    async fn read_recorded_reference(
+        &self,
+        request: rsi_agent_session_protocol::ReferenceReadRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let handle = self.frozen();
+        let binding = request
+            .recorded_binding(&handle.binding().header)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let page: rsi_agent_session_protocol::ReferenceTextPage =
+            handle.call(Operation::ReadReference, &request).await?;
+        validate_reference_page(
+            Operation::ReadReference,
+            &page,
+            request.offset,
+            request.maximum,
+        )?;
+        if page.recorded.as_ref() != Some(&request) || page.reference.metadata.target != binding {
+            return Err(malformed(Operation::ReadReference));
+        }
+        Ok(page)
+    }
+    async fn read_resource(
+        &self,
+        request: rsi_agent_session_protocol::SessionResourceRequest,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ResourceSnapshot> {
+        request
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let handle = self.frozen();
+        let reservation = handle.state.resources.reserve()?;
+        let response: rsi_agent_session_protocol::SessionResourceResponse =
+            handle.call(Operation::Resource, &request).await?;
+        if response.session_id != handle.session_id
+            || response.header_sha256 != handle.target().header_key
+            || response.request != request
+        {
+            return Err(malformed(Operation::Resource));
+        }
+        reservation.retain(response)
+    }
     async fn peek_job(
         &self,
         request: rsi_agent_turn_protocol::JobPreviewRequest,

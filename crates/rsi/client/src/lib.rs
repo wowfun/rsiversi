@@ -15,6 +15,9 @@ mod submission;
 pub use controller::commands::{
     command_invocation, execute_command_once, query_command_result, slash_command,
 };
+pub use controller::resources::{
+    CompletionGroup, InputCompletion, completion_rank, rank_completions,
+};
 pub use controller::source::SourceReadError;
 pub use controller::{
     GoalControlState, SessionController, SessionControllerContract, SessionControllerFactory,

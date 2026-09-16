@@ -102,6 +102,25 @@ pub(super) fn profile(
     let mut rows = Vec::new();
     nodes(snapshot.nodes(), None, &mut total, &mut rows, request);
     let next = request.offset.saturating_add(rows.len());
+    let observed: Vec<_> = status
+        .observed()
+        .iter()
+        .skip(request.offset)
+        .take(request.limit)
+        .map(|instance| {
+            use rsi_meta_profile::ProfileInstanceState as S;
+            let state = match instance.state() {
+                S::Pending(_) => "pending",
+                S::Loading => "loading",
+                S::Active => "active",
+                S::Failed => "failed",
+                S::Unloading => "unloading",
+                S::Disposed => "disposed",
+            };
+            json!({"id":instance.id(),"factory":instance.factory(),"state":state})
+        })
+        .collect();
+    let observed_next = request.offset.saturating_add(observed.len());
     let health = match status.health() {
         ProfileHealth::Converging => "converging",
         ProfileHealth::Converged => "converged",
@@ -119,6 +138,9 @@ pub(super) fn profile(
         "status_revision": status.revision().to_string(), "status_source_digest": status.source_digest(),
         "health": health, "watcher": watcher, "total": total,
         "next_offset": (next < total).then_some(next), "nodes": rows,
+        "observed_total":status.observed().len(),
+        "observed_next_offset":(observed_next < status.observed().len()).then_some(observed_next),
+        "observed":observed,
     })
 }
 fn nodes(

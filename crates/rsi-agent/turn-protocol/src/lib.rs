@@ -36,7 +36,9 @@ pub use continuation::{
     SessionContinuationsContract, WeakContinuationLease,
 };
 mod projection;
+mod resource;
 pub use projection::{SessionProjectionChanges, SessionProjections, SessionProjectionsContract};
+pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;
 pub use command::{SessionCommands, SessionCommandsContract};
 mod observation;

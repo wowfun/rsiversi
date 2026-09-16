@@ -392,7 +392,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
 
     let first_header = header("session-generation-a");
     let first_pin = composition
-        .pin(first_header.agent_preset_id())
+        .pin(first_header.agent_preset_id(), None)
         .await
         .unwrap();
     let first_tools = first_pin.tools();
@@ -423,7 +423,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
         .unwrap();
     let second_header = header("session-generation-b");
     let second_pin = composition
-        .pin(second_header.agent_preset_id())
+        .pin(second_header.agent_preset_id(), None)
         .await
         .unwrap();
     let second_tools = second_pin.tools();
@@ -665,7 +665,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
     let worker = kernel.start_workers();
     let session_header = header("session-resident-damaged-source");
     let pin = composition
-        .pin(session_header.agent_preset_id())
+        .pin(session_header.agent_preset_id(), None)
         .await
         .unwrap();
     kernel
@@ -755,7 +755,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let worker = kernel.start_workers();
     let session_header = header("session-evicted-generation-b");
     let pin = composition
-        .pin(session_header.agent_preset_id())
+        .pin(session_header.agent_preset_id(), None)
         .await
         .unwrap();
     let first = kernel
@@ -840,6 +840,7 @@ async fn cold_composition_failure_has_a_utf8_safe_bounded_diagnostic() {
 #[tokio::test]
 async fn store_read_failure_has_a_utf8_safe_bounded_turn_diagnostic() {
     let memory = Arc::new(MemoryStore::new());
+    append_terminal_history(&memory, "session-store-diagnostic", 1).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =

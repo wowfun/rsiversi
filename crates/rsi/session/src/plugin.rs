@@ -35,7 +35,9 @@ impl PluginFactory for SessionFactory {
             .requiring_local::<rsi_agent_turn_protocol::SessionContinuationsContract>()
             .requiring_local::<rsi_goal::GoalControllerContract>()
             .requiring_local::<SessionProjectionsContract>()
+            .requiring_local::<rsi_agent_turn_protocol::SessionResourcesContract>()
             .requiring_local::<SessionStoreContract>()
+            .requiring_local::<rsi_agent_references::ReferencesContract>()
             .requiring_local::<AgentCompositionContract>()
             .requiring_local::<WorkspaceRegistryContract>()
             .requiring_local::<AgentSettingsContract>()
@@ -61,6 +63,8 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_resources(plan.local::<rsi_agent_turn_protocol::SessionResourcesContract>()?)
+        .with_references(plan.local::<rsi_agent_references::ReferencesContract>()?)
         .with_questions(Some(plan.local::<UserQuestionsContract>()?))
         .with_jobs(plan.local::<rsi_agent_turn_protocol::TurnJobsContract>()?)
         .with_goals(

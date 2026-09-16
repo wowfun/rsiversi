@@ -1,5 +1,14 @@
 # rsi-agent-store-sqlite
 
+Bounded suffix reads first admit row lengths and then fetch that contiguous
+range in one ascending query within the same snapshot. No rejected Fact body
+is materialized. Integrity-check failures preserve a bounded SQLite diagnostic.
+
+CAS reads check the reference length against database metadata and enforce that
+exact length as the physical file-read ceiling before allocating file contents.
+A replaced or oversized file cannot consume the Store-wide CAS maximum through
+a smaller reference. Digest verification still follows the bounded read.
+
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
@@ -25,8 +34,9 @@ refresh LRU order. At most 256 evicted recent identities are remembered only as
 admission hints, never as validation proofs. Failed validations publish no hint
 or proof. The serialized validation lane checks the cache again after admission;
 miss checks alone never change queue membership. Metadata reads neither fill nor touch the cache. The
-cache is an optional hint: a poisoned cache disables proof reuse and marking,
-so it cannot turn a successful durable commit into an error. Cold validation
+cache is an optional hint: poisoning disables evictable-cache reuse and marking,
+while in-use pins remain independent. Cache failure cannot turn a successful
+durable commit into an error. Cold validation
 still runs before any indexed execution/history read.
 Every canonical terminal Fact must have the matching non-NULL terminal index
 Fact and control sequences and prefix digests. The final control of each
@@ -141,7 +151,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 20 admits only the current mandatory Agent-preset
+The exact schema version 21 admits frozen human reference content and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one
@@ -162,3 +172,19 @@ session header and reject a checkpoint cursor beyond the current durable tail.
 They cannot compare the checkpoint's prefix digest with the session's current
 tail digest after later Facts have been appended; Context remains responsible
 for binding and validating the opaque checkpoint bytes and their exact prefix.
+
+Prepared operations retain real validation proofs independently of the evictable
+cache. At most 256 distinct Sessions are pinned at once; concurrent preparations
+of one Session share a pin. Distinct-session waiters retain semaphore FIFO position
+across unrelated pin notifications; same-session waiters can still share a newly
+published pin immediately. Waiting for a pin holds neither a validation lane nor
+payload admission. The pin retains the Store owner; ordinary cache proofs do not.
+Only successful validation or committed typed writes establish proofs.
+Cache insertion returns its retained proof, reusing an existing proof on a hit.
+Pin lookups examine only the selected identity. Insertion sweeps dead
+weak entries before adding a pin, keeping the registry bounded without a sweep
+on each read or append. Indexed scalar text uses one borrowed-value boundary;
+large JSON bodies retain their SQL projection and aggregate page admission.
+Indexed text is checked as a borrowed SQLite value before owned allocation:
+storage type, UTF-8 and owning protocol byte bounds fail as corruption. Existing
+JSON projection and page-lookahead gates remain in force.

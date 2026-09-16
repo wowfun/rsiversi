@@ -28,6 +28,8 @@ const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 #[path = "session_service/files.rs"]
 mod files;
+#[path = "session_service/milestone.rs"]
+mod milestone;
 
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;

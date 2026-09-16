@@ -17,17 +17,26 @@ fn session_fragment_has_fixed_order_and_explicit_authority() {
 
     assert_eq!(fragment.id(), SESSION_FRAGMENT_ID);
     let entries = fragment.entries();
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 4);
     assert_eq!(entries[0].id().as_str(), SESSION_STORE_INSTANCE);
     assert_eq!(entries[0].plugin().as_str(), SQLITE_STORE_FACTORY);
     assert_eq!(entries[0].config()["root"], root.to_string_lossy().as_ref());
-    assert_eq!(entries[1].id().as_str(), SESSION_KERNEL_INSTANCE);
-    assert_eq!(entries[1].plugin().as_str(), KERNEL_FACTORY);
+    assert_eq!(
+        entries[1].id().as_str(),
+        rsi_agent_presets::SESSION_REFERENCES_INSTANCE
+    );
+    assert_eq!(
+        entries[1].plugin().as_str(),
+        rsi_agent_presets::REFERENCES_FACTORY
+    );
     assert!(entries[1].config().is_null());
-    assert_eq!(entries[2].id().as_str(), SESSION_EXECUTOR_INSTANCE);
-    assert_eq!(entries[2].plugin().as_str(), EXECUTOR_FACTORY);
-    assert_eq!(entries[2].config()["executor_id"], "executor-test");
-    assert_eq!(entries[2].config()["maximum_active_turns"], 4);
+    assert_eq!(entries[2].id().as_str(), SESSION_KERNEL_INSTANCE);
+    assert_eq!(entries[2].plugin().as_str(), KERNEL_FACTORY);
+    assert!(entries[2].config().is_null());
+    assert_eq!(entries[3].id().as_str(), SESSION_EXECUTOR_INSTANCE);
+    assert_eq!(entries[3].plugin().as_str(), EXECUTOR_FACTORY);
+    assert_eq!(entries[3].config()["executor_id"], "executor-test");
+    assert_eq!(entries[3].config()["maximum_active_turns"], 4);
 }
 
 #[test]

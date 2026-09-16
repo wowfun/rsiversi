@@ -412,6 +412,29 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn read_fact_suffix(
+        &self,
+        id: &SessionId,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreFactSuffix> {
+        self.inner.read_fact_suffix(id, limit, maximum_bytes).await
+    }
+
+    async fn prepare_session(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::SessionValidationLease> {
+        self.validate_session(id).await?;
+        self.inner.prepare_session(id).await
+    }
+    async fn read_watermarks(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionWatermarks> {
+        self.inner.read_watermarks(id).await
+    }
+
     async fn read_domain_states(
         &self,
         session_id: &SessionId,
@@ -1113,6 +1136,7 @@ impl AgentComposition for UnboundedDiagnosticComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         Err(AgentCompositionError::Unavailable {
             preset_id: preset_id.clone(),
@@ -1130,6 +1154,7 @@ impl AgentComposition for DropTrackingComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         AgentCompositionPin::new(
@@ -1171,6 +1196,7 @@ impl AgentComposition for MutableComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         if self.unavailable.load(Ordering::Acquire) {
@@ -1195,6 +1221,7 @@ impl AgentComposition for TestComposition {
     async fn pin(
         &self,
         preset_id: &AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> Result<AgentCompositionPin, AgentCompositionError> {
         Ok(test_pin(preset_id))
     }
@@ -1480,6 +1507,8 @@ mod jobs;
 mod recovery_and_finalization;
 #[path = "kernel/settlement.rs"]
 mod settlement;
+#[path = "kernel/store_isolation.rs"]
+mod store_isolation;
 #[path = "kernel/submission.rs"]
 mod submission;
 #[path = "kernel/workspace_and_mailbox.rs"]

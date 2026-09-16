@@ -324,7 +324,7 @@ async fn preset_management_uses_actual_agent_declarations_and_rejects_a_mismatch
     let resolver = host
         .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
         .unwrap();
-    let pin = resolver.pin(&id).await.unwrap();
+    let pin = resolver.pin(&id, None).await.unwrap();
     assert_eq!(factory.live.load(Ordering::SeqCst), 1);
     assert!(
         host.lookup_local::<Counter>().is_none(),

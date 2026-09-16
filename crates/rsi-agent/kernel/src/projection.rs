@@ -80,7 +80,7 @@ impl SessionProjections for AgentKernel {
 }
 
 impl AgentKernel {
-    async fn projection_generation(
+    pub(super) async fn projection_generation(
         &self,
         session_id: &SessionId,
     ) -> TurnResult<(Arc<SessionHeader>, AgentCompositionPin)> {
@@ -96,7 +96,7 @@ impl AgentKernel {
             let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
-            let prepared = self.inner.composition.pin(header.agent_preset_id()).await;
+            let prepared = self.pin_cold_composition(&header).await;
             // Even failed cold resolution must yield to a concurrently published resident pin.
             match select_generation(&self.inner, session_id)? {
                 Selection::Resident(header, pin) => return Ok((header, pin)),
@@ -104,7 +104,7 @@ impl AgentKernel {
                     load.wait().await?;
                 }
                 Selection::Cold => {
-                    return Ok((Arc::new(header), prepared.map_err(turn_composition_error)?));
+                    return Ok((Arc::new(header), prepared?));
                 }
             }
         }

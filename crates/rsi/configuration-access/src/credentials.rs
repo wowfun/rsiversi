@@ -1,6 +1,4 @@
-use super::{
-    ApiError, Arc, BoxFuture, CallOrigin, ConfigurationAccess, Deserialize, Result, Serialize,
-};
+use super::{ApiError, Arc, ConfigurationAccess, Deserialize, Result, Serialize};
 use rsi_api_protocol::{ApiRegistrar, ApiRegistration, json_handler};
 use rsi_configuration_api::{CredentialOperation, CredentialReceipt, ProviderKind};
 use rsi_credentials_protocol::{
@@ -50,20 +48,6 @@ fn mutation_result<T>(
         Err(_) => Err(ApiError::OutcomeUnknown),
     }
 }
-fn retained<T: Send + 'static>(
-    owner: &Arc<ConfigurationAccess>,
-    origin: &CallOrigin,
-    future: impl std::future::Future<Output = Result<T>> + Send + 'static,
-) -> Result<BoxFuture<'static, Result<T>>> {
-    let lease = owner.admit(origin)?;
-    let task = owner.execution.spawn(owner.tasks.track_future(async move {
-        let _lease = lease;
-        future.await
-    }));
-    Ok(Box::pin(async move {
-        task.await.map_err(|_| ApiError::OutcomeUnknown)?
-    }))
-}
 pub(super) fn register(
     registrar: &dyn ApiRegistrar,
     owner: Arc<ConfigurationAccess>,
@@ -96,15 +80,16 @@ pub(super) fn register(
                     slot: input.slot,
                 }
                 .validated()?;
-                retained(&authority, &context.origin, async move {
-                    mutation_result(credentials.set(&reference, input.secret).await.map(|()| {
-                        CredentialReceipt {
-                            operation: CredentialOperation::Set,
-                            removed: None,
-                        }
-                    }))
-                })?
-                .await
+                authority
+                    .retained(&context.origin, async move {
+                        mutation_result(credentials.set(&reference, input.secret).await.map(|()| {
+                            CredentialReceipt {
+                                operation: CredentialOperation::Set,
+                                removed: None,
+                            }
+                        }))
+                    })?
+                    .await
             }
         }),
     )?;
@@ -115,15 +100,16 @@ pub(super) fn register(
             let credentials = admin.clone();
             async move {
                 let reference = input.validated()?;
-                retained(&authority, &context.origin, async move {
-                    mutation_result(credentials.unset(&reference).await.map(|removed| {
-                        CredentialReceipt {
-                            operation: CredentialOperation::Unset,
-                            removed: Some(removed),
-                        }
-                    }))
-                })?
-                .await
+                authority
+                    .retained(&context.origin, async move {
+                        mutation_result(credentials.unset(&reference).await.map(|removed| {
+                            CredentialReceipt {
+                                operation: CredentialOperation::Unset,
+                                removed: Some(removed),
+                            }
+                        }))
+                    })?
+                    .await
             }
         }),
     )?;
