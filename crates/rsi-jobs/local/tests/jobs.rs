@@ -30,6 +30,7 @@ struct TestControl {
     release: CancellationToken,
     cancel_count: AtomicUsize,
     wait_count: AtomicUsize,
+    read_count: [AtomicUsize; 2],
     peek_gate: Option<Arc<(Notify, Mutex<bool>, Condvar)>>,
 }
 
@@ -43,6 +44,7 @@ impl TestControl {
             release: CancellationToken::new(),
             cancel_count: AtomicUsize::new(0),
             wait_count: AtomicUsize::new(0),
+            read_count: [AtomicUsize::new(0), AtomicUsize::new(0)],
             peek_gate: None,
         })
     }
@@ -81,6 +83,7 @@ impl JobControl for TestControl {
         }))
     }
     fn read(&self, stream: JobStream, offset: u64) -> Result<JobOutputRead> {
+        self.read_count[usize::from(stream == JobStream::Stderr)].fetch_add(1, Ordering::Relaxed);
         let bytes = match stream {
             JobStream::Stdout => &self.stdout,
             JobStream::Stderr => &self.stderr,
@@ -652,6 +655,10 @@ async fn active_reads_do_not_report_but_terminal_reads_atomically_release_output
 
     control.release.cancel();
     wait_terminal(&jobs, &authority, &id).await;
+    let before = control
+        .read_count
+        .each_ref()
+        .map(|count| count.load(Ordering::Relaxed));
     let terminal = jobs.read(&authority, &id, 0, 0).unwrap();
     assert_eq!(terminal.stdout.bytes, b"hello");
     assert_eq!(terminal.stderr.bytes, b"warning");
@@ -666,6 +673,11 @@ async fn active_reads_do_not_report_but_terminal_reads_atomically_release_output
     assert!(compacted.stdout.lossy);
     assert_eq!(compacted.stderr.oldest_offset, 7);
 
+    let after = control
+        .read_count
+        .each_ref()
+        .map(|count| count.load(Ordering::Relaxed));
+    assert_eq!(after, before.map(|count| count + 1));
     drop(jobs);
     assert!(fiber.dispose().await.is_clean());
 }
@@ -1323,4 +1335,64 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
 
     drop(jobs);
     assert!(fiber.dispose().await.is_clean());
+}
+
+#[derive(Debug)]
+struct BlockingDropProducer {
+    entered: Arc<Notify>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+impl JobProducer for BlockingDropProducer {
+    fn start(&self, _: &JobRequest) -> Result<Arc<dyn JobControl>> {
+        Err(JobsError::Execution("unused fixture".into()))
+    }
+}
+impl Drop for BlockingDropProducer {
+    fn drop(&mut self) {
+        self.entered.notify_one();
+        let mut released = self.release.0.lock().unwrap();
+        while !*released {
+            released = self.release.1.wait(released).unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn producer_destruction_releases_registry_before_external_cleanup() {
+    for withdraw_all in [false, true] {
+        let (_runtime, fiber, jobs) = activated(json!({})).await;
+        let scope = jobs.acquire_scope(scope("other")).unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let lease = jobs
+            .register_producer(registration(
+                "blocking",
+                Arc::new(BlockingDropProducer {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }),
+            ))
+            .unwrap();
+        let retired = if withdraw_all {
+            tokio::spawn(async move {
+                assert!(fiber.dispose().await.is_clean());
+                drop(lease);
+            })
+        } else {
+            tokio::spawn(async move {
+                drop(lease);
+                assert!(fiber.dispose().await.is_clean());
+            })
+        };
+        entered.notified().await;
+        let access = tokio::task::spawn_blocking(move || jobs.list(&scope));
+        let result = tokio::time::timeout(Duration::from_secs(2), access).await;
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        retired.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "external producer destructor held the registry mutex"
+        );
+    }
 }

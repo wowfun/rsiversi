@@ -51,3 +51,8 @@ Producer start, wait, read, peek, and cancel callbacks are panic-contained. No w
 or output is recovered after process exit. Producer wait failures are projected
 to a bounded failed terminal after NUL removal, so containment never creates a
 value that violates the Jobs protocol it is meant to protect.
+
+Scope retention owns ordered membership as well as eviction eligibility. Scope
+list and finalization inspect only that generation's members; global withdrawal
+still visits all relevant records. Producer entries are moved out of the registry
+before cooperative cancellation and opaque destruction run outside its mutex.

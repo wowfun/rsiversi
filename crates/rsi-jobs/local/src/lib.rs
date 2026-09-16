@@ -151,6 +151,8 @@ struct Registry {
     evictable: BTreeMap<u64, String>,
     #[cfg(test)]
     eviction_candidates_examined: usize,
+    #[cfg(test)]
+    scope_records_examined: std::cell::Cell<usize>,
     reservations_global: usize,
     reservations_by_scope: HashMap<u64, usize>,
     active_global: usize,
@@ -160,16 +162,30 @@ struct Registry {
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct ScopeRetention {
-    retained: usize,
+    members: BTreeMap<u64, String>,
     evictable: BTreeSet<u64>,
 }
 
 impl Registry {
+    fn scope_records(&self, generation: u64) -> impl Iterator<Item = (&String, &JobRecord)> {
+        self.retention_by_scope
+            .get(&generation)
+            .into_iter()
+            .flat_map(|scope| scope.members.values())
+            .map(|id| {
+                #[cfg(test)]
+                self.scope_records_examined
+                    .set(self.scope_records_examined.get() + 1);
+                (id, self.jobs.get(id).expect("scope member is retained"))
+            })
+    }
+
     fn insert_record(&mut self, id: &str, record: JobRecord) {
         self.retention_by_scope
             .entry(record.scope.generation())
             .or_default()
-            .retained += 1;
+            .members
+            .insert(record.sequence, id.to_owned());
         let previous = self.jobs.insert(id.to_owned(), record);
         assert!(previous.is_none(), "published job identities are unique");
         self.refresh_eligibility(id);
@@ -205,10 +221,10 @@ impl Registry {
             .retention_by_scope
             .get_mut(&generation)
             .expect("every retained job has a scope count");
-        scope.retained -= 1;
+        scope.members.remove(&record.sequence);
         scope.evictable.remove(&record.sequence);
         self.evictable.remove(&record.sequence);
-        if scope.retained == 0 {
+        if scope.members.is_empty() {
             self.retention_by_scope.remove(&generation);
         }
     }
@@ -485,15 +501,12 @@ impl Jobs for Service {
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>> {
         let registry = lock(&self.registry);
         self.validate_scope(&registry, scope)?;
-        let mut records = registry
-            .jobs
-            .iter()
-            .filter(|(_, record)| record.scope.same_generation(scope))
-            .map(|(id, record)| (record.sequence, record.summary(id)))
+        let records = registry
+            .scope_records(scope.generation())
+            .map(|(id, record)| record.summary(id))
             .collect::<Vec<_>>();
-        records.sort_by_key(|(sequence, _)| *sequence);
         debug_assert!(records.len() <= MAXIMUM_JOBS_PER_LIST);
-        Ok(records.into_iter().map(|(_, summary)| summary).collect())
+        Ok(records)
     }
 
     fn get(&self, scope: &JobScopeAuthority, id: &str) -> Result<JobSummary> {
@@ -614,11 +627,13 @@ impl Jobs for Service {
                 stderr,
             });
         }
-        if let Some(control) = &control {
+        if !terminal && let Some(control) = &control {
             stdout = contained_read(control, JobStream::Stdout, stdout_offset)?;
             stderr = contained_read(control, JobStream::Stderr, stderr_offset)?;
         }
-        let job = self.report_job(id)?;
+        let job = self
+            .report_job_inner(id, false, Some([stdout.next_offset, stderr.next_offset]))?
+            .ok_or_else(|| JobsError::UnknownJob(id.to_owned()))?;
         Ok(JobRead {
             job,
             stdout,
@@ -654,13 +669,17 @@ impl Jobs for Service {
             {
                 registry.scopes.remove(scope.id());
             }
-            registry
-                .jobs
-                .values_mut()
-                .filter(|record| {
-                    record.scope.same_generation(scope) && !record.status.is_terminal()
-                })
-                .filter_map(|record| {
+            let ids = registry
+                .scope_records(scope.generation())
+                .filter(|(_, record)| !record.status.is_terminal())
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| {
+                    let record = registry
+                        .jobs
+                        .get_mut(&id)
+                        .expect("scope member is retained");
                     record.status = JobStatus::Stopping;
                     record.control.clone()
                 })
@@ -816,16 +835,16 @@ impl Service {
         }
     }
 
-    fn report_job(&self, id: &str) -> Result<JobSummary> {
-        self.report_job_inner(id, false)?
-            .ok_or_else(|| JobsError::UnknownJob(id.to_owned()))
-    }
-
     fn report_job_if_unreported(&self, id: &str) -> Result<Option<JobSummary>> {
-        self.report_job_inner(id, true)
+        self.report_job_inner(id, true, None)
     }
 
-    fn report_job_inner(&self, id: &str, only_if_unreported: bool) -> Result<Option<JobSummary>> {
+    fn report_job_inner(
+        &self,
+        id: &str,
+        only_if_unreported: bool,
+        sampled_stream_ends: Option<[u64; 2]>,
+    ) -> Result<Option<JobSummary>> {
         let control = {
             let registry = lock(&self.registry);
             let Some(record) = registry.jobs.get(id) else {
@@ -849,7 +868,8 @@ impl Service {
             }
             record.control.clone()
         };
-        let stream_ends = control.as_ref().map_or([0, 0], capture_stream_ends);
+        let stream_ends = sampled_stream_ends
+            .unwrap_or_else(|| control.as_ref().map_or([0, 0], capture_stream_ends));
         let mut registry = lock(&self.registry);
         let Some(record) = registry.jobs.get_mut(id) else {
             return if only_if_unreported {
@@ -874,16 +894,18 @@ impl Service {
     }
 
     fn withdraw_producer(&self, name: &str, generation: u64) {
-        let controls = {
+        let (retired, controls) = {
             let mut registry = lock(&self.registry);
-            if registry
+            let retired = if registry
                 .producers
                 .get(name)
                 .is_some_and(|entry| entry.generation == generation)
             {
-                registry.producers.remove(name);
-            }
-            registry
+                registry.producers.remove(name)
+            } else {
+                None
+            };
+            let controls = registry
                 .jobs
                 .values_mut()
                 .filter(|record| {
@@ -893,12 +915,14 @@ impl Service {
                     record.status = JobStatus::Stopping;
                     record.control.clone()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (retired, controls)
         };
         for control in controls {
             let _ = contained_cancel(&control);
         }
         self.changed.notify_waiters();
+        drop(retired);
     }
 
     async fn wait_for_producer(&self, generation: u64, timeout_ms: u64) -> Result<()> {
@@ -936,19 +960,13 @@ impl Service {
             }
             notified.await;
         }
-        let mut pending = lock(&self.registry)
-            .jobs
-            .iter()
-            .filter(|(_, record)| {
-                record.scope.generation() == generation
-                    && record.requires_report
-                    && !record.reported
-            })
-            .map(|(id, record)| (record.sequence, id.clone()))
+        let pending = lock(&self.registry)
+            .scope_records(generation)
+            .filter(|(_, record)| record.requires_report && !record.reported)
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        pending.sort_by_key(|(sequence, _)| *sequence);
         let mut unreported = Vec::with_capacity(pending.len());
-        for (_, id) in pending {
+        for id in pending {
             if let Some(job) = self.report_job_if_unreported(&id)? {
                 unreported.push(job);
             }
@@ -958,14 +976,14 @@ impl Service {
 
     fn withdraw_all(&self) {
         self.accepting.store(false, Ordering::Release);
-        let controls = {
+        let (retired, controls) = {
             let mut registry = lock(&self.registry);
-            registry.producers.clear();
+            let retired = std::mem::take(&mut registry.producers);
             for state in registry.scopes.values().filter_map(Weak::upgrade) {
                 state.revoke();
             }
             registry.scopes.clear();
-            registry
+            let controls = registry
                 .jobs
                 .values_mut()
                 .filter(|record| !record.status.is_terminal())
@@ -973,12 +991,14 @@ impl Service {
                     record.status = JobStatus::Stopping;
                     record.control.clone()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (retired, controls)
         };
         for control in controls {
             let _ = contained_cancel(&control);
         }
         self.changed.notify_waiters();
+        drop(retired);
     }
 
     async fn wait_for_all(&self, timeout_ms: u64) -> Result<()> {
@@ -1108,7 +1128,7 @@ fn compact_for_admission(
     while registry
         .retention_by_scope
         .get(&scope_generation)
-        .map_or(0, |scope| scope.retained)
+        .map_or(0, |scope| scope.members.len())
         .checked_add(
             registry
                 .reservations_by_scope
@@ -1275,7 +1295,7 @@ mod tests {
         let mut evictable = BTreeMap::new();
         for (id, record) in &registry.jobs {
             let scope = scopes.entry(record.scope.generation()).or_default();
-            scope.retained += 1;
+            scope.members.insert(record.sequence, id.clone());
             if record.status.is_terminal() && record.reported && record.readers == 0 {
                 scope.evictable.insert(record.sequence);
                 evictable.insert(record.sequence, id.clone());
@@ -1327,7 +1347,7 @@ mod tests {
         }
         registry.jobs["job-1"].scope.revoke();
         assert_retention_invariant(&registry);
-        assert_eq!(registry.retention_by_scope[&1].retained, 1);
+        assert_eq!(registry.retention_by_scope[&1].members.len(), 1);
         registry.remove_record("job-1");
         assert_retention_invariant(&registry);
         assert!(registry.retention_by_scope.is_empty());
@@ -1360,6 +1380,32 @@ mod tests {
             Err(JobsError::Capacity)
         ));
         assert_eq!(registry.eviction_candidates_examined, 2);
+    }
+
+    #[test]
+    fn scope_membership_work_ignores_unrelated_history() {
+        for unrelated in [8, 4096, 65536] {
+            let mut registry = Registry::default();
+            for sequence in 1..=3 {
+                registry.insert_record(
+                    &format!("selected-{sequence}"),
+                    retained_record(sequence, 1),
+                );
+            }
+            for sequence in 4..unrelated + 4 {
+                registry.insert_record(
+                    &format!("other-{sequence}"),
+                    retained_record(sequence, sequence / 256 + 2),
+                );
+            }
+            let ids = registry
+                .scope_records(1)
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, ["selected-1", "selected-2", "selected-3"]);
+            assert_eq!(registry.scope_records_examined.get(), 3);
+            assert_retention_invariant(&registry);
+        }
     }
 
     #[test]

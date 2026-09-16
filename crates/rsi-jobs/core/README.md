@@ -31,11 +31,12 @@ generation rather than a permanent tombstone.
 The registry exposes `list`, `get`, raw offset-based `read`, `wait`, and `kill`
 operations. One exact-scope list contains at most 256 records, aligning the
 generic provider contract with bounded Tool JSON consumers. Reads of active
-work do not report it. A terminal `read` or `wait` re-samples both final stream
-tails before reporting. The active/terminal decision and active summary are
-observed under one registry lock; a terminal observation always takes the
-re-sample-and-report path instead of combining a stale stream snapshot with a
-terminal summary. `kill` reports only after cancellation has settled. Reporting
+work do not report it. An initially terminal `read` samples both final stream tails once and reuses
+their offsets for reporting. A read that observes a transition to terminal
+re-samples both streams before reporting; independent finalization samples its
+own tails. The active/terminal decision and active summary are
+observed under one registry lock; a transition to terminal never combines an earlier active stream snapshot
+with a terminal summary. `kill` reports only after cancellation has settled. Reporting
 drops producer control and captured output, retaining only a bounded tombstone.
 Terminal jobs requiring a report are never evicted before that report. Reported
 tombstones are evicted oldest-first within explicit scope and provider bounds.
