@@ -23,6 +23,7 @@ fn saved_manifest_round_trips_complete_metadata_and_exact_numbers() {
         servers: vec![server],
     };
     let snapshot = manifest.snapshot().unwrap();
+    assert_eq!(snapshot.identity().version(), MANIFEST_CODEC_VERSION);
     let decoded: McpManifest = serde_json::from_value(snapshot.state().value().clone()).unwrap();
     assert_eq!(manifest, decoded);
     decoded.validate().unwrap();
@@ -40,7 +41,7 @@ fn saved_manifest_round_trips_complete_metadata_and_exact_numbers() {
     );
 }
 #[test]
-fn bounds_reject_complete_oversize_and_cross_server_identity_collisions() {
+fn bounds_reject_complete_oversize_and_ambiguous_pairs_have_distinct_names() {
     let mut server = server("fixture");
     server.tools = (0..65)
         .map(|i| tool("fixture", &format!("tool{i}")))
@@ -74,8 +75,8 @@ fn bounds_reject_complete_oversize_and_cross_server_identity_collisions() {
             servers: vec![one, two]
         }
         .validate()
-        .is_err(),
-        "an ambiguous public name must never route to a different raw identity"
+        .is_ok(),
+        "valid raw pairs with the same joined text have distinct public identities"
     );
 }
 #[test]
@@ -87,6 +88,21 @@ fn invalid_schema_and_tampered_public_identity_do_not_restore() {
     server.tools[0] = tool("fixture", "echo");
     server.tools[0].public_name = "other".into();
     assert!(server.validate().is_err());
+}
+#[test]
+fn aggregate_catalog_check_rejects_public_name_collisions_before_schema_validation() {
+    let mut first = server("a");
+    first.tools.push(tool("a", "echo"));
+    let mut second = server("b");
+    second.tools.push(tool("b", "echo"));
+    validate_manifest_catalog([&first, &second]).unwrap();
+    second.tools[0]
+        .public_name
+        .clone_from(&first.tools[0].public_name);
+    assert_eq!(
+        validate_manifest_catalog([&first, &second]),
+        Err("MCP public Tool identity collision".into()),
+    );
 }
 #[test]
 fn remote_replacements_cannot_create_change_disable_or_remove_stdio_configuration() {
@@ -169,4 +185,28 @@ fn selected_tools_leave_room_for_the_mcp_resource_reader() {
     );
     manifest.servers[0].tools[0].selected = false;
     manifest.validate().unwrap();
+}
+
+#[test]
+fn every_public_name_has_a_tuple_digest_even_when_raw_names_are_safe() {
+    for (server, tool) in [
+        ("a", "b__c"),
+        ("a__b", "c"),
+        ("fixture", "echo"),
+        ("a", "中文"),
+        ("a", "__"),
+        ("server", "a".repeat(256).as_str()),
+    ] {
+        let name = public_tool_name(server, tool);
+        assert!(name.len() <= 64);
+        assert!(
+            name.bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
+        );
+        assert!(name.ends_with(&digest(&(server, tool))[..12]));
+    }
+    assert_ne!(public_tool_name("a", "b__c"), public_tool_name("a__b", "c"));
+    assert_ne!(public_tool_name("a", "中文"), public_tool_name("a", "__"));
+    let empty = McpManifest::default().snapshot().unwrap();
+    assert_eq!(empty.identity().version(), 2);
 }

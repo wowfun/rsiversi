@@ -132,6 +132,7 @@ impl ServiceEndpoint for Endpoint {
                         result.enforcement.push(
                             TestSandbox
                                 .confine(ProcessRequest {
+                                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                                     mode: policy.mode,
                                     program: "/bin/echo".into(),
                                     arguments: Vec::new(),

@@ -94,6 +94,11 @@ pub(super) async fn serve(
                     header(headers, "mcp-param-message"),
                     Some("=?base64?IOS4reaWhw0K?=")
                 );
+            } else if message == "中文" {
+                assert_eq!(
+                    header(headers, "mcp-param-message"),
+                    Some("=?base64?5Lit5paH?=")
+                );
             } else {
                 assert_eq!(header(headers, "mcp-param-message"), Some(message));
             }
@@ -134,14 +139,7 @@ pub(super) async fn serve(
     }
     let value = json!({"jsonrpc":"2.0","id":request["id"],"result":result});
     if mode.sse {
-        let bytes = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: comment\n\ndata: {value}\n\n"
-        );
-        for chunk in bytes.as_bytes().chunks(7) {
-            if socket.write_all(chunk).await.is_err() {
-                return;
-            }
-        }
+        sse_response(&mut socket, mode, &value).await;
     } else {
         reply(&mut socket, "200 OK", &value).await;
     }
@@ -172,8 +170,7 @@ async fn listen(
         request["id"].clone()
     };
     let ack = json!({"jsonrpc":"2.0","method":if mode.modern_fault == Some("before-ack") {"notifications/tools/list_changed"} else {"notifications/subscriptions/acknowledged"},"params":{"_meta":{"io.modelcontextprotocol/subscriptionId":id},"notifications":{"toolsListChanged":true}}});
-    if socket
-        .write_all(format!("data: {ack}\n\n").as_bytes())
+    if write_events(&mut socket, mode, &event_bytes(mode, &[ack], true))
         .await
         .is_err()
     {
@@ -181,9 +178,7 @@ async fn listen(
     }
     if events.recv().await.is_ok() {
         let changed = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":request["id"]}}});
-        let _ = socket
-            .write_all(format!("data: {changed}\n\n").as_bytes())
-            .await;
+        let _ = write_events(&mut socket, mode, &event_bytes(mode, &[changed], false)).await;
     }
     std::future::pending::<()>().await;
 }

@@ -125,6 +125,7 @@ impl Stdio {
     ) -> Result<Self> {
         let confined = sandbox
             .confine(ProcessRequest {
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 mode: SandboxMode::DangerFullAccess,
                 program: program.to_owned(),
                 arguments: arguments.to_vec(),

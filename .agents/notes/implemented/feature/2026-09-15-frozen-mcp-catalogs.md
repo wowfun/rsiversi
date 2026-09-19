@@ -39,6 +39,17 @@ the lease is released. Durable-session leases still fail across a changed cold
 generation. Rebuilding from the saved seed at this point would replace
 the authority that admitted the automatic input.
 
+Public names include a digest of the exact `(server, tool)` tuple for every
+identity, including short ASCII names. Delimiter joining alone confuses valid
+pairs such as `(a, b__c)` and `(a__b, c)`. Manifest codec 2 makes this change
+explicit for cold restore, including empty MCP domains; pre-release saved codec
+1 is rejected rather than silently reinterpreting its tool catalog.
+
+[MCP SSE framing](../bug-fix/2026-09-17-mcp-sse-framing.md) owns event parsing and
+request settlement. [Duplex stdout settlement](../bug-fix/2026-09-17-duplex-stdout-settlement.md)
+owns half-close and reaping; [saved-codec diagnostics](../bug-fix/2026-09-17-seed-codec-diagnostics.md)
+owns the safe activation diagnostic channel.
+
 ## Alternatives considered
 
 Mutating sealed Tools would change an existing Session's meaning. Decoding MCP in
@@ -46,6 +57,10 @@ Kernel would reverse ownership. A hash without the complete typed manifest canno
 reconstruct definitions offline. Lossy tail readers cannot distinguish an intact
 JSON-RPC frame after overflow. Direct subprocess creation would bypass shared
 Process admission and retirement ownership.
+
+Keeping the old un-hashed ASCII naming fast path would retain delimiter
+ambiguity. A codec-1 compatibility branch would preserve two routing contracts
+without a compatibility requirement.
 
 ## Consequences
 

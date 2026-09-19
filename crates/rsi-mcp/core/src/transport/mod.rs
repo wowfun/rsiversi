@@ -160,7 +160,10 @@ impl Connection {
         };
         let future = async {
             match &self.transport {
-                Transport::Http(peer) => peer.exchange(&request, &headers, Some(&id)).await,
+                Transport::Http(peer) => {
+                    peer.exchange(http::RequestBody::new(&request, bytes), &headers, Some(&id))
+                        .await
+                }
                 Transport::Stdio(peer) => peer.exchange(bytes, Some(&id)).await,
             }
         };
@@ -203,7 +206,8 @@ impl Connection {
             match &self.transport {
                 Transport::Http(peer) => {
                     peer.set_version(version);
-                    peer.exchange(&request, &[], None).await?;
+                    peer.exchange(http::RequestBody::new(&request, bytes), &[], None)
+                        .await?;
                     peer.watch().await?;
                 }
                 Transport::Stdio(peer) => {

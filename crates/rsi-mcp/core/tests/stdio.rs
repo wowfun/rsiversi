@@ -57,6 +57,41 @@ async fn owner(directory: &Path, mode: &str) -> (Runtime, rsi_meta::FiberHandle,
     (runtime, fiber, service)
 }
 #[tokio::test]
+async fn idle_stdout_half_close_invalidates_readiness_and_reaps_without_another_rpc() {
+    let directory = tempfile::tempdir().unwrap();
+    let gate = directory.path().join("started.close");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (runtime, fiber, service) = owner(directory.path(), "half-close").await;
+    service
+        .refresh("stdio", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(service.status()[0].ready);
+    tokio::task::spawn_blocking(move || std::fs::write(gate, b"x"))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while service.status()[0].ready {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("idle stdout close must invalidate readiness");
+    assert_eq!(service.status()[0].error, Some(McpError::Disconnected));
+    service.shutdown().await;
+    drop(service);
+    assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn modern_stdio_discovers_subscribes_and_correlates_catalog_changes() {
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "modern-changed").await;

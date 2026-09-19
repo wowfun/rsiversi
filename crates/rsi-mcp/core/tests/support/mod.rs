@@ -10,6 +10,7 @@ use rsi_sandbox::{
     SandboxNetwork, SandboxScratch, WorkspaceReadRequest, WorkspaceReadScope,
 };
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -65,6 +66,8 @@ impl Sandbox for TestSandbox {
         assert_eq!(request.mode, rsi_sandbox::SandboxMode::DangerFullAccess);
         assert_eq!(request.workspace, request.cwd);
         Ok(ConfinedProcess {
+            owner: None,
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             program: request.program,
             arguments: request.arguments.into_iter().map(Into::into).collect(),
             cwd: request.cwd,
@@ -89,6 +92,13 @@ pub struct Mode {
     pub modern_fault: Option<&'static str>,
     pub watch: bool,
     pub sse: bool,
+    pub sse_ending: Option<&'static str>,
+    pub sse_chunk: Option<usize>,
+    pub sse_bom: bool,
+    pub sse_notifications: usize,
+    pub sse_tail: bool,
+    pub sse_padding: usize,
+    pub sse_near_limit: bool,
     pub changed: bool,
     pub oversize: bool,
     pub wrong_id: bool,
@@ -180,6 +190,60 @@ impl HttpFixture {
         self.task.await.unwrap();
     }
 }
+fn event_bytes(mode: &Mode, values: &[Value], initial: bool) -> Vec<u8> {
+    let ending = mode.sse_ending.unwrap_or("\n");
+    let mut text = if initial && mode.sse_bom {
+        "\u{feff}".to_owned()
+    } else {
+        String::new()
+    };
+    if initial {
+        text.push_str(&format!(": keepalive{ending}{ending}").repeat(mode.sse_padding + 1));
+    }
+    for value in values {
+        write!(text, "data: {value}{ending}{ending}").unwrap();
+    }
+    text.into_bytes()
+}
+async fn write_events(socket: &mut TcpStream, mode: &Mode, bytes: &[u8]) -> std::io::Result<()> {
+    for chunk in bytes.chunks(mode.sse_chunk.unwrap_or(7)) {
+        socket.write_all(chunk).await?;
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+async fn sse_response(socket: &mut TcpStream, mode: &Mode, value: &Value) {
+    if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nMcp-Session-Id: fixture-session\r\nConnection: close\r\n\r\n").await.is_err() { return; }
+    let mut values =
+        vec![json!({"jsonrpc":"2.0","method":"notifications/progress"}); mode.sse_notifications];
+    values.push(value.clone());
+    let mut bytes = event_bytes(mode, &values, true);
+    if mode.sse_near_limit {
+        let mut padding = vec![b':'];
+        padding.resize(rsi_mcp::MAXIMUM_FRAME_BYTES - bytes.len() - 3, b' ');
+        padding.extend_from_slice(b"\n\n");
+        padding.extend(bytes);
+        bytes = padding;
+    }
+    if mode.sse_tail {
+        let mut duplicate = value.clone();
+        duplicate["result"] = json!({"poison": "duplicate response"});
+        let mut mismatched = duplicate.clone();
+        mismatched["id"] = json!("wrong-correlation");
+        bytes.extend(event_bytes(mode, &[duplicate, mismatched], false));
+        bytes.extend_from_slice(b"data: deliberately invalid trailing JSON\n\n");
+        if mode.sse_near_limit {
+            bytes.extend(std::iter::repeat_n(b'x', 32768));
+        }
+    }
+    if write_events(socket, mode, &bytes).await.is_err() {
+        return;
+    }
+    // A normal exchange must settle at its response, even if the server keeps streaming.
+    if mode.sse_tail {
+        std::future::pending::<()>().await;
+    }
+}
 async fn response(
     socket: &mut TcpStream,
     status: &str,
@@ -228,9 +292,21 @@ async fn serve(
     if headers.starts_with("GET ") {
         assert!(!selected.modern, "modern MCP must not open a GET stream");
         if selected.watch {
-            if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n").await.is_err() { return; }
+            if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.is_err() { return; }
+            if write_events(&mut socket, &selected, &event_bytes(&selected, &[], true))
+                .await
+                .is_err()
+            {
+                return;
+            }
             if events.recv().await.is_ok() {
-                let _ = socket.write_all(b"data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n").await;
+                let changed = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+                let _ = write_events(
+                    &mut socket,
+                    &selected,
+                    &event_bytes(&selected, &[changed], false),
+                )
+                .await;
             }
             std::future::pending::<()>().await;
         } else {
@@ -349,16 +425,7 @@ async fn serve(
         return;
     }
     if selected.sse {
-        let prefix = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nMcp-Session-Id: fixture-session\r\nConnection: close\r\n\r\ndata: {}\n\n",
-            String::from_utf8(body).unwrap()
-        );
-        for chunk in prefix.as_bytes().chunks(7) {
-            if socket.write_all(chunk).await.is_err() {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
+        sse_response(&mut socket, &selected, &value).await;
     } else {
         let _ = response(&mut socket, "200 OK", "application/json", &body).await;
     }

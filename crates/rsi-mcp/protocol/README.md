@@ -14,8 +14,19 @@ actual registration also obeys the Tool Runtime's aggregate 64-tool ceiling. Eac
 manifest must fit the existing 256 KiB Domain state limit and the complete Session
 baseline's 1 MiB limit. Nothing is truncated, sharded or replaced by a digest-only
 record. The server target digest includes its explicit non-secret configuration;
-public Tool names are deterministic server-qualified names with a suffix when
-normalization would be lossy. Raw names are retained independently for RPC calls.
+public Tool names always contain a tuple-derived suffix: the ASCII-normalized
+`mcp__{server}__{tool}` prefix truncated to 51 characters, an underscore, then
+the first 12 hexadecimal SHA-256 digits of the canonical JSON `(server, tool)`
+tuple. Names are at most 64 bytes and independent of catalog order or selection.
+Final collision detection rejects any duplicate identity. Raw names are retained
+independently for RPC calls. The manifest Domain uses codec version 2; older
+codecs are explicitly unsupported, including saved empty manifests. Restoration
+never renames saved Tools or substitutes a current catalog.
+
+`validate_manifest_catalog` owns aggregate counts, strictly ascending unique
+server identities, and public Tool-name uniqueness for both decoded manifests
+and live frozen catalogs. It does not validate individual server schemas or the
+encoded Domain byte limit; those remain required at their respective boundaries.
 
 A manifest's Domain fork policy resets to the child generation's selected initial
 manifest. Saved definitions determine restoration; current transport epochs and

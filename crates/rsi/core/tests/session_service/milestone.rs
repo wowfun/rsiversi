@@ -10,7 +10,7 @@ mod mcp_fixture;
 #[derive(Default)]
 struct Provider {
     requests: Mutex<Vec<Value>>,
-    next_tool: Mutex<Option<(&'static str, Value)>>,
+    next_tool: Mutex<Option<(String, Value)>>,
 }
 async fn response(State(provider): State<Arc<Provider>>, Json(request): Json<Value>) -> Response {
     let call_id = {
@@ -45,7 +45,6 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, id: &str) -> Arc<dyn 
                 .id,
             session_id: SessionId::new(id).unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap()
@@ -219,7 +218,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     );
     // A real spawn Tool commits the immutable parent interval in SQLite.
     *provider.next_tool.lock().unwrap() = Some((
-        "spawn_agent",
+        "spawn_agent".into(),
         json!({"task_name":"reference-child","message":"Read-only child fixture","fork_turns":"all"}),
     ));
     run_message_to_terminal(&target, "spawn-child").await;
@@ -311,6 +310,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn actual_durable_session_restores_mcp_and_retrieval_catalogs_offline() {
+    let tool_name = rsi_mcp::public_tool_name("fixture", "echo");
     let mcp = mcp_fixture::HttpFixture::start(mcp_fixture::Mode::default()).await;
     let provider = Arc::new(Provider::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -330,16 +330,14 @@ async fn actual_durable_session_restores_mcp_and_retrieval_catalogs_offline() {
     std::fs::write(&settings_file, serde_json::to_vec(&settings).unwrap()).unwrap();
     let daemon = DaemonFixture::new(&fixture).await;
     let handle = create(&daemon, &fixture, "frozen-integrations").await;
-    *provider.next_tool.lock().unwrap() = Some((
-        "mcp__fixture__echo",
-        json!({"message":"saved catalog call"}),
-    ));
+    *provider.next_tool.lock().unwrap() =
+        Some((tool_name.clone(), json!({"message":"saved catalog call"})));
     run_message_to_terminal(&handle, "original-catalog").await;
     let initial = handle.history_before(None, 128).await.unwrap();
     assert!(initial.facts.iter().any(|fact| matches!(fact.body(),SessionFactBody::ToolResult {result,..} if !result.is_error && result.value.to_string().contains("saved catalog call"))));
     let definitions = provider.requests.lock().unwrap()[0]["tools"].clone();
     assert!(definitions.to_string().contains("web_fetch"));
-    assert!(definitions.to_string().contains("mcp__fixture__echo"));
+    assert!(definitions.to_string().contains(&tool_name));
     let source_seq = initial.facts.last().unwrap().seq();
     drop(handle);
     daemon.shutdown().await;
@@ -359,13 +357,10 @@ async fn actual_durable_session_restores_mcp_and_retrieval_catalogs_offline() {
     assert_eq!(restored.facts.last().unwrap().seq(), source_seq);
     assert_eq!(provider.requests.lock().unwrap().len(), before);
     for (name, args) in [
-        (
-            "mcp__fixture__echo",
-            json!({"message":"must not reconnect"}),
-        ),
+        (tool_name.as_str(), json!({"message":"must not reconnect"})),
         ("web_fetch", json!({"url":"https://example.com/"})),
     ] {
-        *provider.next_tool.lock().unwrap() = Some((name, args));
+        *provider.next_tool.lock().unwrap() = Some((name.to_owned(), args));
         run_message_to_terminal(&handle, name).await;
         assert_eq!(
             provider.requests.lock().unwrap().last().unwrap()["tools"],
@@ -392,7 +387,7 @@ async fn actual_durable_session_restores_mcp_and_retrieval_catalogs_offline() {
     let fresh = create(&daemon, &fixture, "current-integrations").await;
     run_message_to_terminal(&fresh, "new-catalog").await;
     let current = provider.requests.lock().unwrap().last().unwrap()["tools"].to_string();
-    assert!(!current.contains("mcp__fixture__echo"));
+    assert!(!current.contains(&tool_name));
     assert!(!current.contains("web_fetch"));
     drop((handle, fresh));
     daemon.shutdown().await;

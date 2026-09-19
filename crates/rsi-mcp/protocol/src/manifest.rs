@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 /// Stable owning Agent Domain; codec identity is independent of connection epochs.
 pub const MANIFEST_DOMAIN: &str = "rsi.mcp.manifest";
+/// Tuple-hashed public Tool identities; older codecs are not supported.
+pub const MANIFEST_CODEC_VERSION: u32 = 2;
 /// Negotiated protocol revisions implemented by this integration.
 pub const PROTOCOL_VERSIONS: &[&str] = &[
     LATEST_PROTOCOL_VERSION,
@@ -97,13 +99,6 @@ pub struct McpManifest {
 /// Derives a model-safe name without conflating different raw identities.
 pub fn public_tool_name(server: &str, tool: &str) -> String {
     let joined = format!("mcp__{server}__{tool}");
-    if joined.len() <= 64
-        && joined
-            .bytes()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
-    {
-        return joined;
-    }
     let mut normalized: String = joined
         .chars()
         .map(|ch| {
@@ -201,53 +196,56 @@ impl ServerManifest {
         digest(self)
     }
 }
-impl McpManifest {
-    /// Pure owner codec validation before Domain/Tool registration.
-    pub fn validate(&self) -> Result<()> {
-        if self.servers.len() > MAXIMUM_SERVERS
-            || self.servers.windows(2).any(|pair| pair[0].id >= pair[1].id)
-            || self
-                .servers
-                .iter()
-                .map(|server| server.tools.len())
-                .sum::<usize>()
-                > MAXIMUM_TOOLS
-            || self
-                .servers
-                .iter()
-                .map(|server| server.resources.len() + usize::from(server.instructions.is_some()))
-                .sum::<usize>()
-                > MAXIMUM_RESOURCES
+/// Checks aggregate counts, strictly ascending server IDs and public-name uniqueness.
+/// Each server's metadata/schema and the complete encoded byte limit must be
+/// validated separately; this shared check does not clone or serialize schemas.
+pub fn validate_manifest_catalog<'a>(
+    servers: impl IntoIterator<Item = &'a ServerManifest>,
+) -> Result<()> {
+    let mut previous = None;
+    let mut tools = 0usize;
+    let mut selected = 0usize;
+    let mut resources = 0usize;
+    let mut public_names = BTreeSet::new();
+    for (index, server) in servers.into_iter().enumerate() {
+        tools = tools.saturating_add(server.tools.len());
+        resources = resources
+            .saturating_add(server.resources.len())
+            .saturating_add(usize::from(server.instructions.is_some()));
+        if index >= MAXIMUM_SERVERS
+            || previous.is_some_and(|id| id >= server.id.as_str())
+            || tools > MAXIMUM_TOOLS
+            || resources > MAXIMUM_RESOURCES
         {
             return Err("MCP manifest exceeds server, Tool or resource limits".into());
         }
-        let selected = self
-            .servers
-            .iter()
-            .flat_map(|server| &server.tools)
-            .filter(|tool| tool.selected)
-            .count();
-        let reader = self
-            .servers
-            .iter()
-            .any(|server| !server.resources.is_empty() || server.instructions.is_some());
-        if selected + usize::from(reader) > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS {
+        previous = Some(server.id.as_str());
+        for tool in &server.tools {
+            selected += usize::from(tool.selected);
+            if !public_names.insert(&tool.public_name) {
+                return Err("MCP public Tool identity collision".into());
+            }
+        }
+        if selected + usize::from(resources > 0) > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS {
             return Err(
                 "Selected MCP Tools and resource reader exceed the shared Tool limit".into(),
             );
         }
-        let mut public_names = BTreeSet::new();
+    }
+    Ok(())
+}
+impl McpManifest {
+    /// Pure owner codec validation before Domain/Tool registration.
+    pub fn validate(&self) -> Result<()> {
+        self.validated_state().map(|_| ())
+    }
+    fn validated_state(&self) -> Result<rsi_agent_session_protocol::DomainStateValue> {
+        validate_manifest_catalog(self.servers.iter())?;
         for server in &self.servers {
             server.validate()?;
-            for tool in &server.tools {
-                if !public_names.insert(&tool.public_name) {
-                    return Err("MCP public Tool identity collision".into());
-                }
-            }
         }
         rsi_agent_session_protocol::DomainStateValue::encode(self)
-            .map_err(|_| "Complete MCP manifest exceeds the 256 KiB Domain limit".to_owned())?;
-        Ok(())
+            .map_err(|_| "Complete MCP manifest exceeds the 256 KiB Domain limit".to_owned())
     }
     /// Produces the complete typed initial Domain value for pre-seal composition.
     #[expect(
@@ -255,12 +253,14 @@ impl McpManifest {
         reason = "Only fixed validated constants and infallible JSON flag serialization are unwrapped."
     )]
     pub fn snapshot(&self) -> Result<rsi_agent_session_protocol::DomainSnapshot> {
-        self.validate()?;
+        let state = self.validated_state()?;
         Ok(rsi_agent_session_protocol::DomainSnapshot::new(
-            rsi_agent_session_protocol::DomainIdentity::new(MANIFEST_DOMAIN, 1)
-                .expect("static MCP domain"),
-            rsi_agent_session_protocol::DomainStateValue::encode(self)
-                .map_err(|_| "MCP manifest encoding failed")?,
+            rsi_agent_session_protocol::DomainIdentity::new(
+                MANIFEST_DOMAIN,
+                MANIFEST_CODEC_VERSION,
+            )
+            .expect("static MCP domain"),
+            state,
         ))
     }
 }

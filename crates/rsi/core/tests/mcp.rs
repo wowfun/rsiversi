@@ -8,7 +8,7 @@ use rsi_agent_session_protocol::{AgentPresetId, DomainIdentity};
 use rsi_api_protocol::*;
 use rsi_configuration_api::{McpClient, McpOperation, McpRefreshRequest};
 use rsi_host::{HostPaths, Profile};
-use rsi_mcp::{MANIFEST_DOMAIN, McpOwnerContract};
+use rsi_mcp::{MANIFEST_CODEC_VERSION, MANIFEST_DOMAIN, McpOwnerContract};
 use rsi_settings_protocol::SettingsContract;
 use rsi_tools_protocol::{ToolCall, ToolExecutionPolicy, ToolStart};
 use serde_json::json;
@@ -106,7 +106,7 @@ async fn real_standard_composition_freezes_manifest_reports_drift_as_tool_result
     let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
     let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
     let disabled = resolver.pin(&preset, None).await.unwrap();
-    let identity = DomainIdentity::new(MANIFEST_DOMAIN, 1).unwrap();
+    let identity = DomainIdentity::new(MANIFEST_DOMAIN, MANIFEST_CODEC_VERSION).unwrap();
     assert!(
         disabled
             .domains()
@@ -607,5 +607,60 @@ async fn remote_exa_credential_uses_fixed_owner_and_grant_without_enabling_or_qu
         .unwrap();
     assert!(matches!(api.unset().await, Err(ApiError::Unauthorized)));
     drop((api, grant));
+    assert!(host.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn saved_codec_one_cannot_restore_even_with_an_empty_mcp_manifest() {
+    use rsi_agent_session_protocol::DomainSnapshot;
+    let temporary = tempfile::tempdir().unwrap();
+    let host = composition(temporary.path())
+        .build()
+        .unwrap()
+        .start(Profile::default())
+        .await
+        .unwrap();
+    let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
+    let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
+    let current = resolver.pin(&preset, None).await.unwrap();
+    let states = current
+        .domains()
+        .baseline()
+        .iter()
+        .map(|state| {
+            if state.identity().id() == MANIFEST_DOMAIN {
+                DomainSnapshot::new(
+                    DomainIdentity::new(MANIFEST_DOMAIN, 1).unwrap(),
+                    state.state().clone(),
+                )
+            } else {
+                state.clone()
+            }
+        })
+        .collect();
+    let old = AgentGenerationSeed::new(states).unwrap();
+    let error = resolver.pin(&preset, Some(&old)).await.unwrap_err();
+    assert_eq!(
+        error,
+        rsi_agent_composition_protocol::AgentCompositionError::UnsupportedSeedCodec {
+            stored: DomainIdentity::new(MANIFEST_DOMAIN, 1).unwrap(),
+            expected: DomainIdentity::new(MANIFEST_DOMAIN, MANIFEST_CODEC_VERSION).unwrap(),
+        }
+    );
+    let error = error.to_string();
+    assert!(
+        error.contains("unsupported saved Domain codec")
+            && error.contains(MANIFEST_DOMAIN)
+            && error.contains("start a new conversation"),
+        "{error}"
+    );
+    assert!(
+        resolver
+            .pin(&preset, None)
+            .await
+            .unwrap()
+            .same_generation(&current)
+    );
+    drop((current, resolver));
     assert!(host.shutdown().await.is_clean());
 }

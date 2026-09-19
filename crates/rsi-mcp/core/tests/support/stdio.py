@@ -67,6 +67,15 @@ for raw in sys.stdin.buffer:
     if modern:
         result.update(resultType='complete', ttlMs=1000, cacheScope='private')
     send({'jsonrpc': '2.0', 'id': request['id'], 'result': result})
+    if method == 'tools/list' and mode == 'half-close':
+        # An explicit FIFO gates the close until the client has published readiness.
+        with open(sys.argv[2] + '.close', 'rb', buffering=0) as gate:
+            gate.read(1)
+        os.close(1)
+        with open(sys.argv[2], 'w') as marker:
+            marker.write(str(os.getpid()))
+        sys.stdin.buffer.read()
+        break
     if method == 'tools/call' and mode == 'modern-changed':
         send({'jsonrpc':'2.0','method':'notifications/tools/list_changed','params':{'_meta':{'io.modelcontextprotocol/subscriptionId':subscription}}})
     if method == 'tools/call' and mode == 'changed':

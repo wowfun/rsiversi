@@ -1,14 +1,14 @@
 use crate::{FrozenServer, McpContract, McpError, McpService};
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    AgentGenerationInputsContract, ContributionError, ContributionKind,
+    AgentGenerationInputs, AgentGenerationInputsContract, ContributionError, ContributionKind,
     ContributionRegistrarContract, ContributionRegistration, ContributionResult, DomainDefinition,
     DomainForkPolicy, DomainRegistrarContract, SessionResourceReader,
 };
 use rsi_agent_session_protocol::{
     ContributionId, DomainIdentity, SessionHeader, SessionResourceDescriptor, SessionResourceValue,
 };
-use rsi_mcp_protocol::{MANIFEST_DOMAIN, McpManifest};
+use rsi_mcp_protocol::{MANIFEST_CODEC_VERSION, MANIFEST_DOMAIN, McpManifest};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolExecution, ToolExecutor, ToolRegistrarContract,
@@ -19,6 +19,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 fn meta(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+fn manifest_seed(
+    inputs: &AgentGenerationInputs,
+) -> rsi_meta::Result<&rsi_agent_session_protocol::DomainSnapshot> {
+    let identity =
+        DomainIdentity::new(MANIFEST_DOMAIN, MANIFEST_CODEC_VERSION).expect("static MCP Domain");
+    inputs.seed_state(&identity).map_err(meta)
 }
 /// Ordinary Agent contribution. All definitions come from the exact pre-seal manifest.
 #[derive(Debug, Default)]
@@ -39,12 +46,9 @@ impl PluginFactory for McpToolsFactory {
             .requiring_local::<ToolRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let identity = DomainIdentity::new(MANIFEST_DOMAIN, 1).expect("static MCP Domain");
         let inputs = plan.local::<AgentGenerationInputsContract>()?;
-        let state = inputs
-            .seed
-            .find(&identity)
-            .ok_or_else(|| meta("MCP manifest seed is unavailable"))?;
+        let state = manifest_seed(&inputs)?;
+        let identity = state.identity().clone();
         let manifest: McpManifest = serde_json::from_value(state.state().value().clone())
             .map_err(|_| meta("Invalid saved MCP manifest"))?;
         let definition = DomainDefinition::new(identity, &manifest, McpManifest::validate)
@@ -392,5 +396,33 @@ mod result_tests {
         result.validate().unwrap();
         assert!(result.is_error);
         assert_eq!(result.value["result"], value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn manifest_owner_rejects_old_codec_explicitly_before_decoding_empty_state() {
+        use rsi_agent_composition_protocol::AgentGenerationSeed;
+        use rsi_agent_session_protocol::DomainSnapshot;
+        let current = McpManifest::default().snapshot().unwrap();
+        let old = DomainSnapshot::new(
+            DomainIdentity::new(MANIFEST_DOMAIN, 1).unwrap(),
+            current.state().clone(),
+        );
+        let inputs = AgentGenerationInputs::new(AgentGenerationSeed::new(vec![old]).unwrap(), true);
+        assert!(
+            manifest_seed(&inputs)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported saved Domain codec")
+        );
+        let inputs =
+            AgentGenerationInputs::new(AgentGenerationSeed::new(vec![current]).unwrap(), true);
+        assert_eq!(
+            manifest_seed(&inputs).unwrap().identity().version(),
+            MANIFEST_CODEC_VERSION
+        );
     }
 }

@@ -1,14 +1,16 @@
 use crate::{
+    FrozenServer,
     error::{McpError, Result},
+    service::validate_frozen_servers,
     transport::Connection,
 };
 use rsi_mcp_protocol::{
-    FrozenTool, MAXIMUM_RESOURCES, MAXIMUM_TOOLS, McpManifest, McpTool, ServerConfig,
-    ServerManifest, public_tool_name,
+    FrozenTool, MAXIMUM_RESOURCES, MAXIMUM_TOOLS, McpTool, ServerConfig, ServerManifest,
+    public_tool_name,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 async fn list<T: DeserializeOwned>(
     connection: &Connection,
     method: &str,
@@ -20,7 +22,7 @@ async fn list<T: DeserializeOwned>(
     let mut seen = BTreeSet::new();
     let mut bytes = 0usize;
     for _ in 0..16 {
-        let response = connection
+        let mut response = connection
             .request(
                 method,
                 cursor.map_or_else(|| json!({}), |cursor| json!({"cursor":cursor})),
@@ -36,14 +38,17 @@ async fn list<T: DeserializeOwned>(
             return Err(McpError::Capacity);
         }
         let entries = response
-            .get(field)
-            .and_then(Value::as_array)
+            .as_object_mut()
+            .and_then(|object| object.remove(field))
             .ok_or(McpError::Protocol)?;
+        let Value::Array(entries) = entries else {
+            return Err(McpError::Protocol);
+        };
         if entries.len() > maximum.saturating_sub(items.len()) {
             return Err(McpError::Capacity);
         }
         for entry in entries {
-            items.push(serde_json::from_value(entry.clone()).map_err(|_| McpError::Protocol)?);
+            items.push(serde_json::from_value(entry).map_err(|_| McpError::Protocol)?);
         }
         match response.get("nextCursor") {
             None => return Ok(items),
@@ -61,7 +66,7 @@ pub(crate) async fn discover(
     connection: &Connection,
     config: &ServerConfig,
     legacy: bool,
-) -> Result<ServerManifest> {
+) -> Result<Arc<FrozenServer>> {
     let (version, response) = connection.handshake(legacy).await?;
     let capabilities = response
         .get("capabilities")
@@ -130,12 +135,8 @@ pub(crate) async fn discover(
         tools,
         resources,
     };
-    manifest.validate().map_err(|_| McpError::Protocol)?;
-    McpManifest {
-        servers: vec![manifest.clone()],
-    }
-    .validate()
-    .map_err(|_| McpError::Capacity)?;
+    let manifest = Arc::new(FrozenServer::new(manifest)?);
+    validate_frozen_servers(std::slice::from_ref(&manifest))?;
     if !connection.valid() {
         return Err(McpError::Disconnected);
     }

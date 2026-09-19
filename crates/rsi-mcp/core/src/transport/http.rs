@@ -10,6 +10,34 @@ use rsi_mcp_protocol::MAXIMUM_FRAME_BYTES;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+/// The single bounded encoding plus only the metadata needed after dispatch.
+pub(super) struct RequestBody {
+    bytes: Vec<u8>,
+    method: Option<String>,
+    name: Option<String>,
+}
+impl RequestBody {
+    pub(super) fn new(value: &Value, bytes: Vec<u8>) -> Self {
+        let method = value.get("method").and_then(Value::as_str);
+        let key = if method == Some("resources/read") {
+            "uri"
+        } else {
+            "name"
+        };
+        Self {
+            bytes,
+            method: method.map(str::to_owned),
+            name: value
+                .get("params")
+                .and_then(|params| params.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+    fn encode(value: &Value) -> Result<Self> {
+        Ok(Self::new(value, wire::encode(value)?))
+    }
+}
 struct Inner {
     client: Client,
     url: String,
@@ -26,7 +54,7 @@ impl Inner {
     async fn send(
         &self,
         method: Method,
-        body: Option<&Value>,
+        body: Option<RequestBody>,
         extra: &[(String, String)],
     ) -> Result<Response> {
         let mut request = self
@@ -57,10 +85,7 @@ impl Inner {
         }
         if let Some(body) = body {
             if self.state.modern() {
-                let method = body
-                    .get("method")
-                    .and_then(Value::as_str)
-                    .ok_or(McpError::Protocol)?;
+                let method = body.method.as_deref().ok_or(McpError::Protocol)?;
                 request = request
                     .header(
                         "mcp-protocol-version",
@@ -68,16 +93,7 @@ impl Inner {
                     )
                     .header("mcp-method", method);
                 if matches!(method, "tools/call" | "prompts/get" | "resources/read") {
-                    let key = if method == "resources/read" {
-                        "uri"
-                    } else {
-                        "name"
-                    };
-                    let name = body
-                        .get("params")
-                        .and_then(|params| params.get(key))
-                        .and_then(Value::as_str)
-                        .ok_or(McpError::Protocol)?;
+                    let name = body.name.as_deref().ok_or(McpError::Protocol)?;
                     request =
                         request.header("mcp-name", rsi_mcp_protocol::encode_header_value(name));
                 }
@@ -87,7 +103,7 @@ impl Inner {
             }
             request = request
                 .header(CONTENT_TYPE, "application/json")
-                .body(wire::encode(body)?);
+                .body(body.bytes);
         }
         let response = request.send().await.map_err(|_| McpError::Disconnected)?;
         if response
@@ -155,7 +171,9 @@ impl Inner {
             } else {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client capability is not available"}})
             };
-            let response = self.send(Method::POST, Some(&reply), &[]).await?;
+            let response = self
+                .send(Method::POST, Some(RequestBody::encode(&reply)?), &[])
+                .await?;
             if !matches!(
                 response.status(),
                 StatusCode::ACCEPTED | StatusCode::NO_CONTENT
@@ -230,7 +248,7 @@ impl Http {
     async fn error_response(
         &self,
         response: Response,
-        request: &Value,
+        method: Option<&str>,
         id: &str,
     ) -> Result<Option<Value>> {
         let status = response.status();
@@ -261,20 +279,21 @@ impl Http {
         if modern_error {
             return error.map(Some);
         }
-        if status == StatusCode::BAD_REQUEST
-            && request.get("method").and_then(Value::as_str) == Some("server/discover")
-        {
+        if status == StatusCode::BAD_REQUEST && method == Some("server/discover") {
             return Err(McpError::RemoteError);
         }
         error.and_then(|_| Err(McpError::Protocol))
     }
     pub async fn subscribe(&self, request: &Value) -> Result<()> {
-        let response = self.inner.send(Method::POST, Some(request), &[]).await?;
+        let response = self
+            .inner
+            .send(Method::POST, Some(RequestBody::encode(request)?), &[])
+            .await?;
         if response.status() != StatusCode::OK {
             return self
                 .error_response(
                     response,
-                    request,
+                    request.get("method").and_then(Value::as_str),
                     request["id"].as_str().ok_or(McpError::Protocol)?,
                 )
                 .await
@@ -289,8 +308,16 @@ impl Http {
                 let mut stream = response.bytes_stream();
                 let mut events = wire::Events::default();
                 while let Some(chunk) = stream.next().await {
-                    for value in events.feed(&chunk.map_err(|_| McpError::Disconnected)?)? {
-                        inner.state.subscription_message(&value, true)?;
+                    let chunk = chunk.map_err(|_| McpError::Disconnected)?;
+                    let mut input = chunk.as_ref();
+                    loop {
+                        match events.next(&mut input)? {
+                            wire::EventStep::Message(value) => {
+                                inner.state.subscription_message(&value, true)?;
+                            }
+                            wire::EventStep::Yield => tokio::task::yield_now().await,
+                            wire::EventStep::NeedInput => break,
+                        }
                     }
                 }
                 Err::<(), McpError>(McpError::Disconnected)
@@ -303,10 +330,11 @@ impl Http {
     }
     pub async fn exchange(
         &self,
-        request: &Value,
+        request: RequestBody,
         headers: &[(String, String)],
         id: Option<&str>,
     ) -> Result<Option<Value>> {
+        let method = request.method.clone();
         let response = self
             .inner
             .send(Method::POST, Some(request), headers)
@@ -322,7 +350,7 @@ impl Http {
             };
         };
         if response.status() != StatusCode::OK {
-            return self.error_response(response, request, id).await;
+            return self.error_response(response, method.as_deref(), id).await;
         }
         if response
             .content_length()
@@ -341,27 +369,33 @@ impl Http {
         let mut total = 0usize;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| McpError::Disconnected)?;
-            if chunk.len() > MAXIMUM_FRAME_BYTES.saturating_sub(total) {
-                return Err(McpError::Capacity);
-            }
-            total += chunk.len();
             if sse {
-                let messages = events.feed(&chunk)?;
-                let mut result = None;
-                for value in messages {
-                    if value.get("method").is_some() {
-                        self.inner.server_message(&value).await?;
-                    } else {
-                        if result.is_some() {
-                            return Err(McpError::Protocol);
+                // Only admit the bounded prefix. A complete response may precede
+                // an arbitrarily coalesced trailing suffix in this same chunk.
+                let admitted = chunk.len().min(MAXIMUM_FRAME_BYTES.saturating_sub(total));
+                total += admitted;
+                let mut input = &chunk[..admitted];
+                loop {
+                    match events.next(&mut input)? {
+                        wire::EventStep::Message(value) => {
+                            if value.get("method").is_some() {
+                                self.inner.server_message(&value).await?;
+                            } else {
+                                return wire::result(value, id).map(Some);
+                            }
                         }
-                        result = Some(wire::result(value, id)?);
+                        wire::EventStep::Yield => tokio::task::yield_now().await,
+                        wire::EventStep::NeedInput => break,
                     }
                 }
-                if let Some(result) = result {
-                    return Ok(Some(result));
+                if admitted < chunk.len() {
+                    return Err(McpError::Capacity);
                 }
             } else {
+                if chunk.len() > MAXIMUM_FRAME_BYTES.saturating_sub(total) {
+                    return Err(McpError::Capacity);
+                }
+                total += chunk.len();
                 bytes.extend_from_slice(&chunk);
             }
         }
@@ -386,13 +420,21 @@ impl Http {
                 let mut stream = response.bytes_stream();
                 let mut events = wire::Events::default();
                 while let Some(chunk) = stream.next().await {
-                    for value in events.feed(&chunk.map_err(|_| McpError::Disconnected)?)? {
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(30),
-                            inner.server_message(&value),
-                        )
-                        .await
-                        .map_err(|_| McpError::Timeout)??;
+                    let chunk = chunk.map_err(|_| McpError::Disconnected)?;
+                    let mut input = chunk.as_ref();
+                    loop {
+                        match events.next(&mut input)? {
+                            wire::EventStep::Message(value) => {
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    inner.server_message(&value),
+                                )
+                                .await
+                                .map_err(|_| McpError::Timeout)??;
+                            }
+                            wire::EventStep::Yield => tokio::task::yield_now().await,
+                            wire::EventStep::NeedInput => break,
+                        }
                     }
                 }
                 Err::<(), _>(McpError::Disconnected)

@@ -57,6 +57,22 @@ impl std::ops::Deref for FrozenServer {
         &self.manifest
     }
 }
+/// Checks already validated immutable servers in strictly ascending ID order.
+/// Returns the complete manifest byte count without cloning or encoding schemas.
+pub(crate) fn validate_frozen_servers(servers: &[Arc<FrozenServer>]) -> Result<usize> {
+    rsi_mcp_protocol::validate_manifest_catalog(servers.iter().map(|server| server.manifest()))
+        .map_err(|_| McpError::Capacity)?;
+    let bytes = br#"{"servers":[]}"#.len()
+        + servers
+            .iter()
+            .map(|server| server.encoded_bytes)
+            .sum::<usize>()
+        + servers.len().saturating_sub(1);
+    if bytes > rsi_agent_session_protocol::MAXIMUM_DOMAIN_STATE_BYTES {
+        return Err(McpError::Capacity);
+    }
+    Ok(bytes)
+}
 #[derive(Debug)]
 struct Verified {
     manifest: Arc<FrozenServer>,
@@ -294,35 +310,12 @@ impl McpService {
             return Err(McpError::Disabled);
         }
         let entries = self.entries.read().expect("MCP entries poisoned");
-        let mut servers = Vec::new();
-        let mut bytes = br#"{"servers":[]}"#.len();
-        let mut tools = 0;
-        let mut selected = 0;
-        let mut resources = 0;
-        let mut public_names = std::collections::BTreeSet::new();
-        for entry in entries.values().filter(|entry| entry.config.enabled) {
-            let server = entry.current()?.0;
-            bytes += server.encoded_bytes + usize::from(!servers.is_empty());
-            tools += server.tools.len();
-            selected += server.tools.iter().filter(|tool| tool.selected).count();
-            resources += server.resources.len() + usize::from(server.instructions.is_some());
-            if bytes > rsi_agent_session_protocol::MAXIMUM_DOMAIN_STATE_BYTES
-                || tools > rsi_mcp_protocol::MAXIMUM_TOOLS
-                || selected + usize::from(resources > 0)
-                    > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS
-                || resources > rsi_mcp_protocol::MAXIMUM_RESOURCES
-            {
-                return Err(McpError::Capacity);
-            }
-            servers.push(server);
-        }
-        for server in &servers {
-            for tool in &server.tools {
-                if !public_names.insert(&tool.public_name) {
-                    return Err(McpError::Capacity);
-                }
-            }
-        }
+        let servers = entries
+            .values()
+            .filter(|entry| entry.config.enabled)
+            .map(|entry| entry.current().map(|current| current.0))
+            .collect::<Result<Vec<_>>>()?;
+        validate_frozen_servers(&servers)?;
         Ok(servers)
     }
     /// Observes actual bounded endpoint state; no network request is made.
@@ -546,7 +539,7 @@ async fn refresh_owned(
             guard.connection = Some(connection.clone());
             discovered = discover(&connection, &entry.config, true).await;
         }
-        let manifest = Arc::new(FrozenServer::new(discovered?)?);
+        let manifest = discovered?;
         if entry.retired.load(Ordering::Acquire) {
             return Err(McpError::Disabled);
         }
