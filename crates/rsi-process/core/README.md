@@ -74,9 +74,27 @@ explicit. Dropping the final managed duplex handle starts termination; clones
 share one handle lifetime, while retained byte ports remain readable through
 settlement without keeping the child alive. JSON framing and RPC identity belong to the consumer.
 
+Duplex stdout EOF means that the pipe closed and its buffered bytes have been
+delivered; the child and stderr may still be alive. Stream failure follows any
+already buffered bytes and never becomes successful EOF. Whole-process `wait`
+independently reports reaping, stderr and drain failures. A stdout half-close
+does not itself terminate a generic child or release process admission.
+
 Duplex and batch processes share the same provider's 256-process and 64 MiB
 capture admission. Output capacity remains reserved while handles/readers retain
 it. Termination and provider retirement unblock protocol pipes, terminate the
 managed group and reap the direct child. A pipe that cannot drain within the
 explicit grace reports an error, never lossless EOF. The same Unix process-group,
 descendant-escape and host-crash limitations apply to both contracts.
+
+PTY intent is explicit, typed and process-local. Ordinary pipe execution rejects
+PTY plans. The Linux local PTY path consumes the
+[restricted Sandbox PTY plan](../../rsi-sandbox/README.md).
+portable-pty establishes setsid and TIOCSCTTY before executing that wrapper.
+Process owns native I/O, resize, termination and reaping; live terminal state
+belongs to [PTY](../../rsi-pty/README.md).
+
+PTY request validation checks framing and the supported enforcement stamp, not
+the authenticity of an arbitrary Rust-constructed plan. The trusted consumer
+must obtain the exact plan from Sandbox; neither a stamp nor an opaque plan owner
+constitutes proof of confinement.

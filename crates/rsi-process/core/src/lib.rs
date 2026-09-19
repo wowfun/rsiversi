@@ -5,7 +5,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod duplex;
+mod pty;
 pub use duplex::*;
+pub use pty::*;
 
 use async_trait::async_trait;
 use rsi_meta_contract::LocalContract;
@@ -51,7 +53,7 @@ pub struct ProcessSpec {
 impl ProcessSpec {
     /// Validates platform-neutral request bounds before spawn admission.
     pub fn validate(&self) -> Result<()> {
-        validate_process_plan(&self.process)?;
+        validate_pipe_plan(&self.process)?;
         if self.stdin.len() > MAXIMUM_PROCESS_STDIN_BYTES {
             return Err(ProcessError::InvalidInput(format!(
                 "process stdin exceeds {MAXIMUM_PROCESS_STDIN_BYTES} bytes"
@@ -72,6 +74,15 @@ impl ProcessSpec {
             .checked_add(self.stderr_max_bytes)
             .ok_or_else(|| ProcessError::InvalidInput("capture reservation overflow".into()))
     }
+}
+
+fn validate_pipe_plan(process: &ConfinedProcess) -> Result<()> {
+    if process.stdio != rsi_sandbox::ProcessStdio::Pipes {
+        return Err(ProcessError::InvalidInput(
+            "pipe execution cannot consume a PTY plan".into(),
+        ));
+    }
+    validate_process_plan(process)
 }
 
 fn validate_process_plan(process: &ConfinedProcess) -> Result<()> {
@@ -417,6 +428,8 @@ mod tests {
     fn aggregate_environment_bytes_are_bounded_before_spawn() {
         let spec = ProcessSpec {
             process: ConfinedProcess {
+                owner: None,
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 program: "/bin/true".into(),
                 arguments: Vec::new(),
                 cwd: "/".into(),
@@ -452,6 +465,8 @@ mod tests {
         ] {
             let spec = ProcessSpec {
                 process: ConfinedProcess {
+                    owner: None,
+                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                     program: "/bin/true".into(),
                     arguments: Vec::new(),
                     cwd: "/".into(),
@@ -481,6 +496,8 @@ mod tests {
     fn confined_argv_is_bounded_again_at_the_process_boundary() {
         let spec_with_too_many_arguments = ProcessSpec {
             process: ConfinedProcess {
+                owner: None,
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 program: "/bin/true".into(),
                 arguments: vec![OsString::from("x"); rsi_sandbox::MAXIMUM_SANDBOX_ARGUMENTS + 1],
                 cwd: "/".into(),
@@ -522,6 +539,8 @@ mod tests {
         ] {
             let spec = ProcessSpec {
                 process: ConfinedProcess {
+                    owner: None,
+                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                     program: program.into(),
                     arguments: Vec::new(),
                     cwd: cwd.into(),

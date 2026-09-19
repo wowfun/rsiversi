@@ -15,6 +15,8 @@ use std::sync::Arc;
 fn unconfined_shell(script: &str) -> ConfinedProcess {
     let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
     ConfinedProcess {
+        owner: None,
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
         program: PathBuf::from("/bin/sh").canonicalize().unwrap(),
         arguments: vec![OsString::from("-c"), OsString::from(script)],
         cwd: workspace.clone(),
@@ -572,3 +574,7 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
 
 #[path = "process/duplex.rs"]
 mod duplex;
+
+#[cfg(target_os = "linux")]
+#[path = "process/pty.rs"]
+mod pty;

@@ -1,0 +1,22 @@
+[package]
+name = "rsi-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-pty-protocol = { path = "../protocol" }
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt","sync","time"] }
+vt100.workspace = true
+[dev-dependencies]
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+[lints]
+workspace = true

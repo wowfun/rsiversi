@@ -501,6 +501,7 @@ impl ToolExecution {
         let confined = self
             .sandbox
             .confine(ProcessRequest {
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 mode: self.policy.mode,
                 program,
                 arguments,

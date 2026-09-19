@@ -30,6 +30,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Notify;
 
 mod duplex;
+mod pty;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 #[cfg(unix)]
@@ -275,6 +276,7 @@ impl ProcessOutput for Tail {
 #[cfg(unix)]
 #[derive(Debug)]
 struct ChildState {
+    _plan_owner: Option<rsi_sandbox::ProcessPlanOwner>,
     pid: u32,
     grace: Duration,
     runtime: tokio::runtime::Handle,
@@ -495,7 +497,13 @@ impl Service {
         }
         let stdout = Arc::new(stdout);
         let stderr = Arc::new(stderr);
-        let (state, published) = self.publish_child(pid, spec.termination_grace_ms, runtime, None);
+        let (state, published) = self.publish_child(
+            pid,
+            spec.termination_grace_ms,
+            runtime,
+            None,
+            spec.process.owner.clone(),
+        );
         supervise_child(
             runtime,
             child,
@@ -525,8 +533,10 @@ impl Service {
         grace: u64,
         runtime: &tokio::runtime::Handle,
         duplex_stop: Option<tokio_util::sync::CancellationToken>,
+        plan_owner: Option<rsi_sandbox::ProcessPlanOwner>,
     ) -> (Arc<ChildState>, bool) {
         let state = Arc::new(ChildState {
+            _plan_owner: plan_owner,
             pid,
             grace: Duration::from_millis(grace),
             runtime: runtime.clone(),
@@ -552,19 +562,7 @@ impl Service {
     }
 
     #[cfg(unix)]
-    fn admit_and_spawn(
-        &self,
-        spec: &ProcessSpec,
-        persistent_stdin: bool,
-    ) -> Result<(tokio::process::Child, u32, usize)> {
-        let capture_bytes = spec
-            .capture_bytes()?
-            .checked_add(if persistent_stdin {
-                rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES
-            } else {
-                0
-            })
-            .ok_or(ProcessError::Capacity)?;
+    fn reserve_capture(&self, capture_bytes: usize) -> Result<()> {
         let mut registry = lock_registry(&self.state);
         let capture_after = registry
             .capture_reserved
@@ -582,6 +580,25 @@ impl Service {
         registry.inflight += 1;
         registry.capture_reserved = capture_after;
         drop(registry);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn admit_and_spawn(
+        &self,
+        spec: &ProcessSpec,
+        persistent_stdin: bool,
+    ) -> Result<(tokio::process::Child, u32, usize)> {
+        let capture_bytes = spec
+            .capture_bytes()?
+            .checked_add(if persistent_stdin {
+                rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES
+            } else {
+                0
+            })
+            .ok_or(ProcessError::Capacity)?;
+        self.reserve_capture(capture_bytes)?;
 
         let mut command = tokio::process::Command::new(&spec.process.program);
         command
@@ -679,8 +696,8 @@ fn supervise_child(
         .stderr
         .take()
         .expect("piped stderr is present after successful spawn");
-    let mut stdout_task = runtime.spawn(drain(stdout_pipe, stdout.clone()));
-    let mut stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
+    let stdout_task = runtime.spawn(drain(stdout_pipe, stdout.clone()));
+    let stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
     let wait_state = Arc::clone(state);
     let drain_grace = state.grace;
     runtime.spawn(async move {
@@ -691,25 +708,7 @@ fn supervise_child(
             }
             let _ = task.await;
         }
-        let drains = tokio::time::timeout(drain_grace, async {
-            let stdout = (&mut stdout_task).await;
-            let stderr = (&mut stderr_task).await;
-            (stdout, stderr)
-        })
-        .await;
-        let drain_error = match drains {
-            Ok((Ok(Ok(())), Ok(Ok(())))) => None,
-            Ok((stdout, stderr)) => {
-                Some(format!("stdout drain={stdout:?}, stderr drain={stderr:?}"))
-            }
-            Err(_) => {
-                stdout_task.abort();
-                stderr_task.abort();
-                let _ = (&mut stdout_task).await;
-                let _ = (&mut stderr_task).await;
-                Some("captured pipe drain timed out before EOF".into())
-            }
-        };
+        let drain_error = settle_drains(stdout_task, stderr_task, drain_grace).await;
         if drain_error.is_none() {
             // Cache publication has its own bound and cannot consume pipe-drain grace.
             tokio::join!(
@@ -914,6 +913,10 @@ impl PluginFactory for ProcessLocalFactory {
         let duplex_supply = plan
             .context()
             .provide_local::<rsi_process::DuplexProcessContract>(duplex)?;
+        let pty: Arc<dyn rsi_process::PtyProcess> = service.clone();
+        let pty_supply = plan
+            .context()
+            .provide_local::<rsi_process::PtyProcessContract>(pty)?;
         #[cfg(unix)]
         let cache_supply = if service.config.output_cache.is_some() {
             let cache: Arc<dyn rsi_process::ProcessOutputCache> = service.clone();
@@ -935,12 +938,54 @@ impl PluginFactory for ProcessLocalFactory {
                     drop(service);
                     drop(supply);
                     drop(duplex_supply);
+                    drop(pty_supply);
                     #[cfg(unix)]
                     drop(cache_supply);
                     result
                 })
             }),
         )
+    }
+}
+
+#[cfg(unix)]
+async fn settle_drains(
+    mut stdout: tokio::task::JoinHandle<Result<()>>,
+    mut stderr: tokio::task::JoinHandle<Result<()>>,
+    grace: Duration,
+) -> Option<String> {
+    let deadline = tokio::time::sleep(grace);
+    tokio::pin!(deadline);
+    let (mut out, mut err) = (None, None);
+    let mut timed_out = false;
+    while out.is_none() || err.is_none() {
+        tokio::select! { biased;
+            result = &mut stdout, if out.is_none() => out = Some(result),
+            result = &mut stderr, if err.is_none() => err = Some(result),
+            () = &mut deadline => {
+                timed_out = true;
+                if out.is_none() { stdout.abort(); }
+                if err.is_none() { stderr.abort(); }
+                // A task can finish between the deadline and abort. Its actual
+                // join result wins; an already joined task must never be polled twice.
+                if out.is_none() { out = Some(stdout.await); }
+                if err.is_none() { err = Some(stderr.await); }
+                break;
+            }
+        }
+    }
+    match (out.expect("stdout joined"), err.expect("stderr joined")) {
+        (Ok(Ok(())), Ok(Ok(()))) => None,
+        (out, err) => {
+            let reason = if timed_out {
+                "pipe drain timed out before EOF"
+            } else {
+                "pipe closed before clean EOF"
+            };
+            Some(format!(
+                "{reason}: stdout drain={out:?}, stderr drain={err:?}"
+            ))
+        }
     }
 }
 
@@ -953,6 +998,36 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_join_preserves_clean_completion_and_never_repolls_a_joined_task() {
+        let out = tokio::spawn(async { Ok(()) });
+        let err = tokio::spawn(async { Ok(()) });
+        while !out.is_finished() || !err.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert!(settle_drains(out, err, Duration::ZERO).await.is_none());
+        let out = tokio::spawn(async { Ok(()) });
+        let err = tokio::spawn(std::future::pending::<Result<()>>());
+        while !out.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let error = settle_drains(out, err, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(error.contains("stdout drain=Ok(Ok(()))"), "{error}");
+        assert!(error.contains("Cancelled"), "{error}");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn drain_join_retains_io_failure_when_the_other_drain_times_out() {
+        let out = tokio::spawn(async { Err(ProcessError::Io("fixture failure".into())) });
+        let err = tokio::spawn(std::future::pending::<Result<()>>());
+        let error = settle_drains(out, err, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(error.contains("fixture failure"), "{error}");
+        assert!(error.contains("Cancelled"), "{error}");
+    }
 
     #[derive(Debug, Default)]
     struct StubbornProcessGroups {
@@ -992,6 +1067,8 @@ mod tests {
         let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
         ProcessSpec {
             process: ConfinedProcess {
+                owner: None,
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 program: PathBuf::from("/bin/sh").canonicalize().unwrap(),
                 arguments: vec![OsString::from("-c"), OsString::from("exit 0")],
                 cwd: workspace.clone(),
@@ -1018,6 +1095,7 @@ mod tests {
         groups: Arc<dyn ProcessGroups>,
     ) -> Arc<ChildState> {
         Arc::new(ChildState {
+            _plan_owner: None,
             pid,
             grace: Duration::from_millis(1),
             runtime: tokio::runtime::Handle::current(),

@@ -1,0 +1,15 @@
+[package]
+name = "rsi-pty-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+async-trait.workspace = true
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-process = { path = "../../rsi-process/core" }
+serde.workspace = true
+thiserror.workspace = true
+[lints]
+workspace = true

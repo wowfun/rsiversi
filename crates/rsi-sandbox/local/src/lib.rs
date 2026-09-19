@@ -189,8 +189,15 @@ impl Sandbox for Service {
     }
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
         let (program, cwd, workspace) = validate_request(&request)?;
+        if request.stdio == rsi_sandbox::ProcessStdio::Pty
+            && request.mode == SandboxMode::DangerFullAccess
+        {
+            return Err(SandboxError::Unsupported(request.mode));
+        }
         if request.mode == SandboxMode::DangerFullAccess {
             return Ok(ConfinedProcess {
+                owner: None,
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 program,
                 arguments: request.arguments.into_iter().map(OsString::from).collect(),
                 cwd,
@@ -204,6 +211,7 @@ impl Sandbox for Service {
         let target_program = program.into_os_string();
         let target_cwd = cwd.clone().into_os_string();
         let target_workspace = workspace.clone().into_os_string();
+        let (bind_source, owner) = workspace_source(&request, &cwd, &workspace)?;
         let (wrapper, arguments) = match backend.kind {
             BackendKind::Bubblewrap => {
                 let mut arguments: Vec<OsString> = vec![
@@ -221,13 +229,24 @@ impl Sandbox for Service {
                     "--dev".into(),
                     "/dev".into(),
                 ];
+                if request.stdio == rsi_sandbox::ProcessStdio::Pty {
+                    arguments.retain(|argument| argument != "--new-session");
+                }
                 arguments.extend([
-                    if request.mode == SandboxMode::WorkspaceWrite {
-                        "--bind".into()
+                    match (request.mode, request.stdio) {
+                        (SandboxMode::WorkspaceWrite, rsi_sandbox::ProcessStdio::Pty) => {
+                            "--bind-fd"
+                        }
+                        (_, rsi_sandbox::ProcessStdio::Pty) => "--ro-bind-fd",
+                        (SandboxMode::WorkspaceWrite, _) => "--bind",
+                        _ => "--ro-bind",
+                    }
+                    .into(),
+                    if request.stdio == rsi_sandbox::ProcessStdio::Pty {
+                        "3".into()
                     } else {
-                        "--ro-bind".into()
+                        bind_source.clone()
                     },
-                    target_workspace.clone(),
                     target_workspace.clone(),
                 ]);
                 arguments.extend(["--chdir".into(), target_cwd, "--".into(), target_program]);
@@ -235,6 +254,9 @@ impl Sandbox for Service {
                 (backend.path.clone(), arguments)
             }
             BackendKind::Landlock => {
+                if request.stdio == rsi_sandbox::ProcessStdio::Pty {
+                    return Err(SandboxError::Unsupported(request.mode));
+                }
                 let mut arguments: Vec<OsString> = vec![
                     "--mode".into(),
                     mode_name(request.mode).into(),
@@ -249,8 +271,15 @@ impl Sandbox for Service {
                 (backend.path.clone(), arguments)
             }
         };
+        let (wrapper, arguments, cwd) = if request.stdio == rsi_sandbox::ProcessStdio::Pty {
+            pty_launch(wrapper, arguments, PathBuf::from(bind_source))?
+        } else {
+            (wrapper, arguments, cwd)
+        };
         validate_plan(&wrapper, &arguments, &cwd, &workspace)?;
         Ok(ConfinedProcess {
+            owner,
+            stdio: request.stdio,
             program: wrapper,
             arguments,
             cwd,
@@ -422,6 +451,88 @@ impl PluginFactory for SandboxLocalFactory {
             }),
         )
     }
+}
+
+fn workspace_source(
+    request: &ProcessRequest,
+    cwd: &Path,
+    workspace: &Path,
+) -> Result<(OsString, Option<rsi_sandbox::ProcessPlanOwner>)> {
+    if request.stdio != rsi_sandbox::ProcessStdio::Pty {
+        return Ok((workspace.as_os_str().to_owned(), None));
+    }
+    if workspace != request.workspace || cwd != request.cwd {
+        return Err(SandboxError::InvalidInput(
+            "PTY paths must remain canonical".into(),
+        ));
+    }
+    let (source, owner) = pin_pty_workspace(workspace)?;
+    Ok((source, Some(owner)))
+}
+
+fn pty_launch(
+    wrapper: PathBuf,
+    arguments: Vec<OsString>,
+    cwd: PathBuf,
+) -> Result<(PathBuf, Vec<OsString>, PathBuf)> {
+    // portable-pty closes extra descriptors. Carry the pin as cwd, then open fd 3
+    // in the child. Privileged mode ignores BASH_ENV and inherited shell functions.
+    // All caller arguments are positional; none become shell source.
+    let mut launch = vec![
+        "--noprofile".into(),
+        "--norc".into(),
+        "-p".into(),
+        "-c".into(),
+        "exec 3<. && exec \"$@\"".into(),
+        "rsi-pty-plan".into(),
+        wrapper.into_os_string(),
+    ];
+    launch.extend(arguments);
+    let shell = PathBuf::from("/bin/bash").canonicalize().map_err(|error| {
+        SandboxError::InvalidInput(format!("PTY launcher unavailable: {error}"))
+    })?;
+    Ok((shell, launch, cwd))
+}
+
+#[cfg(target_os = "linux")]
+fn pin_pty_workspace(workspace: &Path) -> Result<(OsString, rsi_sandbox::ProcessPlanOwner)> {
+    use std::os::fd::AsRawFd;
+    let fd = rustix::fs::openat2(
+        rustix::fs::CWD,
+        workspace,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+        rustix::fs::ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| SandboxError::InvalidInput(format!("PTY workspace pin failed: {error}")))?;
+    let file = std::fs::File::from(fd);
+    let metadata = file
+        .metadata()
+        .map_err(|error| SandboxError::InvalidInput(error.to_string()))?;
+    for protected in ["/", "/tmp"] {
+        if matches_protected_root(&metadata, Path::new(protected))? {
+            return Err(SandboxError::InvalidInput(
+                "PTY workspace pin names a protected root".into(),
+            ));
+        }
+    }
+    let source = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd()).into();
+    Ok((source, rsi_sandbox::ProcessPlanOwner::new(file)))
+}
+#[cfg(target_os = "linux")]
+fn matches_protected_root(metadata: &std::fs::Metadata, protected: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(protected) {
+        Ok(root) => Ok(metadata.dev() == root.dev() && metadata.ino() == root.ino()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(SandboxError::InvalidInput(error.to_string())),
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn pin_pty_workspace(_: &Path) -> Result<(OsString, rsi_sandbox::ProcessPlanOwner)> {
+    Err(SandboxError::InvalidInput(
+        "PTY workspace pin requires Linux".into(),
+    ))
 }
 
 fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathBuf)> {
@@ -728,5 +839,13 @@ mod tests {
             canonical_optional_directory(&missing, "optional protected directory"),
             Ok(None)
         ));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_root_identity_skips_absent_roots_but_recognizes_existing_ones() {
+        let temporary = tempfile::tempdir().unwrap();
+        let metadata = temporary.path().metadata().unwrap();
+        assert!(!matches_protected_root(&metadata, &temporary.path().join("absent")).unwrap());
+        assert!(matches_protected_root(&metadata, temporary.path()).unwrap());
     }
 }

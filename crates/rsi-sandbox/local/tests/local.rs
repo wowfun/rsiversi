@@ -93,6 +93,7 @@ async fn foreign_policy_paths_are_rejected_before_native_resolution() {
             let foreign = PathBuf::from(r"C:\project");
             let result = sandbox
                 .confine(ProcessRequest {
+                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                     mode,
                     program: std::env::current_exe().unwrap(),
                     arguments: vec![],
@@ -215,6 +216,7 @@ async fn bubblewrap_precedes_landlock_and_stamp_matches_selected_wrapper() {
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let plan = sandbox
         .confine(ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::WorkspaceWrite,
             program: std::fs::canonicalize("/bin/sh").unwrap(),
             arguments: vec!["-c".into(), "true".into()],
@@ -267,6 +269,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
     let plan = sandbox
         .confine(ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::WorkspaceWrite,
             program: shell.clone(),
             arguments: vec![],
@@ -288,6 +291,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
     assert!(tmpfs < bind);
     let read_only = sandbox
         .confine(ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::ReadOnly,
             program: shell.clone(),
             arguments: vec![],
@@ -311,6 +315,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
         assert!(matches!(
             sandbox
                 .confine(ProcessRequest {
+                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                     mode,
                     program: shell.clone(),
                     arguments: vec![],
@@ -323,6 +328,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
         assert!(matches!(
             sandbox
                 .confine(ProcessRequest {
+                    stdio: rsi_sandbox::ProcessStdio::Pipes,
                     mode,
                     program: shell.clone(),
                     arguments: vec![],
@@ -365,6 +371,7 @@ async fn landlock_rejects_the_filesystem_root_as_a_restricted_workspace() {
     assert!(matches!(
         sandbox
             .confine(ProcessRequest {
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 mode: SandboxMode::WorkspaceWrite,
                 program: std::fs::canonicalize("/bin/sh").unwrap(),
                 arguments: vec![],
@@ -413,6 +420,7 @@ async fn restricted_plan_preserves_non_utf8_workspace_bytes() {
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let plan = sandbox
         .confine(ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::WorkspaceWrite,
             program: std::fs::canonicalize("/bin/sh").unwrap(),
             arguments: vec![],
@@ -461,6 +469,7 @@ async fn failed_probe_falls_through_to_the_next_explicit_candidate() {
         .expect("later candidate should still activate the sandbox service");
     let plan = sandbox
         .confine(ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::ReadOnly,
             program: std::fs::canonicalize("/bin/sh").unwrap(),
             arguments: vec![],
@@ -569,6 +578,7 @@ async fn missing_backend_fails_restricted_mode_but_explicit_bypass_is_truthful()
         .unwrap();
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let request = |mode| ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
         mode,
         program: std::fs::canonicalize("/bin/sh").unwrap(),
         arguments: vec![],
@@ -747,6 +757,7 @@ async fn version_only_executable_is_not_accepted_as_a_working_bubblewrap() {
         .unwrap();
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let request = ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
         mode: SandboxMode::ReadOnly,
         program: std::fs::canonicalize("/bin/sh").unwrap(),
         arguments: vec![],
@@ -788,6 +799,7 @@ async fn zero_exit_executable_is_not_accepted_as_a_working_bubblewrap() {
         .unwrap();
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let request = ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
         mode: SandboxMode::ReadOnly,
         program: std::fs::canonicalize("/bin/sh").unwrap(),
         arguments: vec![],
@@ -838,6 +850,7 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
         .unwrap();
     let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
     let request = |mode, script: &str| ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
         mode,
         program: shell.clone(),
         arguments: vec!["-c".into(), script.into()],
@@ -967,4 +980,89 @@ async fn a_permanently_busy_probe_exhausts_one_absolute_deadline() {
     assert!(matches!(result, Err(SandboxError::Probe(message)) if message.contains("timed out")));
     assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
     drop(writer);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pty_plan_preserves_confinement_and_pins_workspace_across_rename() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bwrap = temporary.path().join("bwrap");
+    std::fs::write(&bwrap, b"probe").unwrap();
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "pty-plan",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(Arc::new(Probe {
+                    replace_during_probe: None,
+                    calls: Mutex::new(vec![]),
+                }))),
+            ),
+            json!({"bubblewrap":[bwrap],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    for mode in [SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite] {
+        let directory = temporary.path().join(format!("workspace-{mode:?}"));
+        std::fs::create_dir(&directory).unwrap();
+        let workspace = directory.canonicalize().unwrap();
+        std::fs::write(workspace.join("marker"), b"original").unwrap();
+        let request = ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pty,
+            mode,
+            program: "/bin/bash".into(),
+            arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            cwd: workspace.clone(),
+            workspace: workspace.clone(),
+        };
+        let plan = sandbox.confine(request.clone()).await.unwrap();
+        assert!(!plan.arguments.iter().any(|arg| arg == "--new-session"));
+        for required in [
+            "--die-with-parent",
+            "--unshare-all",
+            "--tmpfs",
+            "--proc",
+            "--dev",
+        ] {
+            assert!(plan.arguments.iter().any(|arg| arg == required));
+        }
+        assert_eq!(plan.stamp.requested, mode);
+        let bind = if mode == SandboxMode::WorkspaceWrite {
+            "--bind-fd"
+        } else {
+            "--ro-bind-fd"
+        };
+        assert!(
+            plan.arguments
+                .windows(3)
+                .any(|args| args[0] == bind && args[1] == "3" && args[2] == workspace)
+        );
+        let source = plan.cwd.clone();
+        let clone = plan.clone();
+        drop(plan);
+        let original = workspace.with_extension("original");
+        std::fs::rename(&workspace, &original).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("marker"), b"replacement").unwrap();
+        assert_eq!(std::fs::read(source.join("marker")).unwrap(), b"original");
+        drop(clone);
+        // Another test may reuse the process-global fd number after Drop.
+        assert_ne!(
+            std::fs::read_link(&source).ok().as_deref(),
+            Some(original.as_path())
+        );
+        let rejected = ProcessRequest {
+            mode: SandboxMode::DangerFullAccess,
+            ..request
+        };
+        assert!(matches!(
+            sandbox.confine(rejected).await,
+            Err(SandboxError::Unsupported(_))
+        ));
+    }
+    assert!(runtime.shutdown().await.is_clean());
 }

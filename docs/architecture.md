@@ -21,13 +21,19 @@ target narrowing. Domain operations and durable semantics remain
 with their owning product; the API foundation does not import those products.
 
 Base capability families own Storage, Settings, Credentials, Media, Tools,
-Commands, Approval, User Questions, Sandbox, Process, Shell, Jobs, Apply-Patch, Workspace, Files, Permission Presets, and derived
+Commands, Approval, User Questions, Sandbox, Process, PTY, Shell, Jobs, Apply-Patch, Workspace, Files, Permission Presets, and derived
 projections. Their protocols and deterministic test support are libraries;
 stateful providers, registries, schedulers, and policy implementations are
 ordinary `rsi-meta` plugins. `rsi-meta` and `rsi-host` do not know those
 products, and `rsi-host` does not select a default implementation.
 The [native Files library](../crates/rsi-files/native-fs/README.md) supplies shared
 directory-handle mechanics; callers retain their own trust and authorization policy.
+
+[`rsi-pty`](../crates/rsi-pty/README.md) owns live terminal scopes, bounded ANSI/VT100
+screens and attachment/controller state. Process owns the native PTY, byte I/O
+and reaping. Sandbox owns its explicit restricted PTY plan. The standard product
+binds terminal scopes to persisted Session authority and service-generation
+lifetime; the Agent Kernel and durable Session format do not own terminals.
 
 [`rsi-ai`](../crates/rsi-ai/README.md) owns provider-neutral Language and Image
 contracts, exact routing, provider authoring, and transports. Routers and

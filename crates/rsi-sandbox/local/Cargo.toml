@@ -20,6 +20,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 

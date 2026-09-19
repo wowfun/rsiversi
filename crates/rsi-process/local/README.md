@@ -75,7 +75,25 @@ The same provider also publishes the sibling duplex capability. Both spawn paths
 use the same validated confined-plan admission, process registry, capture budget,
 identity-fenced TERM/KILL and reaping mechanics. Duplex stdout waits for free queue
 space before reading another bounded pipe chunk. Its explicit stdin port serializes
-one write and closes on termination or direct-child exit. Lossless stdout EOF is
-published only after the child is reaped and both pipes settle; cancelled or timed-out drains publish
-a stream error after any already buffered bytes. Protocol streams do not enter the
+one write and closes on termination or direct-child exit. The stdout task publishes
+its own EOF or error promptly, independently of child and stderr settlement.
+Task cancellation or panic publishes a stream error after buffered bytes;
+whole-process failures remain observable through `wait`. The reaper retains
+capture ownership through pipe settlement. Protocol streams do not enter the
 best-effort completed-output cache.
+
+Linux PTY masters use nonblocking I/O. A single input write waits at most 500 ms
+for writable capacity and returns the exact accepted prefix, or an error without
+leaving a native write running. Cancellation likewise leaves no deferred write.
+This deadline does not terminate the shell; the terminal owner records an uncertain
+receipt on error and requires explicit takeover before further input. The reader
+polls readiness with a finite interval so retirement can stop an idle drain.
+After reaping, input settlement allows at least the native write deadline,
+independently of a shorter termination grace. Later drain failures preserve the
+first settlement error. Capture reservation covers retained output and its active
+read buffer; borrowed input bytes remain charged to their caller.
+
+Pipe drain settlement retains each join result independently. A grace deadline
+aborts and joins only unfinished drains; concurrent clean completion remains
+success, while cancellation, panic and I/O failure remain observable. A joined
+stdout is never polled again while waiting for stderr.

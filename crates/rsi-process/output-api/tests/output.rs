@@ -118,6 +118,8 @@ async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
     let managed = process
         .spawn(rsi_process::ProcessSpec {
             process: ConfinedProcess {
+                owner: None,
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
                 program: "/bin/cat".into(),
                 arguments: Vec::new(),
                 cwd: path.into(),

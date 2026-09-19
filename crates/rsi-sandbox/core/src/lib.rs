@@ -34,9 +34,21 @@ pub enum SandboxMode {
     DangerFullAccess,
 }
 
+/// Process-local I/O intent; never an enforcement stamp or durable field.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProcessStdio {
+    /// Ordinary pipe-based execution.
+    #[default]
+    Pipes,
+    /// A controlling terminal established before the confined wrapper starts.
+    Pty,
+}
+
 /// Explicit process request before sandbox planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessRequest {
+    /// Exact pipe or controlling-terminal intent.
+    pub stdio: ProcessStdio,
     /// Requested policy.
     pub mode: SandboxMode,
     /// Absolute executable path.
@@ -221,9 +233,29 @@ fn is_lexically_normal_absolute(path: &Path) -> bool {
     rsi_workspace_path::is_normalized_absolute_path(path)
 }
 
+/// Opaque native resources that must outlive execution of a confined plan.
+#[derive(Clone, Debug)]
+pub struct ProcessPlanOwner(std::sync::Arc<dyn fmt::Debug + Send + Sync>);
+impl ProcessPlanOwner {
+    /// Retains provider-owned resources without exposing native operations in the contract.
+    pub fn new(owner: impl fmt::Debug + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(owner))
+    }
+}
+impl PartialEq for ProcessPlanOwner {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ProcessPlanOwner {}
+
 /// Exact process invocation after sandbox wrapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfinedProcess {
+    /// Retain through child settlement; never serialize native resource ownership.
+    pub owner: Option<ProcessPlanOwner>,
+    /// Exact I/O plan accepted by the sandbox provider.
+    pub stdio: ProcessStdio,
     /// Executable to spawn.
     pub program: PathBuf,
     /// Exact wrapper or target arguments.

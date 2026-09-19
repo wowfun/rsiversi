@@ -50,3 +50,26 @@ processes inherit the process owner's environment. These modes protect the
 stated file-write boundary; they do not protect host availability from resource
 exhaustion or conceal inherited secrets. Resource isolation requires a separate
 process/container policy at the deployment boundary.
+
+PTY intent is explicit, typed and process-local. Ordinary pipe execution rejects
+PTY plans. The Linux local PTY path requires a verified Bubblewrap plan in
+read-only or workspace-write mode; it never falls back to Landlock, unconfined
+execution, or a pipe. portable-pty establishes setsid and TIOCSCTTY before the
+wrapper; only the PTY plan omits Bubblewrap's `--new-session`. Namespace,
+`--die-with-parent`, filesystem and scratch boundaries remain in the plan.
+PTY terminal sessions are live resources, not durable enforcement stamps.
+
+Linux PTY plans pin the workspace directory when confined and carry that handle
+into the child before Bubblewrap resolves its bind-fd source. Replacing the
+pathname between confinement and child launch cannot substitute the launch
+workspace. The Process owner retains opaque plan resources through child
+settlement. This pin identifies the workspace at confinement, not the inode at
+the time a Session was first saved; Session authorization remains a saved
+canonical path. Pipe/Landlock plans retain their existing pathname contract.
+PTY confinement rejects symlink traversal and fails closed if native directory
+pinning is unavailable. It requires Linux openat2 and Bubblewrap bind-fd support.
+
+Mount-internal rename safety still depends on the selected Bubblewrap backend.
+Older bind-fd backports can resolve the descriptor to a path without checking the
+mounted inode afterward. A successful plan or pre-launch replacement test does
+not prove that stronger guarantee against concurrent host filesystem mutation.

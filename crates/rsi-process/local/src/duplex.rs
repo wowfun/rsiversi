@@ -132,6 +132,15 @@ mod native {
             self.space.notify_waiters();
         }
     }
+    /// Constructed before spawn so abort-before-first-poll also closes the stream.
+    struct OutputCompletion(Arc<Output>);
+    impl Drop for OutputCompletion {
+        fn drop(&mut self) {
+            self.0.finish(Err(ProcessError::Io(
+                "duplex stdout task ended before publishing its result".into(),
+            )));
+        }
+    }
     struct ReadGuard<'a>(&'a AtomicBool);
     impl Drop for ReadGuard<'_> {
         fn drop(&mut self) {
@@ -275,54 +284,37 @@ mod native {
             let stderr = Arc::new(Tail::new(spec.stderr_max_bytes, reservation));
             let stop = CancellationToken::new();
             let input_stop = CancellationToken::new();
-            let (state, published) =
-                self.publish_child(pid, spec.termination_grace_ms, runtime, Some(stop.clone()));
+            let (state, published) = self.publish_child(
+                pid,
+                spec.termination_grace_ms,
+                runtime,
+                Some(stop.clone()),
+                spec.process.owner.clone(),
+            );
             let stdin = child.stdin.take().expect("persistent piped stdin");
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr_pipe = child.stderr.take().expect("piped stderr");
             let input_cancel = input_stop.clone();
             let terminate = stop.clone();
             let input_task=runtime.spawn(async move {tokio::select! {biased;()=terminate.cancelled()=>{},()=write_input(stdin,receiver,input_cancel)=>{}}});
-            let output_owner = output.clone();
-            let mut stdout_task =
-                runtime.spawn(async move { drain_stdout(stdout, output_owner, stop).await });
-            let mut stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
+            let completion = OutputCompletion(output.clone());
+            let stdout_task = runtime.spawn(async move {
+                let result = drain_stdout(stdout, completion.0.clone(), stop).await;
+                completion.0.finish(result.clone());
+                drop(completion);
+                result
+            });
+            let stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
             let waiting = state.clone();
             let final_output = output.clone();
             runtime.spawn(async move {
                 let outcome = reap_group(&mut child, &waiting).await;
                 input_stop.cancel();
                 let _ = input_task.await;
-                let mut stdout_joined = false;
-                let mut stderr_joined = false;
-                let drained = tokio::time::timeout(waiting.grace, async {
-                    let stdout = (&mut stdout_task).await;
-                    stdout_joined = true;
-                    let stderr = (&mut stderr_task).await;
-                    stderr_joined = true;
-                    (stdout, stderr)
-                })
-                .await;
-                let drain_error = match drained {
-                    Ok((Ok(Ok(())), Ok(Ok(())))) => None,
-                    Ok(_) => Some(ProcessError::Io(
-                        "duplex pipe closed before clean EOF".into(),
-                    )),
-                    Err(_) => {
-                        if !stdout_joined {
-                            stdout_task.abort();
-                            let _ = stdout_task.await;
-                        }
-                        if !stderr_joined {
-                            stderr_task.abort();
-                            let _ = stderr_task.await;
-                        }
-                        Some(ProcessError::Io(
-                            "duplex pipe drain timed out before EOF".into(),
-                        ))
-                    }
-                };
-                final_output.finish(drain_error.clone().map_or(Ok(()), Err));
+                let drain_error = settle_drains(stdout_task, stderr_task, waiting.grace)
+                    .await
+                    .map(ProcessError::Io);
+                // Keep capture ownership through both joins, independently of stdout EOF.
                 drop(final_output);
                 waiting.finish(outcome.and_then(|outcome| drain_error.map_or(Ok(outcome), Err)));
             });
@@ -336,6 +328,64 @@ mod native {
                 output,
                 stderr,
             })))
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn output() -> Arc<Output> {
+            Arc::new(Output {
+                capacity: 8,
+                state: Mutex::new(QueueState {
+                    bytes: VecDeque::from(b"saved".to_vec()),
+                    closed: false,
+                    error: None,
+                }),
+                data: Notify::new(),
+                space: Notify::new(),
+                reading: AtomicBool::new(false),
+                _reservation: Arc::new(CaptureReservation {
+                    service: Weak::new(),
+                    bytes: 8,
+                }),
+            })
+        }
+        #[tokio::test]
+        async fn aborted_unpolled_stdout_guard_preserves_buffer_then_publishes_error() {
+            let output = output();
+            let guard = OutputCompletion(output.clone());
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            });
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let read = output.read(8).await.unwrap();
+            assert_eq!(read.bytes, b"saved");
+            assert!(!read.eof);
+            assert!(matches!(output.read(8).await, Err(ProcessError::Io(_))));
+        }
+        #[tokio::test]
+        async fn panicking_stdout_guard_wakes_reader_and_first_result_wins() {
+            let output = output();
+            let guard = OutputCompletion(output.clone());
+            assert!(
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    panic!("injected stdout panic");
+                })
+                .await
+                .unwrap_err()
+                .is_panic()
+            );
+            output.finish(Ok(()));
+            assert!(!output.read(8).await.unwrap().eof);
+            assert!(matches!(output.read(8).await, Err(ProcessError::Io(_))));
+            let clean = self::output();
+            let guard = OutputCompletion(clean.clone());
+            clean.finish(Ok(()));
+            drop(guard);
+            assert!(clean.read(8).await.unwrap().eof);
         }
     }
 }

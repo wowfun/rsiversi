@@ -49,6 +49,43 @@ async fn write_all(process: &ManagedDuplexProcess, mut bytes: &[u8]) {
     }
 }
 #[tokio::test]
+async fn stdout_half_close_is_observable_before_child_exit_without_releasing_admission() {
+    let (fiber, batch, duplex) = owners(json!({"maximum_active_processes":1})).await;
+    let managed = duplex
+        .spawn(duplex_spec("printf ready; exec 1>&-; read token || :", 128))
+        .unwrap();
+    let output = managed.stdout();
+    let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut bytes = Vec::new();
+        loop {
+            let page = output.read(2).await.unwrap();
+            bytes.extend(page.bytes);
+            if page.eof {
+                break bytes;
+            }
+        }
+    })
+    .await
+    .expect("stdout EOF must not await the child waiting on stdin");
+    assert_eq!(bytes, b"ready");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), managed.wait())
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        batch.spawn(spec("exit 0", 1)),
+        Err(ProcessError::Capacity)
+    ));
+    managed.stdin().close().await.unwrap();
+    assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
+    assert!(output.read(1).await.unwrap().eof);
+    let next = batch.spawn(spec("exit 0", 1)).unwrap();
+    next.wait().await.unwrap();
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
 async fn persistent_binary_echo_is_lossless_through_a_tiny_backpressured_queue() {
     let (fiber, _, process) = owners(json!({})).await;
     let managed = process.spawn(duplex_spec("exec /bin/cat", 257)).unwrap();
@@ -208,7 +245,7 @@ async fn overlapping_read_rejects_and_cancellation_returns_its_admission() {
 }
 
 #[tokio::test]
-async fn stderr_drain_timeout_cannot_publish_clean_stdout_eof_or_strand_wait() {
+async fn stderr_drain_timeout_is_reported_by_wait_independently_of_stdout_eof() {
     let (fiber, _, duplex) = owners(json!({})).await;
     // The bounded escaped child retains stderr after the direct child closes stdout.
     let script = r#"exec /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/sleep", "2"], start_new_session=True, stdout=subprocess.DEVNULL)'"#;
@@ -220,10 +257,7 @@ async fn stderr_drain_timeout_cannot_publish_clean_stdout_eof_or_strand_wait() {
         matches!(outcome, Ok(Err(ProcessError::Io(_)))),
         "{outcome:?}"
     );
-    assert!(matches!(
-        managed.stdout().read(128).await,
-        Err(ProcessError::Io(_))
-    ));
+    assert!(managed.stdout().read(128).await.unwrap().eof);
     assert!(fiber.dispose().await.is_clean());
 }
 
@@ -250,7 +284,19 @@ async fn dropping_the_last_duplex_handle_terminates_while_retained_ports_remain_
         ),
         "last handle did not close the process: {settled:?}"
     );
-    let next = batch.spawn(spec("exit 0", 1)).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match batch.spawn(spec("exit 0", 1)) {
+                Ok(next) => break next,
+                // EOF precedes full reaping; the last handle is intentionally gone,
+                // so observe admission with bounded backoff instead of a busy loop.
+                Err(ProcessError::Capacity) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(error) => panic!("unexpected spawn failure: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     next.wait().await.unwrap();
     drop(next);
     drop(output);

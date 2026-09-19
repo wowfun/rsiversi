@@ -73,3 +73,7 @@ boundary, zero effective capabilities, a minimal `/dev`, host-path write
 denial, and a fresh PID-namespace `/proc`. Explicitly selecting this ignored
 test requires its native dependencies; missing prerequisites fail the gate.
 It does not claim network isolation, Landlock, Windows, or macOS.
+
+PTY protected-root identity checks skip absent optional roots; permission and
+other metadata failures remain errors. The pinned workspace is still checked
+against every existing protected root.

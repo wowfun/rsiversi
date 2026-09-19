@@ -1,7 +1,7 @@
 //! Ongoing byte-protocol seam, independent of batch stdin and lossy tail readers.
 use super::{
     Arc, ConfinedProcess, LocalContract, OsString, ProcessOutcome, ProcessOutput, ProcessSpec,
-    Result, async_trait, fmt, validate_capture, validate_environment, validate_process_plan,
+    Result, async_trait, fmt, validate_capture, validate_environment, validate_pipe_plan,
 };
 /// Maximum one duplex read or write chunk.
 pub const MAXIMUM_DUPLEX_CHUNK_BYTES: usize = 64 * 1024;
@@ -22,7 +22,7 @@ pub struct DuplexProcessSpec {
 impl DuplexProcessSpec {
     /// Validates the same process, environment and capture admission invariants.
     pub fn validate(&self) -> Result<()> {
-        validate_process_plan(&self.process)?;
+        validate_pipe_plan(&self.process)?;
         validate_environment(&self.environment)?;
         validate_capture(
             self.stdout_buffer_bytes,
@@ -55,7 +55,8 @@ pub trait DuplexInput: fmt::Debug + Send + Sync + 'static {
 pub struct DuplexRead {
     /// Exact next bytes. Empty only at clean EOF.
     pub bytes: Vec<u8>,
-    /// True only when the pipe reached EOF and no buffered bytes remain.
+    /// True when stdout reached EOF and its buffered bytes are delivered,
+    /// independently of child/stderr settlement reported by `wait`.
     pub eof: bool,
 }
 /// One bounded lossless stdout stream; it admits only one pending reader.
