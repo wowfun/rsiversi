@@ -95,6 +95,7 @@ fn exa_request_and_sources_preserve_real_highlights_without_generated_answers() 
     );
     let response = json!({"results":[{"url":"https://example.com/a","title":"Source A","highlights":[" ","Exact provider highlight","ignored"],"publishedDate":"2026-09-16"},{"url":"https://example.com/b","highlights":[]},{"url":"https://example.com/c"}]});
     let result = normalize_search("rust ownership".into(), 5, &response.to_string()).unwrap();
+    result.validate().unwrap();
     assert_eq!(result.sources.len(), 1);
     assert_eq!(result.omitted, 2);
     assert!(!result.truncated);
@@ -114,6 +115,7 @@ fn exa_request_and_sources_preserve_real_highlights_without_generated_answers() 
     entries.extend((0..10).map(|_| json!({"url":"https://example.com/b","highlights":["useful"]})));
     let result =
         normalize_search("query".into(), 5, &json!({"results":entries}).to_string()).unwrap();
+    result.validate().unwrap();
     assert_eq!(result.sources.len(), 5);
     assert!(result.truncated);
     assert!(result.sources[0].truncated);

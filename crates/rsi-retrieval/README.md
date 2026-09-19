@@ -23,6 +23,8 @@ followed, within the original scheme/host/port, with validation on every hop.
 
 Each operation has a 30-second deadline including resolution and decoding, a
 4 MiB wire limit, 8 MiB decoded limit and 256 KiB extracted UTF-8 text limit.
+Identity decoding borrows the bounded response body; compressed decoding owns its
+bounded decompression buffer. The final extracted text owns only its retained prefix.
 Wire/decompression overflow fails explicitly; extracted text carries a truncation
 flag. HTML is tokenized into text without execution or a DOM. Script, style,
 template and noscript content is omitted. Content encodings are identity, gzip

@@ -283,7 +283,6 @@ fn normalize_search(request: String, maximum: u8, text: &str) -> Result<Retrieva
             truncated,
         });
     }
-    result.validate()?;
     Ok(result)
 }
 

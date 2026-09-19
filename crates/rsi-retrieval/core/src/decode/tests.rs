@@ -131,3 +131,18 @@ fn gzip_brotli_expansion_is_bounded_and_cancellation_is_checked_during_decode() 
     stop.cancel();
     assert!(matches!(extract(&value, &stop), Err(Error::Cancelled)));
 }
+
+#[test]
+fn identity_borrows_the_body_but_extraction_retains_only_its_bounded_prefix() {
+    let body = body("text/plain", vec![b'x'; MAX_DECODED]);
+    let stop = CancellationToken::new();
+    let decoded = decoded_bytes(&body, &stop).unwrap();
+    assert!(matches!(decoded, Cow::Borrowed(_)));
+    assert_eq!(decoded.as_ptr(), body.bytes.as_ptr());
+    let page = extract(&body, &stop).unwrap();
+    assert_eq!(page.text.len(), MAX_TEXT);
+    assert_eq!(page.text.capacity(), MAX_TEXT);
+    assert!(page.truncated);
+    stop.cancel();
+    assert!(matches!(decoded_bytes(&body, &stop), Err(Error::Cancelled)));
+}

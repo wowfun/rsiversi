@@ -6,6 +6,7 @@ use html5ever::tokenizer::{
     states::RawKind,
 };
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     io::Read,
     rc::Rc,
@@ -35,16 +36,30 @@ fn bounded_read(mut reader: impl Read, stop: &CancellationToken) -> Result<Vec<u
         result.extend_from_slice(&chunk[..count]);
     }
 }
-pub(crate) fn decode(body: &Body, stop: &CancellationToken) -> Result<String, Error> {
-    let decoded = match body.encoding.trim().to_ascii_lowercase().as_str() {
-        "" | "identity" => bounded_read(body.bytes.as_slice(), stop)?,
-        "gzip" => bounded_read(
+fn decoded_bytes<'a>(body: &'a Body, stop: &CancellationToken) -> Result<Cow<'a, [u8]>, Error> {
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    Ok(match body.encoding.trim().to_ascii_lowercase().as_str() {
+        "" | "identity" => {
+            if body.bytes.len() > MAX_DECODED {
+                return Err(Error::Capacity);
+            }
+            Cow::Borrowed(body.bytes.as_slice())
+        }
+        "gzip" => Cow::Owned(bounded_read(
             flate2::read::MultiGzDecoder::new(body.bytes.as_slice()),
             stop,
-        )?,
-        "br" => bounded_read(brotli::Decompressor::new(body.bytes.as_slice(), 8192), stop)?,
+        )?),
+        "br" => Cow::Owned(bounded_read(
+            brotli::Decompressor::new(body.bytes.as_slice(), 8192),
+            stop,
+        )?),
         _ => return Err(Error::UnsupportedContent),
-    };
+    })
+}
+pub(crate) fn decode(body: &Body, stop: &CancellationToken) -> Result<String, Error> {
+    let decoded = decoded_bytes(body, stop)?;
     let charset = body.media.split(';').skip(1).find_map(|part| {
         let (name, value) = part.trim().split_once('=')?;
         name.trim()
