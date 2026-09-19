@@ -25,8 +25,11 @@ is granted. Startup composition, protocol admission and Runtime/event-loop
 lifetime each have one internal owner. A single view request and one pending frame are
 admitted. The shared 32-MiB frame bound remains authoritative. ACK names its exact
 frame; a 30-second missing ACK requests Application teardown. Ordinary requests
-have eight non-queued slots; ACK and disconnect have reserved admission. Binary
-image/source responses travel as raw bytes, without JSON arrays or base64.
+have eight non-queued slots; ACK and disconnect have reserved admission.
+Request admission ends when the operation completes, before its response is handed
+to WebKit. A response consumer can immediately issue its next request without
+competing with the completed operation's permit.
+Binary image/source responses travel as raw bytes, without JSON arrays or base64.
 Tauri's response handoff requires owned bytes, so it copies the shared retained
 buffer. Wry/WebKit also buffer platform requests before this adapter sees them.
 The owner limits bound admitted logical work and pending frames; they are not
