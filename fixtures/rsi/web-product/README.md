@@ -150,7 +150,9 @@ received patch and verifies the subsequent snapshot before continuing the same
 Files workflow. Only frame counts and sizes are retained by this instrumentation.
 
 The default runner also executes renderer admission, real A/B/C module replacement
-and the independent Rust/WASM renderer on both browsers. Admission tests pause
+and the independent Rust/WASM renderer on both browsers. Their explicit asset
+lists include the shared Worker admission module, including cold catalogs without
+an executable renderer. Admission tests pause
 asynchronous setup and disposal, drain accepted input, reject stale hosts and bound
 document imports across reconnects. Offers with no active slot remain pending;
 failed first mounts retain a resident fallback. Authenticated product scenarios
