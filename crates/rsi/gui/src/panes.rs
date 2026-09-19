@@ -14,6 +14,8 @@ mod remote_ui;
 mod source_details;
 #[path = "submissions.rs"]
 mod submissions;
+#[path = "terminal.rs"]
+mod terminal;
 #[path = "ui_details.rs"]
 mod ui_details;
 
@@ -22,7 +24,7 @@ use crate::{
     projection::Transcript,
     renderer::{Renderer, RendererContract},
 };
-use rsi_agent_session_protocol::{MessageId, SessionId, WorkspaceTrust};
+use rsi_agent_session_protocol::{MessageId, SessionId};
 use rsi_agent_turn_protocol::{CancelTarget, ObservationCursor};
 use rsi_application::Surface;
 use rsi_client::{SessionController, SessionControllerContract};
@@ -69,6 +71,8 @@ impl SubmissionState {
 
 #[derive(Debug)]
 struct Attachment {
+    terminal_followers: Mutex<BTreeMap<String, Arc<terminal::Follower>>>,
+    terminal_closed: std::sync::atomic::AtomicBool,
     files: Option<
         Arc<<rsi_session_files_ui::FilesBrowserContract as rsi_meta::LocalContract>::Service>,
     >,
@@ -84,6 +88,7 @@ struct Attachment {
     id: SessionId,
     path: String,
     header: String,
+    agent_preset: String,
     creation: Option<rsi_session_protocol::CreateSession>,
     defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
@@ -131,29 +136,39 @@ impl ResourcePreview {
 }
 impl Attachment {
     async fn close(&self) -> Result<()> {
+        self.detach_terminals().await;
         self.file_read
             .lock()
             .expect("File picker cancellation poisoned")
             .cancel();
-        self.resource
+        let mut failure = self
+            .resource
             .lock()
             .expect("GUI resource poisoned")
-            .clear()?;
+            .clear()
+            .err();
         let cards = std::mem::take(&mut *self.inline.lock().expect("inline cards poisoned"));
         for card in cards.values() {
             card.stop.cancel();
         }
         for card in cards.values() {
-            card.lease.close().await.map_err(error)?;
+            if let Err(error) = card.lease.close().await {
+                failure.get_or_insert_with(|| error.to_string());
+            }
         }
         let surface = self.surface.lock().expect("Web surface poisoned").take();
         if let Some(surface) = surface {
-            let report = surface.close().await.map_err(error)?;
-            if !report.is_clean() {
-                return Err("Surface cleanup failed".into());
+            match surface.close().await {
+                Ok(report) if !report.is_clean() => {
+                    failure.get_or_insert_with(|| "Surface cleanup failed".into());
+                }
+                Err(error) => {
+                    failure.get_or_insert_with(|| error.to_string());
+                }
+                Ok(_) => {}
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 impl Pane {
@@ -263,7 +278,7 @@ impl Pane {
             "completions":*current.completions.lock().expect("GUI completions poisoned"),
             "resource":resource, "resource_revision":resource_revision,
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
-            "header":current.header, "creation":current.creation,
+            "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
@@ -308,6 +323,22 @@ impl GuiApplication {
         }
         surfaces.insert(id, Arc::new(Pane::default()));
         Ok(())
+    }
+    pub(crate) async fn close_surfaces(&self) -> Result<()> {
+        let panes: Vec<_> = self
+            .panes
+            .lock()
+            .expect("GUI surfaces poisoned")
+            .keys()
+            .copied()
+            .collect();
+        let mut failure = None;
+        for pane in panes {
+            if let Err(error) = self.close_surface(pane).await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
     pub(crate) async fn close_surface(&self, id: crate::SurfaceId) -> Result<()> {
         let pane = self.pane(id)?;
@@ -429,11 +460,10 @@ impl GuiApplication {
             Command::Create {
                 pane,
                 workspace,
-                trust,
                 reuse,
             } => {
                 if let Some(reuse) = reuse
-                    && self.reuse_draft(pane, &workspace, trust, &reuse).await?
+                    && self.reuse_draft(pane, &workspace, &reuse).await?
                 {
                     return Ok(());
                 }
@@ -446,11 +476,6 @@ impl GuiApplication {
                         workspace_id: workspace,
                         // Saved Fresh intent follows the default-preset contract in ../README.md.
                         agent_preset_id: None,
-                        workspace_trust: if trust {
-                            WorkspaceTrust::Trusted
-                        } else {
-                            WorkspaceTrust::Untrusted
-                        },
                     }),
                 )
                 .await
@@ -671,6 +696,8 @@ impl GuiApplication {
             .ok_or("Surface UI target is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            terminal_followers: Mutex::new(BTreeMap::new()),
+            terminal_closed: std::sync::atomic::AtomicBool::new(false),
             files: surface.lookup_local::<rsi_session_files_ui::FilesBrowserContract>(),
             file_read: Mutex::new(tokio_util::sync::CancellationToken::new()),
             inline: Mutex::new(BTreeMap::new()),
@@ -685,6 +712,7 @@ impl GuiApplication {
             id,
             path: header.canonical_cwd().into(),
             header: header.fingerprint().map_err(error)?,
+            agent_preset: header.agent_preset_id().to_string(),
             creation,
             defaults: match (before_defaults, self.defaults_stamp().await) {
                 (Some(before), Some(after)) if before == after => Some(after),
@@ -745,7 +773,6 @@ impl GuiApplication {
         &self,
         index: crate::SurfaceId,
         workspace: &rsi_workspace_protocol::WorkspaceId,
-        trust: bool,
         reuse: &ReuseDraft,
     ) -> Result<bool> {
         let pane = self.pane(index)?;
@@ -762,7 +789,6 @@ impl GuiApplication {
         if attached.generation.to_string() != reuse.generation
             || attached.header != reuse.header
             || &creation.workspace_id != workspace
-            || (creation.workspace_trust == WorkspaceTrust::Trusted) != trust
             || attached.durable.load(std::sync::atomic::Ordering::Acquire)
             || !attached
                 .submission

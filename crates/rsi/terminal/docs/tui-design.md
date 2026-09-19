@@ -132,13 +132,20 @@ The chevron, timestamps and band padding have no source-copy authority. Continua
 copying returns original text without UI indentation. Assistant prose remains
 at column zero with terminal-default colors and no role label. Source indentation in code and lists remains.
 Selection applies Black on Cyan after all other styling. Background filler has
-no source hit. Styling preserves original Markdown bytes, including incomplete
-streamed constructs; copying never serializes parsed Markdown.
+no source hit. Markdown is enabled by default for assistant prose and expanded reasoning;
+`/markdown [on|off]` switches to original text for this process. Headings, emphasis,
+quotes, lists, task items, code, links and tables have semantic layout. Narrow
+tables use field records; HTML is literal and images show alternative text.
+Incomplete streamed constructs remain readable. Display runs retain original
+source ranges; copying reads those sources and never serializes parsed Markdown.
+Decorative list/table glyphs and soft wraps have no copy authority. A final
+synthetic Markdown block separator does not add an empty transcript row; the
+transcript owns inter-block spacing. Explicit source newlines remain intact.
 
 Thinking and tools have concise descriptive summaries. One blank row separates
 Thinking from preceding metadata and from the following assistant prose. When
 expanded, the lower blank row follows its reasoning content. Expanded reasoning
-retains its source whitespace.
+uses the current Markdown mode; code preserves source whitespace.
 Only the existing process marker carries outcome color: bright green (ANSI 10)
 means a successful model request or Tool result; bright red (ANSI 9) means a failed request, failed command,
 Tool failure or rejection. Thinking follows its own request's terminal event,

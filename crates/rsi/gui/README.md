@@ -75,7 +75,9 @@ Assistant text may carry a restricted Markdown event stream alongside its exact
 retained source. The application uses at most 64 KiB input, 4,096 events and 32 nested
 elements per block. Encoded events may occupy at most four times source bytes
 plus 256 bytes; exceeding any bound preserves the complete retained plain text.
-This limits aggregate frame expansion with the existing transcript budget.
+Markdown and frame size checks use the shared bounded JSON counting writer,
+without allocating an encoded buffer just to measure its length. This limits
+aggregate frame expansion with the existing transcript budget.
 Headings, paragraphs, lists, quotes, emphasis, code and absolute HTTP(S) links
 are supported. Raw HTML is text; Markdown images show their alt text without
 fetching a URL. Tool/file/source contents keep their plain-text presentations.
@@ -97,7 +99,7 @@ intent has `agent_preset_id: null`; the document validates this producer contrac
 when admitting durable draft records.
 
 Repeated workspace selection may reuse only the selected application's owned,
-unpublished revision-zero draft with matching WorkspaceId/trust/Header and unchanged
+unpublished revision-zero draft with matching WorkspaceId/Header and unchanged
 agent/default-preset Settings versions. The document offers its exact binding only
 after an empty text/image record has flushed and has no pending request or active
 submission/upload. Rust independently checks draft ownership and admission. A
@@ -325,3 +327,43 @@ identical JSON, and checks zero reparses of unchanged finalized blocks. Run alon
 with `cargo test -p rsi-gui projection_performance -- --ignored --nocapture`.
 This isolates projection caching; browser paint and whole desktop PSS require
 separate actual-engine fixtures.
+
+Opt-in `test-support` frame measurements record global materialization, bounded
+JSON counting, top-level comparisons and the actual frame-stream lock duration.
+Each calling thread retains only its latest synchronous frame sample. Default
+builds contain no timing instrumentation. Detail generation fences asynchronous
+reads; it is not a content revision suitable for caching unchanged global JSON.
+
+The standard-product CI job explicitly lints this feature and exercises frame
+reconstruction and materialization counts in ordinary submission tests. The larger
+timing report remains ignored and uses the same case with additional samples.
+
+Terminals use a finite request bridge bound to a pane's current Session
+attachment. Rust records the issued terminal attachments and their controller
+epochs. Closing the application, or closing or switching the pane, detaches those followers, without closing
+the Session's shells. Terminal output bypasses renderer-frame acknowledgements;
+the document cannot choose another Session or reuse a retired pane generation.
+Teardown attempts all pane, card and surface cleanup even when one fails, and
+reports that failure in the application shutdown result.
+
+Rust also owns terminal input sequences, uncertain receipt reconciliation and
+output cursors. The document forwards a bounded byte batch once, and acknowledges
+an opaque output-page ticket only after xterm finishes parsing that page. A lost
+reply returns the same retained page; it cannot advance the cursor twice. Input
+uncertainty blocks further input until an explicit successful takeover. A definitive
+stale-controller rejection immediately marks input read-only without receipt polling. Terminal
+polling does not publish unrelated transcript frames.
+Partial native writes reduce the next batch to the accepted prefix size. A full
+acceptance doubles the next batch up to the input limit, so transient backpressure
+does not leave a paste in one-byte round trips. Batch copies total at most three
+times the original input size, even under repeated short writes.
+
+Terminal output reads have 32 independent admission slots, matching the PTY
+provider's aggregate follower limit. They share command task ownership and
+shutdown draining, but do not occupy the eight ordinary command slots. Terminal
+writes have eight independent admission slots; lifecycle operations use ordinary
+command admission. Output reads use bounded capacity retry on the Subscription
+API lane. Detach always releases local follower state, even if the remote detach fails.
+
+Workspace selection creates Sessions with default project instruction and skill
+discovery; creation commands and draft reuse carry no workspace-trust setting.

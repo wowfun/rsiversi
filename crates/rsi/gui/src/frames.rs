@@ -4,7 +4,6 @@ use rsi_api_protocol::{ApiError, ByteBudget, Result, RetainedBytes};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
     sync::Arc,
 };
 const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -130,8 +129,8 @@ impl FrameState {
                 .value
                 .bytes;
         }
-        let sections = sections();
-        size += encoded_size(&sections)?;
+        let (sections, section_bytes) = capture_sections(sections)?;
+        size += section_bytes;
         if size > MAX_BYTES {
             return Err(ApiError::Capacity);
         }
@@ -165,11 +164,20 @@ impl FrameState {
                     (old != &replacement.value).then(|| pane_patch(*key, old, &replacement.value))
                 })
                 .collect();
+            #[cfg(feature = "test-support")]
+            let started = std::time::Instant::now();
+            let section_changes = fields(&self.sections, &sections, &[]);
+            #[cfg(feature = "test-support")]
+            crate::test_support::update(|sample| {
+                sample.section_compared_fields =
+                    sections.as_object().expect("closed sections").len();
+                sample.section_comparison_ns = started.elapsed().as_nanos();
+            });
             reservation.encode(&Patch {
                 kind: "patch",
                 frame_id: id.to_string(),
                 base_frame_id: self.id.to_string(),
-                sections: fields(&self.sections, &sections, &[]),
+                sections: section_changes,
                 surfaces,
             })?
         };
@@ -300,23 +308,27 @@ fn frame_id(text: &str) -> Result<u64> {
     }
     Ok(id)
 }
+fn capture_sections(sections: impl FnOnce() -> Value) -> Result<(Value, usize)> {
+    #[cfg(feature = "test-support")]
+    let started = std::time::Instant::now();
+    let sections = sections();
+    #[cfg(feature = "test-support")]
+    crate::test_support::update(|sample| {
+        sample.section_materializations += 1;
+        sample.section_materialization_ns = started.elapsed().as_nanos();
+    });
+    #[cfg(feature = "test-support")]
+    let started = std::time::Instant::now();
+    let section_bytes = encoded_size(&sections)?;
+    #[cfg(feature = "test-support")]
+    crate::test_support::update(|sample| {
+        sample.section_counted_bytes = section_bytes;
+        sample.section_count_ns = started.elapsed().as_nanos();
+    });
+    Ok((sections, section_bytes))
+}
 fn encoded_size(value: &impl serde::Serialize) -> Result<usize> {
-    struct Counter(usize);
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > MAX_BYTES - self.0 {
-                return Err(std::io::Error::other("presentation baseline capacity"));
-            }
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Counter(0);
-    serde_json::to_writer(&mut count, value).map_err(|_| ApiError::Capacity)?;
-    Ok(count.0)
+    rsi_api_protocol::measure_json(value, MAX_BYTES).map_err(|_| ApiError::Capacity)
 }
 
 #[cfg(test)]

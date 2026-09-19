@@ -44,6 +44,7 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, state: &TestState) -> render::View {
 }
 pub fn input(state: &TestState) -> Input<'_> {
     Input {
+        markdown: false,
         fold_focus: None,
         activity: None,
         header: &state.header,

@@ -5,6 +5,7 @@ mod home;
 mod plugins;
 mod setup;
 mod slash;
+mod terminals;
 use rsi_terminal_ui::editor;
 mod files;
 mod input;
@@ -327,7 +328,9 @@ impl Client {
                 command,
             },
         );
+        let markdown = self.state.markdown;
         self.state = State::new(header, self.state.remote);
+        self.state.markdown = markdown;
         if let Some(saved) = self.drafts.remove(self.state.header.session_id()) {
             self.state.editor = saved.editor;
             self.state.references = saved.references;
@@ -930,6 +933,10 @@ impl Client {
             Action::FilePicker(request) => self.file_picker(request),
             Action::InsertFile(locator) => self.insert_file(&locator),
             Action::Help => self.state.slash.open_help(),
+            Action::Terminals => self.terminal_menu(None, false),
+            Action::TerminalStatus(terminal) => self.terminal_status(terminal),
+            Action::CloseTerminal(id) => self.terminal_menu(Some(id), false),
+            Action::CloseTerminals => self.terminal_menu(None, true),
             Action::Jobs(request) => self.job_menu(request),
             Action::Preview(request) => {
                 self.state
@@ -1028,7 +1035,6 @@ impl Client {
                             workspace_id: registered.id,
                             session_id,
                             agent_preset_id: None,
-                            workspace_trust: WorkspaceTrust::Untrusted,
                         })
                         .await
                         .map_err(|failure| error(format!("Session creation failed: {failure}")))?;
@@ -1607,11 +1613,6 @@ async fn run_inner(
                 .map_err(error)?,
             session_id: command.session_id,
             agent_preset_id: command.agent_preset,
-            workspace_trust: if command.trust_workspace {
-                WorkspaceTrust::Trusted
-            } else {
-                WorkspaceTrust::Untrusted
-            },
         },
     };
     let mut presentation = crate::presentation::Owner::start(&context, presentation).await?;
@@ -1624,6 +1625,7 @@ async fn run_inner(
         context.lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
         model_catalog.clone(),
     );
+    let mut markdown = true;
     let startup = home::run(
         &context,
         &application,
@@ -1636,6 +1638,7 @@ async fn run_inner(
         &stopped,
         &mut terminate,
         model_catalog.as_ref(),
+        &mut markdown,
     )
     .await;
     let (attached, draft) = match startup {
@@ -1690,6 +1693,7 @@ async fn run_inner(
     client.files = observer.as_ref().expect("initial surface").files.clone();
     let mut ui_changes = client.ui.registry.membership_changes();
     client.state.editor = draft;
+    client.state.markdown = markdown;
     client.refresh_metrics();
     let mut dimensions = terminal::size();
     let mut view = render::View::default();
@@ -1718,7 +1722,7 @@ async fn run_inner(
             if let Some(target) = client.integration_credential.take()
                 && let Some(feature) = client.plugins.clone() { setup.open_integration(target, feature); }
             if let Some(command) = client.setup_command.take() {
-                match command { setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
+                match command { setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
                 dirty = true;
             }
             if client.state.menu.is_some() || client.state.answer.is_some() || client.state.ui_edit.is_some() || client.state.detail.is_some() || setup.active {client.state.slash.hide();}
@@ -2099,4 +2103,12 @@ fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
     }
     #[cfg(not(unix))]
     Ok(std::future::pending())
+}
+
+fn markdown_status(enabled: bool) -> &'static str {
+    if enabled {
+        "Markdown rendering on (this process)"
+    } else {
+        "Markdown rendering off (original text; this process)"
+    }
 }

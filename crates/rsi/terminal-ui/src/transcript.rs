@@ -230,6 +230,7 @@ impl ProcessOutcome {
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent presentation flags; folds do not change lifecycle or retention.
 pub struct Block {
+    pub(crate) markdown: Option<std::sync::Arc<crate::markdown::Document>>,
     pub(crate) clock: ProcessClock,
     pub(crate) outcome: Option<ProcessOutcome>,
     pub key: String,
@@ -368,6 +369,10 @@ impl Block {
             + self.pieces.capacity() * std::mem::size_of::<Piece>()
             + self.map_bytes
             + self
+                .markdown
+                .as_ref()
+                .map_or(0, |document| document.bytes())
+            + self
                 .outputs
                 .iter()
                 .flatten()
@@ -453,6 +458,7 @@ impl Transcript {
             if let Some(old) = previous.get(block.key.as_str()).filter(|old| {
                 old.role == block.role
                     && old.collapsed == block.collapsed
+                    && old.markdown == block.markdown
                     && old.pieces == block.pieces
             }) {
                 block.layout_revision = old.layout_revision.clone();
@@ -677,7 +683,9 @@ impl Transcript {
                     }
                 }
             }
-            SessionFactBody::TurnTerminal { turn_id, outcome } => {
+            SessionFactBody::TurnTerminal {
+                turn_id, outcome, ..
+            } => {
                 if matches!(outcome, rsi_agent_session_protocol::TurnOutcome::Completed) {
                     return;
                 }
@@ -1027,6 +1035,7 @@ impl Transcript {
         let position = self.blocks.iter().position(|block| block.key == key);
         position.unwrap_or_else(|| {
             self.blocks.push(Block {
+                markdown: None,
                 clock: ProcessClock::default(),
                 outcome: None,
                 key,
@@ -1336,6 +1345,7 @@ mod tests {
                         effect_id: EffectId::new("effect").unwrap(),
                         identity: identity.clone(),
                         result: ToolResult::new(value, vec![], is_error).unwrap(),
+                        conclusion: None,
                     },
                 )
                 .unwrap(),
@@ -1745,6 +1755,7 @@ mod tests {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         };
         let result = SessionFact::new(6, 1, result_body(identity)).unwrap();
         let mut live = Transcript::default();
@@ -1809,6 +1820,7 @@ mod tests {
                 )
                 .unwrap(),
                 result,
+                conclusion: None,
             },
         )
         .unwrap();

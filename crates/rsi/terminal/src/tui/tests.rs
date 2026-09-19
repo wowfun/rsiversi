@@ -215,6 +215,7 @@ async fn expanding_a_process_preserves_its_visible_row_even_when_content_overflo
                                     false,
                                 )
                                 .unwrap(),
+                                conclusion: None,
                             },
                         )
                         .unwrap(),

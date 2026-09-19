@@ -91,9 +91,10 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
         };
         nodes.push(node);
     }
-    if depth != 0 || serde_json::to_vec(&nodes).ok()?.len() > source.len() * 4 + 256 {
+    if depth != 0 {
         return None;
     }
+    rsi_api_protocol::measure_json(&nodes, source.len() * 4 + 256).ok()?;
     // Bound retained cache capacity independently of its encoded frame expansion.
     let owned = nodes.capacity() * std::mem::size_of::<Node>()
         + nodes
@@ -112,6 +113,30 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encoded_budget_matches_serde_for_escaped_and_multibyte_nodes() {
+        for text in [
+            "\"\\\n\r\t\0",
+            "界🦀e\u{301}\u{2028}\u{2029}",
+            "<script>& /",
+            "",
+        ] {
+            let nodes = vec![
+                Node::Text { text: text.into() },
+                Node::Code { text: text.into() },
+                Node::Start {
+                    element: Element::Link { href: text.into() },
+                },
+                Node::End,
+            ];
+            let length = serde_json::to_vec(&nodes).unwrap().len();
+            assert_eq!(
+                rsi_api_protocol::measure_json(&nodes, length).unwrap(),
+                length
+            );
+            assert!(rsi_api_protocol::measure_json(&nodes, length - 1).is_err());
+        }
+    }
     #[test]
     fn closed_markdown_preserves_literals_and_restricts_navigation() {
         let source = "## Result\n\n**bold 界** and `literal <x>` with [site](https://example.com/a).\n\n<script>bad()</script>\n\n![remote](https://example.com/image.png)\n\n[bad](javascript:alert%281%29)\n\n```sh\nexit 7\n```";

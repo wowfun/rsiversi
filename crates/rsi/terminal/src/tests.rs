@@ -461,6 +461,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
                             SessionFactBody::TurnTerminal {
                                 turn_id,
                                 outcome: TurnOutcome::Completed,
+                                result: None,
                             },
                         )
                         .unwrap(),
@@ -619,7 +620,7 @@ fn parses_one_valid_agent_preset_only_for_a_fresh_session() {
 }
 
 #[test]
-fn parses_repeat_images_message_identity_and_explicit_fresh_workspace_trust() {
+fn parses_repeat_images_and_message_identity() {
     let command = parse_headless(&[
         "task",
         "--message-id",
@@ -628,7 +629,6 @@ fn parses_repeat_images_message_identity_and_explicit_fresh_workspace_trust() {
         "first.png",
         "--image",
         "second.png",
-        "--trust-workspace",
     ])
     .unwrap();
     assert_eq!(
@@ -641,10 +641,7 @@ fn parses_repeat_images_message_identity_and_explicit_fresh_workspace_trust() {
     );
     assert!(matches!(
         command.options("task".into()).unwrap().session,
-        SessionSelection::Fresh {
-            workspace_trust: WorkspaceTrust::Trusted,
-            ..
-        }
+        SessionSelection::Fresh { .. }
     ));
     assert!(parse_headless(&["task", "--resume", "session-one", "--trust-workspace"]).is_err());
     assert!(parse_headless(&["task", "--trust-workspace", "--trust-workspace"]).is_err());
@@ -661,18 +658,20 @@ fn parses_repeat_images_message_identity_and_explicit_fresh_workspace_trust() {
 }
 
 #[test]
-fn session_resume_cannot_override_immutable_workspace_trust() {
-    let resume = SessionId::new("session-resume-trust").unwrap();
-    let parsed = SessionCommand::parse(vec![
-        OsString::from("--resume"),
-        OsString::from(resume.as_str()),
-        OsString::from("--trust-workspace"),
-    ]);
-    assert!(matches!(
-        parsed,
-        Err(RsiError::Boot(message))
-            if message.contains("immutable authority")
-    ));
+fn removed_workspace_flag_is_unknown_but_literal_input_is_preserved() {
+    let parsed = SessionCommand::parse(vec![OsString::from("--trust-workspace")]);
+    assert!(
+        matches!(parsed, Err(RsiError::Boot(message)) if message.contains("unknown Session application argument"))
+    );
+    assert!(parse_headless(&["--trust-workspace"]).is_err());
+    assert_eq!(
+        parse_headless(&["--", "--trust-workspace"])
+            .unwrap()
+            .positional
+            .as_deref(),
+        Some("--trust-workspace")
+    );
+    assert!(!HELP.contains("--trust-workspace"));
 }
 
 #[tokio::test]
@@ -904,6 +903,7 @@ async fn cancelled_turn_still_delivers_terminal_envelopes_through_backpressure()
             rsi_agent_session_protocol::SessionFactBody::TurnTerminal {
                 turn_id: turn_id.clone(),
                 outcome: TurnOutcome::Cancelled,
+                result: None,
             },
         )
         .unwrap(),

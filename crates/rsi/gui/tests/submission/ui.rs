@@ -90,7 +90,7 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
     backend.block_source.store(false, Ordering::SeqCst);
     app.command(&card).await.unwrap();
     let stale = button(&view(&app)["ui_detail"], None);
-    app.command(&json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string())
+    app.command(&json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string())
         .await
         .unwrap();
     let reads = backend.history_requests.lock().unwrap().len();
@@ -209,7 +209,7 @@ async fn independent_addon_has_generic_fields_and_actions_with_cross_pane_and_wi
     app.command(r#"{"action":"add_surface","pane":"compare"}"#)
         .await
         .unwrap();
-    app.command(&json!({"action":"create","pane":"compare","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string()).await.unwrap();
+    app.command(&json!({"action":"create","pane":"compare","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string()).await.unwrap();
     let current = view(&app);
     let pane = &current["surfaces"]["main"];
     let menu = pane["ui_surfaces"]

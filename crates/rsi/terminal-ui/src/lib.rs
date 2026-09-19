@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)] // Bounds and error categories are owned by the package contract.
 mod dialog;
 pub mod editor;
+mod markdown;
 #[cfg(all(test, target_os = "linux"))]
 mod performance;
 pub mod render;
@@ -37,6 +38,7 @@ pub struct Edit<'a> {
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent display facts, not an exclusive state machine.
 pub struct Input<'a> {
+    pub markdown: bool,
     pub activity: Option<Activity>,
     pub header: &'a SessionHeader,
     pub workspace_label: &'a str,

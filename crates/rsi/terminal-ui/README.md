@@ -1,6 +1,6 @@
 # rsi-terminal-ui
 
-Scene protocol version 12 carries one base surface (application or Session) and
+Scene protocol version 13 carries one base surface (application or Session) and
 at most one redacted application overlay. A bounded Composer prefix selects the
 inline model/effort list at the base editor rectangle; other overlays use a
 centered dialog. The wire type is not recursive. Base
@@ -28,7 +28,7 @@ Context-compaction output is an internal status block, distinct from assistant
 answers even when the preceding model intent is outside the loaded page.
 
 Pure terminal presentation: grapheme editing, bounded transcript projection,
-Markdown styling, layout and source positions. The resident terminal application
+Markdown rendering, layout and source positions. The resident terminal application
 supplies borrowed display data and owns every controller, cancellation token,
 action reference, terminal descriptor and process hook. Menu input contains labels
 and selection only; rendering does not acquire authority from menu contents.
@@ -92,13 +92,15 @@ unchanged folded bodies are not wrapped again on composer edits. Its LRU retains
 at most 512 entries and 1 MiB, including copied window text and source mappings.
 Keys bind the original block revision, width and summary mode; no Facts or source
 leases are retained. A changed body or width recomputes that window.
-Keys include the block's opaque content/source-mapping revision, width and
+Keys include the block's opaque content/source-mapping revision, width, Markdown mode and
 collapse state. A cloned historical projection retains its revision until changed;
 a changed Session replaces source revisions; presentation replacement creates a fresh cache. Insertions, source-window eviction,
 and backfill create a new revision. Titles and selection are projected from current
 state; source anchors and hit maps always resolve through the current pieces.
 The cache retains at most 512 entries and 32 MiB of owned text, compact row ends,
-Markdown style ranges and keys. Least recently used entries are evicted under
+Markdown display runs, source mappings and keys. Scene capture also caches at most
+1 MiB of semantic Markdown documents; each document is limited to 8,192 runs and
+1 MiB, and a scene admits at most 1 MiB of these documents. Least recently used entries are evicted under
 pressure; the currently calculated block is a separate transient bounded by the
 existing 256 KiB source-window limit. Eviction affects recomputation cost, not
 visible content or selection semantics. Each redraw retains only two screens of
@@ -128,3 +130,12 @@ Process outcomes cross the viewport as a closed enum, independently of fold
 state and display titles. Terminal outcomes require completed, non-running Tool
 or reasoning blocks. Request outcomes survive reverse history backfill through
 the retained request projection; partial history cannot imply success.
+
+Markdown layout is produced from retained source before viewport clipping. Scene
+windows retain independently renderable bounded display runs and exact original
+source coordinates, so clipped code/table fragments do not lose parse context.
+The scene carries the explicit rendering mode; both adapters use the same layout.
+Entities and escapes map to their original source ranges, while decorations carry
+no source authority. All retained layout allocations count toward cache limits;
+over-budget Markdown or an evicted source prefix falls back to original text.
+Mode changes preserve logical selection and scroll anchors.

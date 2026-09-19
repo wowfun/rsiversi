@@ -47,6 +47,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &State) -> View {
 }
 pub(super) fn input(state: &State) -> rsi_terminal_ui::Input<'_> {
     rsi_terminal_ui::Input {
+        markdown: state.markdown,
         fold_focus: state.fold_focus,
         activity: state.activity.clone(),
         header: &state.header,

@@ -174,7 +174,7 @@ async fn fixture() -> (
         .root()
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     (runtime, reader, app, files_fiber.unwrap())
 }
 async fn open_card(app: &Arc<rsi_gui::GuiApplication>, pane: &str) {

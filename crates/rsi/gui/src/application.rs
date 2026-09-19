@@ -90,7 +90,6 @@ pub(crate) enum Command {
     Create {
         pane: crate::SurfaceId,
         workspace: rsi_workspace_protocol::WorkspaceId,
-        trust: bool,
         #[serde(default)]
         reuse: Option<crate::panes::ReuseDraft>,
     },
@@ -297,7 +296,9 @@ pub struct GuiApplication {
     pub(crate) notice: Mutex<String>,
     pub(crate) execution: Execution,
     changed: watch::Sender<u64>,
-    slots: Arc<Semaphore>,
+    pub(crate) slots: Arc<Semaphore>,
+    pub(crate) terminal_reads: Arc<Semaphore>,
+    pub(crate) terminal_writes: Arc<Semaphore>,
     pub(crate) tasks: TaskTracker,
     stop: CancellationToken,
     frames: ByteBudget,
@@ -354,12 +355,26 @@ impl GuiApplication {
         F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
+        self.try_admit_inner(report_error, affected_pane, true, &self.slots, operation)
+    }
+    pub(crate) fn try_admit_inner<T, F, Fut>(
+        self: &Arc<Self>,
+        report_error: bool,
+        affected_pane: Option<crate::SurfaceId>,
+        publish: bool,
+        slots: &Arc<Semaphore>,
+        operation: F,
+    ) -> Result<BoxFuture<'static, Result<T>>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
         let admission = self.admission.lock().expect("Web admission poisoned");
         if self.stop.is_cancelled() {
             return Err("Web application is closed".into());
         }
-        let permit = self
-            .slots
+        let permit = slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| "Web application is busy")?;
@@ -372,7 +387,7 @@ impl GuiApplication {
             };
             if report_error && let Err(error) = &result { app.notice.lock().expect("Web notice poisoned").clone_from(error); }
             if let Some(pane) = affected_pane.and_then(|index| app.panes.lock().expect("GUI surfaces poisoned").get(&index).cloned()) { pane.changed(); }
-            app.changed();
+            if publish { app.changed(); }
             result
         }));
         drop(admission);
@@ -451,7 +466,15 @@ impl GuiApplication {
         if self.stop.is_cancelled() {
             return Err(ApiError::ShuttingDown);
         }
-        stream.encode(self, &self.frames, base)
+        #[cfg(feature = "test-support")]
+        let started = {
+            crate::test_support::take_frame_measurement();
+            std::time::Instant::now()
+        };
+        let frame = stream.encode(self, &self.frames, base);
+        #[cfg(feature = "test-support")]
+        crate::test_support::update(|sample| sample.stream_lock_ns = started.elapsed().as_nanos());
+        frame
     }
 
     /// Returns the exact latest encoded frame ID for acknowledgement.
@@ -627,6 +650,8 @@ impl PluginFactory for GuiApplicationFactory {
             execution: plan.context().runtime().execution().clone(),
             changed,
             slots: Arc::new(Semaphore::new(8)),
+            terminal_reads: Arc::new(Semaphore::new(32)),
+            terminal_writes: Arc::new(Semaphore::new(8)),
             tasks: TaskTracker::new(),
             stop: CancellationToken::new(),
             frames: ByteBudget::new(32 * 1024 * 1024)
@@ -651,15 +676,18 @@ impl PluginFactory for GuiApplicationFactory {
                             .stop
                             .cancel();
                         app.slots.close();
+                        app.terminal_reads.close();
+                        app.terminal_writes.close();
                         app.tasks.close();
                     }
                     drop(supply);
                     app.tasks.wait().await;
+                    let closed = app.close_surfaces().await;
                     *app.details.lock().expect("Web details poisoned") =
                         crate::details::Details::default();
                     *app.stream.lock().expect("Web frame stream poisoned") =
                         crate::frames::FrameState::default();
-                    Ok(())
+                    closed
                 })
             }),
         )

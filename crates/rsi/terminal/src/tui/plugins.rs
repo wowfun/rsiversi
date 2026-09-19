@@ -30,6 +30,37 @@ impl State {
             "Refresh plugin status".into(),
             Action::Plugins(PluginsCommand::Refresh),
         )];
+        actions.push((
+            "Host plugins".into(),
+            Action::Plugins(PluginsCommand::Select {
+                target: rsi_configuration_api::PluginStatusTarget::Host,
+            }),
+        ));
+        actions.push((
+            "Current preset configuration".into(),
+            Action::Plugins(PluginsCommand::Select {
+                target: rsi_configuration_api::PluginStatusTarget::Preset {
+                    id: self.header.agent_preset_id().to_string(),
+                },
+            }),
+        ));
+        if let Ok(header_key) = self.header.fingerprint() {
+            actions.push((
+                "Session resident generation".into(),
+                Action::Plugins(PluginsCommand::Select {
+                    target: rsi_configuration_api::PluginStatusTarget::Session {
+                        target: rsi_session_protocol::SessionTarget {
+                            session_id: self.header.session_id().clone(),
+                            header_key,
+                        },
+                    },
+                }),
+            ));
+        }
+        let _ = writeln!(text, "\nSource: {:?}", view.target);
+        for guidance in &view.guidance {
+            let _ = writeln!(text, "{guidance}");
+        }
         if view.exa_available {
             text.push_str("\nWeb retrieval · settings: rsi.retrieval\nweb_fetch and web_search start disabled. Enable them for new Sessions.\nHistory displays recorded sources without fetching them again.\n");
             actions.push((
@@ -158,7 +189,20 @@ impl State {
                 page.offset + page.plugins.len(),
                 page.total
             );
+            let _ = writeln!(
+                text,
+                "\nAvailability: {:?} · Preset root: {:?}",
+                page.context.availability, page.context.preset_source
+            );
+            if let Some(digest) = page.context.source_digest {
+                let _ = writeln!(text, "Source digest: {digest}");
+            }
             for row in page.plugins {
+                let _ = writeln!(
+                    text,
+                    "  Origin: {:?} · Reasons: {:?}",
+                    row.origin, row.diagnostics
+                );
                 let observed = row.observed.map_or_else(
                     || "Not observed".into(),
                     |state| format!("{:?} · {}", state.state, state.plugin),

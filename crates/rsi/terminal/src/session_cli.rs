@@ -172,9 +172,9 @@ async fn render_observation(
             durable_fact_seq,
         } => {
             let terminal = match fact.body() {
-                SessionFactBody::TurnTerminal { turn_id, outcome } => {
-                    Some((turn_id.clone(), outcome.clone()))
-                }
+                SessionFactBody::TurnTerminal {
+                    turn_id, outcome, ..
+                } => Some((turn_id.clone(), outcome.clone())),
                 _ => None,
             };
             sink.send(CliEvent::Fact {
@@ -480,11 +480,6 @@ async fn run(
                 .map_err(session_error)?,
             session_id: command.session_id,
             agent_preset_id: command.agent_preset,
-            workspace_trust: if command.trust_workspace {
-                WorkspaceTrust::Trusted
-            } else {
-                WorkspaceTrust::Untrusted
-            },
         },
     };
     let mut handle = resolve_application_handle(&application, &workspace, selection).await?;

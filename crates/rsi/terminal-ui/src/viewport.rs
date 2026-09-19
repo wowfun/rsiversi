@@ -15,6 +15,7 @@ pub struct Viewport {
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Serialized independent Block flags.
 struct WindowBlock {
+    markdown: Option<crate::markdown::Document>,
     elapsed_ms: Option<u64>,
     running: bool,
     outcome: Option<ProcessOutcome>,
@@ -48,9 +49,9 @@ impl Viewport {
     ) -> (Self, Option<Anchor>) {
         Self::capture_cached(
             transcript,
+            false,
             top,
-            width,
-            height,
+            (width, height),
             None,
             None,
             &mut FoldCache::default(),
@@ -58,19 +59,21 @@ impl Viewport {
     }
     pub(crate) fn capture_cached(
         transcript: &Transcript,
+        markdown: bool,
         top: Option<Anchor>,
-        width: u16,
-        height: u16,
+        dimensions: (u16, u16),
         activity: Option<&crate::Activity>,
         focus: Option<Anchor>,
         cache: &mut FoldCache,
     ) -> (Self, Option<Anchor>) {
+        let (width, height) = dimensions;
         let position = focus
             .and_then(|anchor| transcript.locate(anchor))
             .map(|(index, _)| (index.saturating_sub(usize::from(height)), 0))
             .or_else(|| top.map(|top| transcript.locate(top).unwrap_or((0, 0))));
         let mut projected_top = top;
         let mut remaining = Self::MAXIMUM_TEXT;
+        let mut markdown_remaining = 1024 * 1024;
         let mut blocks = Vec::new();
         let count = (usize::from(height) * 2).clamp(1, MAX_BLOCKS);
         let range: Box<dyn Iterator<Item = usize>> = match position {
@@ -79,40 +82,36 @@ impl Viewport {
         };
         for index in range.take(count) {
             let block = &transcript.blocks[index];
-            let (mut pieces, fold) = if block.collapsed
+            let semantic = markdown
+                && matches!(block.role, Role::Assistant | Role::Reasoning)
+                && !block.collapsed;
+            let prepared = semantic
+                .then(|| cache.markdown.get(block, width))
+                .flatten()
+                .filter(|document| document.bytes() <= markdown_remaining);
+            if let Some(document) = &prepared {
+                markdown_remaining -= document.bytes();
+            }
+            let (mut pieces, fold) = if semantic {
+                if block.bytes() > remaining {
+                    break;
+                }
+                (
+                    block
+                        .pieces
+                        .iter()
+                        .map(|piece| {
+                            window_piece(piece, std::slice::from_ref(&(0..piece.text.len())))
+                        })
+                        .collect(),
+                    None,
+                )
+            } else if block.collapsed
                 && !matches!(block.role, Role::User | Role::Assistant | Role::Metadata)
             {
                 cache.window(block, width)
             } else {
-                let mut pieces = Vec::new();
-                let mut skipped = 0;
-                let indexes: Box<dyn Iterator<Item = usize>> = if position.is_some() {
-                    Box::new(0..block.pieces.len())
-                } else {
-                    Box::new((0..block.pieces.len()).rev())
-                };
-                let mut budget = remaining;
-                for i in indexes {
-                    let piece = &block.pieces[i];
-                    let end = skipped + piece.text.len();
-                    if position.is_some_and(|(at, offset)| at == index && end < offset) {
-                        skipped = end;
-                        continue;
-                    }
-                    if piece.text.len() > budget {
-                        break;
-                    }
-                    budget -= piece.text.len();
-                    pieces.push(window_piece(
-                        piece,
-                        std::slice::from_ref(&(0..piece.text.len())),
-                    ));
-                    skipped = end;
-                }
-                if position.is_none() {
-                    pieces.reverse();
-                }
-                (pieces, None)
+                (unfolded(block, position, index, remaining), None)
             };
             let bytes: usize = pieces.iter().map(|piece| piece.text.len()).sum();
             if bytes > remaining || (pieces.is_empty() && !block.pieces.is_empty()) {
@@ -134,6 +133,7 @@ impl Viewport {
                 _ => block.title.clone(),
             };
             blocks.push(WindowBlock {
+                markdown: prepared.as_deref().cloned(),
                 elapsed_ms,
                 running,
                 outcome: matches!(block.role, Role::Reasoning | Role::Tool)
@@ -171,6 +171,7 @@ impl Viewport {
         let mut result = Transcript::default();
         let mut text_bytes = 0usize;
         let mut map_bytes = 0usize;
+        let mut markdown_bytes = 0usize;
         let mut keys = std::collections::BTreeSet::new();
         for block in self.blocks {
             if block.key.len() > 4096
@@ -260,14 +261,74 @@ impl Viewport {
                 target.first = target.first.min(piece.source.seq);
                 target.pieces.push_back(piece);
             }
+            restore_markdown(target, block.markdown, &mut markdown_bytes)?;
         }
         Ok(result)
     }
 }
 
+fn restore_markdown(
+    target: &mut Block,
+    document: Option<crate::markdown::Document>,
+    markdown_bytes: &mut usize,
+) -> Result<(), &'static str> {
+    if let Some(document) = document {
+        *markdown_bytes = markdown_bytes
+            .checked_add(document.bytes())
+            .ok_or("Markdown overflow")?;
+        if *markdown_bytes > 1024 * 1024
+            || !matches!(target.role, Role::Assistant | Role::Reasoning)
+            || target.collapsed
+        {
+            return Err("invalid Markdown block");
+        }
+        document.validate(&target.text())?;
+        target.markdown = Some(std::sync::Arc::new(document));
+    }
+    Ok(())
+}
+
+fn unfolded(
+    block: &Block,
+    position: Option<(usize, usize)>,
+    index: usize,
+    remaining: usize,
+) -> Vec<WindowPiece> {
+    let mut pieces = Vec::new();
+    let mut skipped = 0;
+    let indexes: Box<dyn Iterator<Item = usize>> = if position.is_some() {
+        Box::new(0..block.pieces.len())
+    } else {
+        Box::new((0..block.pieces.len()).rev())
+    };
+    let mut budget = remaining;
+    for i in indexes {
+        let piece = &block.pieces[i];
+        let end = skipped + piece.text.len();
+        if position.is_some_and(|(at, offset)| at == index && end < offset) {
+            skipped = end;
+            continue;
+        }
+        if piece.text.len() > budget {
+            break;
+        }
+        budget -= piece.text.len();
+        pieces.push(window_piece(
+            piece,
+            std::slice::from_ref(&(0..piece.text.len())),
+        ));
+        skipped = end;
+    }
+    if position.is_none() {
+        pieces.reverse();
+    }
+    pieces
+}
+
 /// Discardable compressed source windows, bounded separately from renderer layouts.
 #[derive(Debug, Default)]
 pub(crate) struct FoldCache {
+    markdown: crate::markdown::Cache,
     entries: VecDeque<FoldEntry>,
     bytes: usize,
     #[cfg(test)]

@@ -85,6 +85,7 @@ struct OwnedEdit {
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Mirrors independent display facts.
 pub struct SessionScene {
+    markdown: bool,
     activity: Option<crate::Activity>,
     header: SessionHeader,
     workspace_label: String,
@@ -131,14 +132,15 @@ impl SessionScene {
     ) -> Result<Self, &'static str> {
         let (transcript, top) = Viewport::capture_cached(
             input.transcript,
+            input.markdown,
             input.top,
-            width,
-            height,
+            (width, height),
             input.activity.as_ref(),
             input.fold_focus.map(|(anchor, _)| anchor),
             cache,
         );
         let scene = Self {
+            markdown: input.markdown,
             activity: input.activity.clone(),
             fold_focus: input.fold_focus,
             header: input.header.clone(),
@@ -472,6 +474,7 @@ impl Renderer {
             Surface::Session(scene) => *scene,
         };
         let SessionScene {
+            markdown,
             activity,
             header,
             workspace_label,
@@ -521,6 +524,7 @@ impl Renderer {
         };
 
         let input = Input {
+            markdown,
             fold_focus,
             activity,
             header: &header,
@@ -617,6 +621,77 @@ mod tests {
             .unwrap(),
         );
     }
+    #[test]
+    fn markdown_scene_preserves_code_context_copy_and_mode_at_clipped_anchors() {
+        let mut state = state();
+        let raw = "# Heading\n\n**bold** &amp; 中文 👩‍💻\n\n```rust\n  first();\n  second();\n```\n";
+        for (i, text) in raw.split_inclusive('\n').enumerate() {
+            state.transcript.apply(
+                &SessionFact::new(
+                    i as u64 + 1,
+                    i as u64 + 1,
+                    SessionFactBody::ModelEvent {
+                        turn_id: TurnId::new("markdown").unwrap(),
+                        effect_id: rsi_agent_session_protocol::EffectId::new("answer").unwrap(),
+                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                        event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::Text(text.into()),
+                        },
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        let anchor = state.transcript.blocks[0]
+            .anchor(raw.find("second").unwrap())
+            .unwrap();
+        for top in [None, Some(anchor)] {
+            state.top = top;
+            for (width, height) in [(80, 24), (28, 16)] {
+                let mut input = input(&state);
+                input.markdown = true;
+                let mut direct =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                let mut direct_view = None;
+                direct
+                    .draw(|frame| {
+                        direct_view = Some(render::draw(
+                            frame,
+                            &input,
+                            &mut render::LayoutCache::default(),
+                        ));
+                    })
+                    .unwrap();
+                let scene = Scene::capture(&input, width, height)
+                    .unwrap()
+                    .encode()
+                    .unwrap();
+                let (buffer, view) = Scene::decode(&scene)
+                    .unwrap()
+                    .render(width, height)
+                    .unwrap();
+                assert_eq!(&buffer, direct.backend().buffer());
+                assert_eq!(view.hits, direct_view.unwrap().hits);
+                assert!(view.sources_belong_to(state.header.session_id(), &state.transcript));
+                if let (Some(first), Some(last)) = (view.hits.first(), view.hits.last()) {
+                    assert_eq!(
+                        view.selected_source(&state.transcript, first.3, last.4)
+                            .unwrap(),
+                        state.transcript.selected(first.3, last.4).unwrap()
+                    );
+                }
+                input.markdown = false;
+                let (raw_buffer, _) = Scene::capture(&input, width, height)
+                    .unwrap()
+                    .render(width, height)
+                    .unwrap();
+                assert_ne!(buffer, raw_buffer);
+            }
+        }
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // The same original sources are compared at all four geometries and fold states.
     fn folded_scene_preserves_large_process_head_tail_count_and_hidden_anchor() {
@@ -1108,7 +1183,7 @@ mod application_tests {
         }
     }
     #[test]
-    fn v12_schema_rejects_stale_v11_and_completion_overflow() {
+    fn v13_schema_rejects_stale_v12_and_completion_overflow() {
         let request = crate::wire::Request {
             identity: crate::wire::Identity {
                 attachment: 0,
@@ -1121,8 +1196,8 @@ mod application_tests {
         };
         let mut model: serde_json::Value =
             serde_json::from_slice(&crate::wire::request_header(&request).unwrap()).unwrap();
-        assert_eq!(model["schema"]["version"], 12);
-        model["schema"]["version"] = serde_json::json!(11);
+        assert_eq!(model["schema"]["version"], 13);
+        model["schema"]["version"] = serde_json::json!(12);
         assert!(crate::wire::parse_header(&serde_json::to_vec(&model).unwrap()).is_err());
         let scene = Scene::from(ApplicationScene {
             completion: Some(Completion {

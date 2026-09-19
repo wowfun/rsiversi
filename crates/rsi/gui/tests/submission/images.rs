@@ -198,7 +198,7 @@ async fn a_lost_upload_waiter_retains_import_ownership_through_pane_replacement(
             .await
             .is_err()
     );
-    cmd(&app, json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false})).await;
+    cmd(&app, json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})).await;
     backend.media.release.notify_one();
     until(|| backend.media.active.load(Ordering::SeqCst) == 0).await;
     assert!(view(&app)["surfaces"]["main"].get("images").is_none());

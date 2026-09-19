@@ -165,7 +165,7 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
     let app = root
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     let view = sources::view(&app);
     let pane = &view["surfaces"]["main"];
     assert_eq!(view["has_remote_ui"], true);

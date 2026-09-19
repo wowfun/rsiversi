@@ -30,7 +30,7 @@ pub use plugin::{
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentPresetId, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
     MAXIMUM_TURN_TEXT_BYTES, MessageId, SessionFact, SessionFactBody, SessionId, TurnId,
-    TurnOutcome, WorkspaceTrust,
+    TurnOutcome,
 };
 use rsi_agent_turn_protocol::{CancelTarget, MessageState, ObservationCursor, SessionObservation};
 use rsi_ai_protocol::{ContentDelta, LanguageEvent, ModelRef};
@@ -63,11 +63,11 @@ pub const HELP: &str = "Session command options (headless):\n  --commands | --co
   rsi --profile headless TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
       [--deployment ID --model ID] [--sandbox read-only|workspace-write|danger-full-access]\n\
-      [--trust-workspace] [--output text|jsonl]\n\
+      [--output text|jsonl]\n\
   rsi --profile cli [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
-      [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n\
+      [--agent-preset ID] [--output text|jsonl]\n\
   rsi --profile tui [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
-      [--agent-preset ID] [--trust-workspace]\n";
+      [--agent-preset ID]\n";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCommand {
@@ -77,7 +77,6 @@ pub(crate) struct SessionCommand {
     resume: Option<SessionId>,
     session_id: Option<SessionId>,
     agent_preset: Option<AgentPresetId>,
-    trust_workspace: bool,
     output: OutputMode,
 }
 
@@ -94,7 +93,6 @@ pub(crate) enum SessionSelection {
         cwd: PathBuf,
         session_id: Option<SessionId>,
         agent_preset_id: Option<AgentPresetId>,
-        workspace_trust: WorkspaceTrust,
     },
     Resume {
         session_id: SessionId,
@@ -307,7 +305,6 @@ impl SessionCommand {
             resume: None,
             session_id: None,
             agent_preset: None,
-            trust_workspace: false,
             output: OutputMode::Text,
         };
         let mut arguments = arguments.into_iter();
@@ -341,9 +338,7 @@ impl SessionCommand {
                     run_preset_value(&mut arguments)?,
                     "--agent-preset",
                 )?,
-                "--trust-workspace" => {
-                    set_flag(&mut command.trust_workspace, "--trust-workspace")?;
-                }
+
                 "--output" => {
                     if output_set {
                         return Err(usage("duplicate --output"));
@@ -370,8 +365,7 @@ impl SessionCommand {
         if (command.list || command.history.is_some())
             && (command.cwd.is_some()
                 || command.session_id.is_some()
-                || command.agent_preset.is_some()
-                || command.trust_workspace)
+                || command.agent_preset.is_some())
         {
             return Err(usage(
                 "read-only Session commands cannot change creation settings",
@@ -383,11 +377,7 @@ impl SessionCommand {
         if command.resume.is_some() && command.agent_preset.is_some() {
             return Err(usage("--resume and --agent-preset are mutually exclusive"));
         }
-        if command.resume.is_some() && command.trust_workspace {
-            return Err(usage(
-                "--trust-workspace cannot change an existing Session's immutable authority",
-            ));
-        }
+
         Ok(command)
     }
 }
@@ -423,7 +413,6 @@ pub(crate) async fn resolve_application_handle(
             cwd,
             session_id,
             agent_preset_id,
-            workspace_trust,
         } => {
             let session_id = session_id.map_or_else(generated_cli_session_id, Ok)?;
             let cwd = std::path::absolute(cwd)
@@ -437,7 +426,6 @@ pub(crate) async fn resolve_application_handle(
                     workspace_id: registered.id,
                     session_id,
                     agent_preset_id,
-                    workspace_trust,
                 })
                 .await
                 .map_err(HandleError::Session)

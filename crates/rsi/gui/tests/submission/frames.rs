@@ -194,3 +194,148 @@ async fn application_frames_follow_models_details_and_generation_changes_without
         Err(rsi_api_protocol::ApiError::ShuttingDown)
     ));
 }
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "opt-in actual next_frame global-section measurement; no timing pass threshold"]
+async fn measure_actual_frames_with_small_and_large_global_details() {
+    global_frame_cases(&[32, 64 * 1024], 10, true).await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn measured_frames_reconstruct_changed_blocks_and_details() {
+    global_frame_cases(&[32, 64 * 1024], 2, false).await;
+}
+
+#[cfg(feature = "test-support")]
+async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) {
+    for &bytes in detail_sizes {
+        let (runtime, backend, app) = sources::fixture().await;
+        let initial = frame(&app, None);
+        let generation = initial["view"]["surfaces"]["main"]["generation"].clone();
+        backend.facts.lock().unwrap().push(
+            SessionFact::new(
+                9,
+                1,
+                SessionFactBody::TurnAccepted {
+                    reasoning_effort: None,
+                    turn_id: TurnId::new("turn").unwrap(),
+                    text: "x".repeat(bytes),
+                    model: None,
+                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        );
+        app.command(&json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"9","field":{"kind":"turn_input"}}}).to_string()).await.unwrap();
+        app.command(&json!({"action":"history","pane":"main","generation":generation}).to_string())
+            .await
+            .unwrap();
+        let mut snapshot = frame(&app, None);
+        for scenario in ["unchanged", "single_block", "single_detail"] {
+            for sample in 0..samples {
+                if scenario == "single_block" {
+                    backend.facts.lock().unwrap().push(
+                        SessionFact::new(
+                            10 + sample,
+                            1,
+                            SessionFactBody::ModelEvent {
+                                purpose: ModelEventPurpose::Conversation,
+                                turn_id: TurnId::new("turn").unwrap(),
+                                effect_id: EffectId::new("stream").unwrap(),
+                                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                    index: 0,
+                                    delta: rsi_ai_protocol::ContentDelta::Text(" changed".into()),
+                                },
+                            },
+                        )
+                        .unwrap(),
+                    );
+                    for action in ["live", "history"] {
+                        app.command(
+                            &json!({"action":action,"pane":"main","generation":generation})
+                                .to_string(),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                if scenario == "single_detail" {
+                    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+                    app.command(&json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"9","field":{"kind":"turn_input"}}}).to_string()).await.unwrap();
+                }
+                let base = snapshot["frame_id"].as_str().unwrap();
+                let (encoded, allocations) =
+                    frame_allocations::measure(|| app.next_frame(Some(base)).unwrap());
+                let measurement = rsi_gui::test_support::take_frame_measurement();
+                let patch: Value = serde_json::from_slice(encoded.as_bytes()).unwrap();
+                assert_eq!(patch["kind"], "patch");
+                if scenario == "single_block" {
+                    assert_eq!(patch["surfaces"].as_array().unwrap().len(), 1);
+                    reconstruct_changed_block(
+                        &mut snapshot["view"]["surfaces"]["main"],
+                        &patch["surfaces"][0],
+                    );
+                } else {
+                    assert_eq!(patch["surfaces"], json!([]));
+                }
+                if scenario == "unchanged" {
+                    assert_eq!(patch["sections"], json!({}));
+                }
+                for (key, value) in patch["sections"].as_object().unwrap() {
+                    snapshot["view"][key] = value.clone();
+                }
+                snapshot["frame_id"] = patch["frame_id"].clone();
+                let output_bytes = encoded.as_bytes().len();
+                drop(encoded);
+                assert_eq!(snapshot["view"], sources::view(&app));
+                assert_eq!(measurement.section_materializations, 1);
+                if report {
+                    eprintln!(
+                        "global_frame {}",
+                        json!({"detail_bytes":bytes,"scenario":scenario,"sample":sample,"allocation_calls":allocations.calls,"allocation_requested_bytes":allocations.requested,"output_bytes":output_bytes,"measurement":measurement})
+                    );
+                }
+            }
+        }
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn reconstruct_changed_block(pane: &mut Value, change: &Value) {
+    for (key, value) in change["fields"].as_object().unwrap() {
+        pane[key] = value.clone();
+    }
+    let transcript = &change["transcript"];
+    assert_eq!(transcript["upsert"].as_array().unwrap().len(), 1);
+    assert_eq!(transcript["remove"], json!([]));
+    for (key, value) in transcript["fields"].as_object().unwrap() {
+        pane["transcript"][key] = value.clone();
+    }
+    let blocks = pane["transcript"]["blocks"].as_array_mut().unwrap();
+    for block in transcript["upsert"].as_array().unwrap() {
+        if let Some(old) = blocks.iter_mut().find(|old| old["key"] == block["key"]) {
+            *old = block.clone();
+        } else {
+            blocks.push(block.clone());
+        }
+    }
+    if let Some(order) = transcript.get("order") {
+        let sorted = order
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|key| {
+                blocks
+                    .iter()
+                    .find(|block| block["key"] == *key)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        *blocks = sorted;
+    }
+}

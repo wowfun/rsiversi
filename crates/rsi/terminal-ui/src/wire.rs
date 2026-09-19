@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 pub const CONTRACT: &str = "rsi.terminal.render";
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 pub const SERVICE: &str = "rsi.terminal.render";
 pub const MAXIMUM_FRAGMENT: usize = 64 * 1024;
 pub const MAXIMUM_FRAME: usize = 32 * 1024 * 1024;

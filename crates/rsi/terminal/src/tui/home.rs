@@ -80,6 +80,7 @@ pub(super) async fn run(
     stop: &tokio_util::sync::CancellationToken,
     terminate: &mut std::pin::Pin<Box<impl std::future::Future<Output = ()>>>,
     catalog: &dyn rsi_ai_protocol::LanguageModels,
+    markdown: &mut bool,
 ) -> Result<Option<(Attachment, editor::Editor)>> {
     let initial = tokio::select! { biased;
         () = stop.cancelled() => return Ok(None),
@@ -215,6 +216,7 @@ pub(super) async fn run(
                                 match command {
                                     setup::Command::Quit => break Ok(None),
                                     setup::Command::Help => slash.open_help(),
+                                    setup::Command::Markdown(mode) => { *markdown = mode.unwrap_or(!*markdown); status = super::markdown_status(*markdown).into(); editor.take(); },
                                     setup::Command::New | setup::Command::Effort => status="Choose a model with /login or /model first. Draft retained.".into(),
                                     setup::Command::Resume(None) => {let application=application.clone();history=Some(Box::pin(async move{application.list_recent(None,128).await.map_err(error)}));},
                                     setup::Command::Resume(Some(session_id)) => {let application=application.clone();let workspace=workspace.clone();attaching=Some(Box::pin(async move{attachment(resolve_application_handle(&application,&workspace,SessionSelection::Resume{session_id,cwd:None}).await?,true,None).await}));},
@@ -341,7 +343,6 @@ mod tests {
             cwd: std::path::PathBuf::from("."),
             session_id: Some(SessionId::new("setup-race").unwrap()),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         };
         for error in [
             SessionError::SetupRequired,

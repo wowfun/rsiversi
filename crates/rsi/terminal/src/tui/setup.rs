@@ -38,6 +38,7 @@ pub(super) enum Command {
     Models,
     Effort,
     Help,
+    Markdown(Option<bool>),
     Plugins,
     New,
     Resume(Option<SessionId>),
@@ -53,6 +54,9 @@ pub(super) fn command(text: &str) -> Option<Command> {
     match words.as_slice() {
         ["/plugins"] => Some(Command::Plugins),
         ["/help"] => Some(Command::Help),
+        ["/markdown"] => Some(Command::Markdown(None)),
+        ["/markdown", "on"] => Some(Command::Markdown(Some(true))),
+        ["/markdown", "off"] => Some(Command::Markdown(Some(false))),
         ["/new"] => Some(Command::New),
         ["/quit" | "/exit"] => Some(Command::Quit),
         ["/resume"] => Some(Command::Resume(None)),
@@ -74,7 +78,7 @@ pub(super) fn command(text: &str) -> Option<Command> {
         }),
         [
             "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume"
-            | "/reference" | "/plugins",
+            | "/reference" | "/plugins" | "/markdown",
             ..,
         ] => Some(Command::Invalid),
         _ => None,
@@ -2237,6 +2241,23 @@ mod tests {
         assert!(matches!(command(" /effort "), Some(Command::Effort)));
         assert!(matches!(command("/effort high"), Some(Command::Invalid)));
         assert!(command("/efforts").is_none());
+        assert!(matches!(
+            command("/markdown"),
+            Some(Command::Markdown(None))
+        ));
+        assert!(matches!(
+            command("/markdown on"),
+            Some(Command::Markdown(Some(true)))
+        ));
+        assert!(matches!(
+            command("/markdown off"),
+            Some(Command::Markdown(Some(false)))
+        ));
+        assert!(matches!(
+            command("/markdown unknown"),
+            Some(Command::Invalid)
+        ));
+        assert!(command("/markdown\nexample").is_none());
         for text in ["/models", "/model-extra", "/compact", "ordinary message"] {
             assert!(command(text).is_none());
         }

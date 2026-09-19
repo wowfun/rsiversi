@@ -372,6 +372,7 @@ mod tests {
         .unwrap();
         Scene::capture(
             &rsi_terminal_ui::Input {
+                markdown: true,
                 fold_focus: None,
                 activity: None,
                 header: &header,

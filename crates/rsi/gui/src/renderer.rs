@@ -381,6 +381,7 @@ mod tests {
                         SessionFactBody::TurnTerminal {
                             turn_id: TurnId::new("turn").unwrap(),
                             outcome: TurnOutcome::Completed,
+                            result: None,
                         },
                     )
                     .unwrap(),

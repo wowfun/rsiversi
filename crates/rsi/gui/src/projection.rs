@@ -514,7 +514,9 @@ impl Transcript {
                     text,
                 );
             }
-            SessionFactBody::TurnTerminal { turn_id, outcome } => {
+            SessionFactBody::TurnTerminal {
+                turn_id, outcome, ..
+            } => {
                 let (status, detail) = match outcome {
                     rsi_agent_session_protocol::TurnOutcome::Completed => {
                         ("Completed", String::new())
@@ -670,6 +672,7 @@ mod tests {
                         false,
                     )
                     .unwrap(),
+                    conclusion: None,
                 },
             )
             .unwrap();
@@ -775,6 +778,7 @@ mod tests {
             SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new("turn").unwrap(),
                 outcome: rsi_agent_session_protocol::TurnOutcome::Cancelled,
+                result: None,
             },
         )
         .unwrap();

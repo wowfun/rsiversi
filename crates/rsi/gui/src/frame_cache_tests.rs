@@ -100,6 +100,7 @@ fn repeated_terminal_facts_reuse_the_closed_status_block() {
         SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("turn").unwrap(),
             outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+            result: None,
         },
     )
     .unwrap();

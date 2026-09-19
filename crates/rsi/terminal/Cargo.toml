@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-workbench-ui = { path = "../workbench-ui" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }

@@ -110,6 +110,7 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         turn_id:TurnId::new("turn").unwrap(), effect_id:EffectId::new("effect").unwrap(),
         identity:rsi_tools_protocol::ToolResultIdentity::new("owner","invocation","call","a".repeat(64)).unwrap(),
         result:rsi_tools_protocol::ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":"a".repeat(32)},"stderr":{"full_output":"b".repeat(32)}}),vec![],false).unwrap(),
+        conclusion: None,
     }).unwrap());
     let session = view(&app)["surfaces"]["main"]["session"].clone();
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())

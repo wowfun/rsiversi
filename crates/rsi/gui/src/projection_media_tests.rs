@@ -62,6 +62,7 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
     )
     .unwrap();

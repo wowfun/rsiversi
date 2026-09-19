@@ -72,6 +72,8 @@ struct Backend {
     unpublished: std::sync::atomic::AtomicBool,
     reject_submissions: std::sync::atomic::AtomicBool,
     header_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
+    terminal_gate: Mutex<Option<Arc<admission::TerminalGate>>>,
+    terminal_detaches: Mutex<Vec<String>>,
     children: Mutex<std::collections::BTreeMap<SessionId, Arc<Backend>>>,
     tree: Mutex<Vec<rsi_agent_store_protocol::StoreAgentDescendantStatus>>,
     observations: std::sync::atomic::AtomicUsize,
@@ -146,6 +148,46 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn terminal(
+        &self,
+        request: terminal::Request,
+    ) -> rsi_session_protocol::Result<terminal::Reply> {
+        use terminal::{Attachment, Operation, Phase, Reply, Request, Size, Terminal};
+        match request {
+            Request::Operate {
+                operation: Operation::Attach { terminal },
+            } => Ok(Reply::Attached(Attachment {
+                id: terminal.clone(),
+                stream_epoch: 1,
+                terminal: Terminal {
+                    id: terminal,
+                    size: Size {
+                        rows: 24,
+                        columns: 80,
+                    },
+                    phase: Phase::Running,
+                    controller: None,
+                    controller_epoch: 1,
+                },
+            })),
+            Request::Operate {
+                operation: Operation::Read { .. },
+            } => {
+                let gate = self.terminal_gate.lock().unwrap().clone().unwrap();
+                gate.entered.add_permits(1);
+                gate.release.cancelled().await;
+                missing()
+            }
+            Request::Operate {
+                operation: Operation::Detach { attachment, .. },
+            } => {
+                self.terminal_detaches.lock().unwrap().push(attachment);
+                Ok(Reply::Done)
+            }
+            _ => missing(),
+        }
+    }
+
     async fn tree_metrics(
         &self,
         _: bool,
@@ -646,7 +688,7 @@ async fn verify_retry(resolution: usize) {
     let app = root
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
     let generation = view["surfaces"]["main"]["generation"].as_str().unwrap();
     let prepared = prepare(&app, generation, "perform effect once", vec![], false).await;
@@ -777,7 +819,7 @@ async fn failed_navigation_at_submission_capacity_keeps_the_current_pane_usable(
         .store(2, std::sync::atomic::Ordering::SeqCst);
     let mut current = serde_json::Value::Null;
     for index in 0..64 {
-        app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+        app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
         current = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
         if index < 63 {
             let generation = current["surfaces"]["main"]["generation"].as_str().unwrap();
@@ -850,7 +892,7 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
 
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
     let session = view["surfaces"]["main"]["session"].clone();
     *backend.facts.lock().unwrap() = (1..=300)
@@ -861,6 +903,7 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
                 SessionFactBody::TurnTerminal {
                     turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap()
@@ -906,3 +949,7 @@ async fn start_ui(root: &Context) {
         assert_eq!(fiber.snapshot().state, FiberState::Active);
     }
 }
+
+#[cfg(feature = "test-support")]
+#[path = "../src/frame_allocations.rs"]
+mod frame_allocations;

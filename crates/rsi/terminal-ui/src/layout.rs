@@ -1,5 +1,5 @@
 //! Presentation-owned body layouts; no durable records or source leases.
-use super::{MarkdownStyles, each_row, markdown_styles};
+use super::{MarkdownStyles, each_row};
 use crate::transcript::{Block, Role, Transcript};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -21,11 +21,24 @@ pub struct Layout {
     pub styles: MarkdownStyles,
     ends: Vec<u32>,
     command_row: Option<usize>,
+    markdown: Option<Arc<crate::markdown::Document>>,
 }
 impl Layout {
-    fn new(block: &Block, width: u16) -> Self {
+    fn new(block: &Block, width: u16, markdown: bool) -> Self {
         let width = width.saturating_sub(if block.role == Role::User { 2 } else { 0 });
-        let text = block.text();
+        let original = block.text();
+        let markdown = (markdown
+            && matches!(block.role, Role::Assistant | Role::Reasoning)
+            && !block.collapsed)
+            .then(|| {
+                block.markdown.clone().or_else(|| {
+                    (!block.discarded && !block.pieces.front().is_some_and(|piece| piece.omitted))
+                        .then(|| crate::markdown::parse(&original, width).map(Arc::new))
+                        .flatten()
+                })
+            })
+            .flatten();
+        let text = markdown.as_ref().map_or(original, |doc| doc.text.clone());
         let command_end: usize = block
             .pieces
             .iter()
@@ -55,16 +68,18 @@ impl Layout {
         if ends.is_empty() {
             ends.push(0);
         }
-        let styles = if block.role == Role::Assistant {
-            markdown_styles(&text)
-        } else {
-            Vec::new()
-        };
+        let styles = markdown.as_ref().map_or_else(Vec::new, |doc| {
+            doc.runs
+                .iter()
+                .map(|run| (run.display.clone(), run.style))
+                .collect()
+        });
         Self {
             text,
             styles,
             ends,
             command_row,
+            markdown,
         }
     }
     fn row_start(&self, index: usize) -> usize {
@@ -82,6 +97,10 @@ impl Layout {
             .map(move |(index, end)| (self.row_start(index), *end as usize))
     }
     pub fn first_row(&self, offset: usize) -> usize {
+        let offset = self
+            .markdown
+            .as_ref()
+            .map_or(offset, |doc| doc.display_offset(offset));
         // Search starts so wrapping and the display-only command/result break
         // preserve their distinct rows, even beside empty source lines.
         let mut from = 0;
@@ -95,6 +114,17 @@ impl Layout {
             }
         }
         from.saturating_sub(1)
+    }
+    pub fn source_offset(&self, display: usize) -> Option<usize> {
+        self.markdown
+            .as_ref()
+            .map_or(Some(display), |doc| doc.source_offset(display))
+    }
+    pub fn source_range(&self, display: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+        self.markdown.as_ref().map_or_else(
+            || Some(display.clone()),
+            |doc| doc.source_range(display.clone()),
+        )
     }
     pub(crate) fn hidden_range(&self, block: &Block) -> Option<(usize, usize)> {
         if !block.collapsed || matches!(block.role, Role::User | Role::Assistant | Role::Metadata) {
@@ -110,6 +140,7 @@ impl Layout {
         self.text.capacity()
             + self.ends.capacity() * size_of::<u32>()
             + self.styles.capacity() * size_of::<(std::ops::Range<usize>, ratatui::style::Style)>()
+            + self.markdown.as_ref().map_or(0, |doc| doc.bytes())
             + size_of::<Self>()
     }
 }
@@ -128,6 +159,7 @@ impl Entry {
 }
 #[derive(Debug, Default)]
 pub struct LayoutCache {
+    markdown: bool,
     entries: VecDeque<Entry>,
     bytes: usize,
     #[cfg(test)]
@@ -136,6 +168,14 @@ pub struct LayoutCache {
     pub enumerated_rows: usize,
 }
 impl LayoutCache {
+    pub fn set_markdown(&mut self, enabled: bool) {
+        if self.markdown != enabled {
+            self.entries.clear();
+            self.bytes = 0;
+            self.markdown = enabled;
+        }
+    }
+
     pub fn retain(&mut self, transcript: &Transcript) {
         let current: BTreeMap<_, _> = transcript
             .blocks
@@ -166,7 +206,7 @@ impl LayoutCache {
         {
             self.builds += 1;
         }
-        let layout = Arc::new(Layout::new(block, width));
+        let layout = Arc::new(Layout::new(block, width, self.markdown));
         let entry = Entry {
             key: block.key.clone(),
             revision: block.layout_revision.clone(),
@@ -258,12 +298,13 @@ mod tests {
                             false,
                         )
                         .unwrap(),
+                        conclusion: None,
                     },
                 )
                 .unwrap(),
             );
             let block = &transcript.blocks[0];
-            let layout = Layout::new(block, 80);
+            let layout = Layout::new(block, 80, false);
             assert_eq!(
                 layout.text,
                 format!("{command}{result}"),
@@ -293,7 +334,7 @@ mod tests {
             "a\tbcdef",
         ] {
             let transcript = transcript(text);
-            let layout = Layout::new(&transcript.blocks[0], 6);
+            let layout = Layout::new(&transcript.blocks[0], 6, false);
             for (index, (start, _)) in layout.rows().enumerate() {
                 assert_eq!(layout.first_row(start), index, "{text:?}: {start}");
             }
@@ -307,7 +348,7 @@ mod tests {
             ("e\u{301}界", vec![(0, 6)]),
         ] {
             let transcript = transcript(text);
-            let layout = Layout::new(&transcript.blocks[0], 6);
+            let layout = Layout::new(&transcript.blocks[0], 6, false);
             assert_eq!(layout.rows().collect::<Vec<_>>(), expected);
         }
     }

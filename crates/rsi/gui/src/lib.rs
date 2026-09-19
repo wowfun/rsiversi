@@ -19,3 +19,6 @@ pub use application::{
 };
 /// Maximum source bytes admitted by an image import before platform copying.
 pub const MAXIMUM_UPLOAD_BYTES: usize = panes::images::MAXIMUM_UPLOAD_BYTES;
+
+#[cfg(feature = "test-support")]
+pub mod test_support;

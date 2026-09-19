@@ -60,6 +60,7 @@ pub enum FooterAction {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct View {
+    markdown: bool,
     rows: Vec<Row>,
     session: Option<rsi_agent_session_protocol::SessionId>,
     anchors: Vec<Option<Anchor>>,
@@ -265,6 +266,7 @@ impl View {
         let mut remaining = 3;
         let mut target = transcript.blocks[first.0].anchor(0);
         let mut cache = LayoutCache::default();
+        cache.set_markdown(self.markdown);
         for index in (0..=first.0).rev() {
             let block = &transcript.blocks[index];
             if block.anchor(0).is_none() {
@@ -281,7 +283,8 @@ impl View {
                         .filter_map(|(i, (offset, _))| {
                             (!(block.summary_only()
                                 || hidden.as_ref().is_some_and(|rows| rows.contains(&(i + 1)))))
-                            .then_some(offset)
+                            .then(|| layout.source_offset(offset))
+                            .flatten()
                         }),
                 )
                 .filter(|offset| index != first.0 || *offset < first.1);
@@ -551,6 +554,7 @@ pub fn selected_visible(
 /// # Panics
 /// Panics if borrowed editor or transcript values violate their in-process invariants.
 pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -> View {
+    cache.set_markdown(state.markdown);
     let area = frame.area();
     frame.render_widget(Block::new().style(Style::default().bg(Color::Reset)), area);
     if area.width < 28 || area.height < 9 {
@@ -689,21 +693,20 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
         body.width,
         body.height,
     );
-    let mut cached = None;
     let anchors = rows
         .iter()
         .map(|row| {
-            if cached.as_ref().is_none_or(|(index, _)| *index != row.block) {
-                cached = Some((row.block, state.transcript.blocks[row.block].anchor_index()));
-            }
-            cached
-                .as_ref()
-                .expect("cached source index")
-                .1
-                .anchor(row.offset)
+            let block = &state.transcript.blocks[row.block];
+            let offset = if row.title || row.spacer.is_some() {
+                Some(row.offset)
+            } else {
+                cache.get(block, body.width).source_offset(row.offset)
+            };
+            offset.and_then(|offset| block.anchor(offset))
         })
         .collect();
     let mut view = View {
+        markdown: state.markdown,
         session: Some(state.header.session_id().clone()),
         anchors,
         rows,
@@ -913,13 +916,17 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
                 break;
             }
             let anchors = &text_cache.as_ref().expect("cached block").2;
-            let a = anchors.anchor(offset).expect("projected text has a source");
-            let b = anchors
-                .anchor(offset + grapheme.len())
-                .expect("projected text has a source");
-            view.hits.push((y, x, width, a, b));
-            let highlight =
-                selected.is_some_and(|(a, b)| (row.block, offset) >= a && (row.block, offset) < b);
+            let source = layout.source_range(offset..offset + grapheme.len());
+            if let Some(range) = &source
+                && let (Some(a), Some(b)) = (anchors.anchor(range.start), anchors.anchor(range.end))
+            {
+                view.hits.push((y, x, width, a, b));
+            }
+            let highlight = source.as_ref().is_some_and(|range| {
+                selected.is_some_and(|(a, b)| {
+                    (row.block, range.end) > a && (row.block, range.start) < b
+                })
+            });
             let style = if highlight {
                 Style::default().bg(Color::Cyan).fg(Color::Black)
             } else {
@@ -1047,27 +1054,6 @@ pub(crate) fn editor_rows(text: &str, cursor: usize, width: usize, height: usize
 }
 
 type MarkdownStyles = Vec<(std::ops::Range<usize>, Style)>;
-
-fn markdown_styles(text: &str) -> MarkdownStyles {
-    use pulldown_cmark::{Event, Parser, Tag};
-    Parser::new(text)
-        .into_offset_iter()
-        .filter_map(|(event, range)| {
-            let style = match event {
-                Event::Start(Tag::CodeBlock(_)) => {
-                    Style::default().bg(Color::Rgb(30, 34, 41)).fg(Color::Gray)
-                }
-                Event::Start(Tag::Heading { .. }) => Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-                Event::Code(_) => Style::default().fg(Color::Gray),
-                _ => return None,
-            };
-            Some((range, style))
-        })
-        .take(1024)
-        .collect()
-}
 
 fn user_style() -> Style {
     Style::default().fg(Color::Gray).bg(Color::Indexed(235))
@@ -1547,6 +1533,7 @@ mod tests {
                         false,
                     )
                     .unwrap(),
+                    conclusion: None,
                 },
             )
             .unwrap(),

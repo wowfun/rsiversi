@@ -13,7 +13,6 @@ pub(crate) struct Command {
     pub(crate) message_id: Option<MessageId>,
     pub(crate) images: Vec<PathBuf>,
     pub(crate) agent_preset: Option<AgentPresetId>,
-    pub(crate) trust_workspace: bool,
     pub(crate) deployment: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) sandbox: Option<SandboxMode>,
@@ -32,7 +31,6 @@ impl Command {
             message_id: None,
             images: Vec::new(),
             agent_preset: None,
-            trust_workspace: false,
             deployment: None,
             model: None,
             sandbox: None,
@@ -95,9 +93,7 @@ impl Command {
                         run_preset_value(&mut arguments)?,
                         "--agent-preset",
                     )?,
-                    "--trust-workspace" => {
-                        set_flag(&mut command.trust_workspace, "--trust-workspace")?;
-                    }
+
                     "--deployment" => {
                         set_option(
                             &mut command.deployment,
@@ -162,11 +158,7 @@ impl Command {
         if self.resume.is_some() && self.agent_preset.is_some() {
             return Err(usage("--resume and --agent-preset are mutually exclusive"));
         }
-        if self.resume.is_some() && self.trust_workspace {
-            return Err(usage(
-                "--trust-workspace cannot change an existing Session's immutable authority",
-            ));
-        }
+
         if self.deployment.is_some() != self.model.is_some() {
             return Err(usage("--deployment and --model must be supplied together"));
         }
@@ -217,11 +209,6 @@ impl Command {
                 },
                 session_id: self.session_id.clone(),
                 agent_preset_id: self.agent_preset.clone(),
-                workspace_trust: if self.trust_workspace {
-                    WorkspaceTrust::Trusted
-                } else {
-                    WorkspaceTrust::Untrusted
-                },
             },
         };
         let model = self

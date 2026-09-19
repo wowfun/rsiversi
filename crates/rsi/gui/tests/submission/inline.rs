@@ -24,6 +24,7 @@ fn facts() -> Vec<SessionFact> {
     }).unwrap(), SessionFact::new(9, 1, SessionFactBody::ToolResult {
         turn_id, effect_id, identity, result: rsi_tools_protocol::ToolResult::new(json!({"large":"unrelated".repeat(32_000),
             "evidence":{"version":1,"omitted":true,"diffs":[{"effect":0,"unified_diff":"--- a/a.rs\n+++ b/a.rs\n-old\n+recorded\n"}]}}), vec![], false).unwrap(),
+        conclusion: None,
     }).unwrap()]
 }
 
@@ -187,7 +188,10 @@ async fn inline_close_failure_does_not_skip_replacement_and_failed_admission_can
         view(&app)["surfaces"]["main"]["inline"][first]["ticket"],
         ticket
     );
-    assert!(runtime.shutdown().await.is_clean());
+    assert!(
+        !runtime.shutdown().await.is_clean(),
+        "application teardown must report the visible fixture card\'s deliberate close failure"
+    );
 }
 
 #[tokio::test]
@@ -254,7 +258,7 @@ async fn inline_patch_uses_exact_evidence_and_retires_blocked_reads_and_old_tick
     assert_eq!(view(&app)["surfaces"]["main"]["inline"], json!({}));
     app.command(&visible(6, json!([key]))).await.unwrap();
     until(|| backend.active_source.load(Ordering::SeqCst) == 1).await;
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     until(|| backend.active_source.load(Ordering::SeqCst) == 0).await;
     assert!(app.command(&complete.to_string()).await.is_err());
     assert!(backend.cancel.lock().unwrap().is_empty());

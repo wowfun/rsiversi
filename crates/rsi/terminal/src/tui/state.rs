@@ -36,6 +36,10 @@ pub(super) enum Action {
     RequestManifest(u64),
     Evidence(rsi_session_protocol::EvidenceRead),
     Todos,
+    Terminals,
+    TerminalStatus(rsi_session_protocol::terminal::Terminal),
+    CloseTerminal(String),
+    CloseTerminals,
     Jobs(Option<rsi_agent_turn_protocol::TurnJobsRequest>),
     Preview(rsi_agent_turn_protocol::JobPreviewRequest),
     Commands,
@@ -109,6 +113,7 @@ impl Menu {
                 ("Agent tree usage".into(), Action::TreeMetrics(true)),
                 ("Inspect requests".into(), Action::Requests(None)),
                 ("Tasks".into(), Action::Todos),
+                ("Session terminals".into(), Action::Terminals),
                 ("Running command output".into(), Action::Jobs(None)),
                 ("Extension state".into(), Action::Extensions),
                 ("Exit".into(), Action::Exit),
@@ -133,6 +138,7 @@ pub(super) struct Answer {
 
 #[allow(clippy::struct_excessive_bools)] // Orthogonal view, lifecycle and read progress flags.
 pub(super) struct State {
+    pub markdown: bool,
     pub(super) activity: Option<rsi_terminal_ui::Activity>,
     pub(super) live_turn: Option<rsi_agent_session_protocol::TurnId>,
     turn_clock: Option<(u64, rsi_agent_session_protocol::TurnId, u64)>,
@@ -229,6 +235,7 @@ impl State {
     }
     pub(super) fn new(header: SessionHeader, remote: bool) -> Self {
         Self {
+            markdown: true,
             activity: None,
             live_turn: None,
             turn_clock: None,

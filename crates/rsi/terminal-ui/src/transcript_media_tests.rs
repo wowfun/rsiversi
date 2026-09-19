@@ -54,6 +54,7 @@ fn ordered_images_preserve_exact_sources_and_selection_mapping() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
     )
     .unwrap();

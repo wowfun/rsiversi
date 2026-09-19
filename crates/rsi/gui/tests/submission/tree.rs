@@ -278,6 +278,7 @@ async fn maximum_tool_content_has_paged_fields_and_shared_failure_semantics() {
             131,
             1,
             SessionFactBody::ToolResult {
+                conclusion: None,
                 turn_id: TurnId::new("tool-turn").unwrap(),
                 effect_id: EffectId::new("tool-effect").unwrap(),
                 identity: rsi_tools_protocol::ToolResultIdentity::new(

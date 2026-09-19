@@ -35,7 +35,7 @@ async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, Stri
     let app = root
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
     let generation = view["surfaces"]["main"]["generation"]
         .as_str()
@@ -347,4 +347,63 @@ async fn crafted_frozen_messages_cannot_change_sandbox_or_delivery_policy() {
     }
     assert_eq!(backend.requests.lock().unwrap().len(), 2);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[derive(Debug)]
+pub(super) struct TerminalGate {
+    pub(super) entered: tokio::sync::Semaphore,
+    pub(super) release: CancellationToken,
+}
+
+#[tokio::test]
+async fn terminal_poll_budget_is_independent_bounded_and_drained_on_shutdown() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let gate = Arc::new(TerminalGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: CancellationToken::new(),
+    });
+    *backend.terminal_gate.lock().unwrap() = Some(gate.clone());
+    let request =
+        |request| json!({"pane":"main","generation":generation,"request":request}).to_string();
+    for i in 0..33 {
+        app.terminal(&request(
+            json!({"type":"attach","terminal":format!("pty-{i}")}),
+        ))
+        .await
+        .unwrap();
+    }
+    let mut reads = Vec::new();
+    for i in 0..32 {
+        reads.push(app.terminal(&request(
+            json!({"type":"read","attachment":format!("pty-{i}")}),
+        )));
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        gate.entered.acquire_many(32),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .forget();
+    let rejected = app
+        .terminal(&request(json!({"type":"read","attachment":"pty-32"})))
+        .await
+        .unwrap_err();
+    assert!(rejected.contains("busy"), "{rejected}");
+    app.command(
+        &json!({"action":"model_refresh","pane":"main","generation":generation}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(runtime.shutdown().await.is_clean());
+    assert_eq!(backend.terminal_detaches.lock().unwrap().len(), 33);
+    for read in reads {
+        assert!(read.await.unwrap_err().contains("Application closed"));
+    }
+    assert!(
+        app.terminal(&request(json!({"type":"read","attachment":"pty-32"})))
+            .await
+            .is_err()
+    );
 }

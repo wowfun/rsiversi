@@ -6,6 +6,10 @@ use termina::event::KeyEvent;
 
 const BUILTINS: &[(&str, &str)] = &[
     ("help", "Commands and keyboard shortcuts"),
+    (
+        "markdown",
+        "Render assistant Markdown: /markdown [on|off]; process-local",
+    ),
     ("plugins", "Read and refresh observed plugin status"),
     (
         "reference",
@@ -86,6 +90,26 @@ fn catalog_entry(entry: rsi_client::InputCompletion, remaining: &mut usize) -> O
         application: false,
         skill: skill.then(|| Arc::new(entry)),
     })
+}
+fn completion_items(entries: &[Entry], providers: bool, dollar: bool) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .map(|entry| {
+            (
+                if dollar {
+                    format!("${}", entry.name)
+                } else if providers {
+                    entry.name.to_string()
+                } else {
+                    entry.skill.as_ref().map_or_else(
+                        || format!("/{}", entry.name),
+                        |skill| skill.replacement.clone(),
+                    )
+                },
+                bounded(&entry.description, 256),
+            )
+        })
+        .collect::<Vec<_>>()
 }
 type Catalog = BoxFuture<'static, (u64, Result<(Vec<Entry>, String)>)>;
 type Preview = BoxFuture<'static, (u64, Result<String>)>;
@@ -297,11 +321,14 @@ impl Ui {
     }
     fn rebuild(&mut self) {
         self.token = None;
+        let dollar =
+            rsi_agent_workspace_context::skill_input::dollar_token_at(&self.observed, self.cursor);
         if self.help
             || self.dismissed
-            || !self.observed.starts_with('/')
-            || self.observed.starts_with("//")
-            || self.observed.contains(['\n', '\r'])
+            || (dollar.is_none()
+                && (!self.observed.starts_with('/')
+                    || self.observed.starts_with("//")
+                    || self.observed.contains(['\n', '\r'])))
         {
             self.popup = None;
             return;
@@ -310,8 +337,11 @@ impl Ui {
             .observed
             .find(char::is_whitespace)
             .unwrap_or(self.observed.len());
-        let providers = self.observed.starts_with("/login ") && self.cursor >= 7;
-        let range = if providers {
+        let providers =
+            dollar.is_none() && self.observed.starts_with("/login ") && self.cursor >= 7;
+        let range = if let Some(token) = &dollar {
+            token.range.clone()
+        } else if providers {
             let start = self.observed[..self.cursor]
                 .rfind(char::is_whitespace)
                 .map_or(7, |i| i + 1);
@@ -330,7 +360,7 @@ impl Ui {
             self.popup = None;
             return;
         }
-        let filter = self.observed[range.clone()].trim_start_matches('/');
+        let filter = self.observed[range.clone()].trim_start_matches(['/', '$']);
         let mut entries = if providers {
             ["deepseek", "openai", "openai-compatible"]
                 .iter()
@@ -343,6 +373,9 @@ impl Ui {
                 .collect::<Vec<_>>()
         } else {
             self.all()
+                .into_iter()
+                .filter(|entry| dollar.is_none() || entry.skill.is_some())
+                .collect()
         };
         entries.retain(|entry| {
             rsi_client::completion_rank(&entry.name, filter).is_some()
@@ -361,22 +394,7 @@ impl Ui {
                     .then_with(|| left.name.cmp(&right.name))
             });
         }
-        let items = entries
-            .iter()
-            .map(|entry| {
-                (
-                    if providers {
-                        entry.name.to_string()
-                    } else {
-                        entry.skill.as_ref().map_or_else(
-                            || format!("/{}", entry.name),
-                            |skill| skill.replacement.clone(),
-                        )
-                    },
-                    bounded(&entry.description, 256),
-                )
-            })
-            .collect::<Vec<_>>();
+        let items = completion_items(&entries, providers, dollar.is_some());
         let selected = self
             .popup
             .as_ref()
@@ -667,6 +685,38 @@ mod tests {
         }
     }
     #[test]
+    fn dollar_completion_is_cursor_local_and_preserves_multiline_text_and_undo() {
+        let mut ui = Ui {
+            catalog: vec![skill("review", "/review"), skill("model", "/skill model")],
+            ..Ui::default()
+        };
+        let original = "first line\n请用 $rev suffix";
+        let mut editor = editor::Editor::with_text(original.into(), 1024);
+        for _ in 0.." suffix".chars().count() {
+            editor.key(KeyCode::Left.into()).unwrap();
+        }
+        let cursor = editor.cursor();
+        ui.update(&editor, None);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 1);
+        assert!(ui.key(KeyCode::Tab.into(), &mut editor));
+        assert_eq!(editor.text(), "first line\n请用 $review suffix");
+        editor
+            .key(KeyEvent {
+                code: KeyCode::Char('z'),
+                modifiers: Modifiers::CONTROL,
+                kind: termina::event::KeyEventKind::Press,
+                state: termina::event::KeyEventState::empty(),
+            })
+            .unwrap();
+        assert_eq!(editor.text(), original);
+        assert_eq!(editor.cursor(), cursor);
+        for text in ["`$rev`", "\\$rev", "[label](https://host/$rev)"] {
+            let editor = editor::Editor::with_text(text.into(), 1024);
+            ui.update(&editor, None);
+            assert!(ui.popup.is_none());
+        }
+    }
+    #[test]
     fn skill_preview_escape_and_collision_insert_preserve_the_draft_and_cursor() {
         let mut ui = Ui {
             catalog: vec![skill("model", "/skill model")],
@@ -782,7 +832,7 @@ mod tests {
         ));
         ui.next().await;
         assert!(ui.diagnostic.contains("read denied"));
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 9);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 10);
         assert!(
             !ui.popup
                 .as_ref()
@@ -835,7 +885,7 @@ mod tests {
             .unwrap()
             .render(42, 12)
             .unwrap();
-        assert_eq!(ui.selected, 9);
+        assert_eq!(ui.selected, 10);
         assert!(ui.diagnostic.contains("permission revoked"));
     }
     #[tokio::test]
@@ -956,7 +1006,7 @@ mod tests {
         let mut ui = Ui::default();
         let mut editor = editor::Editor::with_text("/".into(), 1024);
         ui.update(&editor, None);
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 9);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 10);
         editor.replace_text("/log deepseek").unwrap();
         for _ in 0..9 {
             editor.key(KeyCode::Left.into()).unwrap();

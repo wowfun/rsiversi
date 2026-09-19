@@ -105,6 +105,7 @@ fn scene() -> Vec<u8> {
     let editor = Editor::with_text("Unsubmitted draft stays resident".into(), 1024);
     Scene::capture(
         &Input {
+            markdown: true,
             fold_focus: None,
             activity: None,
             todos: None,

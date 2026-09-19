@@ -38,10 +38,14 @@ async fn empty_draft_reuse_preserves_attachment_and_rejects_changed_defaults_or_
     backend.unpublished.store(true, Ordering::Release);
     let first = view(&app)["surfaces"]["main"].clone();
     let create = |current: &serde_json::Value| {
-        json!({"action":"create","pane":"main","workspace":"a".repeat(64),"trust":false,
+        json!({"action":"create","pane":"main","workspace":"a".repeat(64),
         "reuse":{"generation":current["generation"],"header":current["header"]}})
         .to_string()
     };
+    let mut obsolete: serde_json::Value = serde_json::from_str(&create(&first)).unwrap();
+    obsolete["trust"] = json!(true);
+    assert!(app.command(&obsolete.to_string()).await.is_err());
+    assert_eq!(view(&app)["surfaces"]["main"]["session"], first["session"]);
     app.command(&create(&first)).await.unwrap();
     let reused = view(&app)["surfaces"]["main"].clone();
     assert_eq!(first["session"], reused["session"]);

@@ -23,7 +23,7 @@ If configuration disappears after the startup check, a typed `SetupRequired`
 from Session creation also returns to home. Other creation and resume errors keep
 their error classifications.
 Application commands are `/help`, `/login [deepseek|openai|openai-compatible]`,
-`/model`, `/effort`, `/new`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
+`/model`, `/effort`, `/markdown [on|off]`, `/new`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
 bypass message submission, prompt recall and Session command receipts, and shadow
 same-name Session commands. Recognition requires raw single-line input and a
 cursor at the end; invalid arguments retain the draft. Multi-line input starting
@@ -366,3 +366,20 @@ requests a new catalog.
 The TUI completion display retains at most 64 KiB of catalog text and resource
 coordinates, including skills. Omitted entries produce a visible notice. Filtering
 and help frames share immutable entry strings and skill metadata.
+
+The Actions menu's **Session terminals** lists the Session's live Bash terminals
+with exit/controller status. A selected terminal can be closed explicitly;
+**Close all terminals** reaps every terminal in that Session. The TUI does not
+embed terminal emulation or forward its own terminal input into these shells.
+
+Skill completion uses the [workspace reference parser](../../rsi-agent/workspace-context/README.md),
+including cursor-local tokens in multiline drafts. Dollar completion contains
+only skills and replaces only the active token. Colliding skill names remain
+reachable with `$name` or `/skill name`.
+`/markdown` toggles assistant and expanded reasoning rendering; `on` and `off`
+set it explicitly. This presentation preference starts enabled and lasts across
+Home, Session switches and renderer replacement in this TUI process only.
+
+Fresh, resumed, forked and `/new` Sessions discover project instructions and
+skills from their selected workspace by default. `--trust-workspace` is not an
+application option; after `--`, it remains ordinary application input.
