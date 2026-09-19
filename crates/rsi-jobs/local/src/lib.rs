@@ -41,6 +41,9 @@ pub struct JobsLocalConfig {
     /// Maximum retained records provider-wide.
     #[serde(default = "default_maximum_retained_jobs")]
     pub maximum_retained_jobs: usize,
+    /// Maximum current scope mappings, including empty scopes.
+    #[serde(default = "default_maximum_scopes")]
+    pub maximum_scopes: usize,
     /// Explicit lifecycle wait bound in milliseconds.
     #[serde(default = "default_shutdown_timeout_ms")]
     pub shutdown_timeout_ms: u64,
@@ -62,6 +65,10 @@ const fn default_maximum_retained_jobs() -> usize {
     DEFAULT_MAXIMUM_RETAINED_JOBS
 }
 
+const fn default_maximum_scopes() -> usize {
+    1024
+}
+
 const fn default_shutdown_timeout_ms() -> u64 {
     10_000
 }
@@ -73,6 +80,7 @@ impl Default for JobsLocalConfig {
             maximum_active_jobs: default_maximum_active_jobs(),
             maximum_retained_jobs_per_scope: default_maximum_retained_jobs_per_scope(),
             maximum_retained_jobs: default_maximum_retained_jobs(),
+            maximum_scopes: default_maximum_scopes(),
             shutdown_timeout_ms: default_shutdown_timeout_ms(),
         }
     }
@@ -91,6 +99,7 @@ impl JobsLocalConfig {
                 self.maximum_retained_jobs_per_scope,
             ),
             ("maximum_retained_jobs", self.maximum_retained_jobs),
+            ("maximum_scopes", self.maximum_scopes),
         ] {
             if value == 0 || value > 65_536 {
                 return Err(JobsError::InvalidInput(format!(
@@ -146,6 +155,8 @@ struct Service {
 struct Registry {
     producers: HashMap<String, ProducerEntry>,
     scopes: HashMap<JobScopeId, Weak<JobScopeAuthorityState>>,
+    #[cfg(test)]
+    scope_sweep_capacity: usize,
     jobs: BTreeMap<String, JobRecord>,
     retention_by_scope: HashMap<u64, ScopeRetention>,
     evictable: BTreeMap<u64, String>,
@@ -363,7 +374,6 @@ impl Jobs for Service {
             return Err(JobsError::ShuttingDown);
         }
         let mut registry = lock(&self.registry);
-        prune_dead_scopes(&mut registry.scopes);
         if !self.accepting.load(Ordering::Acquire) {
             return Err(JobsError::ShuttingDown);
         }
@@ -372,6 +382,17 @@ impl Jobs for Service {
             if authority.is_active() {
                 return Ok(authority);
             }
+        }
+        registry.scopes.remove(&id);
+        if registry.scopes.len() >= self.config.maximum_scopes {
+            #[cfg(test)]
+            {
+                registry.scope_sweep_capacity += registry.scopes.capacity();
+            }
+            prune_dead_scopes(&mut registry.scopes);
+        }
+        if registry.scopes.len() >= self.config.maximum_scopes {
+            return Err(JobsError::Capacity);
         }
         let generation = next_generation(
             &self.next_scope_generation,
@@ -1093,7 +1114,7 @@ fn scope_is_current(registry: &Registry, provider_id: u64, scope: &JobScopeAutho
 }
 
 fn prune_dead_scopes(scopes: &mut HashMap<JobScopeId, Weak<JobScopeAuthorityState>>) {
-    scopes.retain(|_, state| state.strong_count() > 0);
+    scopes.retain(|_, state| state.upgrade().is_some_and(|state| state.is_active()));
 }
 
 fn visible_record<'a>(
@@ -1440,6 +1461,124 @@ mod tests {
         assert_eq!(registry.oldest_evictable(None).as_deref(), Some("job-1"));
     }
 
+    fn scope_service(maximum_scopes: usize) -> Service {
+        Service {
+            config: JobsLocalConfig {
+                maximum_scopes,
+                ..JobsLocalConfig::default()
+            },
+            provider_id: 1,
+            accepting: AtomicBool::new(true),
+            next_id: AtomicU64::new(1),
+            next_scope_generation: AtomicU64::new(1),
+            next_producer_generation: AtomicU64::new(1),
+            registry: Mutex::new(Registry::default()),
+            changed: Notify::new(),
+            self_weak: Weak::new(),
+        }
+    }
+
+    fn scope_id(index: usize) -> JobScopeId {
+        JobScopeId::new("bounded", [index.to_string()]).unwrap()
+    }
+
+    #[test]
+    fn empty_scopes_are_bounded_and_dead_or_revoked_generations_are_recycled() {
+        let service = scope_service(2);
+        let first = service.acquire_scope(scope_id(1)).unwrap();
+        let second = service.acquire_scope(scope_id(2)).unwrap();
+        assert!(matches!(
+            service.acquire_scope(scope_id(3)),
+            Err(JobsError::Capacity)
+        ));
+        assert!(first.same_generation(&service.acquire_scope(scope_id(1)).unwrap()));
+        first.revoke();
+        let replacement = service.acquire_scope(scope_id(1)).unwrap();
+        assert!(!first.same_generation(&replacement));
+        drop(second);
+        let third = service.acquire_scope(scope_id(3)).unwrap();
+        assert_eq!(lock(&service.registry).scopes.len(), 2);
+        service.accepting.store(false, Ordering::Release);
+        assert!(matches!(
+            service.acquire_scope(third.id().clone()),
+            Err(JobsError::ShuttingDown)
+        ));
+    }
+
+    #[test]
+    fn capacity_sweep_reclaims_revoked_scopes_even_while_callers_retain_them() {
+        let service = scope_service(2);
+        let first = service.acquire_scope(scope_id(1)).unwrap();
+        let second = service.acquire_scope(scope_id(2)).unwrap();
+        first.revoke();
+        second.revoke();
+        let third = service.acquire_scope(scope_id(3)).unwrap();
+        assert!(third.is_active());
+        assert!(!first.is_active());
+        assert!(!second.is_active());
+        assert_eq!(lock(&service.registry).scopes.len(), 1);
+    }
+
+    #[test]
+    fn scope_sweeps_only_at_capacity_and_existing_acquisitions_do_no_sweeps() {
+        for count in [1024, 2048] {
+            let service = scope_service(count + 1);
+            let held: Vec<_> = (0..count)
+                .map(|i| service.acquire_scope(scope_id(i)).unwrap())
+                .collect();
+            let before = lock(&service.registry).scope_sweep_capacity;
+            assert_eq!(
+                before, 0,
+                "below-limit insertion must not scan the registry"
+            );
+            for _ in 0..count {
+                assert!(held[0].same_generation(&service.acquire_scope(scope_id(0)).unwrap()));
+            }
+            assert_eq!(lock(&service.registry).scope_sweep_capacity, before);
+            // Finalization removes entries without shrinking HashMap backing capacity.
+            lock(&service.registry).scopes.clear();
+            let capacity = lock(&service.registry).scopes.capacity();
+            drop(held);
+            let inserts = 2 * capacity;
+            for i in 0..inserts {
+                drop(service.acquire_scope(scope_id(i)).unwrap());
+            }
+            let work = lock(&service.registry).scope_sweep_capacity - before;
+            // Starting empty, each sweep follows maximum_scopes insertions.
+            let sweeps = (inserts - 1) / service.config.maximum_scopes;
+            assert!(
+                (sweeps * service.config.maximum_scopes..=sweeps * capacity).contains(&work),
+                "capacity={capacity}, sweeps={sweeps}, work={work}"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_limit_defaults_and_bounds_are_validated() {
+        assert_eq!(
+            serde_json::from_str::<JobsLocalConfig>("{}")
+                .unwrap()
+                .maximum_scopes,
+            1024
+        );
+        for maximum_scopes in [0, 65_537] {
+            assert!(
+                JobsLocalConfig {
+                    maximum_scopes,
+                    ..JobsLocalConfig::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        JobsLocalConfig {
+            maximum_scopes: 65_536,
+            ..JobsLocalConfig::default()
+        }
+        .validate()
+        .unwrap();
+    }
+
     #[test]
     fn dead_scope_lookup_entries_are_pruned() {
         let id = JobScopeId::new("test", ["dead"]).unwrap();
@@ -1460,6 +1599,7 @@ mod tests {
             maximum_retained_jobs_per_scope: MAXIMUM_JOBS_PER_LIST + 1,
             maximum_retained_jobs: MAXIMUM_JOBS_PER_LIST + 1,
             shutdown_timeout_ms: 1,
+            maximum_scopes: default_maximum_scopes(),
         };
 
         assert!(matches!(

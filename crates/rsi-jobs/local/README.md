@@ -3,6 +3,13 @@
 This ordinary plugin implements process-local Jobs on the caller-owned Tokio
 runtime. Admission is capped at 10 active jobs per scope and 256 globally by
 default. Retention is capped at 256 tombstones per scope and 1,024 globally.
+`maximum_scopes` independently caps current scope lookup mappings at 1,024 by
+default, within 1..=65,536. It does not count caller-retained historical authority
+handles. Reusing a current active scope succeeds even at capacity and examines
+only that identity. New mappings below capacity do not scan unrelated entries;
+dead or revoked mappings may remain until capacity pressure. At capacity, one cleanup
+scan precedes rejection with `Capacity`; this saturated path remains linear in
+the bounded backing allocation. Exact finalization removes its own mapping.
 Unreported terminal jobs are deliberately not eviction candidates; capacity is
 therefore backpressure on consumers that fail to report observable background
 work, not silent data loss.
@@ -36,7 +43,7 @@ the active-status observation under one registry lock; observing terminal
 instead causes both stream tails to be read again before the same record is
 reported. Per-scope
 retention cannot exceed the 256-record list contract; global retention may span
-many scopes. Dead weak scope lookups are pruned during later acquisition.
+many scopes.
 Admission uses maintained per-scope retained counts and sequence-ordered
 eviction indexes. Only terminal, reported records with no admitted readers
 enter those indexes. Publication, settlement, reporting, and the final read

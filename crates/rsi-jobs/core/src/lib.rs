@@ -88,6 +88,12 @@ pub struct JobScopeAuthorityState {
 }
 
 impl JobScopeAuthorityState {
+    /// Reads revocation without cloning a scope identity.
+    #[doc(hidden)]
+    pub fn is_active(&self) -> bool {
+        !self.revoked.load(Ordering::Acquire)
+    }
+
     /// Revokes the provider-owned state without reconstructing an authority.
     #[doc(hidden)]
     pub fn revoke(&self) {
@@ -168,7 +174,7 @@ impl JobScopeAuthority {
 
     /// Returns whether this exact authority generation remains open.
     pub fn is_active(&self) -> bool {
-        !self.state.revoked.load(Ordering::Acquire)
+        self.state.is_active()
     }
 }
 
@@ -564,7 +570,7 @@ pub enum JobsError {
     /// Malformed or out-of-bounds value.
     #[error("invalid job value: {0}")]
     InvalidInput(String),
-    /// Active or retained record capacity is exhausted.
+    /// Active job, retained record, or current scope capacity is exhausted.
     #[error("job capacity is exhausted")]
     Capacity,
     /// Duplicate exact producer registration.
