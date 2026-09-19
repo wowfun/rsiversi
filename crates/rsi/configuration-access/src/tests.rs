@@ -540,8 +540,9 @@ struct BlockingPlugins {
     entered: Semaphore,
     release: (std::sync::Mutex<bool>, std::sync::Condvar),
 }
+#[async_trait::async_trait]
 impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
-    fn plugins(
+    async fn plugins(
         &self,
         request: rsi_configuration_api::PluginStatusRequest,
     ) -> Result<rsi_configuration_api::PluginStatusPage> {
@@ -553,10 +554,11 @@ impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
             .wait_while(lock.lock().unwrap(), |released| !*released)
             .unwrap();
         Ok(PluginStatusPage {
+            context: rsi_configuration_api::PluginStatusContext::default(),
             desired_revision: "4".into(),
             observed_revision: "7".into(),
-            health: PluginHealth::RestartRequired,
-            watcher: PluginWatcher::Faulted,
+            health: Some(PluginHealth::RestartRequired),
+            watcher: Some(PluginWatcher::Faulted),
             offset: request.offset,
             total: 0,
             next_offset: None,
@@ -599,7 +601,10 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
     let spec = ConfigurationOperation::Plugins.spec();
     let input = || {
         ByteBudget::default()
-            .encode(&json!({"offset":0,"limit":32}), spec.maximum_request_bytes)
+            .encode(
+                &json!({"target":{"kind":"host"},"offset":0,"limit":32}),
+                spec.maximum_request_bytes,
+            )
             .unwrap()
     };
     let call = dispatch.admit(&spec.id, origin.clone()).unwrap();

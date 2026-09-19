@@ -17,8 +17,11 @@ pub fn register_plugin_status(
             async move {
                 request.validate()?;
                 let _lease = owner.admit(&context.origin)?;
-                let page = source.plugins(request).map_err(|_| ApiError::Unavailable)?;
-                page.validate(request).map_err(|_| ApiError::Unavailable)?;
+                let page = source
+                    .plugins(request.clone())
+                    .await
+                    .map_err(|_| ApiError::Unavailable)?;
+                page.validate(&request).map_err(|_| ApiError::Unavailable)?;
                 Ok(Ok::<_, Never>(page))
             }
         }),

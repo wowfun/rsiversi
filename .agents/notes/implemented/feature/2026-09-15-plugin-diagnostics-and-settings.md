@@ -11,6 +11,14 @@ Settings fields whose owning schema already defines typed values and constraints
 
 ## Decision
 
+Diagnostics distinguish current Host state, pure current preset previews and
+the exact resident Session generation. A redacted manifest is captured with each
+generation and retained by its pin. A dedicated residency peek cannot build a
+replacement merely to inspect it. A cold Session explicitly has no resident
+manifest; its later normal resume may select current preset sources. Session
+targets retain the product's Header correlation and Configuration grant checks.
+Source classes and fixed reason guidance expose no dependency keys or raw errors.
+
 Local Inspector keeps its Local-only API policy and separately projects observed
 Profile instances. A new finite Configuration read exposes only flat plugin
 identities, desired enablement and closed lifecycle categories. Its handler

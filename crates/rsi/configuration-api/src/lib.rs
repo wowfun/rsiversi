@@ -48,7 +48,12 @@ impl ConfigurationOperation {
             ),
         };
         OperationSpec {
-            id: OperationId::new("configuration", name, 1).expect("static operation"),
+            id: OperationId::new(
+                "configuration",
+                name,
+                if matches!(self, Self::Plugins) { 2 } else { 1 },
+            )
+            .expect("static operation"),
             access,
             class: OperationClass::Data,
             effect,
@@ -179,8 +184,9 @@ impl ConfigurationClient {
 mod discovery;
 mod plugins;
 pub use plugins::{
-    PluginHealth, PluginLifecycle, PluginObservation, PluginStatusPage, PluginStatusRequest,
-    PluginStatusRow, PluginStatusSource, PluginWatcher,
+    PluginAvailability, PluginDiagnostic, PluginHealth, PluginLifecycle, PluginObservation,
+    PluginOrigin, PluginPresetSource, PluginStatusContext, PluginStatusPage, PluginStatusRequest,
+    PluginStatusRow, PluginStatusSource, PluginStatusTarget, PluginWatcher,
 };
 mod providers;
 pub use discovery::{DiscoveryRequest, DiscoverySnapshot};

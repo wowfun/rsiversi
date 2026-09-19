@@ -6,7 +6,8 @@ use super::{
 use async_trait::async_trait;
 use rsi_configuration_api::{
     ConfigurationClient, ExaClient, ExaCredentialStatus, McpClient, McpCredentialStatus,
-    McpCredentialTarget, McpRefreshRequest, McpStatus, PluginStatusPage, PluginStatusRequest,
+    McpCredentialTarget, McpRefreshRequest, McpStatus, PluginAvailability, PluginStatusPage,
+    PluginStatusRequest, PluginStatusTarget,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,11 @@ use serde::{Deserialize, Serialize};
 pub enum PluginsCommand {
     /// Discard the old page and read current revisions.
     Refresh,
+    /// Select a distinct observation source and discard old pagination.
+    Select {
+        /// Validated source identity.
+        target: PluginStatusTarget,
+    },
     /// Read the fixed Exa credential's redacted availability.
     ExaStatus,
     /// Save a credential without enabling Tools or submitting a search.
@@ -70,6 +76,10 @@ pub struct PluginsView {
     pub exa_notice: Option<String>,
     /// Fresh view identity; not an authorization token.
     pub ticket: String,
+    /// Selected source, retained even when unavailable.
+    pub target: PluginStatusTarget,
+    /// Fixed guidance derived from closed source categories.
+    pub guidance: Vec<String>,
     /// One complete page with independent desired and observed revisions.
     pub page: Option<PluginStatusPage>,
     /// Whether this connection negotiated the MCP workbench API.
@@ -101,6 +111,31 @@ impl PluginsFeature {
         let mut view = self.state.lock().expect("plugin view poisoned").clone();
         view.mcp_available = self.mcp.is_some();
         view.exa_available = self.exa.is_some();
+        if let Some(page) = &view.page {
+            view.guidance = page
+                .plugins
+                .iter()
+                .flat_map(|row| &row.diagnostics)
+                .map(|reason| reason.guidance().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let availability = match page.context.availability {
+                PluginAvailability::NotResident => Some(
+                    "This Session has no resident generation. Normal resume may use the current preset.",
+                ),
+                PluginAvailability::Loading => {
+                    Some("A Session load is in progress. Refresh after it finishes.")
+                }
+                PluginAvailability::Unavailable => Some(
+                    "Composition evidence is unavailable. Check the preset source or local Host diagnostics.",
+                ),
+                PluginAvailability::Ready => None,
+            };
+            if let Some(message) = availability {
+                view.guidance.push(message.into());
+            }
+        }
         view
     }
     /// Subscribes to completed read results.
@@ -111,6 +146,7 @@ impl PluginsFeature {
     ///
     /// # Panics
     /// Panics if the internal state lock was poisoned by a prior panic.
+    #[allow(clippy::too_many_lines)] // The closed workbench command dispatch shares one receipt and lifetime admission.
     pub fn command(self: &Arc<Self>, command: PluginsCommand) -> BoxFuture<'static, Result<()>> {
         let owner = self.clone();
         self.work.run(async move {
@@ -124,13 +160,40 @@ impl PluginsFeature {
             }
             if !matches!(
                 command,
-                PluginsCommand::Refresh | PluginsCommand::Page { .. }
+                PluginsCommand::Refresh
+                    | PluginsCommand::Select { .. }
+                    | PluginsCommand::Page { .. }
             ) {
                 return owner.mcp_command(command).await;
             }
             let refresh = matches!(command, PluginsCommand::Refresh);
             let (request, revisions) = match command {
-                PluginsCommand::Refresh => (PluginStatusRequest::default(), None),
+                PluginsCommand::Refresh => (
+                    PluginStatusRequest {
+                        target: owner
+                            .state
+                            .lock()
+                            .expect("plugin view poisoned")
+                            .target
+                            .clone(),
+                        ..Default::default()
+                    },
+                    None,
+                ),
+                PluginsCommand::Select { target } => {
+                    target.validate().map_err(error)?;
+                    let mut state = owner.state.lock().expect("plugin view poisoned");
+                    state.target = target.clone();
+                    state.page = None;
+                    state.guidance.clear();
+                    (
+                        PluginStatusRequest {
+                            target,
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                }
                 PluginsCommand::Page { ticket, offset } => {
                     let state = owner.state.lock().expect("plugin view poisoned");
                     let page = state
@@ -143,10 +206,15 @@ impl PluginsFeature {
                         return Err("Invalid plugin page transition".into());
                     }
                     (
-                        PluginStatusRequest { offset, limit: 32 },
+                        PluginStatusRequest {
+                            target: state.target.clone(),
+                            offset,
+                            limit: 32,
+                        },
                         Some((
                             page.desired_revision.clone(),
                             page.observed_revision.clone(),
+                            page.context.clone(),
                         )),
                     )
                 }
@@ -162,6 +230,7 @@ impl PluginsFeature {
                         pair != (
                             page.desired_revision.clone(),
                             page.observed_revision.clone(),
+                            page.context.clone(),
                         )
                     }) {
                         Err(

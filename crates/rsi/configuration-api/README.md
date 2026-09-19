@@ -8,12 +8,25 @@ requested membership. Malformed or lost mutation replies remain unknown;
 this client never replays a grant change. Endpoint implementations and durable
 policy belong to the [configuration owner](../configuration-access/README.md).
 
-`configuration/plugins/1` is a separate grant-gated read. Pages contain at most
+`configuration/plugins/2` is a separate grant-gated read. Its explicit target is
+Host observations, a current preset preview, or a Session's resident generation.
+Preset compilation is pure; Session reads validate the Header correlation and
+peek at residency without pinning, preparing or building a generation. A cold
+Session reports `not_resident`; it is never presented as the current preset.
+Pages contain at most
 64 flat instance/plugin identities and closed observed lifecycle states, within
 64 KiB; at most 8,192 desired/observed identities are represented. The desired
 tree revision and observed Profile-status revision are distinct decimal strings.
 No configurations, raw errors, source paths, Runtime graph or dependency keys
-are present. Pagination must restart if either revision changes. Disabled,
+are present. Closed reason categories have fixed guidance, and implementation
+origins distinguish linked, native and unresolved factories. Preset root classes
+are path-free. Pagination must restart if the target, revision pair, availability
+or source digest changes. Only Host carries aggregate health and watcher state. Host observations read
+Profile lifecycle; Session observations describe the successful activation captured
+in the retained composition manifest, not current per-instance lifecycle. The
+page target identifies the source, and the GUI labels Session rows as pinned
+manifest evidence.
+Disabled,
 unobserved and active are separate states; configuration alone proves no running
 generation. The client validates the echoed offset, complete page progress and
 bounded identifiers before exposing a result.
@@ -61,3 +74,7 @@ Exa credential operations are a fixed owner-scoped status/set/unset contract.
 Every Host handler retains the actual Configuration grant through completion.
 Receipts contain no secret or local store path, and never enable Tools or submit
 a search. The fixed `rsi.retrieval/exa` binding is not an AI provider slot.
+
+The Plugins wire contract is v2. It breaks v1 with an explicit target, asynchronous
+resident-generation lookup and optional health/watcher evidence. There is no v1
+migration or compatibility shim; in-tree clients use the v2 contract together.

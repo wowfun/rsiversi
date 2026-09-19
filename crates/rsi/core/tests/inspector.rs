@@ -9,10 +9,11 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug)]
-struct Noop;
+struct Noop(Arc<std::sync::atomic::AtomicUsize>);
 #[async_trait]
 impl PluginFactory for Noop {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(PreparedActivation::new(config.clone()))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -61,15 +62,26 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
         br#"{"rsi.agent":{"default_model":{"deployment":"fixture","model":"unused"}}}"#,
     )
     .unwrap();
+    let prepares = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut addon = StandardAddonBuilder::new("fixture.inspector");
     addon
         .register_linked(
             "fixture.inspect",
             "exact-revision",
             UpdateMode::Replayable,
-            Arc::new(Noop),
+            Arc::new(Noop(prepares.clone())),
         )
         .unwrap();
+    addon
+        .register_factory(
+            rsi::AddonScope::Agent,
+            "fixture.agent-inspect",
+            "agent-revision",
+            UpdateMode::Replayable,
+            Arc::new(Noop(prepares.clone())),
+        )
+        .unwrap();
+    write_inspected_preset(&root, "source-a");
     let composition = StandardComposition::new(
         HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
         BTreeMap::new(),
@@ -117,7 +129,11 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     let mut saw_disabled = false;
     loop {
         let page = configuration
-            .plugins(rsi_configuration_api::PluginStatusRequest { offset, limit: 3 })
+            .plugins(rsi_configuration_api::PluginStatusRequest {
+                offset,
+                limit: 3,
+                ..Default::default()
+            })
             .await
             .unwrap();
         let encoded = serde_json::to_string(&page).unwrap();
@@ -149,6 +165,7 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
         offset = next;
     }
     assert!(saw_visible && saw_disabled);
+    assert_preset_and_resident_views(&configuration, &host, &root, &prepares).await;
     #[cfg(unix)]
     {
         let native = client.native().await.unwrap();
@@ -168,6 +185,142 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     );
     let client = InspectorClient::new(local).unwrap();
     assert!(client.runtime(&RuntimeRequest::default()).await.is_err());
+}
+
+fn write_inspected_preset(root: &std::path::Path, instance: &str) {
+    let preset = root.join("config/agent-presets/inspect");
+    std::fs::create_dir_all(&preset).unwrap();
+    std::fs::write(
+        preset.join("agent.profile.toml"),
+        format!(
+            r#"format = 1
+[[steps]]
+kind = "plugin"
+id = "context"
+plugin = "rsi.agent.context.default"
+[[steps]]
+kind = "plugin"
+id = "{instance}"
+plugin = "fixture.agent-inspect"
+config = {{ secret = "do-not-serialize-agent-config" }}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+#[allow(clippy::too_many_lines)] // One generation-change scenario retains the same pin and preparation counter.
+async fn assert_preset_and_resident_views(
+    client: &rsi_configuration_api::ConfigurationClient,
+    host: &rsi_host::RunningHost,
+    root: &std::path::Path,
+    prepares: &std::sync::atomic::AtomicUsize,
+) {
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId, TurnId,
+    };
+    use rsi_agent_turn_protocol::{SubmitSession, SubmitTurn};
+    use rsi_configuration_api::{PluginAvailability, PluginStatusRequest, PluginStatusTarget};
+    use std::sync::atomic::Ordering;
+    let count = prepares.load(Ordering::SeqCst);
+    let preview = PluginStatusRequest {
+        target: PluginStatusTarget::Preset {
+            id: "inspect".into(),
+        },
+        ..Default::default()
+    };
+    let a = client.plugins(preview.clone()).await.unwrap();
+    assert!(a.plugins.iter().any(|row| row.instance == "source-a"));
+    assert!(a.plugins.iter().all(|row| row.observed.is_none()));
+    assert_eq!(prepares.load(Ordering::SeqCst), count);
+    let composition = host
+        .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
+        .unwrap();
+    let pin = composition
+        .pin(&AgentPresetId::new("inspect").unwrap(), None)
+        .await
+        .unwrap();
+    let header = SessionHeader::new(
+        SessionId::new("inspected-session").unwrap(),
+        1,
+        root.to_str().unwrap(),
+        AgentPresetId::new("inspect").unwrap(),
+        FrozenAgentSettings::new(
+            "default",
+            "system",
+            rsi_ai_protocol::ModelRef::new("fixture", "unused").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let target = rsi_session_protocol::SessionTarget {
+        session_id: header.session_id().clone(),
+        header_key: header.fingerprint().unwrap(),
+    };
+    let turns = host
+        .lookup_local::<rsi_agent_turn_protocol::TurnServiceContract>()
+        .unwrap();
+    turns
+        .submit(SubmitTurn {
+            session: SubmitSession::Fresh(
+                rsi_agent_composition_protocol::PreparedFreshSession::new(header, pin).unwrap(),
+            ),
+            turn_id: TurnId::new("inspection-turn").unwrap(),
+            text: "inspection".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    write_inspected_preset(root, "source-b");
+    let count = prepares.load(Ordering::SeqCst);
+    let b = client.plugins(preview).await.unwrap();
+    assert!(b.plugins.iter().any(|row| row.instance == "source-b"));
+    assert_ne!(a.context.source_digest, b.context.source_digest);
+    let resident = client
+        .plugins(PluginStatusRequest {
+            target: PluginStatusTarget::Session {
+                target: target.clone(),
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(resident.context.availability, PluginAvailability::Ready);
+    assert!(
+        resident
+            .plugins
+            .iter()
+            .any(|row| row.instance == "source-a")
+    );
+    assert!(
+        !resident
+            .plugins
+            .iter()
+            .any(|row| row.instance == "source-b")
+    );
+    for page in [&a, &b, &resident] {
+        let bytes = serde_json::to_string(page).unwrap();
+        assert!(!bytes.contains("do-not-serialize-agent-config"));
+        assert!(!bytes.contains(root.to_str().unwrap()));
+    }
+    let wrong = rsi_session_protocol::SessionTarget {
+        header_key: "f".repeat(64),
+        ..target
+    };
+    assert!(
+        client
+            .plugins(PluginStatusRequest {
+                target: PluginStatusTarget::Session { target: wrong },
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(prepares.load(Ordering::SeqCst), count);
 }
 
 async fn assert_runtime_pages(client: &InspectorClient, root: &std::path::Path) {

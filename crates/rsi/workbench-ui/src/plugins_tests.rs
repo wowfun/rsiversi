@@ -45,10 +45,11 @@ impl ApiClient for Remote {
 }
 fn page(offset: usize, observed: &str) -> PluginStatusPage {
     PluginStatusPage {
+        context: PluginStatusContext::default(),
         desired_revision: "3".into(),
         observed_revision: observed.into(),
-        health: PluginHealth::Converged,
-        watcher: PluginWatcher::Inactive,
+        health: Some(PluginHealth::Converged),
+        watcher: Some(PluginWatcher::Inactive),
         offset,
         total: 33,
         next_offset: (offset == 0).then_some(32),
@@ -57,6 +58,8 @@ fn page(offset: usize, observed: &str) -> PluginStatusPage {
                 instance: format!("plugin-{i:02}"),
                 desired_plugin: Some("fixture".into()),
                 enabled: true,
+                origin: PluginOrigin::Linked,
+                diagnostics: vec![],
                 observed: None,
             })
             .collect(),
@@ -228,4 +231,48 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
     assert!(owner.command(PluginsCommand::ExaStatus).await.is_err());
     assert_eq!(*remote.calls.lock().unwrap(), ["status", "set"]);
     configuration.work.close().await;
+}
+
+#[tokio::test]
+async fn selected_source_survives_refresh_and_digest_changes_fence_pagination() {
+    let target = PluginStatusTarget::Preset {
+        id: "review".into(),
+    };
+    let mut first = page(0, "0");
+    first.context.target = target.clone();
+    first.context.source_digest = Some("a".repeat(64));
+    first.health = None;
+    first.watcher = None;
+    let mut changed = first.clone();
+    changed.offset = 32;
+    changed.plugins = vec![page(32, "0").plugins.remove(0)];
+    changed.next_offset = None;
+    changed.context.source_digest = Some("b".repeat(64));
+    let mut refreshed = first.clone();
+    refreshed.context.source_digest = changed.context.source_digest.clone();
+    let (owner, remote) = feature(vec![Ok(first), Ok(changed), Ok(refreshed)]);
+    owner
+        .command(PluginsCommand::Select {
+            target: target.clone(),
+        })
+        .await
+        .unwrap();
+    let ticket = owner.snapshot().ticket;
+    assert!(
+        owner
+            .command(PluginsCommand::Page { ticket, offset: 32 })
+            .await
+            .is_err()
+    );
+    assert!(owner.snapshot().page.is_none());
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    assert_eq!(owner.snapshot().target, target);
+    assert!(
+        remote
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.target == target)
+    );
 }
