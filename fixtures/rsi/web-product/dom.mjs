@@ -13,7 +13,10 @@ export async function verifyDom(browser, root, report, name) {
     const document = await readFile(join(root, "fixtures/rsi/web-product/document-island.html"), "utf8");
     const standard = await readFile(join(root, "plugins/rsi/web/standard.js"), "utf8");
     await page.route("http://rsi-dom.invalid/**", route => route.fulfill({ contentType: route.request().url().endsWith("standard.js") ? "text/javascript" : "text/html", body: route.request().url().endsWith("standard.js") ? standard : document.replace(/<script[^>]*>[\s\S]*?<\/script>/g, "") }));
+    const admissionSource = await readFile(join(root, "plugins/rsi/web/admission.js"), "utf8");
+    await page.route("http://rsi-dom.invalid/admission.js", route => route.fulfill({ contentType: "text/javascript", body: admissionSource }));
     await page.goto("http://rsi-dom.invalid/");
+    await page.evaluate(async () => { Object.assign(globalThis, await import("/admission.js")); });
     const offer = { revision: "a".repeat(64), catalog: { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: [{ name: "standard.js", sha256: createHash("sha256").update(standard).digest("hex") }], schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] } };
     await page.evaluate(offer => { window.testRendererOffer = offer; }, offer);
     await page.addStyleTag({ path: join(root, "plugins/rsi/web/styles.css") });

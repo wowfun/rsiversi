@@ -31,7 +31,9 @@ Then `npm ci && npm test` builds the actual Rust Web bundle and native RSI execu
 then drives the product document and Dedicated Worker in Chromium and Firefox.
 The runner also exercises document-only reset/reopen and unresolved-submission
 button projection using the shipped JavaScript; those checks are distinct from
-Worker and transport evidence. Install those Playwright browsers first. `RSI_WASM_BINDGEN` selects a matching
+Worker and transport evidence. The document-only and gated Worker fixtures load
+the shipped admission module, so their transport limits and request classification
+match the product. Install those Playwright browsers first. `RSI_WASM_BINDGEN` selects a matching
 wasm-bindgen executable. `RSI_WEB_ASSETS` and `RSI_WEB_BINARY` can select already
 built artifacts explicitly; `RSI_WEB_REPORT` selects a new evidence directory.
 

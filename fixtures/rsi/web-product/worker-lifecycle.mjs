@@ -7,6 +7,7 @@ import { join } from "node:path";
 // isolates commit/disconnect ordering without claiming Rust or server coverage.
 export async function verifyWorkerLifecycle(browser, root) {
   const worker = await readFile(join(root, "plugins/rsi/web/worker.js"), "utf8");
+  const admission = await readFile(join(root, "plugins/rsi/web/admission.js"), "utf8");
   const wasm = `
     let rejectCommit;
     const blocked = [];
@@ -35,7 +36,7 @@ export async function verifyWorkerLifecycle(browser, root) {
   `;
   const server = createServer((request, response) => {
     response.setHeader("Content-Type", request.url === "/" ? "text/html" : "text/javascript");
-    response.end(request.url === "/worker.js" ? worker : request.url === "/rsi_web.js" ? wasm : "<!doctype html><body>");
+    response.end(request.url === "/worker.js" ? worker : request.url === "/admission.js" ? admission : request.url === "/rsi_web.js" ? wasm : "<!doctype html><body>");
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const page = await browser.newPage();

@@ -1,6 +1,6 @@
 //! Linux controlling PTYs share the ordinary Process registry and cleanup lifetime.
-use super::*;
-use rsi_process::{ManagedPtyProcess, PtyProcess, PtyProcessSpec};
+use super::Service;
+use rsi_process::{ManagedPtyProcess, ProcessError, PtyProcess, PtyProcessSpec, Result};
 impl PtyProcess for Service {
     fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess> {
         spec.validate()?;
@@ -17,11 +17,20 @@ impl PtyProcess for Service {
 }
 #[cfg(target_os = "linux")]
 mod native {
-    use super::*;
+    use super::{ManagedPtyProcess, ProcessError, PtyProcessSpec, Result, Service};
+    use crate::{
+        CaptureReservation, ChildState, POST_KILL_GROUP_SETTLEMENT_TIMEOUT, rollback_admission,
+        wait_for_group_disappearance,
+    };
+    use async_trait::async_trait;
     use portable_pty::{CommandBuilder, MasterPty};
-    use rsi_process::{MAXIMUM_PTY_IO_BYTES, PtyControl, PtyRead, PtySize};
+    use rsi_process::{MAXIMUM_PTY_IO_BYTES, ProcessOutcome, PtyControl, PtyRead, PtySize};
     use std::fs::File;
     use std::io::Read;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio::io::unix::AsyncFd;
     use tokio::sync::{Semaphore, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
