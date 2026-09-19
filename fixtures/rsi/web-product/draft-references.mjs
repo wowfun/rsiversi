@@ -13,7 +13,7 @@ export async function verifyDraftReferences(browser, root) {
       const {DraftStore,DraftEditor,validateEditor} = await import('/drafts.js');
       const store = await DraftStore.open('a'.repeat(32),{kind:'local'});
       const reference = {snapshot:{sha256:'b'.repeat(64),byte_len:900},metadata:{source:{session_id:'source',header_sha256:'c'.repeat(64)},target:{session_id:'target',header_sha256:'d'.repeat(64)},through_seq:'9007199254740993',fact_prefix_sha256:'e'.repeat(64),scanned_after_seq:'9007199254740992',retained_after_seq:'9007199254740992',retained_through_seq:'9007199254740993',scanned_bytes:400,text_bytes:12,omissions:['fact_limit']},preview:'你好世界'};
-      const creation = id => ({session_id:id,workspace_id:'f'.repeat(64),agent_preset_id:null,workspace_trust:'trusted'});
+      const creation = id => ({session_id:id,workspace_id:'f'.repeat(64),agent_preset_id:null});
       let record = await store.ensure('main','target','d'.repeat(64),creation('target'));
       const editor = new DraftEditor(store,record);
       const beforeReferences = editor.referencesRevision;

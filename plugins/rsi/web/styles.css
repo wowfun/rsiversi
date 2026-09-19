@@ -45,7 +45,6 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .workspace-form { display:flex; flex-direction:column; gap:7px; margin-top:8px; }
 .workspace-form input { font-size:.78rem; }
 .workspace-form button { font-size:.78rem; }
-.trust { font-size:.73rem; margin-top:4px; }
 .conversations-heading { margin:24px 0 7px; }
 .sidebar-footer { margin-top:auto; padding-top:30px; display:flex; align-items:center; justify-content:space-between; gap:4px; }
 .sidebar-footer button { padding-left:0; font-size:.79rem; }

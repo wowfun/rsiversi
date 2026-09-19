@@ -1,8 +1,13 @@
 import { useState } from 'react'
 import { Button } from '../vendor/dsh/primitives/Button.tsx'
-import { input, run, useView, type McpServer, type PluginsView } from './bridge.ts'
+import { input, run, useView, useSelected, type McpServer, type PluginsView } from './bridge.ts'
 export function Plugins() {
   const view = useView(view => view?.plugins), [busy,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
+  const selected = useSelected(value => value)
+  const agentPreset = useView(view => view?.surfaces[selected]?.agent_preset)
+  const session = useView(view => view?.surfaces[selected]?.session)
+  const header = useView(view => view?.surfaces[selected]?.header)
+  const [preset,setPreset] = useState('')
   const page = view?.page
   const command = (command: Record<string,unknown>) => void (async () => {
     setBusy(true); setProblem(null)
@@ -13,7 +18,16 @@ export function Plugins() {
   const label = (value: string) => value.replaceAll('_',' ')
   return <section className="plugins-panel" aria-label="Plugins">
     <div className="actions"><h2>Plugins</h2><Button disabled={busy} onClick={() => command({kind:'refresh'})}>Refresh plugin status</Button></div>
-    <p className="hint">Desired configuration and observed lifecycle are captured independently. Disabled configuration does not describe a still-retiring instance.</p>
+    <div className="actions" aria-label="Plugin observation source">
+      <Button disabled={busy} onClick={() => command({kind:'select',target:{kind:'host'}})}>Host plugins</Button>
+      <Button disabled={busy || !agentPreset} onClick={() => command({kind:'select',target:{kind:'preset',id:agentPreset}})}>Current preset configuration</Button>
+      <Button disabled={busy || !session || !header} onClick={() => command({kind:'select',target:{kind:'session',target:{session_id:session,header_key:header}}})}>Session resident generation</Button>
+      <label>Preset identity<input value={preset} maxLength={255} onChange={event => setPreset(event.target.value)}/></label>
+      <Button disabled={busy || !preset} onClick={() => command({kind:'select',target:{kind:'preset',id:preset}})}>Inspect preset</Button>
+    </div>
+    <p>Source: {view?.target.kind ?? 'host'}</p>
+    {view?.guidance.map(message => <p role="status" className="hint" key={message}>{message}</p>)}
+    <p className="hint">{view?.target.kind === 'session' ? 'Session rows show the pinned composition manifest. They do not read current per-instance lifecycle.' : 'Desired configuration and observed lifecycle are captured independently. Disabled configuration does not describe a still-retiring instance.'}</p>
     {problem && <p role="alert" className="settings-error">{problem}</p>}
     {view?.diagnostic && <p role="alert" className="settings-error">Plugin status unavailable: {view.diagnostic}</p>}
     {!page && !view?.diagnostic && <p role="status">Read current plugin status to begin.</p>}
@@ -34,9 +48,9 @@ export function Plugins() {
         </article>)}
       </>}
     </section>}
-    {page && <><p className="plugin-revisions">Desired {page.desired_revision} · Observed {page.observed_revision}<br/>Profile {label(page.health)} · Watcher {label(page.watcher)}</p>
+    {page && <><p className="plugin-revisions">Desired {page.desired_revision} · Observed {page.observed_revision}<br/>{page.health && <>Profile {label(page.health)} · Watcher {label(page.watcher ?? 'inactive')}</>}{!page.health && <>{label(page.context.availability)}{page.context.preset_source && ` · ${label(page.context.preset_source)} preset root`}</>}{page.context.source_digest && <><br/>Source {page.context.source_digest.slice(0,12)}</>}</p>
       <div className="plugin-rows">{page.plugins.map(row => <article className="plugin-row" key={row.instance}>
-        <h3>{row.instance}</h3><dl><dt>Desired</dt><dd>{row.desired_plugin ?? 'Removed'} · {row.enabled ? 'enabled' : 'disabled'}</dd><dt>Observed</dt><dd>{row.observed ? `${label(row.observed.state)} · ${row.observed.plugin}` : 'Not observed'}</dd></dl>
+        <h3>{row.instance}</h3><p className="hint">{label(row.origin)}{row.diagnostics.map(reason => ` · ${label(reason)}`)}</p><dl><dt>Desired</dt><dd>{row.desired_plugin ?? 'Removed'} · {row.enabled ? 'enabled' : 'disabled'}</dd><dt>{view?.target.kind === 'session' ? 'Pinned manifest' : 'Observed'}</dt><dd>{row.observed ? `${label(row.observed.state)} · ${row.observed.plugin}` : 'Not observed'}</dd></dl>
       </article>)}</div>
       <div className="actions"><Button disabled={busy || page.offset === 0} onClick={() => command({kind:'page',ticket:view.ticket,offset:Math.max(0,page.offset-32)})}>Previous plugin page</Button><span>{page.offset + Number(page.plugins.length > 0)}–{page.offset+page.plugins.length} of {page.total}</span><Button disabled={busy || page.next_offset === null} onClick={() => command({kind:'page',ticket:view.ticket,offset:page.next_offset})}>Next plugin page</Button></div>
     </>}

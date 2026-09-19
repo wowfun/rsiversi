@@ -1,12 +1,13 @@
 # Web document bridge
 
-IndexedDB schema 3 namespaces composer records by endpoint, real principal
+IndexedDB schema 4 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Upgrade
 validates both old pane ledgers, migrates their records and commits one aggregate
 ledger atomically. It preserves exact pending request strings, phases, receipts
 and incarnations; a malformed record or quota mismatch aborts the entire upgrade.
-The record migration adds empty reference lists and reference counts; it never
-rewrites the opaque Rust submission. A different service/Store version does not
+Upgrade from schema 1, 2 or 3 removes the obsolete workspace-trust field from
+creation intents. Existing editor text, images, references and Header bindings
+remain intact; it never rewrites the opaque Rust submission. A different service/Store version does not
 make an old pending request replayable: Rust checks its operation and immutable
 Header binding. Reconnect to the owning compatible service to reconcile it;
 otherwise retain the old record for explicit recovery instead of replaying or
@@ -42,7 +43,8 @@ These assets render the views of the ordinary [Rust Web application](../../../cr
 The document owns DOM nodes, focus and input delivery; the Dedicated Worker owns
 the actual Rust Profile and application. One view crosses the bridge at a time,
 acknowledged only after DOM rendering. Input delivery admits eight ordinary calls
-and one separate lifecycle call at both bridge ends; frame acknowledgements use
+and one separate lifecycle call at both bridge ends. Terminal reads and writes
+have separate 32-slot and eight-slot lanes at both ends; frame acknowledgements use
 neither lane. A failed draft flush cancels document close, keeps the current
 editor and connection available for recovery, and never reports clean disconnect.
 Native close cancellation also cancels that attempt's drain deadline; a later
@@ -262,3 +264,27 @@ unrelated frames; request, selection and diagnostic changes update the popup.
 
 File-picker buttons use the same product action handler as the composer, so
 synchronous and asynchronous failures reach the visible notice.
+
+Session terminals render their independent bounded stream with pinned xterm
+6.0.0 and fit addon 0.11.0, bundled into the existing application assets. GUI Rust
+owns input sequencing, uncertain receipts and output cursors. The document
+forwards bounded bytes and acknowledges pages after xterm has parsed them.
+
+Terminal dynamic styles use constructed CSSOM sheets through a scoped document
+override, with inert template placeholders and explicit disposal. The production
+`style-src 'self'` policy is unchanged. `xterm-document.mjs` resolves the installed
+ES module and validates it when Vite config loads; resolution also rejects a
+different entry in development; production builds also require
+the patched module to have been loaded. It checks the exact
+dependency digest before correcting the 6.0.0 document-override precedence error;
+dependency upgrades require reviewing this patch. No global DOM method is patched.
+
+Terminal output reads retry an ambiguous bridge failure at most three times with the
+same opaque acknowledgement. Rust retains cursor and page ownership; rendering
+failures and admitted input writes are never retried by this document. Explicit
+bridge admission backpressure retries with capped delays until detach, including
+queued input known not to have been admitted. Exhausted ambiguous-read retries
+leave a visible notice. Renderer initialization failure disposes its scoped styles
+and terminal instead of leaving a partially mounted view.
+Taking control applies the current viewport size even if the viewport has not
+changed since the read-only attachment was opened.

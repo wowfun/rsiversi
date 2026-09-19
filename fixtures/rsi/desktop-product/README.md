@@ -82,3 +82,8 @@ input. Prepare the isolated document copies using the Web product fixture.
 PSS includes the desktop process plus all descendant WebKit web/network processes;
 all three settling samples are retained. `--smoke` checks harness admission only.
 Input-to-paint uses two animation frames, not a claim about physical display scanout.
+
+`--terminals` additionally types into the real xterm widget in the Linux WebView,
+verifies native Bash-created file bytes, detaches and reattaches read-only, takes
+control explicitly, observes exit code 7 and closes the terminal. These screenshots
+and receipts are separate from browser and parser-only evidence.

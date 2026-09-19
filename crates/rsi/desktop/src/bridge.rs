@@ -261,6 +261,7 @@ impl Bridge {
                     .await?
                     .into_bytes())
             }
+            "terminal" => Ok(self.app.terminal(text(source)?).await?.into_bytes()),
             "read_image" => Ok(self.app.read_image(text(source)?).await?.bytes.to_vec()),
             "ui_source" => {
                 if source.len() > 1024 {

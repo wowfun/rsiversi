@@ -21,6 +21,7 @@ const BOOTSTRAP: &[&str] = &[
     "app.js",
     "mounts.js",
     "drafts.js",
+    "admission.js",
     "worker.js",
     "styles.css",
     "rsi_web.js",

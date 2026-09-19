@@ -472,6 +472,12 @@ pub async fn read_image(selection: String) -> Result<js_sys::Uint8Array, JsValue
     Ok(js_sys::Uint8Array::from(object.bytes.as_ref()))
 }
 
+/// Executes one bounded terminal operation without consuming a renderer frame.
+#[wasm_bindgen]
+pub async fn terminal(source: String) -> Result<String, JsValue> {
+    application()?.terminal(&source).await.map_err(failure)
+}
+
 /// Reads a bounded model-local source; the Worker derives its exact target and revision.
 #[wasm_bindgen]
 pub async fn ui_source(source: String) -> Result<js_sys::Uint8Array, JsValue> {

@@ -1,4 +1,6 @@
 import license from '../vendor/dsh/LICENSE?raw'
+import xtermLicense from '@xterm/xterm/LICENSE?raw'
+import fitLicense from '@xterm/addon-fit/LICENSE?raw'
 import type { PropsRenderSlots } from '@rsi/dsh-slots'
 import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -9,6 +11,7 @@ import { slots, host, renderer } from './slots.tsx'
 import { input, run, useView, useSelected } from './bridge.ts'
 import { Navigation } from './navigation.tsx'
 import { Setup } from './setup.tsx'
+import {Terminals} from './terminal.tsx'
 import './workbench.css'
 
 declare module '@rsi/dsh-slots' {
@@ -30,18 +33,20 @@ function Shell({renderSlot}: PropsRenderSlots<'rsi.navigation' | 'rsi.main' | 'r
       {renderSlot('rsi.main',{settings,closeSettings:()=>setSettings(false)})}
       <aside className="resources" aria-label="Session resources" hidden={settings}>{renderSlot('rsi.resources',{})}</aside>
     </main>
-    {licenses && <dialog open className="license-dialog"><h2>Third-party software</h2><p>DeepSeek Harness · MIT · c291e7961a515f6d7af9304e7fd1d257929aef26</p><pre>{license}</pre><Button onClick={()=>setLicenses(false)}>Close licenses</Button></dialog>}
+    {licenses && <dialog open className="license-dialog"><h2>Third-party software</h2><p>DeepSeek Harness · MIT · c291e7961a515f6d7af9304e7fd1d257929aef26</p><pre>{license}</pre><p>xterm.js 6.0.0 · MIT</p><pre>{xtermLicense}</pre><p>xterm Fit 0.11.0 · MIT</p><pre>{fitLicense}</pre><Button onClick={()=>setLicenses(false)}>Close licenses</Button></dialog>}
     <dialog id="detail" className="detail-dialog"><div className="dialog-heading"><h2 id="detail-title">Details</h2><button id="detail-close" aria-label="Close details">×</button></div><div id="detail-body"/></dialog>
   </>
 }
 function Main({settings,closeSettings}: {settings:boolean;closeSettings:()=>void}) {
   const surfaceKeys = useView(view=>Object.keys(view?.surfaces ?? {}).join(','))
   const setup = useView(view=>view?.setup), selected = useSelected(value=>value)
-  const [mode,setMode] = useState('chat')
+  const [mode,setMode] = useState('chat'), [terminals,setTerminals] = useState(false)
+  const surface=useView(view=>view?.surfaces[selected])
   return <section className={`workspace-main mode-${mode}`} aria-label="Conversations">
-    <div hidden={settings} className="session-toolbar"><nav className="pane-tabs" aria-label="Conversation surfaces">{surfaceKeys.split(',').filter(Boolean).map(key=><span key={key}><Button size="sm" id={`pane-tab-${key}`} aria-pressed={selected===key} onClick={()=>input.select(key)}>{key==='main'?'Conversation':key==='compare'?'Compare':key}</Button>{key!=='main' && <Button size="sm" aria-label={`Close ${key}`} onClick={()=>void run(()=>input.close(key))}>×</Button>}</span>)}{surfaceKeys.split(',').filter(Boolean).length<2 && <Button size="sm" id="add-surface" onClick={()=>void run(()=>input.add('compare'))}>+ Compare</Button>}</nav><nav className="view-tabs" aria-label="Conversation view"><Button size="sm" aria-pressed={mode==='chat'} onClick={()=>setMode('chat')}>Chat</Button><Button size="sm" aria-pressed={mode==='trajectory'} onClick={()=>setMode('trajectory')}>Trajectory</Button></nav></div>
+    <div hidden={settings} className="session-toolbar"><nav className="pane-tabs" aria-label="Conversation surfaces">{surfaceKeys.split(',').filter(Boolean).map(key=><span key={key}><Button size="sm" id={`pane-tab-${key}`} aria-pressed={selected===key} onClick={()=>input.select(key)}>{key==='main'?'Conversation':key==='compare'?'Compare':key}</Button>{key!=='main' && <Button size="sm" aria-label={`Close ${key}`} onClick={()=>void run(()=>input.close(key))}>×</Button>}</span>)}{surfaceKeys.split(',').filter(Boolean).length<2 && <Button size="sm" id="add-surface" onClick={()=>void run(()=>input.add('compare'))}>+ Compare</Button>}</nav><nav className="view-tabs" aria-label="Conversation view"><Button size="sm" aria-pressed={mode==='chat'} onClick={()=>setMode('chat')}>Chat</Button><Button size="sm" aria-pressed={mode==='trajectory'} onClick={()=>setMode('trajectory')}>Trajectory</Button><Button size="sm" aria-pressed={terminals} onClick={()=>setTerminals(!terminals)}>Terminal</Button></nav></div>
     {!setup?.agent?.default_model && <div className="setup-prompt" hidden={settings}><strong>Choose a model to start.</strong><span>Open Settings to configure a provider and your conversation defaults.</span></div>}
     <div id="panes" className="panes" hidden={settings}/>
+    {terminals && !settings && surface && <Terminals key={`${selected}:${surface.generation}`} pane={selected} surface={surface} hide={()=>setTerminals(false)}/>}
     {settings && <Setup close={closeSettings}/>}
   </section>
 }

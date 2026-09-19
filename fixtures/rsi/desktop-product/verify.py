@@ -32,6 +32,7 @@ parser.add_argument('--save-failure', action='store_true')
 parser.add_argument('--startup-close', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
+parser.add_argument('--terminals', action='store_true')
 args = parser.parse_args()
 if bool(args.live_env_file) != bool(args.live_model):
     parser.error('live mode requires both an authorized environment file and a model')
@@ -277,6 +278,31 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.terminals:
+        styles_before = script('return document.adoptedStyleSheets.length')
+        button('Terminal'); button('New terminal')
+        until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
+        typography = script('const s=getComputedStyle(document.querySelector(".xterm-rows"));return {family:s.fontFamily,size:s.fontSize,space:s.whiteSpace}')
+        assert 'monospace' in typography['family'] and typography['size'] == '12px' and typography['space'] == 'pre', typography
+        def terminal_keys(text):
+            item = element('.terminal-screen .xterm-helper-textarea')
+            call('POST', root + f'/element/{eid(item)}/value', {'text': text + '\ue007', 'value': list(text + '\ue007')})
+        terminal_keys("printf 'native-pty-ok' > native-pty-result.txt; printf 'Native PTY 界\\n'")
+        until(lambda: (workspace / 'native-pty-result.txt').exists())
+        assert (workspace / 'native-pty-result.txt').read_text() == 'native-pty-ok'
+        until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
+        screenshot('terminal-writer.png')
+        button('Hide terminal panel')
+        until(lambda: script('return document.adoptedStyleSheets.length') == styles_before)
+        button('Terminal'); button('Bash 1 · running')
+        until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="Read only"'))
+        until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
+        screenshot('terminal-readonly.png'); button('Take control')
+        until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
+        terminal_keys('exit 7')
+        until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="Exited 7"'))
+        screenshot('terminal-exited.png'); button('Close terminal'); button('Hide terminal panel')
+        (args.report / 'terminals.json').write_text(json.dumps({'status':'passed','native_bash':True,'readonly_reattach':True,'explicit_takeover':True,'exit_code':7,'closed':True},indent=2))
     if args.tasks:
         verify_tasks(script, button, fill, until, screenshot, workspace, args.report, task_provider)
     geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Send ↗"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')

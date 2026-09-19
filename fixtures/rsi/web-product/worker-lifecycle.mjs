@@ -31,6 +31,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function dispatch_submission() {}
     export async function import_image() {}
     export async function read_image() {}
+    export async function terminal() {}
   `;
   const server = createServer((request, response) => {
     response.setHeader("Content-Type", request.url === "/" ? "text/html" : "text/javascript");

@@ -5,18 +5,24 @@ import { join } from 'node:path';
 export async function verifyDraftMigration(browser, root) {
   const source = await readFile(join(root,'plugins/rsi/web/drafts.js'),'utf8');
   const reports=[];
-  for (const version of [1,2]) for (const corrupt of [false,true]) {
+  for (const version of [1,2,3]) for (const phase of (version === 3 ? ["prepared","dispatching","unknown"] : ["unknown"])) for (const corrupt of [false,true]) {
     const context=await browser.newContext();
     await context.route('http://localhost:37918/**',route=>route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
     const page=await context.newPage();
     try {
       await page.goto('http://localhost:37918/');
-      const report=await page.evaluate(async ({corrupt,version})=>{
-        const records=[0,1].map(pane=>({version,key:['a'.repeat(32),'b'.repeat(32),pane,`session-${pane}`],scope:['a'.repeat(32),'b'.repeat(32),pane],header:'c'.repeat(64),incarnation:String(pane+1).repeat(32),editRevision:3,pendingRevision:2,text:`草稿 ${pane}`,images:[],creation:null,everDispatched:true,pending:{kind:pane===0?'message':'command',id:`original-${pane}`,opaque:'{"revision":18446744073709551615,"fields":{"z":1,"a":2}}',text_bytes:10,images:0,phase:'unknown',editRevision:1},receipt:'{"seq":18446744073709551615}'}));
-        if (version === 2) for (const record of records) { record.key[1] = `device:${record.key[1]}`; record.key[2] = record.key[2] === 0 ? "main" : "compare"; record.scope = record.key.slice(0,3); }
+      const report=await page.evaluate(async ({corrupt,version,phase})=>{
+        const records=[0,1].map(pane=>({version,key:['a'.repeat(32),'b'.repeat(32),pane,`session-${pane}`],scope:['a'.repeat(32),'b'.repeat(32),pane],header:'c'.repeat(64),incarnation:String(pane+1).repeat(32),editRevision:3,pendingRevision:2,text:`草稿 ${pane}`,images:[{id:"d".repeat(64),mime:"image/png",bytes:72,width:1,height:1}],creation:{session_id:`session-${pane}`,workspace_id:"e".repeat(64),agent_preset_id:null,workspace_trust:pane===0 ? "trusted" : "untrusted"},everDispatched:true,pending:{kind:pane===0?'message':'command',id:`original-${pane}`,opaque:'{"revision":18446744073709551615,"fields":{"z":1,"a":2}}',text_bytes:10,images:1,phase,editRevision:1},receipt:'{"seq":18446744073709551615}'}));
+        if (version >= 2) for (const record of records) { record.key[1] = `device:${record.key[1]}`; record.key[2] = record.key[2] === 0 ? "main" : "compare"; record.scope = record.key.slice(0,3); }
+        if (version === 3) for (const record of records) {
+          record.references = [{snapshot:{sha256:'b'.repeat(64),byte_len:900},metadata:{source:{session_id:'source',header_sha256:'f'.repeat(64)},target:{session_id:record.key[3],header_sha256:record.header},through_seq:'9007199254740993',fact_prefix_sha256:'e'.repeat(64),scanned_after_seq:'9007199254740992',retained_after_seq:'9007199254740992',retained_through_seq:'9007199254740993',scanned_bytes:400,text_bytes:12,omissions:['fact_limit']},preview:'你好世界'}];
+          record.pending.references = 1;
+          record.pending.opaque = '{"operation":{"version":6},"workspace_trust":"trusted","revision":18446744073709551615,"reference":' + JSON.stringify(record.references[0]) + '}';
+        }
+        const editableBytes = record => new TextEncoder().encode(record.text).length + (record.references?.length ? new TextEncoder().encode(JSON.stringify(record.references)).length : 0);
         await new Promise((resolve,reject)=>{
           const request=indexedDB.open('rsi.composer',version);
-          request.onupgradeneeded=()=>{const db=request.result;const rows=db.createObjectStore('drafts',{keyPath:'key'});rows.createIndex('scope','scope');const usage=db.createObjectStore('usage');records.forEach(record=>rows.add(record)); if(version===1) records.forEach((record,pane)=>usage.put([1,new TextEncoder().encode(record.text).length,10,new TextEncoder().encode(record.pending.opaque).length],pane)); else usage.put([2,records.reduce((sum,record)=>sum+new TextEncoder().encode(record.text).length,0),20,records.reduce((sum,record)=>sum+new TextEncoder().encode(record.pending.opaque).length,0)],'aggregate'); if(corrupt)usage.put([0,0,0,0],version===1 ? 1 : 'aggregate')};
+          request.onupgradeneeded=()=>{const db=request.result;const rows=db.createObjectStore('drafts',{keyPath:'key'});rows.createIndex('scope','scope');const usage=db.createObjectStore('usage');records.forEach(record=>rows.add(record)); if(version===1) records.forEach((record,pane)=>usage.put([1,editableBytes(record),10,new TextEncoder().encode(record.pending.opaque).length],pane)); else usage.put([2,records.reduce((sum,record)=>sum+editableBytes(record),0),20,records.reduce((sum,record)=>sum+new TextEncoder().encode(record.pending.opaque).length,0)],'aggregate'); if(corrupt)usage.put([0,0,0,0],version===1 ? 1 : 'aggregate')};
           request.onsuccess=()=>{request.result.close();resolve()};request.onerror=()=>reject(request.error);
         });
         const {DraftStore}=await import('/drafts.js');
@@ -28,7 +34,7 @@ export async function verifyDraftMigration(browser, root) {
           const unchanged=JSON.stringify(rows)===JSON.stringify([...records].sort((a,b)=>JSON.stringify(a.key).localeCompare(JSON.stringify(b.key)))),version=raw.version;raw.close();return {rejected,unchanged,version};
         }
         const migrated=await Promise.all(['main','compare'].map((surface,index)=>store.get(surface,`session-${index}`)));
-        const expected=records.map((record,index)=>({...record,version:3,pending:{...record.pending,references:0},references:[],key:['a'.repeat(32),'device:'+'b'.repeat(32),index===0?'main':'compare',record.key[3]],scope:['a'.repeat(32),'device:'+'b'.repeat(32),index===0?'main':'compare']}));
+        const expected=records.map((record,index)=>({...record,version:4,creation:{session_id:record.creation.session_id,workspace_id:record.creation.workspace_id,agent_preset_id:null},pending:{...record.pending,references:record.pending.references??0},references:record.references??[],key:['a'.repeat(32),'device:'+'b'.repeat(32),index===0?'main':'compare',record.key[3]],scope:['a'.repeat(32),'device:'+'b'.repeat(32),index===0?'main':'compare']}));
         const normalize = value => Array.isArray(value) ? value.map(normalize) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,normalize(value[key])])) : value;
         const preserved=JSON.stringify(normalize(migrated))===JSON.stringify(normalize(expected));
         const local=await DraftStore.open('a'.repeat(32),{kind:'local'}),device=await DraftStore.open('a'.repeat(32),{kind:'device',device_id:'d'.repeat(32)});
@@ -36,9 +42,9 @@ export async function verifyDraftMigration(browser, root) {
         await local.ensure('main','session-0','e'.repeat(64));
         const realPrincipal=(await local.get('main','session-0')).key[1]==='local' && (await store.get('main','session-0')).pending.id==='original-0';
         await store.verify();return {rejected,preserved,isolated,realPrincipal,version:store.db.version};
-      },{corrupt,version});
+      },{corrupt,version,phase});
       if(corrupt) assert.deepEqual(report,{rejected:true,unchanged:true,version});
-      else assert.deepEqual(report,{rejected:false,preserved:true,isolated:true,realPrincipal:true,version:3});
+      else assert.deepEqual(report,{rejected:false,preserved:true,isolated:true,realPrincipal:true,version:4});
       reports.push(report);
     } finally {await context.close()}
   }

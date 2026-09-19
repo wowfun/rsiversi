@@ -28,7 +28,7 @@ run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
   join(root, `target/wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
 await build({ root: source, configFile: join(source, "vite.config.mjs"), build: { outDir: output } });
-for (const file of ["worker.js", "mounts.js", "drafts.js"]) {
+for (const file of ["worker.js", "mounts.js", "drafts.js", "admission.js"]) {
   await copyFile(join(source, file), join(output, file));
 }
 await buildRenderers(output);

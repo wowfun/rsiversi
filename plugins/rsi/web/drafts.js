@@ -38,24 +38,24 @@ export function validateEditor(text, images, references = []) {
   require(textBytes + previewBytes <= MiB, "Draft text and reference previews exceed 1 MiB");
   return textBytes + referenceBytes(references);
 }
-function validatePending(pending, version = 3) {
-  require(pending && Object.keys(pending).sort().join() === (version === 3 ? "editRevision,id,images,kind,opaque,phase,references,text_bytes" : "editRevision,id,images,kind,opaque,phase,text_bytes"));
+function validatePending(pending, version = 4) {
+  require(pending && Object.keys(pending).sort().join() === (version >= 3 ? "editRevision,id,images,kind,opaque,phase,references,text_bytes" : "editRevision,id,images,kind,opaque,phase,text_bytes"));
   require(pending && ["message", "command"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string" && bytes(pending.opaque) <= (pending.kind === "message" ? 8 * MiB : 32 * 1024));
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
-  if (version === 3) require(integer(pending.references, 4));
+  if (version >= 3) require(integer(pending.references, 4));
   require(["prepared", "dispatching", "unknown"].includes(pending.phase) && integer(pending.editRevision));
 }
 const surface = value => typeof value === "string" && /^[a-z0-9_-]{1,32}$/.test(value);
 const principalKey = value => value === "local" || (typeof value === "string" && /^device:[0-9a-f]{32}$/.test(value));
-function validateRecord(record, version = 3) {
+function validateRecord(record, version = 4) {
   const legacy = version === 1;
   require(record?.version === version && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (legacy ? hex(record.key[1], 32) && integer(record.key[2], 1) : principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(equal(record.scope, record.key.slice(0, 3)) && hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
-  validateEditor(record.text, record.images, version === 3 ? record.references : []);
-  if (version === 3) require(record.references.every(reference => reference.metadata.target.session_id === record.key[3] && reference.metadata.target.header_sha256 === record.header), "Reference belongs to another draft Header");
+  validateEditor(record.text, record.images, version >= 3 ? record.references : []);
+  if (version >= 3) require(record.references.every(reference => reference.metadata.target.session_id === record.key[3] && reference.metadata.target.header_sha256 === record.header), "Reference belongs to another draft Header");
   if (record.pending !== null) {
     validatePending(record.pending, version);
     require(record.pending.editRevision <= record.editRevision && (record.pending.phase === "prepared" || record.everDispatched));
@@ -64,11 +64,11 @@ function validateRecord(record, version = 3) {
   if (record.creation !== null) {
     const creation = record.creation;
     // The Rust Web README owns the default-preset Fresh creation contract.
-    require(creation && Object.keys(creation).sort().join() === "agent_preset_id,session_id,workspace_id,workspace_trust");
-    require(hex(creation.workspace_id) && creation.session_id === record.key[3] && creation.agent_preset_id === null &&
-      ["trusted", "untrusted"].includes(creation.workspace_trust));
+    require(creation && Object.keys(creation).sort().join() === (version < 4 ? "agent_preset_id,session_id,workspace_id,workspace_trust" : "agent_preset_id,session_id,workspace_id"));
+    require(hex(creation.workspace_id) && creation.session_id === record.key[3] && creation.agent_preset_id === null);
+    if (version < 4) require(["trusted", "untrusted"].includes(creation.workspace_trust));
   }
-  require(Object.keys(record).sort().join() === (version === 3 ? "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version" : "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,scope,text,version"));
+  require(Object.keys(record).sort().join() === (version >= 3 ? "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version" : "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,scope,text,version"));
   return record;
 }
 const referenceBytes = references => references?.length ? bytes(JSON.stringify(references)) : 0;
@@ -101,8 +101,9 @@ function migrate(tx, fail, version) {
       const drafts = tx.objectStore("drafts"), usageStore = tx.objectStore("usage");
       drafts.clear(); usageStore.clear();
       for (const record of rows) {
-        record.version = 3; record.references = [];
-        if (record.pending) record.pending.references = 0;
+        record.version = 4;
+        if (version < 3) { record.references = []; if (record.pending) record.pending.references = 0; }
+        if (record.creation) delete record.creation.workspace_trust;
         if (legacy) { record.key[1] = `device:${record.key[1]}`; record.key[2] = record.key[2] === 0 ? "main" : "compare"; }
         record.scope = record.key.slice(0,3); validateRecord(record); drafts.add(record);
       }
@@ -134,14 +135,14 @@ let database;
 async function openDatabase() {
   if (!database) database = new Promise((resolve, reject) => {
     let failure;
-    const request = indexedDB.open("rsi.composer", 3);
+    const request = indexedDB.open("rsi.composer", 4);
     request.onupgradeneeded = event => {
       const fail = error => { failure = error; request.transaction.abort(); };
       if (failure) { request.transaction.abort(); return; }
       if (event.oldVersion === 0) {
         const records = request.result.createObjectStore("drafts", { keyPath: "key" });
         records.createIndex("scope", "scope"); request.result.createObjectStore("usage");
-      } else if (event.oldVersion === 1 || event.oldVersion === 2) migrate(request.transaction, fail, event.oldVersion);
+      } else if (event.oldVersion === 1 || event.oldVersion === 2 || event.oldVersion === 3) migrate(request.transaction, fail, event.oldVersion);
       else fail(new Error("Unsupported saved draft schema"));
     };
     request.onerror = () => reject(failure ?? request.error);
@@ -259,7 +260,7 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     return validateRecord({
-      version: 3, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 4, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
     });
@@ -323,7 +324,7 @@ export class DraftStore {
       require(old.creation && !old.everDispatched && !old.pending, "Only a never-dispatched Fresh draft can start a replacement conversation");
       require(!old.references.length, "References belong to the original conversation. Remove them before moving this draft, then capture them again.");
       require(!next.text && !next.images.length && !next.references.length && !next.pending && next.creation && !next.everDispatched);
-      require(old.creation.workspace_id === next.creation.workspace_id && old.creation.workspace_trust === next.creation.workspace_trust);
+      require(old.creation.workspace_id === next.creation.workspace_id);
       next.text = old.text; next.images = old.images; next.editRevision = bump(next.editRevision);
       return [undefined, next];
     });

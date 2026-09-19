@@ -1,5 +1,27 @@
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
+export async function verifyPluginSources(page,service,report,browser) {
+  const requests=service.provider.requests.length;
+  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await page.getByRole('button',{name:'Plugins',exact:true}).click();
+  const panel=page.getByRole('region',{name:'Plugins',exact:true});
+  await panel.locator('.plugin-revisions').waitFor();
+  await panel.getByRole('button',{name:'Current preset configuration',exact:true}).click();
+  await panel.getByText('Source: preset',{exact:true}).waitFor();
+  await panel.locator('.plugin-revisions').filter({hasText:'ready'}).waitFor();
+  await panel.locator('.plugin-rows .plugin-row').first().waitFor();
+  await page.screenshot({path:join(report,`${browser}-plugins-preset.png`)});
+  await panel.getByRole('button',{name:'Session resident generation',exact:true}).click();
+  await panel.getByText('Source: session',{exact:true}).waitFor();
+  await panel.locator('.plugin-revisions').filter({hasText:/ready|not resident/}).waitFor();
+  assert(!(await panel.innerText()).includes(service.workspace),'diagnostics leaked workspace');
+  await page.screenshot({path:join(report,`${browser}-plugins-session.png`)});
+  await panel.getByRole('button',{name:'Host plugins',exact:true}).click();
+  await panel.getByText('Source: host',{exact:true}).waitFor();
+  await panel.locator('.plugin-row').first().waitFor();
+  await page.getByRole('button',{name:'Close settings',exact:true}).click();
+  assert.equal(service.provider.requests.length,requests,'diagnostic read invoked a model');
+}
 export async function verifyPlugins(page,pane,service,receipt,report,browser) {
   const input=pane.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('Retained while inspecting plugins');

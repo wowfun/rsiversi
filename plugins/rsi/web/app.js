@@ -1,3 +1,4 @@
+import { lane, limits } from "./admission.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { NativeDocument } from "./src/native.ts";
@@ -187,24 +188,25 @@ async function makeWorker() {
       } catch (error) { if (connection === current && !current.closing) failWorker(`View rendering failed: ${error.message}`, current); }
     } else if (data.kind === "reply") {
       const waiter = current.pending.get(data.id); current.pending.delete(data.id);
-      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true })); else waiter?.resolve(data.result);
+      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true, retryable: data.retryable !== false })); else waiter?.resolve(data.result);
     } else if (data.kind === "failed") { if (!current.closing) failWorker(data.error, current); }
   };
   current.worker.onerror = event => { event.preventDefault(); if (connection === current) failWorker("Browser Worker stopped", current); };
   return current;
 }
 function call(method, payload, transfer = []) {
-  const lifecycle = method === "connect" || method === "disconnect";
-  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(Object.assign(new Error("The application is disconnecting"), { notAdmitted: true }));
-  if (!worker) return Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true }));
-  const ordinary = [...pending.values()].filter(waiter => !waiter.lifecycle).length;
-  if (lifecycle ? [...pending.values()].some(waiter => waiter.lifecycle) : ordinary >= 8) return Promise.reject(Object.assign(new Error("Input is busy; wait for the current action"), { notAdmitted: true }));
+  const selected = lane(method, payload);
+  const lifecycle = selected === "lifecycle";
+  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(Object.assign(new Error("The application is disconnecting"), { notAdmitted: true, retryable: false }));
+  if (!worker) return Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true, retryable: false }));
+  const inflight = [...pending.values()].filter(waiter => waiter.lane === selected).length;
+  if (inflight >= limits[selected]) return Promise.reject(Object.assign(new Error("Input is busy; wait for the current action"), { notAdmitted: true }));
   const id = ++requestId;
   const waiters = pending;
   return new Promise((resolve, reject) => {
-    waiters.set(id, { resolve, reject, lifecycle });
+    waiters.set(id, { resolve, reject, lifecycle, lane: selected });
     try { worker.postMessage({ kind: "call", id, method, payload }, transfer); }
-    catch (error) { waiters.delete(id); reject(Object.assign(error, { notAdmitted: true })); }
+    catch (error) { waiters.delete(id); reject(Object.assign(error, { notAdmitted: true, retryable: false })); }
   });
 }
 

@@ -30,7 +30,10 @@ their product jobs; the Base job owns `rsi-host` and every Base service family,
 while the standard product has its own end-to-end Headless boundary. The Agent
 job exercises the same feature-unified graph as its ordinary package
 tests; it does not repeat a command-line feature that another workspace member
-already enables. Repository-wide formatting runs once in the repository-tools
+already enables. SQLite reader and GUI frame instrumentation have explicit
+`test-support` lint and behavior-test steps in their respective owning jobs.
+Small deterministic invariants run there; larger timing reports remain opt-in.
+Repository-wide formatting runs once in the repository-tools
 job rather than being charged to every platform-specific foundation
 conformance run. Repository `code-check` is an optional diagnostic and does not
 run in CI.
@@ -119,3 +122,7 @@ Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
 headroom, including conditionally selected platform steps. Every browser job
 command has an explicit step deadline; setup actions share the headroom. The repository budget
 test enforces this conservative ceiling when steps are added.
+
+The Web terminal fixture has its own step deadline, outcome and evidence archive.
+It reuses the main product build when present, and can still run after later main
+fixture failures. Its own namespace-policy preflight is restored at step exit.

@@ -33,7 +33,8 @@ With standard Web assets built as described by the
 `RSI_WEB_ASSETS` and `RSI_WORKBENCH_REPORT`, and run `node fixtures/rsi/addon-workbench/verify.mjs`.
 It uses real Chromium and Firefox, authenticated HTTP and the product Worker,
 records the actual provider's plan state and addon Tool declaration, exercises
-the addon Settings editor, and captures the generic extension UI. Device writes
+the addon Settings editor, verifies typed input survives the explicit JSON-mode
+switch, and captures the generic extension UI. Device writes
 to this source-owned addon namespace are rejected by the product's closed remote
 configuration policy; the browser fixture checks that rejection and retained
 editor input. Trusted Local Settings mutation remains covered by the public

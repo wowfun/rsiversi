@@ -73,8 +73,10 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.getByText("Additional settings", { exact: true }).click();
     await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
     await page.getByRole("button", { name: "fixture.workbench", exact: true }).click();
+    await page.getByRole("textbox", { name: "Settings / note", exact: true }).fill("public browser settings");
+    await page.getByRole("button", { name: "Edit as JSON", exact: true }).click();
     const editor = page.getByRole("textbox", { name: "Settings JSON" });
-    await editor.fill(JSON.stringify({ note: "public browser settings" }));
+    assert.deepEqual(JSON.parse(await editor.inputValue()), { note: "public browser settings" });
     const denied = page.waitForResponse(response => response.url().endsWith('/api/v1/settings/replace/1'));
     await page.getByRole("button", { name: "Save settings", exact: true }).click();
     assert.equal((await denied).status(), 401);

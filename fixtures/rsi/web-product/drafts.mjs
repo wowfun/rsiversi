@@ -109,7 +109,7 @@ export async function verifyDrafts(browser, root) {
       });
       const rejects = async operation => { try { await operation(); return false; } catch { return true; } };
       await clear();
-      const creation = session_id => ({session_id, workspace_id:"a".repeat(64), workspace_trust:"untrusted", agent_preset_id:null});
+      const creation = session_id => ({session_id, workspace_id:"a".repeat(64), agent_preset_id:null});
       let original = await store.ensure("main", "fresh-old", "c".repeat(64), creation("fresh-old"));
       original = await store.edit(original, "keep this input", [{id:"d".repeat(64),mime:"image/png",bytes:72,width:1,height:1}]);
       const replacement = await store.ensure("main", "fresh-new", "c".repeat(64), creation("fresh-new"));

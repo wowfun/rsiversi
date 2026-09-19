@@ -56,7 +56,7 @@ export async function verifyAcknowledgementDeadline(page, service) {
         const frame = await first;
         const workspace = frame.view.catalog.workspaces[0].id;
         await call("command", JSON.stringify({action:"add_surface",pane:"compare"}));
-        for (const pane of ["main", "compare"]) await call("command", JSON.stringify({ action: "create", pane, workspace, trust: false }));
+        for (const pane of ["main", "compare"]) await call("command", JSON.stringify({ action: "create", pane, workspace }));
         // A stale acknowledgement must not release the pending frame or renew its deadline.
         worker.postMessage({ kind: "ack", frame_id: "18446744073709551615" });
         const error = await failed;

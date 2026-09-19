@@ -1,11 +1,11 @@
-import init, { connect, command, restore_session, prepare_submission, reference_input, file_input, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import { lane, limits } from "./admission.js";
+import init, { connect, command, terminal, restore_session, prepare_submission, reference_input, file_input, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const initialized = init();
 let connected = false;
 let acknowledgement;
 let pumping;
-let calls = 0;
-let lifecycle = false;
+const calls = Object.fromEntries(Object.keys(limits).map(key => [key, 0]));
 let accepting = false;
 const ordinary = new Set();
 let draining;
@@ -58,6 +58,8 @@ async function dispatch(data) {
     });
   } else if (data.method === "command") {
     result = await command(data.payload);
+  } else if (data.method === "terminal") {
+    result = await terminal(data.payload);
   } else if (data.method === "restore_session") {
     result = await restore_session(data.payload);
   } else if (data.method === "prepare_submission") {
@@ -85,11 +87,13 @@ async function dispatch(data) {
 self.onmessage = ({ data }) => {
   if (data.kind === "ack") { if (data.frame_id === acknowledgement?.frameId) acknowledgement.finish(data.resync === true, data.renderer); return; }
   if (data.kind !== "call" || !Number.isSafeInteger(data.id)) return;
-  const control = data.method === "connect" || data.method === "disconnect";
-  if (control ? lifecycle : (calls >= 8 || (!accepting && data.method !== "resources"))) {
-    postMessage({ kind: "reply", id: data.id, error: "Browser input is busy or closed", notAdmitted: true }); return;
+  const selected = lane(data.method, data.payload);
+  const control = selected === "lifecycle";
+  const closed = !control && !accepting && data.method !== "resources";
+  if (closed || calls[selected] >= limits[selected]) {
+    postMessage({ kind: "reply", id: data.id, error: "Browser input is busy or closed", notAdmitted: true, retryable: !closed }); return;
   }
-  if (control) lifecycle = true; else calls++;
+  calls[selected]++;
   if (data.method === "disconnect") { connected = false; accepting = false; acknowledgement?.finish(true); }
   const task = (async () => {
     try {
@@ -97,7 +101,7 @@ self.onmessage = ({ data }) => {
       postMessage({ kind: "reply", id: data.id, result }, result instanceof Uint8Array ? [result.buffer] : []);
     } catch (error) {
       postMessage({ kind: "reply", id: data.id, error: String(error) });
-    } finally { if (control) lifecycle = false; else calls--; }
+    } finally { calls[selected]--; }
   })();
   if (!control) {
     ordinary.add(task);

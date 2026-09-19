@@ -269,7 +269,9 @@ fn bootstrap(
         paths,
         rsi::capture_standard_environment().map_err(error)?,
         Some(coding),
-    );
+    )
+    .with_user_home(rsi::capture_standard_home().map_err(error)?)
+    .map_err(error)?;
     let composition =
         rsi::ApplicationComposition::new(composition, desktop_addons(owner, lifetime, failed)?)
             .map_err(error)?;

@@ -75,7 +75,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 125
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -184,6 +184,43 @@ jobs:
           npm ci --ignore-scripts
           npm test
 
+      - name: Exercise isolated Web terminal application
+        id: web_terminals
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_product.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: fixtures/rsi/web-product
+        env:
+          RSI_WEB_BINARY: ${{ github.workspace }}/target/debug/rsi
+          RSI_WEB_ASSETS: ${{ runner.temp }}/rsi-web-evidence/assets
+          RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-terminal-evidence
+        run: |
+          mkdir -p "$RSI_WEB_REPORT"
+          exec > >(tee "$RSI_WEB_REPORT/terminal-product.log") 2>&1
+          test -x "$RSI_WEB_BINARY"
+          test -d "$RSI_WEB_ASSETS"
+          declare -A previous_policy
+          restore_policy() {
+            for key in "${!previous_policy[@]}"; do
+              sudo sysctl -w "$key=${previous_policy[$key]}"
+            done
+          }
+          trap restore_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
+          node terminal-verify.mjs
+      - name: Preserve Web terminal evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-web-terminal-evidence
+          path: ${{ runner.temp }}/rsi-web-terminal-evidence
+          if-no-files-found: warn
+
       - name: Record browser step outcomes
         timeout-minutes: 1
         if: always()
@@ -245,10 +282,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise Linux Bubblewrap enforcement
         if: runner.os == 'Linux'
@@ -271,6 +308,8 @@ jobs:
           fi
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
+          cargo test --locked -p rsi-process-local --test process pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement -- --ignored --exact --list | rg --fixed-strings --line-regexp 'pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement: test'
+          cargo test --locked -p rsi-process-local --test process pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement -- --ignored --exact
         timeout-minutes: 5
       - name: Exercise Tool JSON feature-unification boundary
         if: runner.os == 'Linux'
@@ -340,6 +379,12 @@ jobs:
         run: cargo test --locked -p 'rsi-agent*' --all-targets --no-fail-fast
         timeout-minutes: 20
 
+      - name: Check SQLite test-support contracts
+        run: |
+          cargo clippy --locked -p rsi-agent-store-sqlite --features test-support --all-targets -- -D warnings
+          cargo test --locked -p rsi-agent-store-sqlite --features test-support --lib
+        timeout-minutes: 10
+
   rsi:
     strategy:
       fail-fast: false
@@ -350,7 +395,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 200
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -378,6 +423,11 @@ jobs:
       - name: Lint standard rsi
         run: cargo clippy --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
+      - name: Check GUI test-support contracts
+        run: |
+          cargo clippy --locked -p rsi-gui --features test-support --all-targets -- -D warnings
+          cargo test --locked -p rsi-gui --features test-support --test submission
+        timeout-minutes: 10
       - name: Check independent terminal presentation
         run: |
           cargo fmt --manifest-path crates/rsi/terminal-native/Cargo.toml -- --check
@@ -411,6 +461,8 @@ jobs:
             done
           fi
           cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
+          cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
       - name: Exercise development TUI smoke
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}
@@ -586,7 +638,7 @@ jobs:
 
   rsi-desktop:
     runs-on: ubuntu-24.04
-    timeout-minutes: 195
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Linux desktop dependencies
@@ -643,6 +695,10 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
         run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-ack-evidence" --daemon --ack-timeout
+      - name: Exercise actual WebKitGTK session terminals
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
+        timeout-minutes: 5
+        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-terminal-evidence" --terminals --window-close
       - name: Exercise startup close deadline
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
@@ -665,6 +721,7 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-desktop-evidence
             ${{ runner.temp }}/rsi-desktop-ack-evidence
+            ${{ runner.temp }}/rsi-desktop-terminal-evidence
             ${{ runner.temp }}/rsi-desktop-startup-evidence
             ${{ runner.temp }}/rsi-desktop-dist/bundle/receipt.json
             ${{ runner.temp }}/rsi-desktop-dist/build-family.json

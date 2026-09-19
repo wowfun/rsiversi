@@ -205,3 +205,14 @@ Model/effort acceptance reads the adapter-declared choices, changes the durable
 Session selection without submitting, verifies the next actual provider request,
 and restores the declared default. These controls use the same Worker and HTTP
 path as ordinary messages; synthetic selector changes alone are not evidence.
+
+`terminal-verify.mjs`, with explicit `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
+`RSI_WEB_REPORT`, exercises real Bubblewrap Bash through the browser: Unicode,
+oversized and short OSC/DCS filtering at the Worker reply boundary before xterm,
+admission-backpressure recovery and takeover sizing, absence of terminal-created style/link nodes, pane detach, readonly reattach, explicit takeover, retained
+shell environment, resize, exit status and close. It records Chromium/Firefox
+screenshots and checks that terminal operations do not invoke the model. Actual
+computed font/whitespace, CSP violations and stylesheet disposal are asserted;
+text appearing in the DOM alone does not establish a correct terminal grid.
+The same scenario switches Host, current preset and resident Session diagnostic
+views without an additional model request.

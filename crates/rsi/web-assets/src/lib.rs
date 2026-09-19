@@ -41,6 +41,7 @@ fn default_files() -> Vec<String> {
         "rsi_web_bg.wasm",
         "mounts.js",
         "drafts.js",
+        "admission.js",
         "standard.js",
         "ui-renderers.json",
     ]
