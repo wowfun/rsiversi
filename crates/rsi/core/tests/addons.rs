@@ -693,3 +693,6 @@ fn resolved_addon_provenance_and_portable_declarations_are_prepare_free() {
 
 #[path = "addons/native.rs"]
 mod native;
+#[cfg(target_os = "linux")]
+#[path = "addons/scaffold.rs"]
+mod scaffold;

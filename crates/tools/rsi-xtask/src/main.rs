@@ -7,6 +7,7 @@ use std::process::{Command, ExitCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod addon;
 mod cargo_step;
 mod code_check;
 #[cfg(unix)]
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
+        [command, rest @ ..] if command == "addon" => addon::run(rest),
         [command, rest @ ..] if command == "dist" => dist::run(rest),
         [command, rest @ ..] if command == "dev" => dev::run(rest),
         [command] if command == "verify-agent-notes" => {

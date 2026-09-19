@@ -1,5 +1,21 @@
 # rsi-xtask
 
+`cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY` creates an
+independent native Tool addon workspace on Linux/WSL. `NAME` is a lowercase ASCII
+letter followed by lowercase letters, digits or hyphens, at most 48 bytes.
+Generation publishes a private sibling directory atomically and refuses an
+existing destination, including a symlink. It neither invokes Cargo nor installs,
+enables or edits a preset. The generated README and `agent-profile.toml` show the
+explicit build and installation steps and the Portable Tool bridge.
+
+The template is maintained in [addon-template](../../../fixtures/rsi/addon-template/README.md).
+Generation copies its lockfile and rewrites only the root package name. SDK
+dependencies are absolute public-crate paths into this checkout: moving that
+checkout requires updating those paths. With dependencies cached, the generated
+workspace builds with `cargo build --locked --offline` without changing its lock.
+The format-2 addon manifest targets the launcher's native OS/architecture and watches its
+explicit source files. Native Windows/macOS scaffolding is currently unavailable.
+
 `cargo xtask dist desktop /absolute/output [--debug]` creates a new Linux paired
 distribution from an immutable capture of all current tracked and non-ignored
 untracked files, including dirty contents. It never stages or commits them. The
