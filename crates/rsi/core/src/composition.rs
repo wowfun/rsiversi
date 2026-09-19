@@ -126,9 +126,11 @@ const STANDARD_AGENT_METADATA: &[u8] = include_bytes!(concat!(
 #[derive(Clone, Debug)]
 pub struct StandardComposition {
     paths: HostPaths,
+    user_home: Option<PathBuf>,
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
     pub(crate) agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
+    pub(crate) agent_store_reset: Option<rsi_agent_store_sqlite::SqliteStoreResetRequest>,
     coding_tools: Option<StandardCodingTools>,
     agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
@@ -1026,6 +1028,8 @@ impl StandardComposition {
                 paths.config().join("credentials/credentials.json"),
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
+            agent_store_reset: None,
+            user_home: None,
             paths,
             captured_environment,
             coding_tools,
@@ -1037,6 +1041,32 @@ impl StandardComposition {
             #[cfg(unix)]
             native_catalog: None,
         }
+    }
+
+    /// Supplies the launcher's captured home for the optional personal skill root.
+    /// Library compositions omit it unless explicitly supplied.
+    pub fn with_user_home(mut self, home: Option<PathBuf>) -> crate::Result<Self> {
+        if home
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || path.to_str().is_none())
+        {
+            return Err(crate::RsiError::Boot(
+                "user home must be an absolute UTF-8 path".into(),
+            ));
+        }
+        self.user_home = home;
+        Ok(self)
+    }
+
+    /// Requests one explicit Agent Store backup and reset during local startup.
+    /// Clones share the one-shot authority; it is not part of the launch identity.
+    #[must_use]
+    pub fn with_agent_store_reset(
+        mut self,
+        request: rsi_agent_store_sqlite::SqliteStoreResetRequest,
+    ) -> Self {
+        self.agent_store_reset = Some(request);
+        self
     }
 
     /// Adds explicit immutable addon declarations to every standard startup and preview path.
@@ -1402,7 +1432,11 @@ impl StandardComposition {
             )],
         ))?;
         register_preset_settings(&mut builder, preset_settings)?;
-        builder.register_fragment(base_fragment(&paths, linux_tools_enabled))?;
+        builder.register_fragment(base_fragment(
+            &paths,
+            linux_tools_enabled,
+            self.user_home.as_deref(),
+        ))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
             .with_maximum_active_turns(STANDARD_MAXIMUM_ACTIVE_TURNS);
@@ -1632,6 +1666,12 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        "rsi.pty",
+        UpdateMode::RestartRequired,
+        rsi_pty::PtyFactory,
+    )?;
+    register(
+        builder,
         "rsi.mcp",
         UpdateMode::RestartRequired,
         rsi_mcp::McpFactory,
@@ -1827,6 +1867,8 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<SandboxContract>()?;
     builder.register_local_contract::<ProcessContract>()?;
     builder.register_local_contract::<rsi_process::DuplexProcessContract>()?;
+    builder.register_local_contract::<rsi_process::PtyProcessContract>()?;
+    builder.register_local_contract::<rsi_pty_protocol::PtyProviderContract>()?;
     builder.register_local_contract::<rsi_mcp::McpContract>()?;
     builder.register_local_contract::<rsi_mcp::McpOwnerContract>()?;
     builder.register_local_contract::<rsi_retrieval::RetrievalContract>()?;
@@ -1863,7 +1905,11 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
 }
 
 #[allow(clippy::too_many_lines)] // One ordered declaration keeps Base plugin dependencies reviewable.
-fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
+fn base_fragment(
+    paths: &HostPaths,
+    coding_tools: bool,
+    user_home: Option<&Path>,
+) -> ProfileFragment {
     let mut entries = vec![
         ProfileEntry::new("rsi-files", FILES_FACTORY, Value::Null),
         ProfileEntry::new("rsi-storage", STORAGE_FACTORY, Value::Null),
@@ -1932,6 +1978,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
                 Value::Null
             },
         ),
+        ProfileEntry::new("rsi-pty", "rsi.pty", Value::Null),
         ProfileEntry::new("rsi-mcp", "rsi.mcp", Value::Null),
         ProfileEntry::new("rsi-retrieval", "rsi.retrieval", Value::Null),
         ProfileEntry::new("rsi-retrieval-api", "rsi.retrieval.api", Value::Null),
@@ -1953,7 +2000,8 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             WORKSPACE_CONTEXT_FACTORY,
             json!({
                 "user_instruction_file": paths.config().join("AGENTS.md"),
-                "user_skill_roots": [paths.config().join("skills")]
+                "user_skill_roots": std::iter::once(paths.config().join("skills"))
+                    .chain(user_home.map(|home| home.join(".agents/skills"))).collect::<Vec<_>>()
             }),
         ),
         ProfileEntry::new(
@@ -2142,6 +2190,44 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn default_skill_roots_use_only_explicit_home_and_rsi_wins_user_collisions() {
+        let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
+        for (home, expected) in [
+            (None, json!(["/config/skills"])),
+            (
+                Some(Path::new("/home/test")),
+                json!(["/config/skills", "/home/test/.agents/skills"]),
+            ),
+        ] {
+            let fragment = base_fragment(&paths, false, home);
+            let entry = fragment
+                .entries()
+                .iter()
+                .find(|entry| entry.plugin().as_str() == WORKSPACE_CONTEXT_FACTORY)
+                .unwrap();
+            assert_eq!(entry.config()["user_skill_roots"], expected);
+        }
+        assert!(
+            StandardComposition::new(paths, BTreeMap::new(), None)
+                .with_user_home(Some("relative".into()))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_home_rejects_non_utf8_before_profile_serialization() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
+        let home = std::ffi::OsString::from_vec(vec![b'/', 0xff]);
+        assert!(
+            StandardComposition::new(paths, BTreeMap::new(), None)
+                .with_user_home(Some(home.into()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn portable_ai_is_an_explicit_service_factory_with_restart_semantics() {
         let mut builder = StandardAddonBuilder::new("test.providers");
         register_agent_ai_factories(
@@ -2162,7 +2248,7 @@ mod tests {
     #[test]
     fn standard_unconfined_preset_requires_approval() {
         let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
-        let fragment = base_fragment(&paths, false);
+        let fragment = base_fragment(&paths, false, None);
         let permissions = fragment
             .entries()
             .iter()

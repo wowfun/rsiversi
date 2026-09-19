@@ -49,7 +49,7 @@ async fn capture_capacity_precedes_callbacks_and_drop_retirement_cancel_all_acti
     *fixture.callback.view_gate.lock().unwrap() = None;
     let mut next = handle.observe_projections().await.unwrap();
     next.next().await.unwrap().unwrap();
-    fixture.service.stop().await;
+    fixture.service.stop().await.unwrap();
     for task in tasks {
         assert!(matches!(
             task.await.unwrap(),
@@ -220,7 +220,7 @@ async fn retiring_the_service_ends_idle_projection_subscriptions() {
     let handle = fixture.create("retiring-projection").await;
     let mut stream = handle.observe_projections().await.unwrap();
     stream.next().await.unwrap().unwrap();
-    fixture.service.stop().await;
+    fixture.service.stop().await.unwrap();
     assert!(stream.next().await.is_none());
     assert!(matches!(
         handle.observe_projections().await,

@@ -20,6 +20,7 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
             rsi_terminal::INSPECTOR_HELP,
             rsi_terminal::NATIVE_ADDONS_HELP
         );
+        print!("{}", super::reset_state::HELP);
         return 0;
     }
     match start(invocation).await {
@@ -40,12 +41,29 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
     let program = profile
         .program()
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    let running = rsi::start_application(
-        rsi::StandardComposition::new(paths, capture_standard_environment()?, coding),
-        invocation.arguments,
-        program,
-    )
-    .await?;
+    let reset = invocation
+        .reset_state
+        .then(rsi_agent_store_sqlite::SqliteStoreResetRequest::new);
+    let mut composition =
+        rsi::StandardComposition::new(paths, capture_standard_environment()?, coding)
+            .with_user_home(rsi::capture_standard_home()?)?;
+    if let Some(reset) = &reset {
+        composition = composition.with_agent_store_reset(reset.clone());
+    }
+    let started = rsi::start_application(composition, invocation.arguments, program).await;
+    if let Some(reset) = &reset {
+        super::reset_state::report(reset.take_receipt().as_ref());
+    }
+    let running = started?;
+    if reset
+        .as_ref()
+        .is_some_and(rsi_agent_store_sqlite::SqliteStoreResetRequest::is_pending)
+    {
+        running.shutdown().await;
+        return Err(RsiError::Boot(
+            "--reset-state requires a local SQLite Agent Store application".into(),
+        ));
+    }
     rsi_application::ApplicationLifetime::default()
         .run(&running)
         .await

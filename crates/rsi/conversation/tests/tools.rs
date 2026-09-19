@@ -20,6 +20,7 @@ fn fact(seq: u64, kind: &str, owner: &str) -> SessionFact {
         },
         "result" => SessionFactBody::ToolResult {
             turn_id, effect_id, identity, result: ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":"a".repeat(32)},"stderr":{"full_output":"x".repeat(1024*1024)}}), vec![], false).unwrap(),
+            conclusion: None,
         },
         _ => unreachable!(),
     };

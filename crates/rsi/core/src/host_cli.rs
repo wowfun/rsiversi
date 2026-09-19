@@ -2,9 +2,18 @@ use super::*;
 
 pub(super) async fn run_host(command: HostCommand) -> u8 {
     let result = match command.operation {
-        HostOperation::Serve => serve_host_daemon(&command.profile, command.detached_child).await,
-        HostOperation::Start => start_host_daemon(&command.profile).await,
-        HostOperation::Restart => restart_host_daemon(&command.profile, command.force).await,
+        HostOperation::Serve => {
+            serve_host_daemon(
+                &command.profile,
+                command.detached_child,
+                command.reset_state,
+            )
+            .await
+        }
+        HostOperation::Start => start_host_daemon(&command.profile, command.reset_state).await,
+        HostOperation::Restart => {
+            restart_host_daemon(&command.profile, command.force, command.reset_state).await
+        }
         HostOperation::Stop => stop_host_daemon(command.force).await,
         HostOperation::Status => status_host_daemon().await,
         HostOperation::Reload => reload_host_daemon(),
@@ -102,22 +111,29 @@ fn acquire_daemon_owner(
 pub(super) async fn serve_host_daemon(
     profile_id: &HostProfileId,
     detached_child: bool,
+    reset_state: bool,
 ) -> rsi::Result<()> {
+    let receipt_pipe = if detached_child && reset_state {
+        Some(super::reset_state::inherited_pipe()?)
+    } else {
+        None
+    };
     let paths = standard_paths()?;
     let owner_lease = acquire_daemon_owner(&paths, detached_child)?;
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map_err(|error| RsiError::Boot(format!("failed to register SIGTERM: {error}")))?;
-    let mut interrupt =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .map_err(|error| RsiError::Boot(format!("failed to register SIGINT: {error}")))?;
-    let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|error| RsiError::Boot(format!("failed to register SIGHUP: {error}")))?;
+    let [mut terminate, mut interrupt, mut reload] = daemon_signals()?;
     let profile = ProfileCatalog::new(paths.clone())
         .host(profile_id)
         .map_err(profile_management_error)?;
     let (composition, presets) = prepare_standard_composition(None, paths).await?;
-    let daemon = match StandardServiceDaemon::start(composition, &profile, owner_lease).await {
+    let daemon = match start_daemon_and_report(
+        composition,
+        &profile,
+        owner_lease,
+        reset_state,
+        receipt_pipe,
+    )
+    .await
+    {
         Ok(daemon) => daemon,
         Err(error) => {
             let _ = presets.shutdown().await;
@@ -191,6 +207,68 @@ pub(super) async fn serve_host_daemon(
         },
     )
     .await
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_signals() -> rsi::Result<[tokio::signal::unix::Signal; 3]> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let register = |kind, name| {
+        signal(kind).map_err(|error| RsiError::Boot(format!("failed to register {name}: {error}")))
+    };
+    Ok([
+        register(SignalKind::terminate(), "SIGTERM")?,
+        register(SignalKind::interrupt(), "SIGINT")?,
+        register(SignalKind::hangup(), "SIGHUP")?,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+async fn start_daemon_and_report(
+    mut composition: StandardComposition,
+    profile: &rsi::HostProfileDocument,
+    owner_lease: rsi_service_host::HostOwnerLease,
+    reset_state: bool,
+    receipt_pipe: Option<std::fs::File>,
+) -> rsi::Result<StandardServiceDaemon> {
+    let reset = reset_state.then(rsi_agent_store_sqlite::SqliteStoreResetRequest::new);
+    if let Some(reset) = &reset {
+        composition = composition.with_agent_store_reset(reset.clone());
+    }
+    let starting = StandardServiceDaemon::start(composition, profile, owner_lease);
+    tokio::pin!(starting);
+    let (started, published) = if let Some(reset) = &reset {
+        tokio::select! {
+            () = reset.receipt_ready() => {
+                let published = super::reset_state::publish(reset.take_receipt().as_ref(), receipt_pipe);
+                (starting.await, published)
+            }
+            started = &mut starting => {
+                let published = super::reset_state::publish(reset.take_receipt().as_ref(), receipt_pipe);
+                (started, published)
+            }
+        }
+    } else {
+        (starting.await, Ok(()))
+    };
+    let failure = published.err().or_else(|| {
+        (started.is_ok()
+            && reset
+                .as_ref()
+                .is_some_and(rsi_agent_store_sqlite::SqliteStoreResetRequest::is_pending))
+        .then(|| RsiError::Boot("--reset-state requires a local SQLite Agent Store Host".into()))
+    });
+    if let Some(error) = failure {
+        match started {
+            Ok(daemon) => {
+                let stop = CancellationToken::new();
+                stop.cancel();
+                let _ = daemon.run(stop).await;
+            }
+            Err(startup) => return Err(RsiError::Boot(format!("{startup}; {error}"))),
+        }
+        return Err(error);
+    }
+    started
 }
 
 #[cfg(target_os = "linux")]
@@ -336,7 +414,10 @@ fn open_daemon_log(host_paths: &ServiceHostPaths) -> rsi::Result<std::fs::File> 
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result<()> {
+pub(super) async fn start_host_daemon(
+    profile_id: &HostProfileId,
+    reset_state: bool,
+) -> rsi::Result<()> {
     let (paths, expected_key) = expected_host_launch(profile_id).await?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
@@ -359,25 +440,37 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| RsiError::Boot(format!("resolve current executable: {error}")))?;
-    let child = std::process::Command::new(executable)
-        .args([
-            "host",
-            "serve",
-            "--profile",
-            profile_id.as_str(),
-            "--detached-child",
-        ])
+    let mut command = std::process::Command::new(executable);
+    command.args([
+        "host",
+        "serve",
+        "--profile",
+        profile_id.as_str(),
+        "--detached-child",
+    ]);
+    if reset_state {
+        command.arg("--reset-state");
+    }
+    let mut child = command
         .stdin(Stdio::from(
             owner_lease
                 .into_startup_file()
                 .map_err(|error| RsiError::Boot(error.to_string()))?,
         ))
-        .stdout(Stdio::from(log))
+        .stdout(if reset_state {
+            Stdio::piped()
+        } else {
+            Stdio::from(log)
+        })
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|error| RsiError::Boot(format!("spawn Service Host daemon: {error}")))?;
+    let receipt_pipe = child.stdout.take();
     let mut child = DaemonChildGuard::new(child);
     let deadline = tokio::time::Instant::now() + DAEMON_READINESS_TIMEOUT;
+    if let Some(pipe) = receipt_pipe {
+        report_daemon_reset(pipe, deadline, &host_paths).await?;
+    }
     loop {
         if let Some(status) = child
             .child_mut()
@@ -416,6 +509,22 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn report_daemon_reset(
+    pipe: std::process::ChildStdout,
+    deadline: tokio::time::Instant,
+    paths: &ServiceHostPaths,
+) -> rsi::Result<()> {
+    let receipt = tokio::time::timeout_at(deadline, super::reset_state::read(pipe))
+        .await
+        .map_err(|_| daemon_readiness_timeout_error())?
+        .map_err(|error| {
+            RsiError::Boot(format!("{error}; inspect {}", paths.owner_log().display()))
+        })?;
+    super::reset_state::report(receipt.as_ref());
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -505,6 +614,7 @@ pub(super) fn host_stop_timeout(force: bool) -> Duration {
 pub(super) async fn restart_host_daemon(
     profile_id: &HostProfileId,
     force: bool,
+    reset_state: bool,
 ) -> rsi::Result<()> {
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
@@ -516,7 +626,7 @@ pub(super) async fn restart_host_daemon(
     {
         stop_host_daemon(force).await?;
     }
-    start_host_daemon(profile_id).await
+    start_host_daemon(profile_id, reset_state).await
 }
 
 #[cfg(target_os = "linux")]

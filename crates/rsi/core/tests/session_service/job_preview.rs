@@ -49,7 +49,6 @@ async fn remote_job_preview_follows_actual_tool_origin_and_leaves_the_durable_re
                 .id,
             session_id: SessionId::new("native-job-preview").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();

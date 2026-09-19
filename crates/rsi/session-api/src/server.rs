@@ -137,10 +137,16 @@ impl SessionApi {
             Operation::Interactions,
             Operation::Projections,
             Operation::GoalObserve,
+            Operation::TerminalOutput,
         ]
         .into_iter()
-        .zip([service.clone(), service.clone(), service.clone(), service])
-        {
+        .zip([
+            service.clone(),
+            service.clone(),
+            service.clone(),
+            service.clone(),
+            service,
+        ]) {
             registrations.push(registrar.register(
                 operation.spec(),
                 Arc::new(crate::server_stream::Handler { service, operation }),
@@ -291,6 +297,30 @@ fn handle_operations(
         add!(
             GoalControl,
             |owner, request: rsi_goal::GoalControl| async move { owner.control_goal(request).await }
+        ),
+        add!(
+            Terminal,
+            |owner, request: rsi_session_protocol::terminal::Request| async move {
+                request.validate()?;
+                if request.is_output() || request.is_input() {
+                    return Err(rsi_session_protocol::SessionError::Invalid(
+                        "terminal input/output requires its data operation".into(),
+                    ));
+                }
+                owner.terminal(request).await
+            }
+        ),
+        add!(
+            TerminalInput,
+            |owner, request: rsi_session_protocol::terminal::Request| async move {
+                request.validate()?;
+                if !request.is_input() {
+                    return Err(rsi_session_protocol::SessionError::Invalid(
+                        "terminal input operation accepts only byte writes".into(),
+                    ));
+                }
+                owner.terminal(request).await
+            }
         ),
         add!(GoalStatus, |owner, (): ()| async move {
             owner.goal_status().await

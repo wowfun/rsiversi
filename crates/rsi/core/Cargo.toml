@@ -23,6 +23,8 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-pty-protocol = { path = "../../rsi-pty/protocol" }
+rsi-pty = { path = "../../rsi-pty/core" }
 rsi-mcp = { path = "../../rsi-mcp/core" }
 rsi-retrieval = { path = "../../rsi-retrieval/core" }
 rsi-agent-references = { path = "../../rsi-agent/references" }

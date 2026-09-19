@@ -211,6 +211,16 @@ pub async fn connect_or_embed_service_host(
     let preview = composition.preview_host(host_profile)?;
     let launch_key = preview.launch_key.as_str().to_owned();
     let paths = ServiceHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
+    if composition
+        .agent_store_reset
+        .as_ref()
+        .is_some_and(rsi_agent_store_sqlite::SqliteStoreResetRequest::is_pending)
+    {
+        let lease = HostOwnerLease::try_acquire(paths).map_err(|error| {
+            RsiError::Boot(format!("--reset-state requires an idle Service Host: {error}; stop the owner first or run `rsi host restart --reset-state`"))
+        })?;
+        return boot_embedded(parent, composition, host_profile, launch_key, lease).await;
+    }
     let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
     loop {
         if let Some(metadata) = paths.read_metadata().map_err(host_error)? {

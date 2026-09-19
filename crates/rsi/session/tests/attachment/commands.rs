@@ -215,7 +215,6 @@ impl Fixture {
             workspace_id: workspace_id(),
             session_id: SessionId::new(id).unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         }
     }
     async fn create(&self, id: &str) -> Arc<dyn SessionHandle> {
@@ -237,7 +236,7 @@ impl Fixture {
         }
     }
     async fn stop(self) {
-        self.service.stop().await;
+        self.service.stop().await.unwrap();
         self.kernel.shutdown(self.workers).await.unwrap();
         assert!(self.runtime.shutdown().await.is_clean());
     }
@@ -422,7 +421,7 @@ async fn draft_command_capacity_precedes_callback_and_stop_drains_all_owned_requ
         Err(SessionError::Capacity)
     ));
     assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 64);
-    fixture.service.stop().await;
+    fixture.service.stop().await.unwrap();
     for request in pending {
         assert!(matches!(
             request.await.unwrap(),
@@ -510,7 +509,7 @@ async fn timeout_and_expiry_leave_no_receipt_and_retirement_cancels_owned_callba
         async move { handle.execute_command(invocation).await }
     });
     fixture.callback.entered.acquire().await.unwrap().forget();
-    fixture.service.stop().await;
+    fixture.service.stop().await.unwrap();
     assert!(matches!(
         command.await.unwrap(),
         Err(SessionError::ShuttingDown)

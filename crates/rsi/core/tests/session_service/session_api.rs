@@ -1,7 +1,7 @@
 use super::{KEY, composition, fixture, provider};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
-use rsi_agent_session_protocol::{SessionId, WorkspaceTrust};
+use rsi_agent_session_protocol::SessionId;
 use rsi_api_http::{HttpConfig, HttpServer, HttpServices};
 use rsi_api_http_client::{HttpClient, HttpClientConfig};
 use rsi_api_protocol::{
@@ -221,7 +221,6 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
         workspace_id: workspace.id,
         session_id: SessionId::new("http-contract").unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Untrusted,
     };
     let local = host
         .lookup_local::<SessionContract>()
@@ -320,7 +319,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
 async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
     let grant =
         Arc::new(rsi_session_api::SessionTargetClient::new(api, session_id.clone()).unwrap());
-    assert_eq!(grant.operations().len(), 32);
+    assert_eq!(grant.operations().len(), 35);
     let handle = rsi_session_api::SessionClient::attach_target(grant.clone(), session_id)
         .await
         .unwrap();

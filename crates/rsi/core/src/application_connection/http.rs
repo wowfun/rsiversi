@@ -12,6 +12,11 @@ pub(super) struct HttpFactory(pub(super) Arc<ConnectionFactory>);
 #[async_trait]
 impl PluginFactory for HttpFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if self.0.composition.agent_store_reset.is_some() {
+            return Err(self
+                .0
+                .diagnosed("--reset-state is unavailable for remote HTTP applications"));
+        }
         HttpClientFactory
             .prepare(config)
             .map_err(|error| self.0.diagnosed(error))

@@ -167,7 +167,7 @@ pub async fn drive_message(
                 let update = update.ok_or(MessageRunError::Ended("a terminal Fact"))??;
                 if let SessionObservation::Fact { fact, durable_fact_seq } = update {
                     let terminal = match fact.body() {
-                        SessionFactBody::TurnTerminal { turn_id: observed, outcome } if observed == &turn_id => Some(outcome.clone()),
+                        SessionFactBody::TurnTerminal { turn_id: observed, outcome, .. } if observed == &turn_id => Some(outcome.clone()),
                         _ => None,
                     };
                     sink.event(MessageEvent::Fact { session_id: receipt.session_id.clone(), fact, durable_seq: durable_fact_seq }).await?;

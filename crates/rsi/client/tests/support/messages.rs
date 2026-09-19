@@ -72,6 +72,7 @@ impl Scenario {
                                 SessionFactBody::TurnTerminal {
                                     turn_id: TurnId::new(id).unwrap(),
                                     outcome: TurnOutcome::Completed,
+                                    result: None,
                                 },
                             )
                             .unwrap(),

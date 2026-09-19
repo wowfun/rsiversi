@@ -30,6 +30,9 @@ impl ApiHandler for Handler {
             ));
         };
         match self.operation {
+            Operation::TerminalOutput => {
+                terminal_output(self.service.as_ref(), input, budget, maximum).await
+            }
             Operation::GoalObserve => goal(self.service.as_ref(), input, budget, maximum).await,
             Operation::Projections => {
                 projections(self.service.as_ref(), input, budget, maximum).await
@@ -91,6 +94,43 @@ impl ApiHandler for Handler {
             )),
         }
     }
+}
+async fn terminal_output(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<rsi_session_protocol::terminal::Request> =
+        serde_json::from_slice(input.as_bytes())
+            .map_err(|_| ApiError::Invalid("invalid terminal output request".into()))?;
+    let result = async {
+        request.input.validate()?;
+        if !request.input.is_output() {
+            return Err(rsi_session_protocol::SessionError::Invalid(
+                "terminal output accepts only reads".into(),
+            ));
+        }
+        handle(service, &request.target)
+            .await?
+            .terminal(request.input)
+            .await
+    }
+    .await;
+    let body = match wire::domain(result)? {
+        Ok(body) => body,
+        Err(failure) => return Err(ApiError::Domain(budget.encode(&failure, maximum)?)),
+    };
+    let json = budget.encode(
+        &HandleReply {
+            target: request.target,
+            body,
+        },
+        maximum,
+    )?;
+    Ok(ApiOutput::Stream(Box::pin(futures_util::stream::once(
+        async move { Ok(ApiMessage { json, binary: None }) },
+    ))))
 }
 async fn goal(
     service: &dyn SessionService,

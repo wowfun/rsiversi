@@ -809,7 +809,7 @@ plugin = "rsi.application.tui"
             );
             assert!(
                 self.child.try_wait().unwrap().is_none(),
-                "terminal exited before {text}"
+                "terminal exited before {text}: {output}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1253,6 +1253,8 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
     let mut terminal =
         TerminalClient::start_presentation(&fixture, &["--session-id", "native-hot-reload"], true);
     terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"/markdown off\r");
+    terminal.until("Markdown rendering off").await;
     terminal.send(b"hold this turn\r");
     tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
         .await
@@ -1280,6 +1282,9 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
         1,
         "terminal owner must not restart"
     );
+    terminal.send(b"\x15/markdown\r");
+    terminal.until("Markdown rendering on").await;
+    terminal.send(b"unsubmitted-draft-kept");
     state.release.notify_one();
     terminal.until("hello from daemon").await;
     terminal.until("unsubmitted-draft-kept").await;

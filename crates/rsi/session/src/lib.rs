@@ -36,6 +36,7 @@ mod projections;
 mod reads;
 mod references;
 mod resources;
+mod terminal;
 pub use plugin::SessionFactory;
 use references::map_reference_error;
 
@@ -49,6 +50,7 @@ use rsi_session_protocol::{
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    terminals: Option<Arc<terminal::Terminals>>,
     resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
     references: Option<Arc<rsi_agent_references::References>>,
     resource_retention: rsi_session_protocol::ResourceRetention,
@@ -87,6 +89,16 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Supplies one generation-owned terminal registry, independent of Agent residency.
+    #[must_use]
+    pub fn with_terminals(
+        mut self,
+        provider: Arc<dyn rsi_pty_protocol::PtyProvider>,
+        sandbox: Arc<dyn rsi_sandbox::Sandbox>,
+    ) -> Self {
+        self.terminals = Some(Arc::new(terminal::Terminals::new(provider, sandbox)));
+        self
+    }
     /// Supplies the bounded immutable conversation reference owner.
     #[must_use]
     pub fn with_references(mut self, references: Arc<rsi_agent_references::References>) -> Self {
@@ -119,6 +131,7 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            terminals: None,
             resources: None,
             references: None,
             resource_retention: rsi_session_protocol::ResourceRetention::default(),
@@ -184,6 +197,7 @@ impl LocalSessionService {
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
+            terminals: self.terminals.clone(),
             references: self.references.clone(),
             resources: self.resources.clone(),
             resource_retention: self.resource_retention.clone(),
@@ -242,9 +256,15 @@ impl LocalSessionService {
     }
 
     /// Stops draft admission and waits for service-owned preparation and sweeping.
-    pub async fn stop(&self) {
+    pub async fn stop(&self) -> Result<()> {
         self.projection_stopped.cancel();
+        let terminals = if let Some(terminals) = &self.terminals {
+            terminals.stop().await
+        } else {
+            Ok(())
+        };
         tokio::join!(self.draft_commands.stop(), self.drafts.stop());
+        terminals
     }
 
     async fn prepare_draft(
@@ -290,7 +310,6 @@ impl LocalSessionService {
             agent_preset_id,
             settings,
         )
-        .and_then(|header| header.with_workspace_trust(request.workspace_trust))
         .map_err(|error| SessionError::Invalid(error.to_string()))?;
         let draft = AgentSessionDraft::new(header, Arc::clone(&self.composition))
             .await
@@ -382,6 +401,7 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    terminals: Option<Arc<terminal::Terminals>>,
     references: Option<Arc<rsi_agent_references::References>>,
     resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
     resource_retention: rsi_session_protocol::ResourceRetention,
@@ -577,6 +597,12 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn terminal(
+        &self,
+        request: rsi_session_protocol::terminal::Request,
+    ) -> Result<rsi_session_protocol::terminal::Reply> {
+        self.terminal_request(request).await
+    }
     async fn read_recorded_reference(
         &self,
         request: rsi_agent_session_protocol::ReferenceReadRequest,

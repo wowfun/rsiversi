@@ -19,7 +19,9 @@ fn facts() -> (Entry, SessionFact, SessionFact) {
         },
     )
     .unwrap();
-    let result=SessionFact::new(5,1,SessionFactBody::ToolResult{turn_id:TurnId::new("turn").unwrap(),effect_id:EffectId::new("effect").unwrap(),identity,result:ToolResult::new(json!({"version":1,"operation":"search","request":"a question","sources":[{"url":"https://example.com","title":"<script>literal title</script>","text":"external <b>data</b>","published_at":null,"truncated":false}],"omitted":0,"truncated":false}),vec![],false).unwrap()}).unwrap();
+    let result=SessionFact::new(5,1,SessionFactBody::ToolResult{turn_id:TurnId::new("turn").unwrap(),effect_id:EffectId::new("effect").unwrap(),identity,result:ToolResult::new(json!({"version":1,"operation":"search","request":"a question","sources":[{"url":"https://example.com","title":"<script>literal title</script>","text":"external <b>data</b>","published_at":null,"truncated":false}],"omitted":0,"truncated":false}),vec![],false).unwrap() ,
+ conclusion: None,
+}).unwrap();
     (
         Entry {
             intent: SourceRef {

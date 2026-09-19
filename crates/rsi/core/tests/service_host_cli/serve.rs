@@ -379,7 +379,6 @@ plugin = "rsi.application.headless"
             &session,
             "--cwd",
             fixture.workspace.to_str().unwrap(),
-            "--trust-workspace",
             "--output",
             "jsonl",
         ])

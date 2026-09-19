@@ -173,9 +173,40 @@ generic Profile lifecycle diagnostics continue to redact plugin error text.
 
 Service startup preserves the SQLite factory's safe startup diagnostic separately
 from Profile errors. A schema mismatch reports the configured Store root, expected
-and actual versions, and the absence of automatic migration. Startup neither
-rewrites an old schema version nor replaces the user's Store with an empty one.
+and actual versions, the absence of automatic migration, and the explicit
+`--reset-state` recovery option. Ordinary startup preserves the existing Store.
+
+The daemon publishes a reset receipt as soon as the old root has been moved to
+its backup, before initializing the replacement Store or waiting for other startup
+work, so a timeout during later startup work still leaves the caller with its backup path.
+If the daemon exits before publishing any receipt, the launcher uses its ordinary
+startup-exit diagnostic and identifies the daemon log; empty EOF is not a malformed
+receipt. A partial or malformed frame remains an explicit receipt error.
 Each Service boot owns a fresh diagnostic slot, independent of cloned compositions.
+
+`rsi tui --reset-state`, `rsi --profile NAME --reset-state`, and Linux
+`rsi host start|serve|restart --reset-state` request a one-time backup and fresh
+Agent Store, including when the existing schema is current. Only the configured
+SQLite Agent Store is reset; configuration, credentials, Media, other state and
+caches remain intact. For applications, the launcher consumes the option only
+immediately after `tui` or `--profile NAME`, before any application arguments.
+Later tokens, including option values and everything after `--`, belong to the
+application. Help never resets state. Application arguments and Profiles prepare before mutation. Remote
+HTTP and operator-only connections reject the option. Reset requires exclusive
+Host ownership instead of connecting to an existing daemon; stop that owner first
+or use `host restart --reset-state`.
+
+The request is process-local, shared across composition clones, excluded from
+launch identity, and consumed once, so Profile reload cannot reset again. The
+[SQLite backend](../../rsi-agent/store-sqlite/README.md) owns backup, locking and
+fresh Store creation. The launcher reports escaped original and backup paths on
+stderr before running the application, including after a later startup failure.
+Detached startup returns that receipt through a bounded startup pipe to its
+launcher. A successful startup must have consumed an explicit reset request;
+unconsumed requests stop the new application or daemon and report an error.
+Receipt publication failure retains any original startup error in the diagnostic.
+Missing Stores initialize without a backup. Backups are never pruned
+automatically. No confirmation prompt or automatic migration is performed.
 
 Application startup may use the last published role catalog so linked management
 surfaces remain available after a failed native candidate. New Agent selection
@@ -516,3 +547,6 @@ The integration composition source reuses its merged generation seed while the
 base seed, current MCP seed and retrieval flags are unchanged. Every snapshot
 still checks those owners before reuse, so cached bytes never substitute for
 current readiness or current executable authority.
+
+Personal skill discovery skips missing, empty or relative HOME values. Standard
+path resolution still requires an absolute HOME when an XDG fallback needs it.

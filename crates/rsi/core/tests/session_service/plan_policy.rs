@@ -44,7 +44,6 @@ async fn standard_plan_policy_denies_bash_before_intent_start_or_filesystem_effe
                 .id,
             session_id: SessionId::new("plan-denied-bash").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

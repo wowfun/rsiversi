@@ -4,7 +4,7 @@ use rsi::{
     StandardCodingTools, StandardComposition, StandardServiceDaemon,
 };
 use rsi_agent_goal::{GoalAction, GoalPhase, GoalState};
-use rsi_agent_session_protocol::{DomainRequestId, SessionId, WorkspaceTrust};
+use rsi_agent_session_protocol::{DomainRequestId, SessionId};
 use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, SecretValue};
 use rsi_goal::{GoalControl, GoalDriverStage};
@@ -243,6 +243,7 @@ async fn run() -> Result<serde_json::Value> {
         rsi::capture_standard_environment()?,
         Some(tools),
     )
+    .with_user_home(rsi::capture_standard_home()?)?
     .with_credential_store(Arc::new(NoCredentialStore));
     let host_paths = ServiceHostPaths::from_host_paths(&paths)?;
     host_paths.validate_daemon_endpoint()?;
@@ -342,7 +343,6 @@ async fn exercise(
                 session_id: request.session,
                 workspace_id: workspace.id,
                 agent_preset_id: None,
-                workspace_trust: WorkspaceTrust::Untrusted,
             }),
         )
         .await??

@@ -9,7 +9,7 @@ use rsi::{
     ServiceHostConnectionMode, StandardCodingTools, StandardComposition, StandardServiceDaemon,
     connect_or_embed_service_host,
 };
-use rsi_agent_session_protocol::{MessageId, SessionFactBody, SessionId, TurnId, WorkspaceTrust};
+use rsi_agent_session_protocol::{MessageId, SessionFactBody, SessionId, TurnId};
 use rsi_agent_turn_protocol::{MessageReceipt, ObservationCursor, SessionObservation};
 use rsi_api_protocol::HostEpoch;
 use rsi_credentials_local::SecretStore;
@@ -30,6 +30,8 @@ const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 mod files;
 #[path = "session_service/milestone.rs"]
 mod milestone;
+#[path = "session_service/terminals.rs"]
+mod terminals;
 
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;
@@ -386,7 +388,6 @@ async fn standard_plan_commands_reach_the_actual_projection_and_provider_context
                 .id,
             session_id: SessionId::new("standard-plan-mode").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -447,20 +448,20 @@ async fn standard_plan_commands_reach_the_actual_projection_and_provider_context
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn standard_product_applies_project_instructions_only_with_durable_workspace_trust() {
+async fn standard_product_applies_project_instructions_by_default_on_create_and_resume() {
     let (endpoint, requests, provider) = capturing_provider().await;
     let fixture = fixture(&endpoint);
     std::fs::create_dir(fixture.workspace.join(".git")).unwrap();
     std::fs::write(
         fixture.workspace.join("AGENTS.md"),
-        "TRUSTED_PROJECT_INSTRUCTION_MARKER",
+        "DEFAULT_PROJECT_INSTRUCTION_MARKER",
     )
     .unwrap();
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
     let application = running.session_service().unwrap();
-    let trusted = application
+    let created = application
         .create(CreateSession {
             workspace_id: running
                 .workspace_registry()
@@ -469,29 +470,17 @@ async fn standard_product_applies_project_instructions_only_with_durable_workspa
                 .await
                 .unwrap()
                 .id,
-            session_id: SessionId::new("trusted-workspace-context").unwrap(),
+            session_id: SessionId::new("default-workspace-context").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();
-    run_message_to_terminal(&trusted, "trusted-workspace-message").await;
-    let untrusted = application
-        .create(CreateSession {
-            workspace_id: running
-                .workspace_registry()
-                .unwrap()
-                .get_or_create(&fixture.workspace)
-                .await
-                .unwrap()
-                .id,
-            session_id: SessionId::new("untrusted-workspace-context").unwrap(),
-            agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
-        })
+    run_message_to_terminal(&created, "created-workspace-message").await;
+    let resumed = application
+        .attach(created.header().await.unwrap().session_id())
         .await
         .unwrap();
-    run_message_to_terminal(&untrusted, "untrusted-workspace-message").await;
+    run_message_to_terminal(&resumed, "resumed-workspace-message").await;
 
     {
         let requests = requests.lock().unwrap();
@@ -499,12 +488,12 @@ async fn standard_product_applies_project_instructions_only_with_durable_workspa
         assert!(
             requests[0]
                 .to_string()
-                .contains("TRUSTED_PROJECT_INSTRUCTION_MARKER")
+                .contains("DEFAULT_PROJECT_INSTRUCTION_MARKER")
         );
         assert!(
-            !requests[1]
+            requests[1]
                 .to_string()
-                .contains("TRUSTED_PROJECT_INSTRUCTION_MARKER")
+                .contains("DEFAULT_PROJECT_INSTRUCTION_MARKER")
         );
     }
     assert!(running.shutdown().await.is_clean());
@@ -540,7 +529,6 @@ async fn assert_session_service_contract(
             workspace_id: registry.get_or_create(workspace).await.unwrap().id,
             session_id: SessionId::new(session).unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         },
         workspace.canonicalize().unwrap().to_str().unwrap(),
         &rsi_meta::Execution::native(tokio::runtime::Handle::current()),
@@ -575,7 +563,6 @@ async fn local_and_uds_adapters_pass_one_real_kernel_store_contract() {
             .id,
         session_id: SessionId::new("shared-draft").unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Untrusted,
     };
     let (in_process, over_socket) =
         tokio::join!(local.create(shared.clone()), remote.create(shared.clone()));
@@ -585,7 +572,8 @@ async fn local_and_uds_adapters_pass_one_real_kernel_store_contract() {
         over_socket.unwrap().header().await.unwrap()
     );
     let mut conflict = shared;
-    conflict.workspace_trust = WorkspaceTrust::Trusted;
+    conflict.agent_preset_id =
+        Some(rsi_agent_session_protocol::AgentPresetId::new("other-agent").unwrap());
     assert!(matches!(
         remote.create(conflict).await,
         Err(SessionError::DraftConflict { .. })
@@ -882,7 +870,6 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
                 .id,
             session_id: SessionId::new("failed-media-message").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

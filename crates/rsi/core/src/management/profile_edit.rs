@@ -33,7 +33,8 @@ async fn edit(command: &ProfileCommand) -> rsi::Result<Value> {
     let coding = super::super::standard_coding_tools()?;
     #[cfg(not(target_os = "linux"))]
     let coding = None;
-    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let composition = StandardComposition::new(paths, BTreeMap::new(), coding)
+        .with_user_home(rsi::capture_standard_home()?)?;
     let presets = AgentPresetManager::open_standard_preview(&composition).await?;
     let result = (|| {
         let composition = composition.with_agent_presets(&presets)?;

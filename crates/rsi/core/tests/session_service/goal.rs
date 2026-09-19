@@ -18,7 +18,6 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
                 .id,
             session_id: SessionId::new(id).unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap()
@@ -317,7 +316,7 @@ async fn real_report_tool_completes_only_after_its_source_turn() {
     assert_eq!(goal.allocated_rounds, 1);
     let report = goal.report.unwrap();
     let history = handle.history_before(None, 128).await.unwrap();
-    assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { turn_id, outcome: rsi_agent_session_protocol::TurnOutcome::Completed } if turn_id == &report.source_turn)));
+    assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { turn_id, outcome: rsi_agent_session_protocol::TurnOutcome::Completed, .. } if turn_id == &report.source_turn)));
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }
@@ -541,7 +540,6 @@ async fn remote_goal_control_and_observation_use_the_same_host_driver() {
             workspace_id,
             session_id: SessionId::new("remote-goal").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

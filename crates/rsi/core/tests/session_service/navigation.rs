@@ -62,7 +62,6 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             workspace_id: workspace.id.clone(),
             session_id: session.clone(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

@@ -574,3 +574,106 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
         );
     }
 }
+
+#[test]
+fn session_client_requires_current_header_operation_versions() {
+    let versions = [
+        (Operation::Create, 7),
+        (Operation::Attach, 6),
+        (Operation::Recent, 6),
+        (Operation::DraftSnapshot, 6),
+        (Operation::SelectPreset, 6),
+        (Operation::Inspect, 6),
+    ];
+    for (operation, version) in versions {
+        let current = operation.spec();
+        assert_eq!(current.id.version(), version);
+        let mut remote = Remote::new();
+        let operations = &mut Arc::get_mut(&mut remote).unwrap().operations;
+        let old = operations
+            .iter_mut()
+            .find(|spec| spec.id == current.id)
+            .unwrap();
+        old.id =
+            rsi_api_protocol::OperationId::new("session", current.id.name(), version - 1).unwrap();
+        assert!(matches!(
+            SessionClient::new(remote),
+            Err(ApiError::Unavailable)
+        ));
+    }
+    for operation in [
+        Operation::History,
+        Operation::Observe,
+        Operation::ReadMessage,
+    ] {
+        assert_eq!(operation.spec().id.version(), 5);
+    }
+    assert_eq!(Operation::Submit.spec().id.version(), 4);
+    assert_eq!(Operation::MessageStatus.spec().id.version(), 3);
+    assert!(SessionClient::new(Remote::new()).is_ok());
+}
+
+#[tokio::test]
+async fn terminal_output_uses_a_bounded_subscription_and_preserves_typed_failures() {
+    use rsi_session_protocol::terminal::{
+        Operation as TerminalOperation, OutputPage, Phase, PtyError, Reply, Request, Size, Terminal,
+    };
+    let (remote, _, handle) = fixture().await;
+    let request = Request::Operate {
+        operation: TerminalOperation::Read {
+            terminal: "terminal".into(),
+            attachment: "view".into(),
+            stream_epoch: 1,
+            cursor: 0,
+        },
+    };
+    let reply = Reply::Output(OutputPage {
+        terminal: Terminal {
+            id: "terminal".into(),
+            size: Size {
+                rows: 24,
+                columns: 80,
+            },
+            phase: Phase::Running,
+            controller: None,
+            controller_epoch: 1,
+        },
+        attachment: "view".into(),
+        stream_epoch: 1,
+        reset: false,
+        cursor: 0,
+        next_cursor: 3,
+        text: "界".into(),
+    });
+    let target = Target {
+        session_id: header().session_id().clone(),
+        header_key: header().fingerprint().unwrap(),
+    };
+    remote.stream(&[json!(HandleReply {
+        target: target.clone(),
+        body: reply.clone()
+    })]);
+    assert_eq!(handle.terminal(request.clone()).await.unwrap(), reply);
+    assert_eq!(
+        remote.requests.lock().unwrap().last().unwrap().0.class,
+        OperationClass::Subscription
+    );
+    remote.domain(&Failure::Terminal {
+        error: PtyError::Unavailable("closed".into()),
+    });
+    assert!(matches!(
+        handle.terminal(request.clone()).await,
+        Err(SessionError::Terminal(PtyError::Unavailable(_)))
+    ));
+    remote.stream(&[]);
+    assert!(handle.terminal(request.clone()).await.is_err());
+    remote.stream(&[json!(HandleReply {
+        target: Target {
+            header_key: "a".repeat(64),
+            ..target
+        },
+        body: reply
+    })]);
+    assert!(handle.terminal(request).await.is_err());
+    assert_eq!(remote.output.used(), 0);
+}

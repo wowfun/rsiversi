@@ -12,6 +12,11 @@ pub(super) struct OperatorFactory(pub(super) Arc<ConnectionFactory>);
 #[async_trait]
 impl PluginFactory for OperatorFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if self.0.composition.agent_store_reset.is_some() {
+            return Err(self
+                .0
+                .diagnosed("--reset-state is unavailable for operator-only applications"));
+        }
         if !config.is_null() {
             return Err(self
                 .0

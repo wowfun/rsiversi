@@ -135,6 +135,12 @@ pub(super) fn failure(
     failure: Failure,
 ) -> rsi_session_protocol::Result<SessionError> {
     let valid = match &failure {
+        Failure::Terminal { error } => {
+            matches!(
+                operation,
+                Operation::Terminal | Operation::TerminalOutput | Operation::TerminalInput
+            ) && error.validate().is_ok()
+        }
         Failure::Invalid { message } => message.len() <= 4096,
         Failure::DraftConflict { .. } => operation == Operation::Create,
         Failure::Conflict { .. } => operation == Operation::Image,
@@ -201,7 +207,6 @@ impl SessionService for SessionClient {
         };
         if header.session_id() != &request.session_id
             || workspace.validate().is_err()
-            || header.workspace_trust() != request.workspace_trust
             || (created.draft.revision == 0
                 && request
                     .agent_preset_id
@@ -355,6 +360,30 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn terminal(
+        &self,
+        request: rsi_session_protocol::terminal::Request,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::terminal::Reply> {
+        request.validate()?;
+        let operation = if request.is_output() {
+            Operation::TerminalOutput
+        } else if request.is_input() {
+            Operation::TerminalInput
+        } else {
+            Operation::Terminal
+        };
+        let handle = self.frozen();
+        let reply = if request.is_output() {
+            crate::client_stream::terminal_output(&handle, &request).await?
+        } else {
+            handle.call(operation, &request).await?
+        };
+        request
+            .validate_reply(&reply)
+            .map_err(|_| malformed(operation))?;
+        Ok(reply)
+    }
+
     async fn capture_reference(
         &self,
         source: SessionId,

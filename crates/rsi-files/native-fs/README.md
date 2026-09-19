@@ -33,4 +33,4 @@ read bounds, cancellation, authorization and directory-handle lifetime.
 
 This package has no non-Unix implementation. Consumers with a separate fallback
 must describe that fallback's own guarantees. It does not supply a process
-sandbox enforcement stamp or interpret WorkspaceTrust.
+sandbox enforcement stamp or decide which sources become model context.

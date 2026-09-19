@@ -136,7 +136,6 @@ async fn exercise(scenario: Scenario) {
             })
             .unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();
@@ -349,7 +348,6 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
                 .id,
             session_id: session.clone(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();

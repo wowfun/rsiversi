@@ -11,7 +11,7 @@ use futures_util::StreamExt as _;
 use rsi::{RunningRsi, StandardCodingTools, StandardComposition};
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentMessageContent, AgentPresetId, MessageId, SessionFact,
-    SessionFactBody, SessionId, TurnId, TurnOutcome, WorkspaceTrust,
+    SessionFactBody, SessionId, TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::SessionStore as _;
 use rsi_agent_store_sqlite::SqliteStore;
@@ -771,6 +771,7 @@ async fn observe_turn_after(
                     SessionFactBody::TurnTerminal {
                         turn_id: observed,
                         outcome,
+                        ..
                     } if observed == turn_id => Some(outcome.clone()),
                     _ => None,
                 };
@@ -804,7 +805,6 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
                 .id,
             session_id: SessionId::new("fixture-created").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -1140,18 +1140,48 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One sequential public-seam scenario preserves causality and exact evidence"
-)]
 async fn built_binary_runs_the_complete_real_coding_tool_flow() {
+    real_coding_tool_flow(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn trusted_structured_consumer_configuration_registers_the_tool() {
+    real_coding_tool_flow(true).await;
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_lines)] // The same public binary scenario verifies default and explicitly enabled catalogs.
+async fn real_coding_tool_flow(read_structured_results: bool) {
     let (endpoint, calls, requests, server) = tool_server().await;
     let fixture = fixture(&endpoint);
+    if read_structured_results {
+        let preset = rsi::user_agent_preset_root(&fixture.paths).join("structured-consumer");
+        std::fs::create_dir_all(&preset).unwrap();
+        let profile =
+            include_str!("../../../../plugins/rsi-agent-presets/standard/agent.profile.toml")
+                .replace(
+                    "plugin = \"rsi.agent.tools\"",
+                    "plugin = \"rsi.agent.tools\"\nconfig = { read_structured_results = true }",
+                );
+        std::fs::write(preset.join("agent.profile.toml"), profile).unwrap();
+        std::fs::write(
+            preset.join("preset.toml"),
+            include_str!("../../../../plugins/rsi-agent-presets/standard/preset.toml"),
+        )
+        .unwrap();
+    }
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
             "--profile",
             "test-headless",
             "exercise all coding tools",
+            "--agent-preset",
+            if read_structured_results {
+                "structured-consumer"
+            } else {
+                "standard"
+            },
             "--cwd",
             fixture.workspace.to_str().unwrap(),
             "--sandbox",
@@ -1182,6 +1212,11 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect::<Vec<_>>();
+    assert_eq!(
+        tool_names.contains(&"read_agent_result"),
+        read_structured_results
+    );
+    tool_names.retain(|name| *name != "read_agent_result");
     tool_names.sort_unstable();
     assert_eq!(
         tool_names,
@@ -1491,8 +1526,33 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
             .any(|line| { line["type"] == "fact" && line["fact"]["type"] == "cancel_requested" }),
         "SIGINT output: {lines:#?}"
     );
-    assert_eq!(lines.last().unwrap()["type"], "outcome", "{lines:#?}");
-    assert_eq!(lines.last().unwrap()["outcome"]["status"], "cancelled");
+    // Presentation has a one-second cancellation grace, even with a draining
+    // consumer. Read the embedded service's durable outcome after it has exited;
+    // a missing presentation tail is not evidence of an unflushed cancellation.
+    let session = SessionId::new(lines[0]["session_id"].as_str().unwrap()).unwrap();
+    let turn = TurnId::new(lines[1]["turn_id"].as_str().unwrap()).unwrap();
+    let store = SqliteStore::open(fixture.paths.state().join("agent")).unwrap();
+    let facts = store.read_facts(&session, 0, 256).await.unwrap();
+    assert!(facts.caught_up());
+    assert!(facts.facts.iter().any(|fact| matches!(fact.body(),
+        SessionFactBody::CancelRequested { turn_id, .. } if turn_id == &turn
+    )));
+    let terminals = facts
+        .facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::TurnTerminal {
+                turn_id, outcome, ..
+            } if turn_id == &turn => Some(outcome),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals, [&TurnOutcome::Cancelled]);
+    for line in lines.iter().filter(|line| line["type"] == "outcome") {
+        assert_eq!(line["turn_id"], turn.as_str());
+        assert_eq!(line["outcome"]["status"], "cancelled");
+        assert_eq!(Some(line), lines.last());
+    }
     server.abort();
 }
 
@@ -1645,7 +1705,6 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
                 .id,
             session_id: SessionId::new("fixture-created").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -1783,7 +1842,6 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
                     .id,
                 session_id: SessionId::new("question-session").unwrap(),
                 agent_preset_id: None,
-                workspace_trust: WorkspaceTrust::Untrusted,
             })
             .await
             .unwrap();

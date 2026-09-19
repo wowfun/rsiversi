@@ -50,7 +50,7 @@ Host's approval broker is also an ordinary plugin; the launcher neither
 constructs Session adapters nor registers a second broker per client.
 
 `LocalSessionService` is constructed from already-owned capabilities. Draft
-creation resolves a registered WorkspaceId, freezes workspace trust and settings,
+creation resolves a registered WorkspaceId, freezes the canonical workspace and settings,
 rejects a durable identity collision and retains the actual Agent draft payload,
 including typed initial states and its preset generation. Attach and
 history read only the durable Store. Submission defers execution dependencies
@@ -114,3 +114,31 @@ checked overflow is an explicit read error, never a saturated reported total.
 Attached handles share their immutable Header internally. Metrics and model
 availability polling do not copy the frozen pricing table; an owned Header is
 materialized only for the public Header response.
+
+Live terminals are retained by one registry owned by the Session service
+generation. Creation checks the persisted Header and freezes its authorization;
+subsequent operations use the typed live scope without Store reads or Header
+fingerprints. Creation revalidates its canonical workspace and confines an explicit PTY-intent Bash
+plan. The child receives a fixed environment (PATH, workspace HOME, SHELL, TERM,
+LANG and disabled HISTFILE), without ambient credentials or shell startup files.
+Retiring this service retires all scopes even while detached handles remain.
+The registry neither pins an Agent composition nor writes terminal state to Store.
+Closing the last terminal releases its empty scope after admitted operations finish;
+failed first creation also releases that slot. Detach and Kernel eviction retain
+nonempty scopes. Explicit operation leases determine the last admitted operation,
+independently of incidental shared-owner clones. Its release checks the local
+scope emptiness snapshot without issuing a List operation. Concurrent creation
+and closure serialize scope mutations.
+
+Service retirement attempts every terminal scope even if one cleanup fails. The
+first cleanup error propagates through the Session plugin's finalizer; successful
+draft cleanup cannot turn a failed native reap into a clean Host shutdown.
+Retirement retains scopes until cleanup completes, so cancelling a waiter does
+not lose cleanup ownership. Repeated completed retirements return the same error.
+
+The standard `SessionFactory` requires both PTY and Sandbox local contracts and
+publishes the complete product service. Direct `LocalSessionService::new` callers
+may omit optional capabilities, as with other embedded/test service assemblies;
+without `with_terminals`, terminal requests return unavailable. This constructor
+is not an alternative plugin dependency declaration. Terminal authority is
+Session-wide for authorized single-user clients, not a per-pane shell ACL.

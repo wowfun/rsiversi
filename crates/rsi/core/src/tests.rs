@@ -71,6 +71,45 @@ fn parse(arguments: &[&str]) -> rsi::Result<Parse> {
 }
 
 #[test]
+fn reset_state_is_a_launcher_option_and_respects_the_argument_separator() {
+    for arguments in [
+        &["tui", "--reset-state"][..],
+        &["--profile", "cli", "--reset-state"][..],
+    ] {
+        let Parse::Application(application) = parse(arguments).unwrap() else {
+            panic!("application")
+        };
+        assert!(application.reset_state);
+        assert!(application.arguments.is_empty());
+    }
+    let Parse::Application(application) =
+        parse(&["--profile", "headless", "--", "--reset-state"]).unwrap()
+    else {
+        panic!("application")
+    };
+    assert!(!application.reset_state);
+    assert_eq!(application.arguments, ["--", "--reset-state"]);
+    assert!(parse(&["tui", "--reset-state", "--reset-state"]).is_err());
+    for command in ["stop", "status", "reload"] {
+        assert!(parse(&["host", command, "--reset-state"]).is_err());
+    }
+    for command in ["profile", "agent-store", "agent-preset"] {
+        assert!(parse(&[command, "--reset-state"]).is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reset_state_is_available_for_all_host_start_operations() {
+    for command in ["start", "serve", "restart"] {
+        let Parse::Host(host) = parse(&["host", command, "--reset-state"]).unwrap() else {
+            panic!("host")
+        };
+        assert!(host.reset_state);
+    }
+}
+
+#[test]
 fn agent_store_verify_has_a_strict_absolute_root_contract() {
     let Parse::AgentStore(command) = parse(&[
         "agent-store",
@@ -217,4 +256,22 @@ fn tui_alias_preserves_application_arguments() {
     assert_eq!(alias.profile, profile.profile);
     assert_eq!(alias.arguments, profile.arguments);
     assert!(parse(&[]).is_err());
+}
+
+#[test]
+fn application_reset_option_cannot_consume_task_or_option_values() {
+    for arguments in [
+        vec!["task", "--reset-state"],
+        vec!["--model", "--reset-state", "task"],
+        vec!["--image", "--reset-state", "task"],
+        vec!["--", "--reset-state"],
+    ] {
+        let mut input = vec!["--profile", "headless"];
+        input.extend(arguments.iter().copied());
+        let Parse::Application(application) = parse(&input).unwrap() else {
+            panic!("application");
+        };
+        assert!(!application.reset_state, "{arguments:?}");
+        assert_eq!(application.arguments, arguments);
+    }
 }

@@ -60,7 +60,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         SessionId::new("allowed").unwrap(),
     )
     .unwrap();
-    assert_eq!(local.operations().len(), 32); // Includes composition resources and three reference reads.
+    assert_eq!(local.operations().len(), 35); // Includes composition resources and three reference reads.
     assert!(local.operations().contains(&Operation::Resource.spec()));
     for operation in [
         Operation::CaptureReference,

@@ -1,8 +1,6 @@
 #![cfg(unix)]
 use async_trait::async_trait;
-use rsi_agent_session_protocol::{
-    AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId, WorkspaceTrust,
-};
+use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId};
 use rsi_api::ApiRegistry;
 use rsi_api_http::{HttpConfig, HttpServer, HttpServices};
 use rsi_api_http_client::{HttpClient, HttpClientConfig};
@@ -151,7 +149,7 @@ struct Harness {
 }
 impl Harness {
     #[allow(clippy::too_many_lines)] // One isolated transport binds its actual reader and lifetimes.
-    async fn start(trust: WorkspaceTrust) -> Self {
+    async fn start() -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         std::fs::write(root.join("file"), b"hello\0\xffworld").unwrap();
@@ -170,8 +168,6 @@ impl Harness {
             )
             .unwrap(),
         )
-        .unwrap()
-        .with_workspace_trust(trust)
         .unwrap();
         let reads = Arc::new(Reads {
             header,
@@ -295,89 +291,86 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn real_http_requires_authentication_before_session_binding_and_ignores_trust_as_file_authority()
- {
+async fn real_http_requires_authentication_before_session_binding_and_reads_selected_workspace() {
     let _serial = SERIAL.lock().await;
-    for trust in [WorkspaceTrust::Untrusted, WorkspaceTrust::Trusted] {
-        let harness = Harness::start(trust).await;
-        let input = serde_json::json!({"target": harness.target(), "input": {"path": "66696c65", "kind": "file"}});
-        let response = harness.raw("open", input.clone(), false).await;
-        assert_eq!(response.status(), 401);
-        assert_eq!(harness.reads.calls.load(Ordering::SeqCst), 0);
-        let mut forged = input;
-        forged["input"]["workspace"] = serde_json::json!("/");
-        assert_eq!(harness.raw("open", forged, true).await.status(), 400);
-        assert_eq!(harness.reads.calls.load(Ordering::SeqCst), 0);
-        let file = harness
-            .client
-            .open(
-                harness.target(),
-                RelativePath::new(b"file").unwrap(),
-                FileKind::File,
-            )
-            .await
-            .unwrap();
-        let page = harness
-            .client
-            .read(harness.target(), file.clone(), 4, 6)
-            .await
-            .unwrap();
-        assert_eq!(page.bytes_hex, hex::encode(b"o\0\xffwor"));
-        let mut wrong = file.clone();
-        wrong.path = RelativePath::new(b"sub").unwrap();
-        assert_eq!(
-            harness.client.read(harness.target(), wrong, 0, 1).await,
-            Err(SessionFilesError::Files(FilesError::Binding))
-        );
-        let directory = harness
-            .client
-            .open(
-                harness.target(),
-                RelativePath::default(),
-                FileKind::Directory,
-            )
-            .await
-            .unwrap();
-        let page = harness
-            .client
-            .list(harness.target(), directory.clone(), 0, 1)
-            .await
-            .unwrap();
-        assert_eq!(page.total, 2);
-        assert_eq!(page.entries[0].name, "file");
+    let harness = Harness::start().await;
+    let input = serde_json::json!({"target": harness.target(), "input": {"path": "66696c65", "kind": "file"}});
+    let response = harness.raw("open", input.clone(), false).await;
+    assert_eq!(response.status(), 401);
+    assert_eq!(harness.reads.calls.load(Ordering::SeqCst), 0);
+    let mut forged = input;
+    forged["input"]["workspace"] = serde_json::json!("/");
+    assert_eq!(harness.raw("open", forged, true).await.status(), 400);
+    assert_eq!(harness.reads.calls.load(Ordering::SeqCst), 0);
+    let file = harness
+        .client
+        .open(
+            harness.target(),
+            RelativePath::new(b"file").unwrap(),
+            FileKind::File,
+        )
+        .await
+        .unwrap();
+    let page = harness
+        .client
+        .read(harness.target(), file.clone(), 4, 6)
+        .await
+        .unwrap();
+    assert_eq!(page.bytes_hex, hex::encode(b"o\0\xffwor"));
+    let mut wrong = file.clone();
+    wrong.path = RelativePath::new(b"sub").unwrap();
+    assert_eq!(
+        harness.client.read(harness.target(), wrong, 0, 1).await,
+        Err(SessionFilesError::Files(FilesError::Binding))
+    );
+    let directory = harness
+        .client
+        .open(
+            harness.target(),
+            RelativePath::default(),
+            FileKind::Directory,
+        )
+        .await
+        .unwrap();
+    let page = harness
+        .client
+        .list(harness.target(), directory.clone(), 0, 1)
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.entries[0].name, "file");
+    harness
+        .client
+        .release(harness.target(), directory.token)
+        .await
+        .unwrap();
+    harness.reads.available.store(false, Ordering::SeqCst);
+    assert_eq!(
         harness
             .client
-            .release(harness.target(), directory.token)
-            .await
-            .unwrap();
-        harness.reads.available.store(false, Ordering::SeqCst);
-        assert_eq!(
-            harness
-                .client
-                .read(harness.target(), file.clone(), 0, 1)
-                .await,
-            Err(SessionFilesError::Files(FilesError::Unavailable))
-        );
-        harness.reads.available.store(true, Ordering::SeqCst);
-        let mut wrong_target = harness.target();
-        wrong_target.header_key = "0".repeat(64);
-        assert_eq!(
-            harness.client.read(wrong_target, file.clone(), 0, 1).await,
-            Err(SessionFilesError::Files(FilesError::Unavailable))
-        );
-        harness
-            .client
-            .release(harness.target(), file.token)
-            .await
-            .unwrap();
-        harness.close().await;
-    }
+            .read(harness.target(), file.clone(), 0, 1)
+            .await,
+        Err(SessionFilesError::Files(FilesError::Unavailable))
+    );
+    harness.reads.available.store(true, Ordering::SeqCst);
+    let mut wrong_target = harness.target();
+    wrong_target.header_key = "0".repeat(64);
+    assert_eq!(
+        harness.client.read(wrong_target, file.clone(), 0, 1).await,
+        Err(SessionFilesError::Files(FilesError::Unavailable))
+    );
+    harness
+        .client
+        .release(harness.target(), file.token)
+        .await
+        .unwrap();
+    harness.close().await;
 }
 
 #[tokio::test]
 async fn credential_revocation_cancels_an_in_flight_real_page_and_releases_session_activity() {
     let _serial = SERIAL.lock().await;
-    let harness = Harness::start(WorkspaceTrust::Untrusted).await;
+    let harness = Harness::start().await;
     let file = harness
         .client
         .open(
@@ -409,7 +402,7 @@ async fn credential_revocation_cancels_an_in_flight_real_page_and_releases_sessi
 #[tokio::test]
 async fn session_retirement_cancels_active_files_response_without_changing_api_authentication() {
     let _serial = SERIAL.lock().await;
-    let harness = Harness::start(WorkspaceTrust::Trusted).await;
+    let harness = Harness::start().await;
     let file = harness
         .client
         .open(
@@ -438,7 +431,7 @@ async fn session_retirement_cancels_active_files_response_without_changing_api_a
 #[tokio::test]
 async fn endpoint_replacement_releases_old_generation_tokens_before_new_reader_admission() {
     let _serial = SERIAL.lock().await;
-    let mut harness = Harness::start(WorkspaceTrust::Untrusted).await;
+    let mut harness = Harness::start().await;
     let mut old = None;
     for _ in 0..MAXIMUM_FILE_TOKENS {
         old = Some(

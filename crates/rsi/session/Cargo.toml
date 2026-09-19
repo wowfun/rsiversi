@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-process = { path = "../../rsi-process/core" }
+rsi-pty-protocol = { path = "../../rsi-pty/protocol" }
 rsi-agent-references = { path = "../../rsi-agent/references" }
 rsi-conversation = { path = "../conversation" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }

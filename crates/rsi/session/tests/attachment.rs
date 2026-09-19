@@ -5,7 +5,7 @@ use rsi_agent_composition_protocol::{
 use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
     MAXIMUM_TURN_TEXT_BYTES, MessageId, SessionFact, SessionFactBody, SessionHeader, SessionId,
-    TurnId, WorkspaceTrust,
+    TurnId,
 };
 use rsi_agent_store_protocol::{AppendBatch, SessionStore};
 use rsi_agent_testkit::MemoryStore;
@@ -484,8 +484,6 @@ impl TurnService for CompetingPublicationTurns {
                     original.settings().clone(),
                 )
                 .unwrap()
-                .with_workspace_trust(original.workspace_trust())
-                .unwrap()
             } else {
                 original.clone()
             };
@@ -919,7 +917,6 @@ async fn new_drafts_read_current_defaults_while_existing_headers_remain_frozen()
         workspace_id: workspace_id(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
-        workspace_trust: WorkspaceTrust::Untrusted,
     };
     let first = service.create(request("defaults-first")).await.unwrap();
     let frozen = first.header().await.unwrap();
@@ -970,7 +967,6 @@ async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() 
         workspace_id: workspace_id(),
         session_id: SessionId::new("same-draft").unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Untrusted,
     };
     let first = service.create(request.clone()).await.unwrap();
     let second = service.create(request.clone()).await.unwrap();
@@ -979,7 +975,8 @@ async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() 
         "one registry shares one preparation and pin"
     );
     let mut conflict = request;
-    conflict.workspace_trust = WorkspaceTrust::Trusted;
+    conflict.agent_preset_id =
+        Some(rsi_agent_session_protocol::AgentPresetId::new("other-agent").unwrap());
     assert!(matches!(
         service.create(conflict).await,
         Err(SessionError::DraftConflict { .. })
@@ -1205,7 +1202,6 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-competing-publication").unwrap(),
             agent_preset_id: Some(preset_id),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -1307,7 +1303,6 @@ async fn assert_competing_image_publication(concurrent: bool) {
             workspace_id: workspace_id(),
             session_id,
             agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -1470,7 +1465,6 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-failing-fresh-preset").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("missing-preset").unwrap()),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await;
 
@@ -1518,6 +1512,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
                     SessionFactBody::TurnTerminal {
                         turn_id,
                         outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                        result: None,
                     },
                 )
                 .unwrap(),
@@ -1795,7 +1790,6 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-image-only").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .expect("draft creation must not resolve a Language route or mutate Workspace");
@@ -1883,7 +1877,6 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
                 workspace_id: workspace_id(),
                 session_id: SessionId::new("question-errors").unwrap(),
                 agent_preset_id: None,
-                workspace_trust: WorkspaceTrust::Untrusted,
             })
             .await
             .unwrap();
@@ -1986,7 +1979,6 @@ async fn fresh_interactions_release_composition_pin_and_follow_tree_publication_
             workspace_id: workspace_id(),
             session_id: root.clone(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -2073,7 +2065,6 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
         workspace_id: workspace_id(),
         session_id: SessionId::new("registered-draft").unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Untrusted,
     };
     let first = service.create(request.clone()).await.unwrap();
     assert_eq!(
@@ -2098,7 +2089,7 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
         matches!(service.create(next).await, Err(SessionError::Invalid(message)) if message.contains("not registered"))
     );
     assert_eq!(workspace.reads.load(Ordering::SeqCst), 2);
-    service.stop().await;
+    service.stop().await.unwrap();
 }
 
 #[derive(Debug)]
@@ -2107,6 +2098,12 @@ struct UnavailableCommands;
 struct UnavailableProjections;
 #[async_trait]
 impl rsi_agent_turn_protocol::SessionProjections for UnavailableProjections {
+    fn resident_composition(
+        &self,
+        _: &SessionId,
+    ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ResidentComposition> {
+        panic!("unexpected residency lookup")
+    }
     fn watch_projection_changes(
         &self,
         _: &SessionId,

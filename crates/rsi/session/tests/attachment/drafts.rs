@@ -64,7 +64,8 @@ async fn device_slots_cover_creating_and_ready_drafts_and_retries_share_the_firs
         &service.create(first.clone()).await.unwrap()
     ));
     let mut conflict = first;
-    conflict.workspace_trust = WorkspaceTrust::Trusted;
+    conflict.agent_preset_id =
+        Some(rsi_agent_session_protocol::AgentPresetId::new("other-agent").unwrap());
     assert!(matches!(
         service.create_from(conflict, device(2)).await,
         Err(SessionError::DraftConflict { .. })
@@ -88,7 +89,7 @@ async fn device_slots_cover_creating_and_ready_drafts_and_retries_share_the_firs
         .await
         .unwrap();
     assert_eq!(preparation.calls.load(Ordering::SeqCst), 66);
-    service.stop().await;
+    service.stop().await.unwrap();
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
 }
 
@@ -152,7 +153,6 @@ fn request(_path: &Path, id: impl Into<String>) -> CreateSession {
         workspace_id: workspace_id(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Untrusted,
     }
 }
 
@@ -195,7 +195,7 @@ async fn concurrent_creates_keep_one_preparation_after_the_first_waiter_is_dropp
             .unwrap(),
         expected.header().await.unwrap()
     );
-    service.stop().await;
+    service.stop().await.unwrap();
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
     assert!(expected.header().await.is_err());
 }
@@ -259,7 +259,7 @@ async fn capacity_precedes_preparation_and_idle_sweep_releases_pins_held_by_loca
         matches!(first.header().await, Err(SessionError::NotFound(_))),
         "a new lease cannot revive an old handle"
     );
-    service.stop().await;
+    service.stop().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -296,7 +296,7 @@ async fn an_active_operation_owns_its_pin_until_completion_then_gets_a_fresh_idl
     pending.await.unwrap();
     tokio::time::advance(std::time::Duration::from_mins(59)).await;
     handle.header().await.unwrap();
-    service.stop().await;
+    service.stop().await.unwrap();
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
 }
 
@@ -312,7 +312,7 @@ async fn failed_preparation_releases_its_reserved_slot_for_the_next_attempt() {
             Err(SessionError::Backend(_))
         ));
     }
-    service.stop().await;
+    service.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -327,7 +327,7 @@ async fn retirement_cancels_owned_preparation_and_rejects_later_admission() {
         async move { service.create(request).await }
     });
     preparation.entered.acquire().await.unwrap().forget();
-    service.stop().await;
+    service.stop().await.unwrap();
     assert!(matches!(
         waiter.await.unwrap(),
         Err(SessionError::ShuttingDown)
@@ -373,7 +373,7 @@ async fn hung_preparation_expires_its_waiters_and_releases_device_capacity() {
         .await
         .unwrap();
     assert_eq!(preparation.calls.load(Ordering::SeqCst), 65);
-    service.stop().await;
+    service.stop().await.unwrap();
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
 }
 
@@ -465,7 +465,7 @@ async fn fresh_reads_reconcile_competing_publications_without_submitting() {
                     .len(),
                 1
             );
-            service.stop().await;
+            service.stop().await.unwrap();
         }
     }
 }
@@ -505,7 +505,7 @@ async fn stop_during_fresh_publication_keeps_the_active_lease_until_io_finishes(
     })
     .await
     .unwrap();
-    service.stop().await;
+    service.stop().await.unwrap();
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
     assert!(matches!(
         handle.header().await,
@@ -533,8 +533,6 @@ async fn publish_competing(
         draft.agent_preset_id().clone(),
         draft.settings().clone(),
     )
-    .unwrap()
-    .with_workspace_trust(draft.workspace_trust())
     .unwrap();
     store
         .append(AppendBatch {
@@ -569,31 +567,28 @@ async fn workspace_read_lease_holds_actual_draft_only_until_finite_read_ends() {
     let directory = tempfile::tempdir().unwrap();
     let preparation = Preparation::new(false);
     let service = service(directory.path(), preparation.clone());
-    for trust in [WorkspaceTrust::Untrusted, WorkspaceTrust::Trusted] {
-        let mut input = request(directory.path(), format!("read-{trust:?}"));
-        input.workspace_trust = trust;
-        let handle = service.create(input).await.unwrap();
-        let header = handle.header().await.unwrap();
-        let target = SessionTarget {
-            session_id: header.session_id().clone(),
-            header_key: header.fingerprint().unwrap(),
-        };
-        let read = service.acquire(&target).await.unwrap();
-        assert_eq!(read.header(), &header);
-        tokio::time::advance(std::time::Duration::from_mins(61)).await;
-        tokio::task::yield_now().await;
-        assert!(service.acquire(&target).await.is_ok());
-        assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
-        drop(read);
-        tokio::time::advance(std::time::Duration::from_mins(61)).await;
-        tokio::task::yield_now().await;
-        assert!(matches!(
-            service.acquire(&target).await,
-            Err(SessionError::NotFound(_))
-        ));
-        assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
-    }
-    service.stop().await;
+    let input = request(directory.path(), "read-draft");
+    let handle = service.create(input).await.unwrap();
+    let header = handle.header().await.unwrap();
+    let target = SessionTarget {
+        session_id: header.session_id().clone(),
+        header_key: header.fingerprint().unwrap(),
+    };
+    let read = service.acquire(&target).await.unwrap();
+    assert_eq!(read.header(), &header);
+    tokio::time::advance(std::time::Duration::from_mins(61)).await;
+    tokio::task::yield_now().await;
+    assert!(service.acquire(&target).await.is_ok());
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
+    drop(read);
+    tokio::time::advance(std::time::Duration::from_mins(61)).await;
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        service.acquire(&target).await,
+        Err(SessionError::NotFound(_))
+    ));
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
+    service.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -623,7 +618,7 @@ async fn workspace_read_binding_rejects_wrong_header_and_service_retirement_canc
     target.header_key = header.fingerprint().unwrap();
     let read = service.acquire(&target).await.unwrap();
     assert!(!read.retiring().is_cancelled());
-    service.stop().await;
+    service.stop().await.unwrap();
     assert!(read.retiring().is_cancelled());
     assert!(matches!(
         service.acquire(&target).await,

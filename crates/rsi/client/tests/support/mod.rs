@@ -258,6 +258,7 @@ impl SessionHandle for Handle {
                     SessionFactBody::TurnTerminal {
                         turn_id: TurnId::new("turn").unwrap(),
                         outcome: TurnOutcome::Completed,
+                        result: None,
                     },
                 )
                 .unwrap(),

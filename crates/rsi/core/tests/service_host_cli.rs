@@ -6,6 +6,8 @@ mod addons;
 mod commands;
 #[path = "service_host_cli/inspector.rs"]
 mod inspector;
+#[path = "service_host_cli/reset.rs"]
+mod reset;
 #[path = "service_host_cli/serve.rs"]
 mod serve;
 #[path = "service_host_cli/tui.rs"]

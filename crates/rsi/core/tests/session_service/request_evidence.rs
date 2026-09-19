@@ -72,7 +72,6 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
                 .id,
             session_id: session_id.clone(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();
@@ -251,7 +250,6 @@ async fn optional_evidence_budget_fallback_still_dispatches_exactly_one_request(
                 .id,
             session_id: SessionId::new("evidence-fallback").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Trusted,
         })
         .await
         .unwrap();

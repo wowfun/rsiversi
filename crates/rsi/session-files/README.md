@@ -5,7 +5,7 @@ through ordinary endpoint and client plugins. The API consumes the independent
 Files reader and the actual Session read-lease service. `files/open`, `read`,
 `list` and `release` are version-one authenticated Data/Read operations: a lost
 waiter cancels work. They accept a Session/Header target and relative paths or
-retained file descriptors, never an absolute root or WorkspaceTrust override.
+retained file descriptors, never an absolute root override.
 
 The endpoint plugin also publishes the same typed client for trusted embedded
 applications. Its private adapter admits only these four exact read operations
@@ -15,8 +15,7 @@ obtain this capability from the ordinary authenticated domain client plugin.
 
 Every call decodes its closed bounded request, reserves materialization
 scratch and validates ranges before acquiring the actual Session read lease. The Header's canonical cwd
-selects the root. Trusted and Untrusted Session workspaces are equally browseable
-by an authenticated caller; trust only governs instruction/skill promotion.
+selects the root for an authenticated caller.
 Session identity, Header fingerprint and file token are correlation values,
 not secrets or authentication. Draft expiry is an unavailable domain object;
 missing/revoked authentication remains an API authorization failure. API or

@@ -29,6 +29,8 @@ impl PluginFactory for SessionFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<rsi_pty_protocol::PtyProviderContract>()
+            .requiring_local::<rsi_sandbox::SandboxContract>()
             .requiring_local::<TurnServiceContract>()
             .requiring_local::<rsi_agent_turn_protocol::TurnJobsContract>()
             .requiring_local::<SessionCommandsContract>()
@@ -63,6 +65,10 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_terminals(
+            plan.local::<rsi_pty_protocol::PtyProviderContract>()?,
+            plan.local::<rsi_sandbox::SandboxContract>()?,
+        )
         .with_resources(plan.local::<rsi_agent_turn_protocol::SessionResourcesContract>()?)
         .with_references(plan.local::<rsi_agent_references::ReferencesContract>()?)
         .with_questions(Some(plan.local::<UserQuestionsContract>()?))
@@ -76,10 +82,7 @@ impl PluginFactory for SessionFactory {
         plan.defer(
             "stop Session drafts",
             Box::new(move || {
-                Box::pin(async move {
-                    cleanup.stop().await;
-                    Ok(())
-                })
+                Box::pin(async move { cleanup.stop().await.map_err(|error| error.to_string()) })
             }),
         )?;
         let supply = plan

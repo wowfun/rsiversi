@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentPresetId, FrozenAgentSettings, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
-    MessageId, SessionFact, SessionHeader, SessionId, TurnId, WorkspaceTrust,
+    MessageId, SessionFact, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservation,
@@ -23,6 +23,8 @@ use thiserror::Error;
 
 mod evidence;
 mod reads;
+/// Session-bound live terminal requests.
+pub mod terminal;
 pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead};
 mod model_selection;
 pub use model_selection::{ModelAvailability, ModelSelectionRead};
@@ -136,8 +138,6 @@ pub struct CreateSession {
     pub session_id: SessionId,
     /// Explicit preset or the current catalog default.
     pub agent_preset_id: Option<AgentPresetId>,
-    /// Explicit immutable authority for project-controlled instructions and skills.
-    pub workspace_trust: WorkspaceTrust,
 }
 
 /// One atomic view of a still-unpublished draft.
@@ -359,6 +359,14 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Operates a live terminal bound to this persisted Session and frozen workspace policy.
+    async fn terminal(&self, request: terminal::Request) -> Result<terminal::Reply> {
+        let _ = request;
+        Err(
+            terminal::PtyError::Unavailable("this Session service has no terminal provider".into())
+                .into(),
+        )
+    }
     /// Reads one recorded reference in this Session or its actual inherited parent interval.
     async fn read_recorded_reference(
         &self,
@@ -542,6 +550,9 @@ impl rsi_meta_contract::LocalContract for SessionContract {
 /// Closed Session application failure taxonomy shared by all adapters.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    /// Bounded live terminal failure, including explicit unsupported platform/policy.
+    #[error(transparent)]
+    Terminal(#[from] terminal::PtyError),
     /// New Sessions require an explicitly configured default model.
     #[error(
         "Setup required: configure rsi.agent.default_model with its deployment and model fields"
@@ -730,5 +741,25 @@ impl MetricsRead {
             return Err(SessionError::Invalid("metrics watermark mismatch".into()));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn creation_has_no_workspace_trust_field_and_rejects_the_old_shape() {
+        let value = serde_json::json!({"workspace_id": "a".repeat(64), "session_id": "new-session", "agent_preset_id": null});
+        let creation: CreateSession = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(creation).unwrap(), value);
+        let mut old = value;
+        old["workspace_trust"] = serde_json::json!("trusted");
+        assert!(
+            serde_json::from_value::<CreateSession>(old)
+                .unwrap_err()
+                .to_string()
+                .contains("workspace_trust")
+        );
     }
 }

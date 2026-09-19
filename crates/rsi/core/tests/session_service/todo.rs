@@ -66,7 +66,6 @@ async fn todo_replaces_across_turns_clears_and_is_allowed_in_plan_mode() {
                 .id,
             session_id: SessionId::new("todo-plan").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

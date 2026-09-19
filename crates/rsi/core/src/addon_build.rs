@@ -322,6 +322,7 @@ async fn run_owned(
     arguments.extend_from_slice(build.command());
     let confined = sandbox
         .confine(rsi_sandbox::ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             mode: SandboxMode::DangerFullAccess,
             program: "/usr/bin/env".into(),
             arguments,

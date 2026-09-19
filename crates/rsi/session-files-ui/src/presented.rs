@@ -222,6 +222,7 @@ mod tests {
         SessionFact::new(seq, 1, SessionFactBody::ToolResult {
             turn_id: TurnId::new(turn).unwrap(), effect_id: EffectId::new(effect).unwrap(), identity,
             result: ToolResult::new(json!({"presented":{"version":version,"files":[{"path_hex":"7265706f7274","description":"report","length":42}]}}), vec![], failed).unwrap(),
+            conclusion: None,
         }).unwrap()
     }
     #[test]

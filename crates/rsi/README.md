@@ -3,8 +3,10 @@
 ## Terminal application
 
 `rsi tui` (equivalently `rsi --profile tui`) selects the fullscreen text
-application. It accepts application arguments only; a custom Application Profile
-uses `rsi --profile NAME`. The [terminal package](terminal/README.md) owns startup,
+application. A custom Application Profile uses `rsi --profile NAME`. The launcher
+also accepts the explicit [Agent Store reset option](core/README.md), for example
+`rsi tui --reset-state`, before forwarding application arguments.
+The [terminal package](terminal/README.md) owns startup,
 Home, setup, input, controller lifetime and terminal cleanup. Its
 [interaction design](terminal/docs/tui-design.md) owns information hierarchy,
 transcript presentation, editing, model/effort selection and Session navigation.
@@ -84,7 +86,7 @@ The observations are captured at their owning boundaries, not as one atomic grap
 
 The standard Host supplies the independent Files reader and Session-bound Files
 API. Embedded, UDS and HTTP applications use the same finite typed client.
-Authenticated users may browse both trusted and untrusted valid Session roots;
+Authenticated users may browse valid Session roots;
 expired drafts remain unavailable. The standard Unix Agent preset includes
 `file_read` and `directory_list` through its sealed Tool catalog and existing
 approval/Sandbox policy. Other platforms expose typed unsupported reads and omit
@@ -369,3 +371,10 @@ they do not claim runtime staging or Agent generation application. JSON revision
 use canonical decimal strings. A running standard Host observes its enabled store
 through the existing native manager; `rsi --profile inspector native` reads that
 manager's separate status and retained resources.
+
+Standard workspace skills use project definitions by default before the RSI config
+`skills` directory and then the optional captured HOME's `.agents/skills`.
+The launcher captures HOME explicitly; `StandardComposition` never reads it.
+An absent HOME with complete XDG paths omits that optional root. Remote clients
+use the owning Host's skill catalog, not their local filesystem. Explicit Profile
+workspace-context configuration retains control of its user roots.

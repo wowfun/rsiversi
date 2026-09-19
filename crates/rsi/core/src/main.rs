@@ -69,6 +69,7 @@ mod cli;
 #[cfg(target_os = "linux")]
 mod host_cli;
 mod management;
+mod reset_state;
 
 use application::{report_error, run_application};
 use cli::{
@@ -139,7 +140,8 @@ async fn prepare_standard_composition(
     let coding_tools = None;
     let system_root =
         standard_agent_preset_root(&paths).map_err(|error| RsiError::Boot(error.to_string()))?;
-    let composition = StandardComposition::new(paths, environment, coding_tools);
+    let composition = StandardComposition::new(paths, environment, coding_tools)
+        .with_user_home(rsi::capture_standard_home()?)?;
     let presets = if let Some(parent) = parent {
         AgentPresetManager::open_standard_in(parent, &composition, system_root).await?
     } else {

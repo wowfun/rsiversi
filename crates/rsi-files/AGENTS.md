@@ -1,6 +1,6 @@
 Read the family [contract](README.md) before changing filesystem behavior.
 
-- Keep native filesystem mechanics independent of Session, Workspace trust,
+- Keep native filesystem mechanics independent of Session, workspace-context selection,
   API authentication and model Tool admission.
 - Root handles own the selected directory; later relative reads must not reopen
   that authority through a potentially replaced absolute path.

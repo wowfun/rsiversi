@@ -201,7 +201,12 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
     };
     #[cfg(not(target_os = "linux"))]
     let coding = None;
-    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let composition = match rsi::capture_standard_home().and_then(|home| {
+        StandardComposition::new(paths, BTreeMap::new(), coding).with_user_home(home)
+    }) {
+        Ok(composition) => composition,
+        Err(error) => return report_error(&error),
+    };
     let presets = match AgentPresetManager::open_standard_preview(&composition).await {
         Ok(presets) => presets,
         Err(error) => return report_error(&error),
@@ -372,7 +377,12 @@ pub(super) async fn run_agent_preset(command: AgentPresetCommand) -> u8 {
     };
     #[cfg(not(target_os = "linux"))]
     let coding = None;
-    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let composition = match rsi::capture_standard_home().and_then(|home| {
+        StandardComposition::new(paths, BTreeMap::new(), coding).with_user_home(home)
+    }) {
+        Ok(composition) => composition,
+        Err(error) => return report_error(&error),
+    };
     let manager = match AgentPresetManager::open_standard(&composition, system_root).await {
         Ok(manager) => manager,
         Err(error) => return report_error(&error),

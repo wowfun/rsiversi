@@ -54,7 +54,6 @@ async fn standard_repeat_contribution_reaches_provider_after_unchanged_real_tool
                 .id,
             session_id: SessionId::new("repeat-provider").unwrap(),
             agent_preset_id: None,
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();

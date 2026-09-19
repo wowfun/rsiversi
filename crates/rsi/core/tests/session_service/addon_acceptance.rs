@@ -85,7 +85,6 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
                 .id,
             session_id: SessionId::new(id).unwrap(),
             agent_preset_id: Some(rsi_agent_presets::AgentPresetId::new("workbench").unwrap()),
-            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap()
@@ -288,7 +287,6 @@ async fn check_removed(fixture: &Fixture) {
                 workspace_id,
                 session_id: SessionId::new("removed-addon").unwrap(),
                 agent_preset_id: Some(rsi_agent_presets::AgentPresetId::new("workbench").unwrap()),
-                workspace_trust: WorkspaceTrust::Untrusted,
             })
             .await
             .is_err()

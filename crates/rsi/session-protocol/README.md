@@ -105,8 +105,7 @@ Attachment is a durable-data operation: it reads the Store Header and builds a
 handle without resolving the current preset generation, Language/Image route,
 filesystem state, or Workspace registry. Those execution dependencies are
 prepared only by the selected operation. Draft creation takes a registered `WorkspaceId`. Its owned preparation resolves
-that exact registration into the existing canonical-cwd Header, freezes the
-explicit workspace-trust decision, rejects an identity already present in the
+that exact registration into the canonical-cwd Header, rejects an identity already present in the
 durable Store and pins its preset. It neither probes the filesystem nor registers
 a Workspace or requires the default Language route. Clients register or select a
 Workspace through its independent capability before creating a Session.
@@ -217,7 +216,7 @@ draft active only for the admitted read and exposes the Session service's
 retirement signal. Consumers retain it until their finite operation completes;
 they never put it in idle file tokens or UI subscriptions. Every new read
 reacquires it, so expired drafts and changed Header bindings are rejected before
-filesystem work. Both workspace trust values are allowed: the lease establishes
+filesystem work. The lease establishes
 current Session correlation and lifetime, not API authentication, model Tool
 policy or permission to promote file content into instructions.
 
@@ -238,3 +237,21 @@ continue the current cut before advancing to a newer one. Session totals exclude
 child and inherited attempts. This operation neither observes live executions
 nor changes Session state. The pure reducer belongs to Conversation; acquisition
 and bounded cache policy belong to Session.
+
+## Live Session terminals
+
+A persisted Session may create Linux Bash terminals only under its frozen
+ReadOnly or WorkspaceWrite Bubblewrap policy and canonical workspace. Drafts,
+unsupported platforms/backends and DangerFullAccess return TerminalUnavailable.
+No execution policy is widened or chosen by the client. A service generation
+retains at most 256 Session scopes, each with the bounds and controller/receipt
+protocol owned by [PTY](../../rsi-pty/README.md). Pane detach and Kernel eviction
+leave these scopes alive; explicit close, service retirement and Host stop reap
+them. Live IDs do not survive restart.
+
+Requests bind the ordinary Session target and Header fingerprint. Output uses
+finite 16 KiB UTF-8 pages on a separate API data operation, independent of
+transcript acknowledgement. Terminal control has its own bounded operation.
+Input is at most 64 KiB of exact bytes: accepted-prefix receipts permit safe
+continuation even if a native write splits a UTF-8 character. Unknown input
+receipts require querying the original epoch/sequence; they never permit replay.

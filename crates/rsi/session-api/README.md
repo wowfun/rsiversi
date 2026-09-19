@@ -6,10 +6,9 @@ their API failure category. Clients may show setup without treating data or Stor
 failures as missing configuration.
 
 
-The current Session format is 14. Operations carrying changed Header, Fact or
-message shapes negotiate their own versions: create v5; submit v3; attach,
-recent, draft-snapshot, select-preset, history, observe, inspect and read-message
-v4. Message-status remains v2. Metrics is a read-only v1 operation returning a
+The current Session format is 16. Operations negotiate their own versions:
+create v7; attach, recent, draft-snapshot, select-preset and inspect v6; history,
+observe and read-message v5; submit v4. Message-status is v3. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.
 Evidence is a read-only v1 operation: one exact request section, at most 256 KiB
 decoded source per page and a 2 MiB encoded response ceiling. Clients revalidate
@@ -150,3 +149,16 @@ catalog or one resource preview. Requests and replies use the validated resource
 protocol, require the Session read grant, and retain generation-bound identities.
 The narrowed Session-target adapter exposes this operation only for its bound
 Session; discovery and previews neither submit a Turn nor authorize execution.
+
+Terminal output long polls use authenticated Subscription admission, leaving Data
+slots available for finite Session reads and submissions. The terminal-output v2
+wire operation emits one page with a 128 KiB encoded ceiling, then closes. The
+Session client consumes its first page and drops the stream; its public method
+remains a finite read, independent of transcript subscription ACKs. Terminal
+controls use Control mutations with an 8 KiB encoded request ceiling. Input uses
+a distinct Data mutation with a 512 KiB encoded request ceiling covering the
+64 KiB byte array. All retain the exact Session/Header target.
+
+Clients validate operation-specific terminal, attachment, stream, controller and
+input receipt coordinates before exposing replies. Unsupported terminal policy
+and native failures retain the bounded typed terminal error taxonomy.

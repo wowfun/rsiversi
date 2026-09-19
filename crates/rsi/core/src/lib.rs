@@ -167,7 +167,10 @@ impl RunningRsi {
         launch_key: Option<String>,
         parent: Option<&rsi_meta::Context>,
     ) -> Result<Self> {
-        composition.agent_store_factory = rsi_agent_store_sqlite::SqliteStoreFactory::default();
+        composition.agent_store_factory = composition.agent_store_reset.clone().map_or_else(
+            rsi_agent_store_sqlite::SqliteStoreFactory::default,
+            rsi_agent_store_sqlite::SqliteStoreFactory::with_reset_once,
+        );
         let store_diagnostic = composition.agent_store_factory.clone();
         let started = Box::pin(async {
             #[cfg(unix)]
@@ -204,7 +207,7 @@ impl RunningRsi {
                 use rsi_agent_store_sqlite::SqliteStoreStartupFailureKind as Kind;
                 let reason = match failure.kind {
                     Kind::SchemaMismatch { expected, actual } => format!(
-                        "Agent Store schema mismatch: expected {expected}, actual {actual}; no automatic migration is available. Preserve the old Store and use a fresh root or a matching older build"
+                        "Agent Store schema mismatch: expected {expected}, actual {actual}; no automatic migration is available. Preserve the old Store and use a fresh root or a matching older build. Re-run with --reset-state to back up the Agent Store and start with empty session history."
                     ),
                     Kind::WriterLocked => "Agent Store root already has an active writer".into(),
                     Kind::Invalid => "Agent Store root or filesystem layout is invalid".into(),
@@ -429,6 +432,16 @@ fn required_local<C: rsi_meta::LocalContract>(
         .ok_or_else(|| RsiError::Boot(format!("{name} is unavailable")))
 }
 
+/// Captures usable absolute HOME for optional personal skill discovery.
+/// Missing, empty and relative values skip this optional source.
+pub fn capture_standard_home() -> Result<Option<PathBuf>> {
+    Ok(personal_home(std::env::var_os("HOME")))
+}
+
+fn personal_home(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
 /// Resolves standard XDG-style paths without searching for a Profile.
 pub fn standard_paths() -> Result<HostPaths> {
     let config = optional_environment_path("XDG_CONFIG_HOME")?;
@@ -488,6 +501,17 @@ pub type Result<T> = std::result::Result<T, RsiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_personal_home_ignores_missing_empty_and_relative_paths() {
+        for value in [None, Some("".into()), Some("relative".into())] {
+            assert_eq!(personal_home(value), None);
+        }
+        assert_eq!(
+            personal_home(Some("/home/example".into())),
+            Some(PathBuf::from("/home/example"))
+        );
+    }
 
     #[test]
     fn complete_xdg_paths_do_not_require_home() {

@@ -2,7 +2,7 @@
 
 `FilesToolsFactory` is an ordinary Agent contribution. It registers `file_read`
 and `directory_list`, plus `present`, through the staged Tool registrar and consumes the independent
-Files reader. It does not call the human Files API or consult WorkspaceTrust.
+Files reader. It does not call the human Files API.
 The existing Tool catalog gate, resolved Turn policy and approval owner remain
 in force. A read-only operation does not imply approval exemption.
 

@@ -17,6 +17,9 @@ pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_R
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Operation {
+    Terminal,
+    TerminalOutput,
+    TerminalInput,
     Create,
     Attach,
     Recent,
@@ -53,7 +56,10 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 37] = [
+        Self::Terminal,
+        Self::TerminalOutput,
+        Self::TerminalInput,
         Self::Create,
         Self::Attach,
         Self::Recent,
@@ -93,6 +99,9 @@ impl Operation {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};
         let (name, class, effect, input, output) = match self {
+            Self::Terminal => ("terminal", Control, Mutation, 8192, 128 * 1024),
+            Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
+            Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),
             Self::Create => ("create", Data, Mutation, 8192, HEADER_REPLY + 16 * 1024),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
@@ -145,17 +154,16 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create => 5,
-                    Self::Submit => 3,
-                    Self::MessageStatus | Self::Jobs => 2,
+                    Self::Create => 7,
+                    Self::Submit => 4,
+                    Self::MessageStatus => 3,
+                    Self::Jobs | Self::TerminalOutput => 2,
                     Self::Attach
                     | Self::Recent
                     | Self::DraftSnapshot
                     | Self::SelectPreset
-                    | Self::History
-                    | Self::Observe
-                    | Self::Inspect
-                    | Self::ReadMessage => 4,
+                    | Self::Inspect => 6,
+                    Self::History | Self::Observe | Self::ReadMessage => 5,
                     _ => 1,
                 },
             )
@@ -258,6 +266,9 @@ pub(crate) enum Observation<C, F> {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    Terminal {
+        error: rsi_session_protocol::terminal::PtyError,
+    },
     SetupRequired {},
     Invalid {
         message: String,
@@ -297,6 +308,7 @@ pub(crate) fn domain<T>(
     result.map(Ok).or_else(|error| {
         let invalid = |_| ApiError::Backend("invalid Session error identity".into());
         Ok(Err(match error {
+            SessionError::Terminal(error) => Failure::Terminal { error },
             SessionError::SetupRequired => Failure::SetupRequired {},
             SessionError::Api(error) => return Err(error),
             SessionError::Backend(_) => {
@@ -343,6 +355,7 @@ pub(crate) fn domain<T>(
 impl Failure {
     pub fn into_error(self) -> SessionError {
         match self {
+            Self::Terminal { error } => SessionError::Terminal(error),
             Self::SetupRequired {} => SessionError::SetupRequired,
             Self::Invalid { message } => SessionError::Invalid(message),
             Self::NotFound {} => SessionError::NotFound("remote Session object".into()),
@@ -393,5 +406,16 @@ mod setup_tests {
         assert!(
             matches!(domain::<()>(Err(SessionError::Backend("private-diagnostic".into()))), Err(ApiError::Backend(message)) if message == "Session backend failed")
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_admission_tests {
+    use super::*;
+    #[test]
+    fn output_polling_does_not_occupy_data_admission() {
+        let spec = Operation::TerminalOutput.spec();
+        assert_eq!(spec.class, OperationClass::Subscription);
+        assert_eq!(spec.effect, OperationEffect::Read);
     }
 }

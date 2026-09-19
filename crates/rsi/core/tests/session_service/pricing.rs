@@ -32,7 +32,6 @@ async fn configured_prices_freeze_at_creation_and_are_copied_into_actual_intents
         workspace_id: workspace.clone(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: None,
-        workspace_trust: WorkspaceTrust::Trusted,
     };
     let service = running.session_service().unwrap();
     let original = service.create(create("unpriced")).await.unwrap();

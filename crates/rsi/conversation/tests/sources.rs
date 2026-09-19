@@ -85,6 +85,7 @@ fn dense_patch_evidence_fits_the_pretty_source_window() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
     )
     .unwrap();
@@ -121,6 +122,7 @@ fn tool_subfields_select_exact_values_without_unrelated_payloads() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
     )
     .unwrap();
@@ -215,6 +217,7 @@ fn exact_fact_and_content_kind_replace_numeric_field_aliasing() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
     )
     .unwrap();
@@ -271,6 +274,7 @@ fn exact_fact_and_content_kind_replace_numeric_field_aliasing() {
         SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("turn").unwrap(),
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     )
     .unwrap();
@@ -573,6 +577,7 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
                 false,
             )
             .unwrap(),
+            conclusion: None,
         },
         &[(FactField::ToolImage { index: 0 }, "image/png")],
     );

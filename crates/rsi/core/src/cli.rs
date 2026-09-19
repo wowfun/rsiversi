@@ -2,14 +2,14 @@ use super::{AgentPresetId, ApplicationProfileId, HostProfileId, OsString, PathBu
 use rsi_application::arguments::utf8;
 
 pub(super) const HELP: &str = "Usage:\n\
-  rsi tui [APPLICATION ARGUMENTS]\n\
-  rsi --profile PROFILE [APPLICATION ARGUMENTS]\n\
+  rsi tui [--reset-state] [APPLICATION ARGUMENTS]\n\
+  rsi --profile PROFILE [--reset-state] [APPLICATION ARGUMENTS]\n\
       headless: TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
                 [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
                 [--deployment ID --model ID] [--sandbox MODE]\n\
-                [--trust-workspace] [--output text|jsonl]\n\
+                [--output text|jsonl]\n\
       cli:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
-                [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n\
+                [--agent-preset ID] [--output text|jsonl]\n\
       tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
       devices: <register LABEL|list|revoke DEVICE_ID>\n\
@@ -26,7 +26,11 @@ Commands:\n\
   host            Control the explicit local Service Host daemon\n\
   agent-preset    Inspect and manage local Agent presets\n\
   agent-store     Verify the durable Agent Store\n\
-  addon           Manage local native source bytes and explicit selection\n";
+  addon           Manage local native source bytes and explicit selection\n\n\
+Startup option:\n\
+  --reset-state   Back up and clear Agent session state; preserve configuration and credentials\n\
+                 Place before application arguments\n\
+                 Example: rsi tui --reset-state\n";
 pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> list [--output text|json]\n\
   rsi profile <application|host> show ID [--output text|json]\n\
@@ -37,12 +41,13 @@ pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> preview-edit ID SOURCE_FILE [--output text|json] (Unix)\n\
   rsi profile <application|host> commit-edit ID SOURCE_FILE REVIEW_DIGEST [--output text|json] (Unix)\n";
 pub(super) const HOST_HELP: &str = "Usage:\n\
-  rsi host start [--profile HOST]\n\
-  rsi host serve [--profile HOST]\n\
-  rsi host restart [--profile HOST] [--force]\n\
+  rsi host start [--profile HOST] [--reset-state]\n\
+  rsi host serve [--profile HOST] [--reset-state]\n\
+  rsi host restart [--profile HOST] [--force] [--reset-state]\n\
   rsi host stop [--force]\n\
   rsi host status\n\
-  rsi host reload\n";
+  rsi host reload\n\n\
+  --reset-state   Back up and clear Agent session state; preserve configuration and credentials\n";
 pub(super) const AGENT_PRESET_HELP: &str = "Usage:\n\
   rsi agent-preset list [--output text|json]\n\
   rsi agent-preset show ID [--output text|json]\n\
@@ -92,6 +97,7 @@ pub(super) enum Parse {
 pub(super) struct ApplicationInvocation {
     pub(super) profile: ApplicationProfileId,
     pub(super) arguments: Vec<OsString>,
+    pub(super) reset_state: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +145,7 @@ pub(super) struct HostCommand {
     pub(super) profile: HostProfileId,
     pub(super) force: bool,
     pub(super) detached_child: bool,
+    pub(super) reset_state: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -566,6 +573,7 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     let mut profile_set = false;
     let mut force = false;
     let mut detached_child = false;
+    let mut reset_state = false;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -583,18 +591,9 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
                 )
                 .map_err(|error| host_usage(error.to_string()))?;
             }
-            "--force" => {
-                if force {
-                    return Err(host_usage("duplicate --force"));
-                }
-                force = true;
-            }
-            "--detached-child" => {
-                if detached_child {
-                    return Err(host_usage("duplicate --detached-child"));
-                }
-                detached_child = true;
-            }
+            "--force" => set_host_flag(&mut force, "--force")?,
+            "--reset-state" => set_host_flag(&mut reset_state, "--reset-state")?,
+            "--detached-child" => set_host_flag(&mut detached_child, "--detached-child")?,
             option => return Err(host_usage(format!("unknown Host option `{option}`"))),
         }
         index += 1;
@@ -610,6 +609,16 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     if force && !matches!(operation, HostOperation::Stop | HostOperation::Restart) {
         return Err(host_usage("--force is valid only for stop or restart"));
     }
+    if reset_state
+        && !matches!(
+            operation,
+            HostOperation::Start | HostOperation::Serve | HostOperation::Restart
+        )
+    {
+        return Err(host_usage(
+            "--reset-state is valid only for start, serve or restart",
+        ));
+    }
     if detached_child && operation != HostOperation::Serve {
         return Err(host_usage(
             "--detached-child is valid only for the internal serve child",
@@ -622,13 +631,21 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
             profile,
             force,
             detached_child,
+            reset_state,
         }))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (operation, profile, force, detached_child);
+        let _ = (operation, profile, force, detached_child, reset_state);
         Ok(Parse::HostUnsupported)
     }
+}
+
+fn set_host_flag(flag: &mut bool, name: &str) -> rsi::Result<()> {
+    if std::mem::replace(flag, true) {
+        return Err(host_usage(format!("duplicate {name}")));
+    }
+    Ok(())
 }
 
 pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
@@ -644,10 +661,10 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
         return Ok(Parse::Version);
     }
     if first == "tui" {
-        return Ok(Parse::Application(ApplicationInvocation {
-            profile: ApplicationProfileId::new("tui").expect("builtin profile"),
-            arguments: arguments.collect(),
-        }));
+        return parse_application(
+            ApplicationProfileId::new("tui").expect("builtin profile"),
+            arguments,
+        );
     }
     if first == "--profile" {
         let profile = arguments
@@ -655,10 +672,7 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
             .ok_or_else(|| usage("--profile requires an Application Profile name"))?;
         let profile =
             ApplicationProfileId::new(utf8(profile)?).map_err(|error| usage(error.to_string()))?;
-        return Ok(Parse::Application(ApplicationInvocation {
-            profile,
-            arguments: arguments.collect(),
-        }));
+        return parse_application(profile, arguments);
     }
     if first == "addon" {
         #[cfg(unix)]
@@ -687,6 +701,31 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
     Err(usage(format!(
         "unknown command `{first}`; select an Application Profile with --profile"
     )))
+}
+
+fn parse_application(
+    profile: ApplicationProfileId,
+    arguments: impl Iterator<Item = OsString>,
+) -> rsi::Result<Parse> {
+    let mut forwarded = Vec::new();
+    let mut reset_state = false;
+    let mut options = true;
+    for argument in arguments {
+        if options && argument == "--reset-state" {
+            if reset_state {
+                return Err(usage("duplicate --reset-state"));
+            }
+            reset_state = true;
+        } else {
+            options = false;
+            forwarded.push(argument);
+        }
+    }
+    Ok(Parse::Application(ApplicationInvocation {
+        profile,
+        arguments: forwarded,
+        reset_state,
+    }))
 }
 
 pub(super) fn usage(message: impl Into<String>) -> RsiError {

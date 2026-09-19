@@ -73,12 +73,46 @@ async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() 
         .until(&format!("expected {version}, actual {}", version - 1))
         .await;
     terminal.until("no automatic migration").await;
+    terminal.until("--reset-state").await;
     let output = terminal.output.lock().unwrap();
     assert!(String::from_utf8_lossy(&output.complete()).contains(root.to_str().unwrap()));
     drop(output);
     let status = terminal.child.wait().unwrap();
     assert_eq!(status.exit_code(), 2);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
+    for launcher in [&["tui"][..], &["--profile", "tui"][..]] {
+        let fixture = CliFixture::new("http://127.0.0.1:1");
+        let root = fixture.temporary.path().join("state/rsi/agent");
+        drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
+        let db = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
+        db.pragma_update(
+            None,
+            "user_version",
+            rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION - 1,
+        )
+        .unwrap();
+        drop(db);
+        let before = std::fs::read(root.join("sessions.sqlite3")).unwrap();
+        let mut terminal = TerminalClient::launch(&fixture, &["--reset-state"], launcher);
+        terminal.until("Enter send").await;
+        terminal.send(b"\x04");
+        terminal.finish().await;
+        assert!(
+            String::from_utf8_lossy(&terminal.output.lock().unwrap().complete())
+                .contains("previous state preserved at")
+        );
+        let backups = super::super::reset::backups(&fixture);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read(backups[0].join("sessions.sqlite3")).unwrap(),
+            before
+        );
+        rsi_agent_store_sqlite::SqliteStore::verify(&root).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

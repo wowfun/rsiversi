@@ -91,7 +91,6 @@ async fn create_retry_correlates_original_input_while_returning_the_current_sele
         .unwrap(),
         session_id: header().session_id().clone(),
         agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-        workspace_trust: header().workspace_trust(),
     };
     let selected = view("other", 4);
     remote.reply(&wire::Created {
@@ -121,7 +120,8 @@ async fn create_retry_correlates_original_input_while_returning_the_current_sele
         Err(SessionError::Api(ApiError::OutcomeUnknown))
     ));
     let mut wrong = request.clone();
-    wrong.workspace_trust = rsi_agent_session_protocol::WorkspaceTrust::Trusted;
+    wrong.agent_preset_id =
+        Some(rsi_agent_session_protocol::AgentPresetId::new("other-agent").unwrap());
     remote.reply(&wire::Created {
         creation: wrong,
         draft: selected,

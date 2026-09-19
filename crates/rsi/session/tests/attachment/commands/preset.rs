@@ -157,7 +157,7 @@ async fn preset_deadline_and_retirement_preserve_the_previous_draft() {
         .await
         .unwrap()
         .forget();
-    fixture.service.stop().await;
+    fixture.service.stop().await.unwrap();
     assert!(matches!(
         pending.await.unwrap(),
         Err(SessionError::ShuttingDown)

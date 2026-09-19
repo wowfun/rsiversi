@@ -44,6 +44,7 @@ pub(super) fn parse(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Pa
     let mut arguments = arguments.peekable();
     if arguments.peek().is_some_and(|value| value == "refresh") {
         return Ok(Parse::Application(super::ApplicationInvocation {
+            reset_state: false,
             profile: rsi::ApplicationProfileId::new("addons")
                 .map_err(|error| RsiError::Boot(error.to_string()))?,
             arguments: arguments.collect(),

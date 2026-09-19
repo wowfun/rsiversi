@@ -66,6 +66,20 @@ fn retention_error(error: &TurnError) -> SessionError {
     }
 }
 
+pub(super) async fn terminal_output(
+    handle: &Handle,
+    request: &rsi_session_protocol::terminal::Request,
+) -> rsi_session_protocol::Result<rsi_session_protocol::terminal::Reply> {
+    let operation = Operation::TerminalOutput;
+    let mut source = open(handle, operation, request).await?;
+    let message = source
+        .next()
+        .await
+        .ok_or_else(|| client::malformed(operation))?
+        .map_err(|error| stream_error(operation, error))?;
+    decode(handle, operation, &message)
+}
+
 pub(super) async fn goal(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
