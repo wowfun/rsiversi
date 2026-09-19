@@ -185,6 +185,7 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             effect_id: EffectId::new("tool-1").unwrap(),
             identity: tool_identity,
             result: ToolResult::new(json!({"answer": 42}), vec![], false).unwrap(),
+            conclusion: None,
         },
     ]))
     .unwrap();
@@ -280,6 +281,7 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
         SessionFactBody::TurnTerminal {
             turn_id: previous,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -373,6 +375,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
         SessionFactBody::TurnTerminal {
             turn_id: parent_turn,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     ]);
     let child_turn = TurnId::new("turn-fork-child").unwrap();
@@ -433,6 +436,7 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         SessionFactBody::TurnTerminal {
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     ]);
 
@@ -487,6 +491,7 @@ fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
         SessionFactBody::TurnTerminal {
             turn_id: old,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -524,6 +529,7 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
         SessionFactBody::TurnTerminal {
             turn_id: old,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -602,6 +608,7 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
         SessionFactBody::TurnTerminal {
             turn_id: old,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     ]))
     .unwrap();
@@ -693,6 +700,7 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
             SessionFactBody::TurnTerminal {
                 turn_id: turn,
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
         ]))
         .unwrap();
@@ -748,6 +756,7 @@ fn checkpoint_rejects_a_claim_filtered_sequence_hole() {
             SessionFactBody::TurnTerminal {
                 turn_id: turn,
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap(),
@@ -775,6 +784,7 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
         SessionFactBody::TurnTerminal {
             turn_id: first,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -799,6 +809,7 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: queued,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         ))
         .unwrap();

@@ -128,7 +128,7 @@ pub trait PostToolContributor: fmt::Debug + Send + Sync + 'static {
 /// Read-only inputs for one prepublication Tool result settlement.
 #[derive(Debug)]
 pub struct ToolSettlementContext<'a> {
-    /// Immutable Session settings and trust policy.
+    /// Immutable Session settings.
     pub header: &'a SessionHeader,
     /// Exact durable intent of the started Tool.
     pub intent: &'a SessionFact,
@@ -139,16 +139,22 @@ pub struct ToolSettlementContext<'a> {
 }
 
 /// Pure typed state proposals committed atomically with one `ToolResult`.
+#[derive(Debug, Default)]
+pub struct ToolSettlement {
+    /// Atomic typed domain replacements.
+    pub domains: Vec<ValidatedDomainProposal>,
+    /// Optional request to conclude after committing this exact result.
+    pub conclusion: Option<rsi_agent_session_protocol::ToolConclusion>,
+}
+
+/// Pure callback over one retained result and exact current domains.
 pub trait ToolSettlementContributor: fmt::Debug + Send + Sync + 'static {
     /// Has no external effects and returns only validated domain replacements.
     ///
     /// # Errors
     /// Returns an error when the matching Tool result or current domain state
     /// cannot produce a valid replacement.
-    fn settle(
-        &self,
-        context: &ToolSettlementContext<'_>,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>>;
+    fn settle(&self, context: &ToolSettlementContext<'_>) -> ContributionResult<ToolSettlement>;
 }
 
 /// Exact prepared Tool call and already-resolved constraints.

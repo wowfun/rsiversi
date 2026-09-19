@@ -25,6 +25,8 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let child_id = SessionId::new("session-delivery-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -182,6 +184,7 @@ async fn recovery_closes_an_activation_step_before_interrupting_its_turn() {
 }
 
 #[tokio::test(start_paused = true)]
+#[allow(clippy::too_many_lines)] // One settlement scenario crosses the running and idle parent states.
 async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
@@ -223,6 +226,8 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         kernel.spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -312,6 +317,8 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
     let child_id = SessionId::new("session-terminal-promotion-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -423,6 +430,8 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     let child_id = SessionId::new("session-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -604,6 +613,8 @@ async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
     let caller = control_tool_caller(&kernel, &root_claim).await;
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -664,6 +675,8 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
     let caller = control_tool_caller(&kernel, &root_claim).await;
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -725,6 +738,8 @@ async fn wait_completion_cause_uses_snapshot_without_control_replay() {
     let child_id = SessionId::new("session-long-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -890,6 +905,8 @@ async fn assert_tree_capacity(direct: bool) {
         let child_id = SessionId::new(format!("session-a-running-child-{index}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 cancellation: CancellationToken::new(),
@@ -914,6 +931,8 @@ async fn assert_tree_capacity(direct: bool) {
     }
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -1096,6 +1115,8 @@ pub(super) async fn active_parent_and_child(
         .unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -1472,6 +1493,8 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         for index in 0..2 {
             kernel
                 .spawn_agent(SpawnAgentRequest {
+                    output_contract: None,
+                    role: None,
                     model: None,
                     reasoning_effort: None,
                     cancellation: CancellationToken::new(),

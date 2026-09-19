@@ -259,6 +259,8 @@ pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
     (encoded_len, json): (i64, Option<String>),
     maximum_bytes: usize,
 ) -> Result<T> {
+    #[cfg(feature = "test-support")]
+    let _decode = super::test_support::DecodeProbe::start();
     let encoded_len = usize::try_from(encoded_len)
         .map_err(|_| StoreError::Corrupt(format!("{label} has a negative byte length")))?;
     if encoded_len > maximum_bytes {

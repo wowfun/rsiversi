@@ -1,55 +1,35 @@
 ---
-name: Durable workspace trust for instructions and skills
-comment: Prevent project-controlled context from becoming ambient authority
+name: Durable workspace observations for instructions and skills
+comment: Keep mutable filesystem observations coherent and attributable
 ---
 
 ## Problem
 
-This note owns the trust decision and user-visible workspace-context policy;
-the generic durable scheduling and Fact lifecycle remain in the
-[Agent Kernel note](2026-08-26-durable-agent-kernel.md). The current package
-contract is documented by
-[Workspace Context](../../../../crates/rsi-agent/workspace-context/README.md).
-
-Workspace instructions and skills alter model-visible context and can influence
-Tool use. Loading project files for every Session would let an arbitrary cloned
-repository inject instructions or shadow a trusted user skill. Re-evaluating
-trust from current process state on resume would also let one durable Session
-change meaning across Host generations or forks.
-
-Filesystem context is mutable after Session creation, so the Agent needs both a
-stable authority decision and durable evidence of the exact snapshots supplied
-to each Step. The Kernel must remain the sole writer of model-visible Facts
-rather than delegating durability to the filesystem adapter.
+Mutable filesystem context needs durable evidence of the exact instructions and
+skills supplied to each Step. The Kernel must remain the sole writer of
+model-visible Facts; filesystem adapters provide bounded observations.
+The selected-source policy belongs to the
+[default workspace decision](../simplification/2026-09-19-default-workspace-context.md),
+and current limits and source rules belong to the
+[Workspace Context contract](../../../../crates/rsi-agent/workspace-context/README.md).
 
 ## Decision
-
-`WorkspaceTrust` is an explicit immutable field in the durable Session Header and
-defaults to `untrusted`. A fork preserves the parent's trust decision together
-with its canonical workspace. Changing trust requires creating a new Session;
-attach, resume, executor replacement, and Host restart do not reinterpret it.
 
 `WorkspaceContext` is a process-local interface that returns one bounded
 observation for a validated Header and the current messages. Missing, malformed,
 oversized, or Session-unsafe optional sources are complete omissions. Unexpected
 filesystem I/O marks the observation incomplete, causing the Kernel to preserve
 last-good durable context instead of publishing partial replacement or tombstone
-Facts. Configured user
-instruction and skill roots are trusted and remain eligible in both modes. An
-untrusted workspace contributes no project `AGENTS.md` and no project skills. A
-trusted workspace discovers the nearest `.git` ancestor, reads instructions from
-that root down to the Session cwd, and scans only the root-level
-`.agents/skills` directory.
+Facts. Source discovery and precedence follow the selected workspace contract.
 
-User roots are evaluated before the project root, and first selection wins, so a
-project skill cannot shadow an identically named user skill. Skill metadata
+Skill metadata
 separately controls model visibility and direct-user invocation. Only a direct
 Human message may request a selected user-invocable skill body; Agent messages,
 completion messages, Tool output, and model output cannot manufacture that
 authority.
 
-The Kernel refreshes the complete snapshot before every provider request and
-writes instruction replacement, skill-catalog replacement, invocation, and
+The contributor refreshes the complete snapshot before every provider request and
+proposes instruction replacement, skill-catalog replacement, invocation, and
 tombstone Facts. Content digests suppress unchanged replacements, while an empty
 later snapshot removes an earlier nonempty view. Source counts, paths, entries,
 individual files, rendered text, and the final Fact batch are all bounded before
@@ -62,10 +42,9 @@ and each digest names the exact model-visible bounded result.
 The Store maintains an offline-verifiable digest projection from canonical
 workspace input Facts, so cold recovery restores suppression state without
 republishing an unchanged baseline.
-The trusted project root is opened once as a directory capability, and every
-project source is resolved relative to that handle. Concurrent ambient renames
-or intermediate symlink replacement therefore cannot redirect reads outside
-the selected authority. Sources are streamed only through their configured byte
+The project instruction root is opened as a directory capability. Skill roots
+instead follow directory links and pin their resolved target for one observation.
+Concurrent ambient renames cannot redirect a read away from its selected handle. Sources are streamed only through their configured byte
 limit, unsafe NUL/DEL text is omitted, and rendered limits count UTF-8 bytes
 without splitting a scalar. Skill enumeration reads only the remaining global
 allowance plus one overflow probe, sorts the retained prefix, and marks an
@@ -78,22 +57,23 @@ last-good workspace context rather than durably mislabeling the new body.
 
 ## Alternatives considered
 
-Unconditionally loading project instructions and skills was rejected because
-repository contents are not user authority. Allowing project skills to override
-user skills was rejected because a checkout could silently replace a trusted
-name. Treating system configuration as another filesystem precedence layer was
-rejected because user and project discovery should not override system or direct
-user instructions.
+The original source-authority decision rejected unconditional project discovery
+because repository contents are not user authority. It also stated: "Allowing
+project skills to override user skills was rejected because a checkout could
+silently replace a trusted name." Trust was frozen in the Header so attach and
+fork could not reinterpret that choice. Those source-selection decisions are
+superseded by the [selected workspace decision](../simplification/2026-09-19-default-workspace-context.md),
+which explicitly accepts project-name shadowing and preserves its rationale and
+risks. The durable observation and publication rules in this note remain current.
+Treating system configuration as another filesystem precedence layer remains
+rejected: filesystem context cannot override the authority of system or direct
+Human instructions.
 
-Recomputing trust on attach or inheriting the current parent's process-local
-choice at each fork was rejected because durable history would no longer have one
-stable interpretation. Allowing any message source to invoke a user-invocable
-skill was rejected because Agent-controlled text could impersonate a direct
-Human request.
-
-Persisting raw filesystem paths as the authority was rejected. Paths identify
-sources for evidence, but the immutable Header trust decision and durable
-replacement Facts determine what the model actually received.
+Publishing partial observations was rejected because a transient failure could
+silently replace or erase valid instructions. Treating any message source as a
+skill invocation was rejected because Agent-controlled text could impersonate
+a direct Human request. Persisting paths alone was rejected: durable replacement
+Facts, rather than later filesystem contents, determine what a model received.
 
 ## Consequences
 
@@ -107,11 +87,12 @@ withdrawal closes admission, requests cooperative cancellation and waits for rea
 jobs. An operating-system filesystem call already running cannot be forcibly
 cancelled, so it occupies capacity until it returns.
 
-Opening an existing Session in a newly trusted checkout does not upgrade it; a
-new Session is required. A trusted Session observes later project edits before
-the next provider request and records replacements or tombstones, so its context
-can evolve without silently rewriting prior Steps. An untrusted Session can still
-use explicitly configured user instructions and skills.
+Every selected workspace observes later project edits before the next provider
+request and records replacements or tombstones, without rewriting prior Steps.
+An incomplete observation retains the last-good baseline and invocation cursor.
+A bounded diagnostic is entered once per failure episode, including before the
+first complete observation, so project failures cannot silently suppress user
+context indefinitely. Complete recovery clears only the diagnostic latch.
 
 Malformed, oversized, unsafe, or out-of-scope filesystem entries are omitted
 from a complete bounded observation. Unexpected read failures make it

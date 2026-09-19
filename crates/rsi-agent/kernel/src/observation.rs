@@ -368,9 +368,12 @@ pub(super) fn activation_terminal_controls(
     Ok(controls)
 }
 
-pub(super) fn activation_outcome(outcome: &TurnOutcome) -> ActivationOutcome {
+pub(super) fn activation_outcome(
+    outcome: &TurnOutcome,
+    result: Option<rsi_agent_session_protocol::AgentResultRef>,
+) -> ActivationOutcome {
     match outcome {
-        TurnOutcome::Completed => ActivationOutcome::Completed,
+        TurnOutcome::Completed => ActivationOutcome::Completed { result },
         TurnOutcome::Cancelled => ActivationOutcome::Cancelled,
         TurnOutcome::Failed { code, message }
         | TurnOutcome::PartialFailed { code, message, .. } => ActivationOutcome::Failed {

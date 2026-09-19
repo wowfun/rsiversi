@@ -5,14 +5,18 @@
 
 use async_trait::async_trait;
 use rsi_agent_context::ModelContextBuilder;
-use rsi_agent_session_protocol::{AgentPresetId, SessionHeader};
+use rsi_agent_session_protocol::{AgentPresetId, DomainIdentity, SessionHeader};
 use rsi_meta_contract::LocalContract;
 use rsi_tools_protocol::ToolRuntime;
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod manifest;
+mod report;
+mod scoped_tools;
 mod seed;
+pub use manifest::{CompositionInstance, CompositionManifest, CompositionOrigin};
 pub use seed::{AgentGenerationInputs, AgentGenerationInputsContract, AgentGenerationSeed};
 mod command;
 mod contribution;
@@ -30,8 +34,8 @@ pub use contribution::{
     ContributionInput, ContributionKind, ContributionOutput, ContributionRegistrar,
     ContributionRegistrarContract, ContributionRegistration, ContributionResult, ContributionStage,
     MAXIMUM_AGENT_CONTRIBUTIONS, MAXIMUM_CONTRIBUTION_INPUT_BYTES, MAXIMUM_CONTRIBUTION_INPUTS,
-    PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest, ToolSettlementContext,
-    ToolSettlementContributor,
+    PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest, ToolSettlement,
+    ToolSettlementContext, ToolSettlementContributor,
 };
 pub use domain::{
     DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
@@ -56,6 +60,8 @@ pub struct AgentCompositionPin {
     domains: DomainCatalog,
     contributions: ContributionCatalog,
     owner: Arc<dyn AgentGenerationOwner>,
+    manifest: Option<Arc<CompositionManifest>>,
+    output_contract: Option<rsi_agent_session_protocol::OutputContract>,
 }
 
 impl AgentCompositionPin {
@@ -92,12 +98,26 @@ impl AgentCompositionPin {
             domains,
             contributions,
             owner,
+            manifest: None,
+            output_contract: None,
         })
     }
 
     /// Returns the durable logical preset identity.
     pub const fn preset_id(&self) -> &AgentPresetId {
         &self.preset_id
+    }
+
+    /// Captures the immutable redacted evidence built with this pin.
+    #[must_use]
+    pub fn with_manifest(mut self, manifest: Arc<CompositionManifest>) -> Self {
+        self.manifest = Some(manifest);
+        self
+    }
+
+    /// Returns captured evidence, absent for custom providers without manifests.
+    pub fn manifest(&self) -> Option<Arc<CompositionManifest>> {
+        self.manifest.clone()
     }
 
     /// Returns the effective source identity used to build this generation.
@@ -115,6 +135,44 @@ impl AgentCompositionPin {
     /// Returns the immutable Tool Runtime pinned by this generation.
     pub fn tools(&self) -> Arc<dyn ToolRuntime> {
         Arc::clone(&self.tools)
+    }
+
+    /// Applies a claim's immutable restriction without mutating the generation catalog.
+    #[must_use]
+    pub fn for_delegation(
+        mut self,
+        policy: Option<&rsi_agent_session_protocol::DelegationPolicy>,
+    ) -> Self {
+        if let Some(policy) = policy {
+            self.tools = Arc::new(scoped_tools::ScopedTools {
+                inner: self.tools,
+                allowed: policy.tools().clone(),
+            });
+        }
+        self
+    }
+
+    /// Adds a private reporting Tool. Retain the returned pin for this resident Turn.
+    ///
+    /// # Errors
+    /// Rejects a catalog that already uses the reserved reporting name.
+    pub fn with_output_contract(
+        mut self,
+        owner: &str,
+        contract: rsi_agent_session_protocol::OutputContract,
+    ) -> Result<Self> {
+        self.tools = Arc::new(report::ReportTools::new(
+            self.tools,
+            owner,
+            contract.clone(),
+        )?);
+        self.output_contract = Some(contract);
+        Ok(self)
+    }
+
+    /// Returns the output contract installed for this claim, absent on ordinary turns.
+    pub const fn output_contract(&self) -> Option<&rsi_agent_session_protocol::OutputContract> {
+        self.output_contract.as_ref()
     }
 
     /// Returns the unique immutable context builder from this exact generation.
@@ -458,6 +516,16 @@ impl AgentSessionDraft {
 /// Closed composition failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentCompositionError {
+    /// A saved Domain requires a codec its owner no longer accepts.
+    #[error(
+        "unsupported saved Domain codec {stored:?}; expected {expected:?}; start a new conversation using the current preset"
+    )]
+    UnsupportedSeedCodec {
+        /// Structurally validated saved identity; never includes state contents.
+        stored: DomainIdentity,
+        /// Exact codec required by the current Domain owner.
+        expected: DomainIdentity,
+    },
     /// Typed initial-state validation or binding failed.
     #[error(transparent)]
     Domain(#[from] DomainError),

@@ -121,6 +121,7 @@ impl PostToolContributor for GoalPlugin {
                 effect_id,
                 identity,
                 result,
+                ..
             } = fact.body()
                 && turn_id == &context.turn_id
                 && !result.is_error

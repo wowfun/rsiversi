@@ -302,6 +302,7 @@ async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicte
                 vec![SessionFactBody::TurnTerminal {
                     turn_id: submitted.turn_id.clone(),
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 }],
             )
             .await
@@ -494,6 +495,7 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: first.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1357,6 +1359,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
                         SessionFactBody::TurnTerminal {
                             turn_id: turn_id.clone(),
                             outcome: TurnOutcome::Completed,
+                            result: None,
                         },
                     )
                     .unwrap(),
@@ -1429,6 +1432,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
                         SessionFactBody::TurnTerminal {
                             turn_id,
                             outcome: TurnOutcome::Completed,
+                            result: None,
                         },
                     )
                     .unwrap(),
@@ -1756,7 +1760,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
     let pin = AgentCompositionPin::new(
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(SourceOnlyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -1833,7 +1837,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
     let pin = AgentCompositionPin::new(
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(SourceOnlyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -2000,6 +2004,7 @@ async fn retained_history(store: &MemoryStore, name: &str) -> usize {
         SessionFactBody::TurnTerminal {
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     ];
     let facts = bodies
@@ -2230,7 +2235,7 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
                         1,
                         AgentControlRecordBody::ActivationSettled {
                             activation_id: activation,
-                            outcome: ActivationOutcome::Completed,
+                            outcome: ActivationOutcome::Completed { result: None },
                         },
                     )
                     .unwrap(),
@@ -2343,6 +2348,7 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
         SessionFactBody::TurnTerminal {
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     )
     .unwrap();

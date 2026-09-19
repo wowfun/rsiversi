@@ -355,8 +355,8 @@ Workspace instructions and skills are ordinary Agent execution contributions ove
 [a bounded filesystem source](../workspace-context/README.md). The plugin owns
 invocation interpretation, complete digests, last-good state and Session-bound
 history cursors in its typed domain. The Kernel owns only generic role/source
-validation, budgets and atomic Fact/control submission. A Session Header freezes
-workspace trust at creation and a fork preserves it. The contributor runs before
+validation, budgets and atomic Fact/control submission. The selected canonical
+workspace supplies project sources for fresh, resumed and forked Sessions. The contributor runs before
 each new provider retry series, while provider retries reuse the already entered
 inputs. A successful Tool round therefore cannot hide workspace changes before
 the next model request; no Tool-specific filesystem-touch enumeration is needed.

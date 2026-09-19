@@ -1,5 +1,42 @@
 use super::*;
 
+#[tokio::test]
+async fn previous_session_format_is_rejected_without_rewriting_database_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "previous-format").await;
+    drop(store);
+    let path = root.path().join("sessions.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    let header: String = connection
+        .query_row(
+            "SELECT header_json FROM sessions WHERE session_id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut header: serde_json::Value = serde_json::from_str(&header).unwrap();
+    header["format_version"] = 15.into();
+    header["workspace_trust"] = "trusted".into();
+    connection
+        .execute(
+            "UPDATE sessions SET header_json=?1 WHERE session_id=?2",
+            rusqlite::params![header.to_string(), id.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(
+        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains("unsupported session format version 15"))
+    );
+    drop(store);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 #[test]
 fn integrity_check_reports_the_actual_bounded_sqlite_failure() {
     let connection = Connection::open_in_memory().unwrap();
@@ -1452,7 +1489,9 @@ async fn cold_activation_replay_reads_the_immutable_header_once() {
                     seq + 1,
                     AgentControlRecordBody::ActivationSettled {
                         activation_id,
-                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed,
+                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed {
+                            result: None,
+                        },
                     },
                 )
                 .unwrap(),
@@ -1958,4 +1997,89 @@ async fn unrelated_pin_notifications_preserve_distinct_session_waiter_order() {
     drop(first_result);
     drop(second);
     drop(leases);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "opt-in warm reader contention measurement; no timing pass threshold"]
+async fn measure_warm_fact_pages_and_small_metadata() {
+    warm_reader_case(64, 48 * 1024, 30, true).await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn warm_reader_measurements_cover_workers_without_revalidation() {
+    warm_reader_case(4, 1024, 2, false).await;
+}
+
+#[cfg(feature = "test-support")]
+async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usize, report: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "warm-mixed-reader").await;
+    let facts = (2..=u64::try_from(fact_count).unwrap() + 1)
+        .map(|seq| {
+            SessionFact::new(
+                seq,
+                seq,
+                SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                    turn_id: TurnId::new("turn-1").unwrap(),
+                    effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
+                    event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text("x".repeat(text_bytes)),
+                    },
+                },
+            )
+            .unwrap()
+            .into()
+        })
+        .collect();
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 1,
+            header: None,
+            facts,
+        })
+        .await
+        .unwrap();
+    store.prepare_session(&id).await.unwrap();
+    let warm = store.read_facts(&id, 1, fact_count).await.unwrap();
+    assert_eq!(warm.facts.len(), fact_count);
+    let page_bytes: usize = warm.facts.iter().map(SessionFact::encoded_len).sum();
+    drop(warm);
+    let before = store.validation_counts().0;
+    for mixed in [false, true] {
+        store.begin_reader_measurements();
+        for _ in 0..iterations {
+            if mixed {
+                let (page, header) =
+                    tokio::join!(store.read_facts(&id, 1, fact_count), store.header(&id));
+                assert_eq!(page.unwrap().facts.len(), fact_count);
+                header.unwrap();
+            } else {
+                store.header(&id).await.unwrap();
+            }
+        }
+        let samples = store.take_reader_measurements();
+        assert_eq!(samples.len(), iterations * if mixed { 2 } else { 1 });
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.json_decode_ns <= sample.worker_ns)
+        );
+        if report {
+            eprintln!(
+                "warm_reader {}",
+                serde_json::json!({"mixed":mixed,"fact_page_bytes":page_bytes,"samples":samples})
+            );
+        }
+    }
+    assert_eq!(
+        store.validation_counts().0,
+        before,
+        "warm measurement must never revalidate the session"
+    );
 }

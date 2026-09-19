@@ -334,6 +334,7 @@ struct ScannedTurn {
     image: Option<(ModelRef, ImageRequest)>,
     terminal: bool,
     completed_model_without_successor: bool,
+    concluded: bool,
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
     budget_exhausted: Option<(BudgetDimension, u64, u64)>,
@@ -493,6 +494,7 @@ fn scan_turn(
                 turn_id,
                 effect_id,
                 identity,
+                conclusion,
                 ..
             } if turn_id == claim.turn_id() => {
                 let Some(index) = state.effects.iter().position(
@@ -501,6 +503,7 @@ fn scan_turn(
                     return Err("Tool result lacks exact start");
                 };
                 state.effects.remove(index);
+                state.concluded |= conclusion.is_some();
             }
             SessionFactBody::TurnTerminal { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.terminal = true;

@@ -140,6 +140,8 @@ impl Sandbox for TestSandbox {
             ),
         };
         Ok(ConfinedProcess {
+            owner: None,
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
             program: request.program,
             arguments: request.arguments.into_iter().map(Into::into).collect(),
             cwd: request.cwd,
@@ -1614,3 +1616,6 @@ mod pool;
 mod tool_execution;
 #[path = "end_to_end/tool_settlement.rs"]
 mod tool_settlement;
+
+#[path = "end_to_end/structured.rs"]
+mod structured;

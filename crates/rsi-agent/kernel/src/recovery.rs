@@ -92,6 +92,7 @@ pub(super) async fn repair_unfinished_session(
             SessionFactBody::TurnTerminal {
                 turn_id: turn_id.clone(),
                 outcome,
+                result: None,
             },
         )?);
 
@@ -332,7 +333,7 @@ pub(super) async fn load_control_state(
                     .map_err(|error| KernelError::Invariant(error.to_string()))?;
                     super::execution::validate_intent_price(&header, fact.body())
                         .map_err(|error| KernelError::Invariant(error.to_string()))?;
-                    apply_recovered_fact(&mut turns, &mut order, budget, fact)?;
+                    apply_recovered_fact(&mut turns, &mut order, budget, &header, fact)?;
                     turn_cursor = fact.seq();
                 }
                 if !turn_page.has_more {

@@ -20,6 +20,7 @@ struct State {
     scanned_session: Option<SessionId>,
     scanned_turn: Option<TurnId>,
     through_fact_seq: u64,
+    incomplete_reported: bool,
 }
 
 fn validate_state(state: &State) -> Result<(), String> {
@@ -76,9 +77,28 @@ impl ContextContributor for Contributor {
             .source
             .snapshot(&context.header, &requests)
             .await
-            .map_err(contribution_error)?;
+            .map_err(workspace_error)?;
         if !snapshot.complete {
-            return Ok(ContributionOutput::default());
+            if previous.incomplete_reported {
+                return Ok(ContributionOutput::default());
+            }
+            let mut next = previous;
+            next.incomplete_reported = true;
+            let mut diagnostic = String::from(
+                "Workspace context could not be read completely. The last complete instructions and skill catalog remain in effect, if available; new instructions and requested skills have not been loaded. Check workspace and skill-directory read permissions or retry after the files stop changing.",
+            );
+            if let Some(detail) = snapshot.diagnostic {
+                diagnostic.push_str("\nSource failure: ");
+                diagnostic.push_str(&detail);
+            }
+            return Ok(ContributionOutput {
+                inputs: vec![ContributionInput::context(diagnostic)],
+                domains: vec![
+                    self.state
+                        .propose(view.revision, &next)
+                        .map_err(contribution_error)?,
+                ],
+            });
         }
         let next = State {
             instructions_sha256: Some(snapshot.instructions_sha256.clone()),
@@ -86,6 +106,7 @@ impl ContextContributor for Contributor {
             scanned_session: Some(context.header.session_id().clone()),
             scanned_turn: Some(context.turn_id.clone()),
             through_fact_seq: context.horizon.fact_seq,
+            incomplete_reported: false,
         };
         let inputs = entered_inputs(&previous, snapshot);
         let domains = if next == previous {
@@ -131,14 +152,14 @@ async fn pending_requests(
             }
             match fact.body() {
                 SessionFactBody::TurnAccepted { text, .. } => {
-                    requests.push_text(text).map_err(contribution_error)?;
+                    requests.push_text(text).map_err(workspace_error)?;
                 }
                 SessionFactBody::InputMessageEntered {
                     source: InputMessageSource::Human { .. },
                     content,
                     ..
                 } => {
-                    requests.push_content(content).map_err(contribution_error)?;
+                    requests.push_content(content).map_err(workspace_error)?;
                 }
                 _ => {}
             }
@@ -178,6 +199,14 @@ fn entered_inputs(current: &State, snapshot: WorkspaceContextSnapshot) -> Vec<Co
     inputs
 }
 
+fn workspace_error(error: WorkspaceContextError) -> ContributionError {
+    match error {
+        WorkspaceContextError::Capacity => ContributionError::Capacity,
+        WorkspaceContextError::Closed => ContributionError::Closed,
+        error => contribution_error(error),
+    }
+}
+
 fn contribution_error(error: impl fmt::Display) -> ContributionError {
     ContributionError::Invalid(error.to_string())
 }
@@ -201,7 +230,7 @@ impl PluginFactory for WorkspaceContributorFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN_ID, 1).expect("static domain"),
+            DomainIdentity::new(DOMAIN_ID, 2).expect("static domain"),
             &State::default(),
             validate_state,
         )
@@ -248,5 +277,21 @@ impl PluginFactory for WorkspaceContributorFactory {
                 })
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn workspace_boundary_preserves_capacity_and_closed() {
+        assert!(matches!(
+            workspace_error(WorkspaceContextError::Capacity),
+            ContributionError::Capacity
+        ));
+        assert!(matches!(
+            workspace_error(WorkspaceContextError::Closed),
+            ContributionError::Closed
+        ));
     }
 }

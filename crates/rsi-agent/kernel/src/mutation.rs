@@ -33,6 +33,10 @@ impl ClaimMutationGate {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    pub(super) fn is_ending(&self) -> bool {
+        self.lock().terminal_drainer
+    }
+
     pub(super) fn is_retiring(&self) -> bool {
         self.lock().retiring
     }

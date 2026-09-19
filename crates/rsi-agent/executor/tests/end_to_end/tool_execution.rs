@@ -18,6 +18,86 @@ impl ToolExecutor for AuthenticatedEcho {
     }
 }
 
+#[tokio::test]
+async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_claims() {
+    use rsi_agent_session_protocol::{DelegationPolicy, DelegationRole};
+    let stack = BaseStack::activate().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+        })
+        .unwrap();
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("test.language.roles", provider.clone())
+        .await;
+    let executor = stack.activate_executor("role-policy").await;
+    let role = DelegationRole {
+        name: "reason-only".into(),
+        persona: Some("ROLE_PERSONA_FROZEN".into()),
+        allow: Some(std::collections::BTreeSet::default()),
+        deny: std::collections::BTreeSet::default(),
+    };
+    let policy =
+        DelegationPolicy::freeze(Some(&role), ["echo".into()].into_iter().collect(), None).unwrap();
+    let restricted = header_for_session("restricted", TurnBudget::default())
+        .with_delegation_policy(Some(policy))
+        .unwrap();
+    let (submitted, outcome) = stack
+        .submit_and_wait_with_header("try echo", None, restricted)
+        .await;
+    assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. } if code == "tool.not_found"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64)
+        .await
+        .unwrap()
+        .facts;
+    assert!(!facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolStarted { .. }
+            | SessionFactBody::ToolRejected { .. }
+            | SessionFactBody::ToolResult { .. }
+    )));
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(requests[0].tools().is_empty());
+        assert!(
+            serde_json::to_string(&requests[0])
+                .unwrap()
+                .contains("ROLE_PERSONA_FROZEN")
+        );
+    }
+    // A second Session sharing the sealed generation still discovers echo.
+    assert_eq!(stack.tool_runtime().definitions().len(), 1);
+    let (_, outcome) = stack.submit_and_wait("ordinary independent task").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        provider.requests.lock().unwrap()[1].tools()[0].name(),
+        "echo"
+    );
+    drop(lease);
+    stack.dispose(language, executor).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() {
     let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;

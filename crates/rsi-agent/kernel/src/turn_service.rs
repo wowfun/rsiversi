@@ -55,6 +55,14 @@ impl TurnService for AgentKernel {
         }
     }
 
+    async fn read_agent_result(
+        &self,
+        caller: &AgentCallerAuthority,
+        locator: &rsi_agent_session_protocol::AgentResultLocator,
+    ) -> TurnResult<serde_json::Value> {
+        self.read_structured_result(caller, locator).await
+    }
+
     async fn send_agent_message(&self, request: SendAgentMessage) -> TurnResult<MessageReceipt> {
         let cancellation = request.cancellation.clone();
         tokio::select! {
@@ -1293,6 +1301,7 @@ impl AgentKernel {
                         &mut session.turns,
                         &mut session.turn_order,
                         &budget,
+                        &session.header,
                         fact,
                     )
                     .map_err(turn_kernel_error)?;
@@ -1326,6 +1335,10 @@ impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Child identity, lineage, source admission and initial message form one preparation protocol.
     async fn spawn_agent_prepared(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         self.validate_agent_caller(&request.caller)?;
+        if let Some(role) = &request.role {
+            role.validate()
+                .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        }
         let selection = spawn_selection(&request)?;
         validate_identifier("subagent task name", &request.task_name)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
@@ -1432,6 +1445,37 @@ impl AgentKernel {
             .pin(child_header.agent_preset_id(), None)
             .await
             .map_err(turn_composition_error)?;
+        let tool_names: std::collections::BTreeSet<_> = composition
+            .tools()
+            .definitions()
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        let shadows_output = tool_names
+            .iter()
+            .any(|name| name == rsi_agent_session_protocol::REPORT_RESULT_TOOL);
+        let policy = rsi_agent_session_protocol::DelegationPolicy::freeze(
+            request.role.as_ref(),
+            tool_names,
+            parent_header.delegation_policy(),
+        )
+        .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let child_header = child_header
+            .with_delegation_policy(Some(policy))
+            .and_then(|header| {
+                header.with_initial_output(request.output_contract.clone().map(|contract| {
+                    rsi_agent_session_protocol::InitialOutputContract {
+                        message_id: request.message_id.clone(),
+                        contract,
+                    }
+                }))
+            })
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        if request.output_contract.is_some() && shadows_output {
+            return Err(TurnError::Invalid(
+                "catalog shadows the reserved output Tool".into(),
+            ));
+        }
         let mut prepared =
             PreparedFreshSession::new(child_header, composition).map_err(turn_composition_error)?;
         if boundary.resolved_terminal_control_seq > 0 {
@@ -1497,6 +1541,17 @@ impl AgentKernel {
             .ok_or_else(|| {
                 TurnError::Invalid("spawn retry disagrees with existing child lineage".into())
             })?;
+        let policy = header
+            .delegation_policy()
+            .ok_or_else(|| TurnError::Invalid("spawn retry lacks delegation policy".into()))?;
+        if !policy
+            .matches_role(request.role.as_ref())
+            .map_err(|error| TurnError::Invalid(error.to_string()))?
+        {
+            return Err(TurnError::Invalid(
+                "spawn retry disagrees with frozen role".into(),
+            ));
+        }
         let parent = request.caller.header();
         let expected = parent
             .forked_child(
@@ -1505,6 +1560,15 @@ impl AgentKernel {
                 origin.clone(),
                 spawn_selection(request)?,
             )
+            .and_then(|header| header.with_delegation_policy(Some(policy.clone())))
+            .and_then(|header| {
+                header.with_initial_output(request.output_contract.clone().map(|contract| {
+                    rsi_agent_session_protocol::InitialOutputContract {
+                        message_id: request.message_id.clone(),
+                        contract,
+                    }
+                }))
+            })
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if expected != header
             || origin.parent_header_fingerprint

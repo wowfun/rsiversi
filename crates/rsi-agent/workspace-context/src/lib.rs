@@ -1,4 +1,4 @@
-//! Bounded trust-aware workspace instruction and skill snapshots.
+//! Bounded workspace instruction and skill snapshots.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -9,12 +9,11 @@ use async_trait::async_trait;
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader, WorkspaceTrust,
+    AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader,
 };
 #[cfg(unix)]
 use rsi_files_native_fs::{
-    is_link_rejection, open_absolute_directory_no_follow, open_relative_directory_no_follow,
-    open_relative_file_no_follow,
+    is_link_rejection, open_absolute_directory_no_follow, open_relative_file_no_follow,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_meta_contract::LocalContract;
@@ -29,12 +28,17 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 mod budget;
+mod observation;
+use observation::Observation;
 mod requests;
+pub mod skill_input;
 pub use requests::WorkspaceSkillRequests;
 mod contributor;
+mod skill_files;
 mod skills;
 use budget::{SnapshotBudget, SnapshotOwner};
 pub use contributor::WorkspaceContributorFactory;
+use skill_files::{SkillDiscovery, SkillSource};
 pub use skills::{SkillAudience, WorkspaceSkillToolsFactory};
 
 /// Maximum bytes read from one instruction or skill source.
@@ -64,6 +68,8 @@ pub struct WorkspaceSkillInvocation {
 pub struct WorkspaceContextSnapshot {
     /// Whether this is a complete observation safe to replace last-good state.
     pub complete: bool,
+    /// First source failure, with bounded escaped path text; absent on complete observations.
+    pub diagnostic: Option<String>,
     /// Digest of the complete rendered instruction baseline, including empty.
     pub instructions_sha256: String,
     /// Nonempty rendered baseline; `None` means no active instructions.
@@ -93,7 +99,7 @@ pub enum WorkspaceContextError {
     Failed(String),
 }
 
-/// Process-local trust-aware workspace context source.
+/// Process-local workspace context source.
 #[async_trait]
 pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     /// Reads an explicitly selected skill or its catalog under independent invocation flags.
@@ -125,9 +131,9 @@ impl LocalContract for WorkspaceContextContract {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceContextConfig {
-    /// Optional trusted user instruction file.
+    /// Optional configured user instruction file.
     pub user_instruction_file: Option<PathBuf>,
-    /// Ordered trusted user skill roots, strongest first.
+    /// Ordered configured user skill roots, strongest first.
     #[serde(default)]
     pub user_skill_roots: Vec<PathBuf>,
 }
@@ -179,20 +185,10 @@ struct SelectedSkill {
     name: String,
     description: String,
     source: String,
-    path: PathBuf,
-    project_authority: Option<Arc<ProjectAuthority>>,
+    file: SkillSource,
     model_invocable: bool,
     user_invocable: bool,
 }
-
-#[derive(Clone, Copy, Debug)]
-enum SkillEntryKind {
-    Directory,
-    File,
-    Other,
-}
-
-type SkillEntries = (Vec<(PathBuf, SkillEntryKind)>, bool);
 
 #[derive(Debug)]
 struct ProjectAuthority {
@@ -216,69 +212,41 @@ impl ProjectAuthority {
         let Ok(relative) = path.strip_prefix(&self.root) else {
             return Ok(None);
         };
-        match self.directory.symlink_metadata(relative) {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => return Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        }
-        #[cfg(unix)]
-        let file = match open_relative_file_no_follow(&self.directory, relative) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) if is_link_rejection(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        #[cfg(not(unix))]
-        let file = match self.directory.open(relative) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        #[cfg(not(unix))]
-        let file = file.into_std();
-        Ok(file.metadata()?.is_file().then_some(file))
+        open_directory_regular_file(&self.directory, relative)
     }
+}
 
-    fn skill_entries(&self, path: &Path, maximum: usize) -> std::io::Result<Option<SkillEntries>> {
-        let Ok(relative) = path.strip_prefix(&self.root) else {
-            return Ok(None);
-        };
-        #[cfg(unix)]
-        let directory = match open_relative_directory_no_follow(&self.directory, relative) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) if is_link_rejection(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        #[cfg(not(unix))]
-        let directory = {
-            let metadata = match self.directory.symlink_metadata(relative) {
-                Ok(metadata) if metadata.is_dir() => metadata,
-                Ok(_) => return Ok(None),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
-            };
-            let _ = metadata;
-            self.directory.open_dir(relative)?
-        };
-        let mut entries = Vec::new();
-        for entry in directory.entries()?.take(maximum.saturating_add(1)) {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let kind = if file_type.is_dir() {
-                SkillEntryKind::Directory
-            } else if file_type.is_file() {
-                SkillEntryKind::File
-            } else {
-                SkillEntryKind::Other
-            };
-            entries.push((path.join(entry.file_name()), kind));
-        }
-        let overflow = entries.len() > maximum;
-        entries.truncate(maximum);
-        Ok(Some((entries, overflow)))
+fn open_directory_regular_file(directory: &Dir, relative: &Path) -> std::io::Result<Option<File>> {
+    match directory.symlink_metadata(relative) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     }
+    #[cfg(unix)]
+    let file = match open_relative_file_no_follow(directory, relative) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if is_link_rejection(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        match directory.open_with(relative, &options) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    };
+    Ok(file.metadata()?.is_file().then_some(file))
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,12 +284,13 @@ impl WorkspaceContext for LocalWorkspaceContext {
         let config = Arc::clone(&self.config);
         let cwd = PathBuf::from(header.canonical_cwd());
         let budget = SnapshotBudget::new(&config, &cwd, stop)?;
-        let trust = header.workspace_trust();
         let id = id.map(str::to_owned);
         cancellation
-            .run_until_cancelled(lease.run(move || {
-                skills::read_skills(&config, &cwd, trust, id.as_deref(), audience, budget)
-            }))
+            .run_until_cancelled(
+                lease.run(move || {
+                    skills::read_skills(&config, &cwd, id.as_deref(), audience, budget)
+                }),
+            )
             .await
             .ok_or(WorkspaceContextError::Closed)?
     }
@@ -338,10 +307,9 @@ impl WorkspaceContext for LocalWorkspaceContext {
             self.owner.cancellation.clone(),
         )?;
         let cwd = PathBuf::from(header.canonical_cwd());
-        let workspace_trust = header.workspace_trust();
         let invocations = requests.names().to_vec();
         lease
-            .run(move || snapshot_with_budget(&config, &cwd, workspace_trust, &invocations, budget))
+            .run(move || snapshot_with_budget(&config, &cwd, &invocations, budget))
             .await
     }
 }
@@ -350,61 +318,65 @@ impl WorkspaceContext for LocalWorkspaceContext {
 fn snapshot_blocking(
     config: &WorkspaceContextConfig,
     cwd: &Path,
-    workspace_trust: WorkspaceTrust,
     invoked_names: &[String],
 ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
     let budget = SnapshotBudget::new(config, cwd, CancellationToken::new())?;
-    snapshot_with_budget(config, cwd, workspace_trust, invoked_names, budget)
+    snapshot_with_budget(config, cwd, invoked_names, budget)
 }
 
 fn snapshot_with_budget(
     config: &WorkspaceContextConfig,
     cwd: &Path,
-    workspace_trust: WorkspaceTrust,
     invoked_names: &[String],
     mut budget: SnapshotBudget,
 ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-    let mut complete = true;
-    let (project_root, project_authority) =
-        skills::project_boundary(cwd, workspace_trust, &mut complete);
+    let mut observation = Observation::default();
+    let (project_root, git_root) = skills::project_boundary(cwd, &mut observation);
+    let project_authority = project_root
+        .as_deref()
+        .filter(|_| git_root)
+        .and_then(|root| {
+            ProjectAuthority::open(root).map_or_else(
+                |error| {
+                    observation.io(root, "open instruction root", &error);
+                    None
+                },
+                Some,
+            )
+        });
     let instructions = read_instructions(
         config,
         cwd,
-        project_root.as_deref(),
-        project_authority.as_deref(),
+        project_root.as_deref().filter(|_| git_root),
+        project_authority.as_ref(),
         &budget,
-        &mut complete,
+        &mut observation,
     )?;
     let selected = skills::discover_selected(
         config,
+        cwd,
         project_root.as_deref(),
-        project_authority.as_ref(),
-        &mut complete,
+        &mut observation,
         &mut budget,
     )?;
     let skill_catalog = render_skill_catalog(&selected);
     let mut invocations = Vec::new();
     for name in invoked_names {
         budget.check()?;
-        let Some(skill) = selected
-            .iter()
-            .find(|skill| skill.name == *name && skill.user_invocable)
-        else {
+        let Ok(index) = selected.binary_search_by(|skill| skill.name.cmp(name)) else {
             continue;
         };
+        let skill = &selected[index];
+        if !skill.user_invocable {
+            continue;
+        }
         let reservation = MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
             .checked_add(skill.name.len())
             .and_then(|bytes| bytes.checked_add(skill.source.len()))
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<WorkspaceSkillInvocation>()))
             .ok_or(WorkspaceContextError::Capacity)?;
         budget.reserve(reservation)?;
-        let invocation = read_bounded_utf8(
-            &skill.path,
-            skill.project_authority.as_deref(),
-            &mut complete,
-            &budget.cancellation,
-        )
-        .and_then(|raw| selected_skill_invocation(skill, &raw, &mut complete));
+        let invocation = read_skill_invocation(skill, &mut observation, &budget.cancellation);
         let retained = invocation.as_ref().map_or(0, |invocation| {
             invocation.text.capacity()
                 + invocation.name.capacity()
@@ -421,7 +393,8 @@ fn snapshot_with_budget(
     }
     budget.check()?;
     Ok(WorkspaceContextSnapshot {
-        complete,
+        complete: observation.is_complete(),
+        diagnostic: observation.diagnostic,
         instructions_sha256: digest(instructions.as_deref().unwrap_or("")),
         instructions,
         skill_catalog_sha256: digest(skill_catalog.as_deref().unwrap_or("")),
@@ -430,13 +403,13 @@ fn snapshot_with_budget(
     })
 }
 
-fn find_project_root(cwd: &Path, complete: &mut bool) -> Option<PathBuf> {
+fn find_project_root(cwd: &Path, observation: &mut Observation) -> Option<PathBuf> {
     let mut current = cwd.to_path_buf();
     loop {
         match fs::symlink_metadata(current.join(".git")) {
             Ok(_) => return Some(current),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => *complete = false,
+            Err(error) => observation.io(&current.join(".git"), "find project root", &error),
         }
         if !current.pop() {
             return None;
@@ -445,43 +418,51 @@ fn find_project_root(cwd: &Path, complete: &mut bool) -> Option<PathBuf> {
 }
 
 fn directories_between(root: &Path, cwd: &Path) -> Result<Vec<PathBuf>, WorkspaceContextError> {
-    let relative = cwd.strip_prefix(root).map_err(|_| {
+    cwd.strip_prefix(root).map_err(|_| {
         WorkspaceContextError::Invalid("project root does not contain Session cwd".into())
     })?;
-    let mut directories = vec![root.to_path_buf()];
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        directories.push(current.clone());
-    }
-    if directories.len() > MAXIMUM_WORKSPACE_INSTRUCTION_FILES {
-        directories.drain(..directories.len() - MAXIMUM_WORKSPACE_INSTRUCTION_FILES);
-    }
+    let mut directories: Vec<_> = cwd
+        .ancestors()
+        .take_while(|directory| directory.starts_with(root))
+        .take(MAXIMUM_WORKSPACE_INSTRUCTION_FILES)
+        .map(Path::to_path_buf)
+        .collect();
+    directories.reverse();
     Ok(directories)
 }
 
 fn read_bounded_utf8(
     path: &Path,
     project_authority: Option<&ProjectAuthority>,
-    complete: &mut bool,
+    observation: &mut Observation,
     cancellation: &CancellationToken,
 ) -> Option<String> {
     if cancellation.is_cancelled() {
         return None;
     }
-    let mut file = match open_contained_regular_file(path, project_authority) {
+    let file = match open_contained_regular_file(path, project_authority) {
         Ok(Some(file)) => file,
         Ok(None) => return None,
-        Err(_) => {
-            *complete = false;
+        Err(error) => {
+            observation.io(path, "open instructions", &error);
             return None;
         }
     };
+    read_opened_utf8(file, path, observation, cancellation)
+}
+
+fn read_opened_utf8(
+    mut file: File,
+    path: &Path,
+    observation: &mut Observation,
+    cancellation: &CancellationToken,
+) -> Option<String> {
     let bytes = read_source_chunks(
         &mut file,
+        path,
         MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES + 1,
         cancellation,
-        complete,
+        observation,
     )?;
     if bytes.len() > MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES {
         return None;
@@ -491,19 +472,18 @@ fn read_bounded_utf8(
 }
 
 fn read_skill_metadata_prefix(
-    path: &Path,
-    project_authority: Option<&ProjectAuthority>,
-    complete: &mut bool,
+    source: &SkillSource,
+    observation: &mut Observation,
     cancellation: &CancellationToken,
 ) -> Option<String> {
     if cancellation.is_cancelled() {
         return None;
     }
-    let mut file = match open_contained_regular_file(path, project_authority) {
+    let mut file = match source.open() {
         Ok(Some(file)) => file,
         Ok(None) => return None,
-        Err(_) => {
-            *complete = false;
+        Err(error) => {
+            observation.io(&source.logical_path, "open skill metadata", &error);
             return None;
         }
     };
@@ -512,16 +492,17 @@ fn read_skill_metadata_prefix(
             return None;
         }
         Ok(_) => {}
-        Err(_) => {
-            *complete = false;
+        Err(error) => {
+            observation.io(&source.logical_path, "stat skill metadata", &error);
             return None;
         }
     }
     let mut bytes = read_source_chunks(
         &mut file,
+        &source.logical_path,
         MAXIMUM_SKILL_METADATA_PREFIX_BYTES,
         cancellation,
-        complete,
+        observation,
     )?;
     let valid_len = match std::str::from_utf8(&bytes) {
         Ok(_) => bytes.len(),
@@ -535,9 +516,10 @@ fn read_skill_metadata_prefix(
 
 fn read_source_chunks(
     file: &mut File,
+    path: &Path,
     maximum: usize,
     cancellation: &CancellationToken,
-    complete: &mut bool,
+    observation: &mut Observation,
 ) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -549,8 +531,8 @@ fn read_source_chunks(
         match file.read(&mut chunk[..remaining]) {
             Ok(0) => break,
             Ok(count) => bytes.extend_from_slice(&chunk[..count]),
-            Err(_) => {
-                *complete = false;
+            Err(error) => {
+                observation.io(path, "read source", &error);
                 return None;
             }
         }
@@ -610,6 +592,16 @@ fn open_file_no_follow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+fn instruction_section<'a>(source: &'a str, text: &'a str) -> [&'a str; 5] {
+    ["\nInstructions from: ", source, "\n\n", text, "\n"]
+}
+
+fn instruction_section_bytes(source: &str, text: &str) -> usize {
+    instruction_section(source, text)
+        .iter()
+        .fold(0usize, |sum, part| sum.saturating_add(part.len()))
+}
+
 fn render_instructions(
     user_sections: &[(String, String)],
     project_sections: &[(String, String)],
@@ -619,161 +611,88 @@ fn render_instructions(
     }
     let mut rendered = String::from(INSTRUCTIONS_PREAMBLE);
     for (source, text) in user_sections {
-        let section = format!("\nInstructions from: {source}\n\n{text}\n");
-        if rendered.len().saturating_add(section.len()) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
+        if rendered
+            .len()
+            .saturating_add(instruction_section_bytes(source, text))
+            <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
         {
-            rendered.push_str(&section);
+            for part in instruction_section(source, text) {
+                rendered.push_str(part);
+            }
         }
     }
     let mut selected = Vec::new();
     let mut selected_bytes = rendered.len();
     for (source, text) in project_sections.iter().rev() {
-        let section = format!("\nInstructions from: {source}\n\n{text}\n");
-        if selected_bytes.saturating_add(section.len()) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
-        {
-            selected_bytes += section.len();
-            selected.push(section);
+        let bytes = instruction_section_bytes(source, text);
+        if selected_bytes.saturating_add(bytes) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES {
+            selected_bytes += bytes;
+            selected.push((source, text));
         }
     }
     selected.reverse();
-    for section in selected {
-        rendered.push_str(&section);
+    for (source, text) in selected {
+        for part in instruction_section(source, text) {
+            rendered.push_str(part);
+        }
     }
     Some(rendered)
 }
 
-fn discover_skills(
-    root: &Path,
-    project_authority: Option<&Arc<ProjectAuthority>>,
-    selected: &mut BTreeMap<String, SelectedSkill>,
-    inspected: &mut usize,
-    complete: &mut bool,
-    budget: &mut SnapshotBudget,
-) -> Result<(), WorkspaceContextError> {
-    budget.check()?;
-    let path_bytes = root
-        .as_os_str()
-        .len()
-        .checked_add(512)
-        .and_then(|bytes| bytes.checked_mul((MAXIMUM_WORKSPACE_SKILL_ENTRIES + 1) * 4))
-        .ok_or(WorkspaceContextError::Capacity)?;
-    budget.reserve(path_bytes)?;
-    let result = (|| {
-        let remaining = MAXIMUM_WORKSPACE_SKILL_ENTRIES.saturating_sub(*inspected);
-        let (mut entries, overflow) = if let Some(authority) = project_authority {
-            match authority.skill_entries(root, remaining) {
-                Ok(Some(entries)) => entries,
-                Ok(None) => return Ok(()),
-                Err(_) => {
-                    *complete = false;
-                    return Ok(());
-                }
-            }
-        } else {
-            let entries = match fs::read_dir(root) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(_) => {
-                    *complete = false;
-                    return Ok(());
-                }
-            };
-            let mut retained = Vec::new();
-            for entry in entries.take(remaining.saturating_add(1)) {
-                let Ok(entry) = entry else {
-                    *complete = false;
-                    continue;
-                };
-                let Ok(file_type) = entry.file_type() else {
-                    *complete = false;
-                    continue;
-                };
-                let kind = if file_type.is_dir() {
-                    SkillEntryKind::Directory
-                } else if file_type.is_file() {
-                    SkillEntryKind::File
-                } else {
-                    SkillEntryKind::Other
-                };
-                retained.push((entry.path(), kind));
-            }
-            let overflow = retained.len() > remaining;
-            retained.truncate(remaining);
-            (retained, overflow)
-        };
-        if overflow {
-            *complete = false;
-        }
-        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        for (path, kind) in entries {
-            budget.check()?;
-            *inspected += 1;
-            let skill_path = if matches!(kind, SkillEntryKind::Directory) {
-                path.join("SKILL.md")
-            } else if matches!(kind, SkillEntryKind::File)
-                && path.extension().is_some_and(|extension| extension == "md")
-            {
-                path
-            } else {
-                continue;
-            };
-            let Some(raw) = read_skill_metadata_prefix(
-                &skill_path,
-                project_authority.map(AsRef::as_ref),
-                complete,
-                &budget.cancellation,
-            ) else {
-                continue;
-            };
-            let Some(skill) = parse_skill(&skill_path, project_authority, &raw) else {
-                continue;
-            };
-            if !selected.contains_key(&skill.name) {
-                budget.reserve(
-                    skill.name.capacity() * 2
-                        + skill.description.capacity()
-                        + skill.source.capacity()
-                        + skill.path.capacity()
-                        + std::mem::size_of::<SelectedSkill>() * 2,
-                )?;
-                selected.insert(skill.name.clone(), skill);
-            }
-        }
-        Ok(())
-    })();
-    budget.release(path_bytes);
-    result
+fn parse_skill(file: SkillSource, project_root: Option<&Path>, raw: &str) -> Option<SelectedSkill> {
+    let frontmatter = parse_skill_metadata(raw)?;
+    let source = project_root.map_or_else(
+        || display_path(&file.logical_path),
+        |root| display_project_path(root, &file.logical_path),
+    );
+    Some(SelectedSkill {
+        name: frontmatter.name,
+        description: frontmatter.description,
+        source,
+        file,
+        model_invocable: !frontmatter.disable_model_invocation,
+        user_invocable: frontmatter.user_invocable,
+    })
 }
 
-fn parse_skill(
-    path: &Path,
-    project_authority: Option<&Arc<ProjectAuthority>>,
-    raw: &str,
-) -> Option<SelectedSkill> {
+fn parse_skill_metadata(raw: &str) -> Option<SkillFrontmatter> {
     let (yaml, body) = split_skill(raw)?;
-    let frontmatter: SkillFrontmatter = yaml_serde::from_str(yaml).ok()?;
+    let mut frontmatter: SkillFrontmatter = yaml_serde::from_str(yaml).ok()?;
     if !valid_skill_name(&frontmatter.name)
         || frontmatter.description.trim().is_empty()
         || body.trim().is_empty()
     {
         return None;
     }
-    Some(SelectedSkill {
-        name: frontmatter.name,
-        description: frontmatter
-            .description
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-        source: project_authority.map_or_else(
-            || display_path(path),
-            |authority| display_project_path(&authority.root, path),
-        ),
-        path: path.to_owned(),
-        project_authority: project_authority.cloned(),
-        model_invocable: !frontmatter.disable_model_invocation,
-        user_invocable: frontmatter.user_invocable,
-    })
+    frontmatter.description = frontmatter
+        .description
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(frontmatter)
+}
+
+fn read_skill_invocation(
+    skill: &SelectedSkill,
+    observation: &mut Observation,
+    cancellation: &CancellationToken,
+) -> Option<WorkspaceSkillInvocation> {
+    let path = &skill.file.logical_path;
+    let file = match skill.file.open() {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            observation.fail(path, "selected skill is no longer a regular file");
+            return None;
+        }
+        Err(error) => {
+            observation.io(path, "open selected skill", &error);
+            return None;
+        }
+    };
+    // Invalid optional content is omitted; I/O and identity changes mark the
+    // observation incomplete in their owning readers.
+    let raw = read_opened_utf8(file, path, observation, cancellation)?;
+    selected_skill_invocation(skill, &raw, observation)
 }
 
 fn split_skill(raw: &str) -> Option<(&str, &str)> {
@@ -785,22 +704,22 @@ fn split_skill(raw: &str) -> Option<(&str, &str)> {
 fn selected_skill_invocation(
     skill: &SelectedSkill,
     raw: &str,
-    complete: &mut bool,
+    observation: &mut Observation,
 ) -> Option<WorkspaceSkillInvocation> {
     let Some((_, body)) = split_skill(raw) else {
-        *complete = false;
+        observation.fail(&skill.file.logical_path, "selected skill metadata changed");
         return None;
     };
-    let Some(current) = parse_skill(&skill.path, skill.project_authority.as_ref(), raw) else {
-        *complete = false;
+    let Some(current) = parse_skill_metadata(raw) else {
+        observation.fail(&skill.file.logical_path, "selected skill metadata changed");
         return None;
     };
     if current.name != skill.name
         || current.description != skill.description
-        || current.model_invocable != skill.model_invocable
+        || current.disable_model_invocation == skill.model_invocable
         || current.user_invocable != skill.user_invocable
     {
-        *complete = false;
+        observation.fail(&skill.file.logical_path, "selected skill metadata changed");
         return None;
     }
     Some(WorkspaceSkillInvocation {
@@ -938,14 +857,14 @@ mod tests {
     fn retained_tiny_instruction_buffers_fit_the_snapshot_scratch_budget() {
         let directory = tempfile::tempdir().unwrap();
         let cancellation = CancellationToken::new();
-        let mut complete = true;
+        let mut observation = Observation::default();
         let mut texts = Vec::new();
         for index in 0..MAXIMUM_WORKSPACE_INSTRUCTION_FILES {
             let path = directory.path().join(format!("AGENTS-{index}.md"));
             fs::write(&path, "tiny instruction\n").unwrap();
-            texts.push(read_bounded_utf8(&path, None, &mut complete, &cancellation).unwrap());
+            texts.push(read_bounded_utf8(&path, None, &mut observation, &cancellation).unwrap());
         }
-        assert!(complete);
+        assert!(observation.is_complete());
         assert!(texts.iter().all(|text| text == "tiny instruction\n"));
         let retained: usize = texts.iter().map(String::capacity).sum();
         assert!(
@@ -973,18 +892,18 @@ mod tests {
         fs::rename(&project, &held_project).unwrap();
         symlink(&outside, &project).unwrap();
 
-        let mut complete = true;
+        let mut observation = Observation::default();
         assert_eq!(
             read_bounded_utf8(
                 &project.join("AGENTS.md"),
                 Some(&authority),
-                &mut complete,
+                &mut observation,
                 &CancellationToken::new()
             )
             .as_deref(),
             Some("PINNED INSTRUCTION")
         );
-        assert!(complete);
+        assert!(observation.is_complete());
     }
 
     #[cfg(unix)]
@@ -1012,7 +931,6 @@ mod tests {
                 user_skill_roots: Vec::new(),
             },
             temporary.path(),
-            WorkspaceTrust::Untrusted,
             &[],
         )
         .unwrap();
@@ -1027,8 +945,7 @@ mod tests {
             name: "multibyte".into(),
             description: "bounded body".into(),
             source: "SKILL.md".into(),
-            path: PathBuf::from("SKILL.md"),
-            project_authority: None,
+            file: skill_files::test_source(),
             model_invocable: true,
             user_invocable: true,
         };
@@ -1049,17 +966,16 @@ mod tests {
             name: "selected".into(),
             description: "selected description".into(),
             source: "SKILL.md".into(),
-            path: PathBuf::from("SKILL.md"),
-            project_authority: None,
+            file: skill_files::test_source(),
             model_invocable: true,
             user_invocable: true,
         };
         let replacement =
             "---\nname: replacement\ndescription: replacement description\n---\nREPLACEMENT BODY";
-        let mut complete = true;
+        let mut observation = Observation::default();
 
-        assert!(selected_skill_invocation(&selected, replacement, &mut complete).is_none());
-        assert!(!complete);
+        assert!(selected_skill_invocation(&selected, replacement, &mut observation).is_none());
+        assert!(!observation.is_complete());
     }
 
     #[test]
@@ -1068,16 +984,15 @@ mod tests {
             name: "selected".into(),
             description: "selected description".into(),
             source: "SKILL.md".into(),
-            path: PathBuf::from("SKILL.md"),
-            project_authority: None,
+            file: skill_files::test_source(),
             model_invocable: true,
             user_invocable: true,
         };
         let current = "---\nname: selected\ndescription: selected   description\n---\nCURRENT BODY";
-        let mut complete = true;
+        let mut observation = Observation::default();
 
-        let invocation = selected_skill_invocation(&selected, current, &mut complete).unwrap();
-        assert!(complete);
+        let invocation = selected_skill_invocation(&selected, current, &mut observation).unwrap();
+        assert!(observation.is_complete());
         assert!(invocation.text.contains("CURRENT BODY"));
     }
 
@@ -1141,7 +1056,6 @@ mod capacity_tests {
                 user_skill_roots: vec![root.path().to_owned()],
             },
             root.path(),
-            WorkspaceTrust::Untrusted,
             names,
         )
         .unwrap();
@@ -1168,11 +1082,11 @@ mod capacity_tests {
             user_skill_roots: vec![root.path().to_owned()],
         };
         assert_eq!(
-            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names),
+            snapshot_blocking(&config, root.path(), &names),
             Err(WorkspaceContextError::Capacity)
         );
         assert_eq!(
-            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names[..1])
+            snapshot_blocking(&config, root.path(), &names[..1])
                 .unwrap()
                 .invocations
                 .len(),
@@ -1185,8 +1099,7 @@ mod capacity_tests {
             )
             .unwrap();
         }
-        let snapshot =
-            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names).unwrap();
+        let snapshot = snapshot_blocking(&config, root.path(), &names).unwrap();
         assert!(snapshot.complete);
         assert_eq!(snapshot.invocations.len(), names.len());
         assert!(
@@ -1204,30 +1117,36 @@ fn read_instructions(
     project_root: Option<&Path>,
     project_authority: Option<&ProjectAuthority>,
     budget: &SnapshotBudget,
-    complete: &mut bool,
+    observation: &mut Observation,
 ) -> Result<Option<String>, WorkspaceContextError> {
     let mut user_instruction_sections = Vec::new();
     if let Some(path) = &config.user_instruction_file {
         budget.check()?;
-        if let Some(text) = read_bounded_utf8(path, None, complete, &budget.cancellation) {
+        if let Some(text) = read_bounded_utf8(path, None, observation, &budget.cancellation) {
             user_instruction_sections.push((display_path(path), text));
         }
     }
     let mut project_instruction_sections = Vec::new();
-    let mut retained = render_instructions(&user_instruction_sections, &[])
-        .map_or(INSTRUCTIONS_PREAMBLE.len(), |text| text.len());
+    let mut retained = user_instruction_sections.iter().fold(
+        INSTRUCTIONS_PREAMBLE.len(),
+        |retained, (source, text)| {
+            let bytes = instruction_section_bytes(source, text);
+            if retained.saturating_add(bytes) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES {
+                retained + bytes
+            } else {
+                retained
+            }
+        },
+    );
     if let (Some(root), Some(authority)) = (project_root, project_authority) {
         for directory in directories_between(root, cwd)?.into_iter().rev() {
             budget.check()?;
             let path = directory.join("AGENTS.md");
             if let Some(text) =
-                read_bounded_utf8(&path, Some(authority), complete, &budget.cancellation)
+                read_bounded_utf8(&path, Some(authority), observation, &budget.cancellation)
             {
                 let source = display_project_path(root, &path);
-                let bytes = source
-                    .len()
-                    .saturating_add(text.len())
-                    .saturating_add("\nInstructions from: \n\n\n".len());
+                let bytes = instruction_section_bytes(&source, &text);
                 if retained.saturating_add(bytes) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES {
                     retained += bytes;
                     project_instruction_sections.push((source, text));

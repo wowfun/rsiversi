@@ -934,6 +934,29 @@ impl SessionStore for MemoryStore {
         Ok(inspection)
     }
 
+    async fn read_agent_message(
+        &self,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let entry = state
+            .agent_messages
+            .get(&(session_id.clone(), message_id.clone()))
+            .cloned();
+        if let Some(entry) = &entry {
+            entry.validate(session.controls.last().map_or(0, AgentControlRecord::seq))?;
+        }
+        Ok(entry)
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,

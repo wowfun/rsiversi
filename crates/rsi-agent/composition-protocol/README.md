@@ -1,5 +1,15 @@
 # rsi-agent-composition-protocol
 
+An optional immutable `CompositionManifest` describes the flat, redacted plugin
+instances captured when a generation is built. It contains identities, effective
+enablement and implementation origin, without configuration or filesystem paths.
+The manifest is process-local and retained with the pin; it is never a durable
+Session artifact or a promise that a cold resume uses the same executable bytes.
+
+A claim-scoped Tool view filters both definitions and preparation against frozen
+delegation names. Query, wait and retirement retain exact invocation identities.
+The base generation and other claims' catalogs remain immutable and independent.
+
 Finite resource requests enter the generation driver as validated opaque values.
 The driver validates contribution output and measures its complete response once,
 returning an immutable proof with its encoded size. Local retention transfers
@@ -183,3 +193,26 @@ Clones and equality reuse that immutable identity without serializing payloads. 
 is isolated within the hidden generation. Each consuming plugin decodes its own
 state using its Domain codec before declaring Tools or callbacks. The Kernel
 neither interprets provider payloads nor mutates an already sealed catalog.
+
+Plugins select saved states through `AgentGenerationInputs::seed_state` when
+they require one exact codec. A mismatch records only the actual and expected
+typed Domain identities in that private build. Composition reports this closed
+diagnostic after rollback, including the action to start a new conversation;
+it never exposes arbitrary plugin activation messages or saved state contents.
+
+Tool settlement callbacks return validated domain proposals and at most one typed
+conclusion. The Kernel validates and atomically publishes conclusion metadata
+with the exact ToolResult. Conclusions forbid further business Facts in that
+Turn; the Executor stops before any later unstarted Tool or model request.
+Claim-scoped `report_result` is an exclusive, retained pure Tool whose real input
+schema is the frozen initial output contract. Invalid values return an ordinary
+error ToolResult and consume the existing Turn budget. Retention belongs to the
+resident Turn and survives executor replacement; it is not a shared catalog edit.
+
+A claim pin exposes `output_contract()` only when its private reporting Tool was
+installed for that Turn. The Kernel selects this from the initial message binding;
+Executor settlement uses the selected pin rather than a Session-wide Header hint.
+Delegation restricts Tool discovery and preparation. Retained result query, wait
+and commit still use the provider's exact identity protocol for recovery of already
+admitted effects; this wrapper is not an isolation boundary between trusted Rust
+holders. Models cannot call those operations or supply retained-result identities.

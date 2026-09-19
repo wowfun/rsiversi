@@ -1,6 +1,6 @@
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, FrozenAgentSettings,
-    MessageId, MessageOptions, SessionHeader, SessionId, WorkspaceTrust,
+    MessageId, MessageOptions, SessionHeader, SessionId,
 };
 use rsi_agent_workspace_context::WorkspaceSkillRequests;
 use rsi_agent_workspace_context::{
@@ -13,7 +13,7 @@ use rsi_sandbox::SandboxMode;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn header(cwd: &Path, trust: WorkspaceTrust) -> SessionHeader {
+fn header(cwd: &Path) -> SessionHeader {
     let cwd = fs::canonicalize(cwd).unwrap();
     SessionHeader::new(
         SessionId::new("workspace-context-session").unwrap(),
@@ -29,8 +29,6 @@ fn header(cwd: &Path, trust: WorkspaceTrust) -> SessionHeader {
         )
         .unwrap(),
     )
-    .unwrap()
-    .with_workspace_trust(trust)
     .unwrap()
 }
 
@@ -68,12 +66,60 @@ fn context(
     .unwrap()
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn skill_discovery_failure_identifies_the_logical_source() {
+    use rsi_agent_workspace_context::SkillAudience;
+    use tokio_util::sync::CancellationToken;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("skills");
+    fs::create_dir(&root).unwrap();
+    let denied = root.join("broken\nentry");
+    // An overlong target is an unexpected I/O failure, not an optional missing link.
+    std::os::unix::fs::symlink("x".repeat(300), &denied).unwrap();
+    let source = context(None, vec![root]);
+    let error = source
+        .skills(
+            &header(temp.path()),
+            None,
+            SkillAudience::Human,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("broken\\nentry"), "{error}");
+    assert!(
+        !error.contains('\n'),
+        "path control characters must be escaped"
+    );
+    let snapshot = source
+        .snapshot(&header(temp.path()), &WorkspaceSkillRequests::default())
+        .await
+        .unwrap();
+    assert!(!snapshot.complete);
+    let diagnostic = snapshot.diagnostic.unwrap();
+    assert!(diagnostic.contains("broken\\nentry"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("resolve skill directory"),
+        "{diagnostic}"
+    );
+    fs::remove_file(denied).unwrap();
+    let recovered = source
+        .snapshot(&header(temp.path()), &WorkspaceSkillRequests::default())
+        .await
+        .unwrap();
+    assert!(recovered.complete);
+    assert!(recovered.diagnostic.is_none());
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "One catalog exercises flags, trust and changing source bytes together"
+    reason = "One catalog exercises flags, precedence and changing source bytes together"
 )]
-async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
+async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes() {
     use rsi_agent_session_protocol::SessionResourceValue;
     use rsi_agent_workspace_context::SkillAudience;
     use tokio_util::sync::CancellationToken;
@@ -106,15 +152,14 @@ async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
         &project.join(".agents/skills"),
         "manual",
         "manual",
-        "shadow",
+        "shadow\ndisable-model-invocation: true",
         "SHADOW",
     );
     let source = context(None, vec![user.clone()]);
-    let untrusted = header(&project, WorkspaceTrust::Untrusted);
-    let trusted = header(&project, WorkspaceTrust::Trusted);
+    let session = header(&project);
     let human = source
         .skills(
-            &trusted,
+            &session,
             None,
             SkillAudience::Human,
             CancellationToken::new(),
@@ -133,10 +178,9 @@ async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
     );
     assert!(!entries[0].model_readable);
     for (name, audience, header) in [
-        ("manual", SkillAudience::Model, &trusted),
-        ("automatic", SkillAudience::Human, &trusted),
-        ("project", SkillAudience::Model, &untrusted),
-        ("../manual", SkillAudience::Human, &trusted),
+        ("manual", SkillAudience::Model, &session),
+        ("automatic", SkillAudience::Human, &session),
+        ("../manual", SkillAudience::Human, &session),
     ] {
         assert!(
             source
@@ -147,7 +191,7 @@ async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
     }
     let before = source
         .skills(
-            &untrusted,
+            &session,
             Some("automatic"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -167,7 +211,7 @@ async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
     );
     let after = source
         .skills(
-            &untrusted,
+            &session,
             Some("automatic"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -183,7 +227,7 @@ async fn explicit_reads_preserve_independent_flags_trust_and_current_bytes() {
     cancelled.cancel();
     assert!(
         source
-            .skills(&trusted, None, SkillAudience::Human, cancelled)
+            .skills(&session, None, SkillAudience::Human, cancelled)
             .await
             .is_err()
     );
@@ -196,7 +240,10 @@ fn human_message_for_alias() -> AgentMessage {
 }
 
 #[tokio::test]
-async fn untrusted_workspace_omits_every_project_controlled_source() {
+async fn selected_workspace_loads_project_and_user_sources_by_default() {
+    use rsi_agent_session_protocol::{
+        AgentPath, ForkOrigin, ForkTurnSelection, ModelSelection, TurnId,
+    };
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let cwd = project.join("nested");
@@ -222,25 +269,53 @@ async fn untrusted_workspace_omits_every_project_controlled_source() {
     );
     let source = context(Some(user.join("AGENTS.md")), vec![user.join("skills")]);
 
-    let snapshot = source
-        .snapshot(
-            &header(&cwd, WorkspaceTrust::Untrusted),
-            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+    let created = header(&cwd);
+    let restored: SessionHeader =
+        serde_json::from_slice(&serde_json::to_vec(&created).unwrap()).unwrap();
+    let child = created
+        .forked_child(
+            SessionId::new("workspace-child").unwrap(),
+            2,
+            ForkOrigin {
+                parent_session_id: created.session_id().clone(),
+                root_session_id: created.session_id().clone(),
+                path: AgentPath::new(vec![1]).unwrap(),
+                task_name: "child".into(),
+                parent_header_fingerprint: created.fingerprint().unwrap(),
+                invoking_turn_id: TurnId::new("spawn").unwrap(),
+                resolved_after_seq: 0,
+                resolved_terminal_seq: 0,
+                terminal_prefix_sha256: "0".repeat(64),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
+                requested_turns: ForkTurnSelection::None,
+                effective_turns: 0,
+            },
+            ModelSelection::baseline(created.settings()),
         )
-        .await
         .unwrap();
-
-    assert!(snapshot.complete);
-    let instructions = snapshot.instructions.unwrap();
-    assert!(instructions.contains("USER INSTRUCTION"));
-    assert!(!instructions.contains("PROJECT INSTRUCTION"));
-    let catalog = snapshot.skill_catalog.unwrap();
-    assert!(catalog.contains("user-only"));
-    assert!(!catalog.contains("project-only"));
+    for session in [created, restored, child] {
+        let snapshot = source
+            .snapshot(
+                &session,
+                &WorkspaceSkillRequests::from_messages(&[&human("$project-only")]).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(snapshot.complete);
+        let instructions = snapshot.instructions.unwrap();
+        assert!(instructions.contains("USER INSTRUCTION"));
+        assert!(instructions.contains("PROJECT INSTRUCTION"));
+        let catalog = snapshot.skill_catalog.unwrap();
+        assert!(catalog.contains("user-only"));
+        assert!(catalog.contains("project-only"));
+        assert_eq!(snapshot.invocations.len(), 1);
+        assert!(snapshot.invocations[0].text.contains("PROJECT SKILL BODY"));
+    }
 }
 
 #[tokio::test]
-async fn trusted_project_instructions_are_root_to_cwd_and_user_skill_wins_name_collision() {
+async fn project_instructions_are_root_to_cwd_and_project_skill_wins_name_collision() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let cwd = project.join("a/b");
@@ -268,7 +343,7 @@ async fn trusted_project_instructions_are_root_to_cwd_and_user_skill_wins_name_c
 
     let snapshot = source
         .snapshot(
-            &header(&cwd, WorkspaceTrust::Trusted),
+            &header(&cwd),
             &WorkspaceSkillRequests::from_messages(&[&human("/shared")]).unwrap(),
         )
         .await
@@ -280,11 +355,11 @@ async fn trusted_project_instructions_are_root_to_cwd_and_user_skill_wins_name_c
     let cwd = instructions.find("CWD INSTRUCTION").unwrap();
     assert!(root < parent && parent < cwd);
     let catalog = snapshot.skill_catalog.unwrap();
-    assert!(catalog.contains("user description"));
-    assert!(!catalog.contains("project description"));
+    assert!(!catalog.contains("user description"));
+    assert!(catalog.contains("project description"));
     assert_eq!(snapshot.invocations.len(), 1);
-    assert!(snapshot.invocations[0].text.contains("USER SELECTED BODY"));
-    assert!(!snapshot.invocations[0].text.contains("PROJECT SHADOW BODY"));
+    assert!(!snapshot.invocations[0].text.contains("USER SELECTED BODY"));
+    assert!(snapshot.invocations[0].text.contains("PROJECT SHADOW BODY"));
 }
 
 #[tokio::test]
@@ -303,7 +378,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
 
     let agent_snapshot = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[&message(
                 AgentMessageSource::Agent {
                     source_session_id: session,
@@ -319,7 +394,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
 
     let human_snapshot = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[&human("\n /manual argument")]).unwrap(),
         )
         .await
@@ -336,7 +411,7 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
     let body = format!("{}TAIL AFTER METADATA PREFIX", "x".repeat(32 * 1024));
     write_skill(&skills, "large", "large", "large body skill", &body);
     let source = context(None, vec![skills]);
-    let session = header(temporary.path(), WorkspaceTrust::Untrusted);
+    let session = header(temporary.path());
 
     let catalog = source
         .snapshot(
@@ -378,7 +453,7 @@ async fn crlf_skill_frontmatter_is_discovered_and_invoked() {
 
     let snapshot = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[&human("/crlf")]).unwrap(),
         )
         .await
@@ -405,14 +480,14 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
 
     let first = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
         .unwrap();
     let second = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -442,7 +517,7 @@ async fn session_unsafe_instruction_and_skill_sources_are_omitted() {
 
     let snapshot = source
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[&human("/unsafe")]).unwrap(),
         )
         .await
@@ -456,7 +531,7 @@ async fn session_unsafe_instruction_and_skill_sources_are_omitted() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn trusted_project_sources_never_follow_links_outside_the_project() {
+async fn project_skill_links_follow_targets_while_instructions_stay_contained() {
     use std::os::unix::fs::symlink;
 
     let temporary = tempfile::tempdir().unwrap();
@@ -482,7 +557,7 @@ async fn trusted_project_sources_never_follow_links_outside_the_project() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project, WorkspaceTrust::Trusted),
+            &header(&project),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -490,12 +565,12 @@ async fn trusted_project_sources_never_follow_links_outside_the_project() {
 
     assert!(snapshot.complete);
     assert!(snapshot.instructions.is_none());
-    assert!(snapshot.skill_catalog.is_none());
+    assert!(snapshot.skill_catalog.unwrap().contains("outside"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn symlinked_project_skill_root_is_a_complete_omission() {
+async fn symlinked_project_skill_root_loads_external_skills() {
     use std::os::unix::fs::symlink;
 
     let temporary = tempfile::tempdir().unwrap();
@@ -508,14 +583,14 @@ async fn symlinked_project_skill_root_is_a_complete_omission() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project, WorkspaceTrust::Trusted),
+            &header(&project),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
         .unwrap();
 
     assert!(snapshot.complete);
-    assert!(snapshot.skill_catalog.is_none());
+    assert!(snapshot.skill_catalog.unwrap().contains("outside"));
 }
 
 #[tokio::test]
@@ -534,7 +609,7 @@ async fn skill_entry_scan_stops_at_the_declared_bound() {
 
     let snapshot = context(None, vec![skills])
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -561,7 +636,7 @@ async fn later_skill_root_overflow_is_not_mistaken_for_a_complete_catalog() {
 
     let snapshot = context(None, vec![first, second])
         .snapshot(
-            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &header(temporary.path()),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -585,7 +660,7 @@ async fn project_skill_invocation_exposes_only_a_project_relative_source() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project, WorkspaceTrust::Trusted),
+            &header(&project),
             &WorkspaceSkillRequests::from_messages(&[&human("/relative")]).unwrap(),
         )
         .await
@@ -621,7 +696,7 @@ async fn instruction_bounds_retain_the_most_specific_project_policy() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&cwd, WorkspaceTrust::Trusted),
+            &header(&cwd),
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -647,7 +722,7 @@ async fn skills_above_the_source_limit_are_omitted_from_the_catalog() {
         &"x".repeat(rsi_agent_workspace_context::MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES),
     );
     let source = context(None, vec![skills]);
-    let session = header(temporary.path(), WorkspaceTrust::Untrusted);
+    let session = header(temporary.path());
     let snapshot = source
         .snapshot(
             &session,
@@ -658,4 +733,195 @@ async fn skills_above_the_source_limit_are_omitted_from_the_catalog() {
     assert!(snapshot.complete);
     assert!(snapshot.skill_catalog.is_none());
     assert!(snapshot.invocations.is_empty());
+}
+
+#[tokio::test]
+async fn nested_roots_precede_rsi_and_personal_roots_and_stop_at_git() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("repo");
+    let cwd = project.join("nested");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    let rsi = temp.path().join("config/skills");
+    let personal = temp.path().join("home/.agents/skills");
+    for (root, body) in [
+        (&personal, "PERSONAL"),
+        (&rsi, "RSI"),
+        (&project.join(".agents/skills"), "ROOT"),
+        (&cwd.join(".agents/skills"), "NEAREST"),
+    ] {
+        write_skill(root, "review", "review", body, body);
+    }
+    write_skill(
+        &temp.path().join(".agents/skills"),
+        "outside",
+        "outside",
+        "outside",
+        "OUTSIDE",
+    );
+    let source = context(None, vec![rsi.clone(), personal]);
+    let requests =
+        WorkspaceSkillRequests::from_messages(&[&human("请用 $review $review")]).unwrap();
+    for (remove, expected) in [
+        (None, "NEAREST"),
+        (Some(cwd.join(".agents/skills")), "ROOT"),
+        (Some(project.join(".agents/skills")), "RSI"),
+        (Some(rsi), "PERSONAL"),
+    ] {
+        if let Some(path) = remove {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let snapshot = source.snapshot(&header(&cwd), &requests).await.unwrap();
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.invocations.len(), 1);
+        assert!(snapshot.invocations[0].text.contains(expected));
+        assert!(!snapshot.skill_catalog.unwrap().contains("outside"));
+    }
+    write_skill(
+        &cwd.join(".agents/skills"),
+        "review",
+        "review",
+        "nearest",
+        "NEAREST",
+    );
+    fs::remove_dir_all(project.join(".git")).unwrap();
+    let snapshot = source.snapshot(&header(&cwd), &requests).await.unwrap();
+    assert!(snapshot.invocations[0].text.contains("NEAREST"));
+    assert!(!snapshot.skill_catalog.unwrap().contains("outside"));
+}
+
+#[test]
+fn dollar_requests_are_ordered_bounded_and_human_only() {
+    let human = human("/first then $second $first `$code` \\$escaped\n$third");
+    let agent = message(
+        AgentMessageSource::Agent {
+            source_session_id: SessionId::new("agent").unwrap(),
+        },
+        "$agent",
+    );
+    let requests = WorkspaceSkillRequests::from_messages(&[&human, &agent]).unwrap();
+    assert_eq!(requests.names(), ["first", "second", "third"]);
+    assert!(
+        WorkspaceSkillRequests::default()
+            .push_text(&(0..4097).fold(String::new(), |mut text, index| {
+                use std::fmt::Write as _;
+                write!(text, "$name-{index} ").unwrap();
+                text
+            }))
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[path = "context/skill_links.rs"]
+mod skill_links;
+
+#[test]
+fn repeated_dollar_prose_only_counts_distinct_candidates() {
+    let mut requests = WorkspaceSkillRequests::default();
+    requests
+        .push_text(&"$100 $200 $guide ".repeat(4096))
+        .unwrap();
+    assert_eq!(requests.names(), ["100", "200", "guide"]);
+    let mut requests = WorkspaceSkillRequests::default();
+    for index in 0..4096 {
+        requests.push_text(&format!("$skill-{index}")).unwrap();
+    }
+    requests.push_text("$skill-0").unwrap();
+    assert_eq!(
+        requests.push_text("$overflow"),
+        Err(rsi_agent_workspace_context::WorkspaceContextError::Capacity)
+    );
+}
+
+#[tokio::test]
+async fn invalid_optional_body_does_not_discard_other_workspace_context() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    fs::write(temp.path().join("AGENTS.md"), "Valid project instructions").unwrap();
+    let skills = temp.path().join(".agents/skills");
+    write_skill(
+        &skills,
+        "bad",
+        "bad",
+        "Late invalid body",
+        &format!("{}\0", "a".repeat(20_000)),
+    );
+    write_skill(&skills, "good", "good", "Valid body", "Valid skill body");
+    let source = context(None, vec![]);
+    let requests = WorkspaceSkillRequests::from_messages(&[&human("$bad $good")]).unwrap();
+    let snapshot = source
+        .snapshot(&header(temp.path()), &requests)
+        .await
+        .unwrap();
+    assert!(snapshot.complete);
+    assert!(
+        snapshot
+            .instructions
+            .unwrap()
+            .contains("Valid project instructions")
+    );
+    assert!(snapshot.skill_catalog.unwrap().contains("good"));
+    assert_eq!(snapshot.invocations.len(), 1);
+    assert_eq!(snapshot.invocations[0].name, "good");
+}
+
+#[tokio::test]
+async fn instruction_byte_limit_prefers_deepest_without_reaching_the_file_count_limit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let cwd = project.join("near/deep");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    for (directory, marker) in [
+        (&project, "ROOT OMITTED"),
+        (&project.join("near"), "NEAR RETAINED"),
+    ] {
+        fs::write(
+            directory.join("AGENTS.md"),
+            format!(
+                "{marker}{}",
+                "x".repeat(MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES - marker.len())
+            ),
+        )
+        .unwrap();
+    }
+    fs::write(cwd.join("AGENTS.md"), "DEEPEST RETAINED").unwrap();
+    let snapshot = context(None, Vec::new())
+        .snapshot(&header(&cwd), &WorkspaceSkillRequests::default())
+        .await
+        .unwrap();
+    let text = snapshot.instructions.unwrap();
+    assert!(snapshot.complete);
+    assert!(text.contains("DEEPEST RETAINED") && text.contains("NEAR RETAINED"));
+    assert!(!text.contains("ROOT OMITTED"));
+    assert!(text.len() <= rsi_agent_workspace_context::MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES);
+}
+
+#[tokio::test]
+async fn skill_catalog_retains_a_complete_lexical_prefix_within_its_byte_limit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let skills = temporary.path().join("skills");
+    let name = |i| format!("{i:03}{}", "x".repeat(61));
+    for index in 0..MAXIMUM_WORKSPACE_SKILL_ENTRIES {
+        write_skill(
+            &skills,
+            &name(index),
+            &name(index),
+            &"🦀".repeat(500),
+            "bounded body",
+        );
+    }
+    let snapshot = context(None, vec![skills])
+        .snapshot(
+            &header(temporary.path()),
+            &WorkspaceSkillRequests::default(),
+        )
+        .await
+        .unwrap();
+    assert!(snapshot.complete);
+    let catalog = snapshot.skill_catalog.unwrap();
+    assert!(catalog.len() <= rsi_agent_workspace_context::MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES);
+    assert!(catalog.contains(&name(0)));
+    assert!(!catalog.contains(&name(MAXIMUM_WORKSPACE_SKILL_ENTRIES - 1)));
+    assert!(catalog.ends_with("</available_skills>"));
 }

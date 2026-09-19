@@ -1,6 +1,6 @@
 # rsi-agent-workspace-context
 
-Explicit skill discovery and body reads use the same trust, precedence and
+Explicit skill discovery and body reads use the same precedence and
 identity validation as before-step snapshots. Human discovery and preview
 require user-invocable; the skill_read Tool requires model-invocable and derives
 its Header from AgentCallerAuthority. These independent flags apply equally to
@@ -25,6 +25,18 @@ entered content or direct Turn acceptance can
 request skills. The filesystem source receives bounded selected invocation
 names and never receives a Store writer.
 
+Domain version 2 also records whether an incomplete observation has been reported.
+An incomplete observation enters one bounded diagnostic per failure episode,
+without publishing any partial baseline, consuming skill requests, or changing
+the last-good digests. A subsequent complete observation clears that diagnostic
+latch. A project read failure can delay the whole baseline, including user-owned
+sources; this is visible even when no complete baseline has yet been entered.
+Local observations retain only the first failure's logical path and reason, in
+at most 2 KiB including escaped path text. The contributor's diagnostic and
+explicit resource read errors include this detail without source contents or
+raw operating-system error text. Diagnostic storage shares the snapshot scratch
+budget; the incomplete-observation latch and last-good state rules are unchanged.
+
 All instances and generations share four process-wide blocking lanes. Each job
 reserves a conservative 16 MiB aggregate envelope, including configuration,
 paths, invocation names, selected metadata, source/render scratch and results;
@@ -35,8 +47,16 @@ snapshot before its returned text alone reaches 16 MiB. Exhaustion returns
 source buffers retain capacity equal to their admitted byte length; reads
 grow with observed data and compact before collection, so many tiny instruction
 files do not retain one maximum-size allocation each. Inputs
-contain at most 64 messages with 64 content blocks each; invocation extraction
-examines all 4,096 possible tokens before matching at most 256 selected skills.
+to the finite `from_messages` adapter contain at most 64 messages with 64 content
+blocks each. Production scans validated Human Facts incrementally at the captured
+horizon. Both paths retain at most 4,096 distinct candidate names before matching
+at most 256 selected skills; repeated names do not consume additional capacity.
+Capacity and source closure retain their typed contribution error categories.
+The first nonempty line accepts `/name` and `/skill name`. Direct Human text also
+accepts `$name` anywhere outside code, escaped text and link destinations. Names
+use the existing skill-name grammar; unknown names remain ordinary text. References
+are deduplicated in source order. The pure reference/token parser is also used by
+terminal completion; parsing alone grants no invocation authority.
 
 Cancellation of an async waiter does not release a running job's lane. The
 blocking job and any unclaimed result own that lane until dropped. Withdrawal
@@ -44,12 +64,14 @@ closes the instance, requests cooperative cancellation between reads and read
 chunks, and drains actual jobs. A filesystem call already executing cannot be
 forcibly stopped; it continues to occupy process capacity until it returns.
 
-The configured user instruction file and user skill roots are trusted inputs.
-Project inputs are eligible only when the immutable Session Header says
-`trusted`. Project instructions are ordered from the nearest Git root to the
-Session cwd; when that chain exceeds 64 files, the deepest 64 retain the most
-specific policy. Project skills are scanned only from `<root>/.agents/skills` and
-cannot replace an identically named user skill. Discovery and source reads are
+The configured user instruction file, user skill roots and selected Session
+workspace participate in discovery by default. Project instructions are ordered
+from the nearest Git root to the Session cwd; when that chain exceeds 64 files,
+the deepest 64 retain the most
+specific policy. Project skills are scanned cwd-to-root from each `.agents/skills` directory,
+retaining the deepest 64 directories. Without a Git root, skills use cwd alone.
+The nearest project definition wins, followed by configured user roots in their
+specified order. Catalog, preview and invocation share this exact selection. Discovery and source reads are
 bounded: each directory stream stops after the remaining global allowance plus
 one overflow probe, and retained entries are sorted before selection. Seeing
 the overflow probe makes the observation incomplete instead of scanning an
@@ -63,6 +85,8 @@ misattributed invocation. LF and CRLF frontmatter are accepted, and every
 rendered result is
 bounded by UTF-8 bytes without splitting a scalar value. Malformed, oversized,
 or Session-unsafe optional files containing NUL or DEL are skipped.
+This omission also applies to an invalid body discovered beyond the metadata
+prefix; it does not discard otherwise valid instructions and catalog context.
 An absent optional path is also a complete omission. Any other filesystem I/O
 failure marks the observation incomplete, so the contributor preserves the last-good
 durable digests instead of publishing replacement or tombstone Facts from a
@@ -76,22 +100,40 @@ wins, then rendered root-to-cwd. The skill catalog retains its lexical prefix.
 does not mean every eligible source byte fit the model-visible render. Digests
 always cover the exact bounded text proposed for persistence.
 
-The trusted project authority root is acquired once per snapshot without
-following Unix path components and retained as a directory capability. Project
-directory enumeration, metadata, and source opens all stay relative to that
-owned handle, so concurrent renames or intermediate symlink replacement cannot
-redirect a read outside the selected project. A project skill root or entry
-that is itself a symbolic link is a complete omission rather than an unexpected
-I/O failure. The source is still reopened on each observation, so edits remain
-visible before the next provider request.
+Project instruction reads acquire the project root once per snapshot
+without following Unix path components and retain it as a directory capability.
+Instruction opens stay relative to that handle, including across renames.
+
+Skill roots are discovery locations, not filesystem containment boundaries.
+Configured user roots and project roots follow directory symbolic links,
+including parent components and targets outside the project. No additional
+target allowlist or approval is required. Skill files themselves (`SKILL.md` or
+standalone `.md` files) must be regular files, not symbolic links. Discovery
+remains limited to the existing immediate entries, with no recursive walk.
+Each observation resolves and opens the target directories, retaining their
+handles for metadata and body reads. A link retarget or directory rename cannot
+redirect an already selected skill; the next observation resolves links again.
+Body reads revalidate the selected metadata, and an unavailable or changed
+selected source makes the observation incomplete.
+
+Skills retain both their logical discovery path and resolved file identity.
+Displayed sources use the discovery path (project-relative for project skills);
+resolved identities deduplicate aliases, with the first valid discovery winning.
+Name precedence remains unchanged. Entries count toward the scan limit before
+deduplication, and retained paths, identities and directory handles share the
+snapshot budget. During discovery, missing paths, dangling links, directory-link
+loops and file links are complete omissions. A source selected by that observation
+which disappears or becomes a file link before its body read instead makes the
+observation incomplete; the next discovery can omit it normally. Permission and other unexpected I/O errors make
+the observation incomplete. Exact reads distinguish a missing skill from
+model-invocation or user-invocation restrictions and from failed/changed reads.
 The Unix handle mechanics are shared through
-[`rsi-files-native-fs`](../../rsi-files/native-fs/README.md); instruction discovery,
-WorkspaceTrust and snapshot capacity remain owned here.
-The typed Session Header is trusted at this process-local seam; only its cwd and
-workspace-trust value cross into the blocking discovery task.
+[`rsi-files-native-fs`](../../rsi-files/native-fs/README.md); instruction discovery and
+snapshot capacity remain owned here.
+The typed Session Header is trusted at this process-local seam; only its cwd
+crosses into the blocking discovery task.
 
 The service returns complete instruction and catalog digests. The contributor
-recognizes a skill invocation only in direct Human content whose first
-nonempty-line token is `/<name>`, and places selected skill bodies after its
-background inputs. Invocation names are extracted from borrowed Fact content
+recognizes skill invocations only in direct Human content using the syntax
+defined above, and places selected skill bodies after its background inputs. Invocation names are extracted from borrowed Fact content
 before blocking filesystem discovery; durable message payloads are not cloned.

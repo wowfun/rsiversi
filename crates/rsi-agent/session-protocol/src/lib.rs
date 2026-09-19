@@ -17,6 +17,12 @@ use std::fmt;
 use thiserror::Error;
 
 mod compaction;
+mod structured;
+pub use structured::*;
+mod delegation;
+pub use delegation::{
+    DelegationPolicy, DelegationRole, MAXIMUM_DELEGATION_PERSONA_BYTES, MAXIMUM_DELEGATION_TOOLS,
+};
 mod continuation;
 mod pricing;
 pub use pricing::{PriceError, PriceQuote, PriceTable};
@@ -66,7 +72,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 14;
+pub const SESSION_FORMAT_VERSION: u32 = 16;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -405,6 +411,7 @@ pub enum AgentMessageSource {
     Completion {
         child_session_id: SessionId,
         activation_id: ActivationId,
+        outcome: ActivationOutcome,
     },
 }
 
@@ -545,10 +552,12 @@ impl AgentMessage {
             AgentMessageSource::Completion {
                 child_session_id,
                 activation_id,
+                outcome,
             } => InputMessageSource::Completion {
                 message_id: self.message_id.clone(),
                 child_session_id: child_session_id.clone(),
                 activation_id: activation_id.clone(),
+                outcome: outcome.clone(),
             },
         }
     }
@@ -585,6 +594,29 @@ impl AgentMessage {
             MAXIMUM_AGENT_MESSAGE_BYTES
         };
         validate_message_content(&self.content, text_limit)?;
+        if let AgentMessageSource::Completion {
+            child_session_id,
+            activation_id,
+            outcome,
+        } = &self.source
+        {
+            if let ActivationOutcome::Completed {
+                result: Some(result),
+            } = outcome
+            {
+                result.validate()?;
+                if &result.child_session_id != child_session_id
+                    || &result.activation_id != activation_id
+                {
+                    return Err(SessionError::Invalid(
+                        "Completion result identity mismatch".into(),
+                    ));
+                }
+            }
+            bounded_compact_json_len(self, MAXIMUM_COMPLETION_MESSAGE_BYTES).map_err(|_| {
+                SessionError::Invalid("encoded Completion exceeds its reservation".into())
+            })?;
+        }
         if self.options.reasoning_effort.is_some() && self.options.model.is_none() {
             return Err(SessionError::Invalid(
                 "effort override requires an explicit model".into(),
@@ -678,6 +710,7 @@ pub enum InputMessageSource {
         message_id: MessageId,
         child_session_id: SessionId,
         activation_id: ActivationId,
+        outcome: ActivationOutcome,
     },
     /// Initial or refreshed Agent instruction text.
     AgentInstructions {
@@ -718,17 +751,6 @@ impl InputMessageSource {
     }
 }
 
-/// Frozen authority for loading project-controlled instructions and skills.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceTrust {
-    /// Project-controlled context is ignored; user-owned context remains eligible.
-    #[default]
-    Untrusted,
-    /// Project-controlled context may enter the model under bounded discovery rules.
-    Trusted,
-}
-
 /// Terminal result of one model Step within a Turn.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -755,7 +777,7 @@ impl StepOutcome {
 #[allow(missing_docs)] // Variant prose defines each closed outcome payload.
 pub enum ActivationOutcome {
     /// The activation and every descendant settled successfully.
-    Completed,
+    Completed { result: Option<AgentResultRef> },
     /// A bounded failure ended the activation.
     Failed { code: String, message: String },
     /// Explicit close-tree cancellation ended the activation.
@@ -921,6 +943,21 @@ impl AgentControlRecordBody {
             } => {
                 validate_identifier("activation failure code", code)?;
                 validate_safe_diagnostic("activation failure message", message)
+            }
+            Self::ActivationSettled {
+                activation_id,
+                outcome:
+                    ActivationOutcome::Completed {
+                        result: Some(result),
+                    },
+            } => {
+                result.validate()?;
+                if &result.activation_id != activation_id {
+                    return Err(SessionError::Invalid(
+                        "activation result identity mismatch".into(),
+                    ));
+                }
+                Ok(())
             }
             Self::WaitParked {
                 kind, deadline_ms, ..
@@ -1455,10 +1492,11 @@ pub struct SessionHeader {
     session_id: SessionId,
     created_at_ms: u64,
     canonical_cwd: String,
-    workspace_trust: WorkspaceTrust,
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
     fork_origin: Option<ForkOrigin>,
+    delegation_policy: Option<DelegationPolicy>,
+    initial_output: Option<InitialOutputContract>,
 }
 
 impl<'de> Deserialize<'de> for SessionHeader {
@@ -1467,16 +1505,22 @@ impl<'de> Deserialize<'de> for SessionHeader {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct WireHeader {
             format_version: u32,
             session_id: Option<serde_json::Value>,
             created_at_ms: Option<serde_json::Value>,
             canonical_cwd: Option<serde_json::Value>,
-            workspace_trust: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
-            fork_origin: Option<ForkOrigin>,
+            fork_origin: Option<serde_json::Value>,
+            delegation_policy: Option<serde_json::Value>,
+            initial_output: Option<serde_json::Value>,
+            #[serde(flatten)]
+            #[expect(
+                clippy::zero_sized_map_values,
+                reason = "Serde flatten requires a map; discard values and reject names after checking the version"
+            )]
+            unknown: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
         }
 
         let wire = WireHeader::deserialize(deserializer)?;
@@ -1485,15 +1529,33 @@ impl<'de> Deserialize<'de> for SessionHeader {
                 wire.format_version,
             )));
         }
+        if let Some(field) = wire.unknown.keys().next() {
+            return Err(serde::de::Error::custom(format!(
+                "unknown Session Header field `{field}`"
+            )));
+        }
         let header = Self {
             format_version: wire.format_version,
             session_id: decode_header_field(wire.session_id, "session_id")?,
             created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
             canonical_cwd: decode_header_field(wire.canonical_cwd, "canonical_cwd")?,
-            workspace_trust: decode_header_field(wire.workspace_trust, "workspace_trust")?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
             settings: decode_header_field(wire.settings, "settings")?,
-            fork_origin: wire.fork_origin,
+            fork_origin: wire
+                .fork_origin
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
+            delegation_policy: wire
+                .delegation_policy
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
+            initial_output: wire
+                .initial_output
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
         };
         header
             .validate()
@@ -1528,10 +1590,12 @@ impl SessionHeader {
             session_id,
             created_at_ms,
             canonical_cwd: canonical_cwd.into(),
-            workspace_trust: WorkspaceTrust::Untrusted,
+
             agent_preset_id,
             settings,
             fork_origin: None,
+            delegation_policy: None,
+            initial_output: None,
         };
         header.validate()?;
         Ok(header)
@@ -1549,6 +1613,9 @@ impl SessionHeader {
         }
         validate_canonical_path(&self.canonical_cwd)?;
         self.settings.validate()?;
+        if let Some(policy) = &self.delegation_policy {
+            policy.validate()?;
+        }
         if let Some(origin) = &self.fork_origin {
             origin.validate()?;
             if origin.parent_session_id == self.session_id {
@@ -1586,18 +1653,6 @@ impl SessionHeader {
     /// Returns the canonical creation-time workspace path.
     pub fn canonical_cwd(&self) -> &str {
         &self.canonical_cwd
-    }
-
-    /// Returns the immutable creation-time workspace trust decision.
-    pub const fn workspace_trust(&self) -> WorkspaceTrust {
-        self.workspace_trust
-    }
-
-    /// Selects the explicit creation-time workspace trust decision.
-    pub fn with_workspace_trust(mut self, workspace_trust: WorkspaceTrust) -> Result<Self> {
-        self.workspace_trust = workspace_trust;
-        self.validate()?;
-        Ok(self)
     }
 
     /// Returns the durable Agent preset identity selected for this session.
@@ -1652,8 +1707,30 @@ impl SessionHeader {
             self.agent_preset_id.clone(),
             self.settings.clone().with_model_selection(selection)?,
         )?
-        .with_workspace_trust(self.workspace_trust)?
-        .with_fork_origin(origin)
+        .with_fork_origin(origin)?
+        .with_delegation_policy(self.delegation_policy.clone())
+    }
+
+    /// Initial spawn output binding, absent from follow-up and descendant contracts.
+    pub const fn initial_output(&self) -> Option<&InitialOutputContract> {
+        self.initial_output.as_ref()
+    }
+    /// Binds an already validated contract to the initial spawn input.
+    pub fn with_initial_output(mut self, output: Option<InitialOutputContract>) -> Result<Self> {
+        self.initial_output = output;
+        self.validate()?;
+        Ok(self)
+    }
+    /// Frozen exact Tool names and persona for a delegated child.
+    pub const fn delegation_policy(&self) -> Option<&DelegationPolicy> {
+        self.delegation_policy.as_ref()
+    }
+
+    /// Binds a validated restriction before the child Header is first admitted.
+    pub fn with_delegation_policy(mut self, policy: Option<DelegationPolicy>) -> Result<Self> {
+        self.delegation_policy = policy;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Returns the optional immutable fork lineage.
@@ -1990,6 +2067,8 @@ pub enum SessionFactBody {
         identity: ToolResultIdentity,
         /// Bounded result.
         result: ToolResult,
+        /// Atomic accepted conclusion, if any.
+        conclusion: Option<ToolConclusion>,
     },
     /// Sole terminal Fact for one turn.
     TurnTerminal {
@@ -1997,6 +2076,8 @@ pub enum SessionFactBody {
         turn_id: TurnId,
         /// Canonical terminal outcome.
         outcome: TurnOutcome,
+        /// Exact structured result, only on successful completion.
+        result: Option<AgentResultRef>,
     },
 }
 
@@ -2124,10 +2205,41 @@ impl SessionFactBody {
                 validate_tool_intent(identity, name, arguments, None)?;
                 rejection.validate()
             }
-            Self::ToolResult { result, .. } => result
-                .validate()
-                .map_err(|error| SessionError::Invalid(error.to_string())),
-            Self::TurnTerminal { outcome, .. } => outcome.validate(),
+            Self::ToolResult {
+                result, conclusion, ..
+            } => {
+                result
+                    .validate()
+                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                if let Some(conclusion) = conclusion {
+                    conclusion.validate()?;
+                    if result.is_error {
+                        return Err(SessionError::Invalid(
+                            "error result cannot conclude a Turn".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Self::TurnTerminal {
+                turn_id,
+                outcome,
+                result,
+            } => {
+                outcome.validate()?;
+                if let Some(result) = result {
+                    result.validate()?;
+                    if !matches!(outcome, TurnOutcome::Completed)
+                        || &result.turn_id != turn_id
+                        || seq.is_some_and(|seq| result.fact_seq >= seq)
+                    {
+                        return Err(SessionError::Invalid(
+                            "terminal result does not precede its successful Turn".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2471,14 +2583,21 @@ pub fn control_prefix_sha256<'a>(
 }
 
 fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {
-    struct Counter(usize);
+    bounded_compact_json_len(value, usize::MAX)
+}
+fn bounded_compact_json_len(value: &(impl Serialize + ?Sized), maximum: usize) -> Result<usize> {
+    struct Counter {
+        bytes: usize,
+        maximum: usize,
+    }
 
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
+            self.bytes = self
+                .bytes
                 .checked_add(bytes.len())
-                .ok_or_else(|| std::io::Error::other("encoded JSON length overflowed"))?;
+                .filter(|length| *length <= self.maximum)
+                .ok_or_else(|| std::io::Error::other("encoded JSON exceeds its byte limit"))?;
             Ok(bytes.len())
         }
 
@@ -2487,10 +2606,10 @@ fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {
         }
     }
 
-    let mut counter = Counter(0);
+    let mut counter = Counter { bytes: 0, maximum };
     serde_json::to_writer(&mut counter, value)
         .map_err(|error| SessionError::Encoding(error.to_string()))?;
-    Ok(counter.0)
+    Ok(counter.bytes)
 }
 
 /// Validates one contiguous Fact sequence after an explicit cursor.

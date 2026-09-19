@@ -169,12 +169,14 @@ pub(super) async fn finish_control_tool(kernel: &AgentKernel, claim: &TurnClaim)
             .unwrap(),
             result: rsi_tools_protocol::ToolResult::new(serde_json::json!({}), vec![], false)
                 .unwrap(),
+            conclusion: None,
         }],
     )
     .await;
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One exact source claim proves route, role retry and authority expiry together.
 async fn child_model_comes_from_producing_request_and_tool_authority_expires() {
     use rsi_ai_protocol::{
         ModelRef, PreparedLanguageSettings, ReasoningEffortId, ReasoningEffortProfile,
@@ -190,6 +192,8 @@ async fn child_model_comes_from_producing_request_and_tool_authority_expires() {
         .unwrap()
         .unwrap();
     let request = |caller, id: &str, model, reasoning_effort| SpawnAgentRequest {
+        output_contract: None,
+        role: None,
         caller,
         model,
         reasoning_effort,
@@ -219,10 +223,24 @@ async fn child_model_comes_from_producing_request_and_tool_authority_expires() {
         );
     prepared.language_settings = Some(PreparedLanguageSettings::new(profile, None).unwrap());
     let caller = control_tool_caller_with_snapshot(&kernel, &claim, prepared).await;
-    let inherited = request(caller.clone(), "inherited", None, None);
+    let mut inherited = request(caller.clone(), "inherited", None, None);
+    inherited.role = Some(rsi_agent_session_protocol::DelegationRole {
+        name: "auditor".into(),
+        persona: Some("frozen role text".into()),
+        allow: Some(std::collections::BTreeSet::default()),
+        deny: std::collections::BTreeSet::default(),
+    });
     let first = kernel.spawn_agent(inherited.clone()).await.unwrap();
     assert_eq!(kernel.spawn_agent(inherited.clone()).await.unwrap(), first);
+    let mut changed_role = inherited.clone();
+    changed_role.role.as_mut().unwrap().persona = Some("changed".into());
+    assert!(kernel.spawn_agent(changed_role).await.is_err());
     let header = store.header(&first.session_id).await.unwrap();
+    assert_eq!(
+        header.delegation_policy().unwrap().persona(),
+        Some("frozen role text")
+    );
+    assert!(header.delegation_policy().unwrap().tools().is_empty());
     assert_eq!(
         header.settings().default_model(),
         &ModelRef::new("source-deployment", "actual-model").unwrap()
@@ -262,4 +280,76 @@ async fn child_model_comes_from_producing_request_and_tool_authority_expires() {
     );
     drop(lease);
     kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn frozen_tool_policy_is_enforced_before_kernel_publication() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let worker = kernel.start_workers();
+    let header = header("restricted-root")
+        .with_delegation_policy(Some(
+            rsi_agent_session_protocol::DelegationPolicy::freeze(
+                None,
+                std::collections::BTreeSet::new(),
+                None,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header),
+            message: mailbox_message("restricted-input"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("restricted-worker".into()).unwrap();
+    let claim = kernel
+        .claim("restricted-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    publish_model_source(&kernel, &claim, "denied-call", "denied_tool", &snapshot()).await;
+    let before = store.read_watermarks(claim.session_id()).await.unwrap();
+    let result = kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::ToolIntent {
+                turn_id: claim.turn_id().clone(),
+                effect_id: EffectId::new("denied-effect").unwrap(),
+                source_model_effect_id: EffectId::new("source-model").unwrap(),
+                identity: ToolResultIdentity::new(
+                    "owner",
+                    "denied-effect",
+                    "denied-call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+                name: "denied_tool".into(),
+                arguments: serde_json::json!({}),
+                approval: None,
+                parallel_safe: false,
+            }],
+        )
+        .await;
+    assert!(
+        matches!(result, Err(TurnError::Invalid(_))),
+        "denied ToolIntent was admitted"
+    );
+    assert_eq!(
+        store.read_watermarks(claim.session_id()).await.unwrap(),
+        before
+    );
+    assert!(
+        kernel
+            .tool_caller(&claim, &EffectId::new("denied-effect").unwrap())
+            .is_err()
+    );
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.shutdown(worker).await.unwrap();
 }

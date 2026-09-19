@@ -4,8 +4,8 @@ use rsi_agent_composition_protocol::{
     ContextContributor, ContributionContext, ContributionError, ContributionInput,
     ContributionKind, ContributionOutput, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainForkPolicy, DomainHandle, DomainRegistrarContract,
-    SessionProjection, SessionProjectionContext, ToolSettlementContext, ToolSettlementContributor,
-    ValidatedDomainProposal,
+    SessionProjection, SessionProjectionContext, ToolSettlement, ToolSettlementContext,
+    ToolSettlementContributor,
 };
 use rsi_agent_session_protocol::{
     ContributionId, DomainIdentity, DomainStateView, ProjectionValue, SessionFactBody,
@@ -71,10 +71,7 @@ impl ToolExecutor for WriteTool {
     }
 }
 impl ToolSettlementContributor for Todo {
-    fn settle(
-        &self,
-        context: &ToolSettlementContext<'_>,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    fn settle(&self, context: &ToolSettlementContext<'_>) -> ContributionResult<ToolSettlement> {
         let SessionFactBody::ToolIntent {
             name, arguments, ..
         } = context.intent.body()
@@ -82,7 +79,7 @@ impl ToolSettlementContributor for Todo {
             return Err(invalid("Todo settlement requires a ToolIntent"));
         };
         if name != TOOL || context.result.is_error {
-            return Ok(vec![]);
+            return Ok(ToolSettlement::default());
         }
         let args: Arguments = serde_json::from_value(arguments.clone()).map_err(invalid)?;
         let actual: Arguments =
@@ -91,11 +88,14 @@ impl ToolSettlementContributor for Todo {
             return Err(invalid("Todo result disagrees with its exact ToolIntent"));
         }
         let (view, _) = self.current(context.domains)?;
-        Ok(vec![
-            self.state
-                .propose(view.revision, &args.todos)
-                .map_err(invalid)?,
-        ])
+        Ok(ToolSettlement {
+            domains: vec![
+                self.state
+                    .propose(view.revision, &args.todos)
+                    .map_err(invalid)?,
+            ],
+            conclusion: None,
+        })
     }
 }
 #[async_trait]

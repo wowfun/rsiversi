@@ -1,5 +1,10 @@
 # rsi-agent-turn-protocol
 
+`SessionProjections::resident_composition` only peeks at the current resident
+generation. It does not read a cold Store, await a load or invoke composition
+resolution. `NotResident` and `Loading` are explicit observations. This operation
+is distinct from derived domain snapshot capture, which may resolve a cold pin.
+
 `TurnJobs::peek_job` samples process-local output through the original executor's
 weak Jobs source. The request binds Session/Header, active Turn, nonzero claim
 generation, job ID and durable Tool effect. Kernel revalidates the live source

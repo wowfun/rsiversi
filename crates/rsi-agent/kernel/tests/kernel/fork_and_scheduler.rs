@@ -24,6 +24,8 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     let child_id = SessionId::new("session-fork-page-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -114,6 +116,8 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
     let child_id = SessionId::new("session-z-idle-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -250,6 +254,8 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
         let child_id = SessionId::new(format!("session-cascade-child-{label}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 cancellation: CancellationToken::new(),
@@ -375,6 +381,7 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
                 vec![SessionFactBody::TurnTerminal {
                     turn_id: queued.turn_id,
                     outcome: TurnOutcome::Cancelled,
+                    result: None,
                 }],
             )
             .await
@@ -469,6 +476,8 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
     let child_id = SessionId::new("session-parked-recovery-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),

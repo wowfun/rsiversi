@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pulldown-cmark.workspace = true
 async-trait.workspace = true
 cap-std.workspace = true
 hex.workspace = true

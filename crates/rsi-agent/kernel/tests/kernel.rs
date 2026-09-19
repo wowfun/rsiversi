@@ -809,6 +809,14 @@ impl SessionStore for FactReadRaceStore {
         Ok(page)
     }
 
+    async fn read_agent_message(
+        &self,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreAgentMessage>> {
+        self.inner.read_agent_message(session_id, message_id).await
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -1046,7 +1054,7 @@ fn client_turn_id() -> TurnId {
 }
 
 #[derive(Debug)]
-struct EmptyTools;
+struct SourceOnlyTools;
 
 #[derive(Debug)]
 struct DropOwner(Arc<AtomicUsize>);
@@ -1058,9 +1066,17 @@ impl Drop for DropOwner {
 }
 
 #[async_trait]
-impl ToolRuntime for EmptyTools {
+impl ToolRuntime for SourceOnlyTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        Vec::new()
+        // These fixtures publish source-bound effects directly; keep the frozen
+        // child policy honest even though they never invoke a Tool executor.
+        ["fixture_control", "echo"]
+            .into_iter()
+            .map(|name| {
+                ToolDefinition::new(name, "Test source", serde_json::json!({"type":"object"}))
+                    .unwrap()
+            })
+            .collect()
     }
 
     fn prepare(
@@ -1102,7 +1118,7 @@ fn test_pin_with_digest(preset_id: &AgentPresetId, digit: char) -> AgentComposit
     AgentCompositionPin::new(
         preset_id.clone(),
         digit.to_string().repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(SourceOnlyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -1160,7 +1176,7 @@ impl AgentComposition for DropTrackingComposition {
         AgentCompositionPin::new(
             preset_id.clone(),
             "a".repeat(64),
-            Arc::new(EmptyTools),
+            Arc::new(SourceOnlyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             rsi_agent_composition_protocol::DomainCatalog::default(),
             rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -1438,6 +1454,7 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
                 SessionFactBody::TurnTerminal {
                     turn_id,
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap(),
@@ -1543,3 +1560,6 @@ mod request_evidence;
 #[path = "kernel/tool_origin.rs"]
 mod tool_origin;
 use tool_origin::control_tool_caller;
+
+#[path = "kernel/structured.rs"]
+mod structured;

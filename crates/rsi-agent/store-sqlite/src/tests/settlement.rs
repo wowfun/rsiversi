@@ -25,7 +25,9 @@ pub(super) fn append(id: &SessionId, previous: u64) -> AtomicSessionAppend {
                 1,
                 AgentControlRecordBody::ActivationSettled {
                     activation_id,
-                    outcome: rsi_agent_session_protocol::ActivationOutcome::Completed,
+                    outcome: rsi_agent_session_protocol::ActivationOutcome::Completed {
+                        result: None,
+                    },
                 },
             )
             .unwrap(),

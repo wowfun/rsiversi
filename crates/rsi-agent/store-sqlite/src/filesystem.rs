@@ -1,11 +1,8 @@
 use super::*;
 
 pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() || path.as_os_str().is_empty() {
-        return Err(StoreError::Invalid(
-            "SQLite Agent Store root must be an absolute path".into(),
-        ));
-    }
+    let normalized = normalized_root_path(path)?;
+    let path = normalized.as_path();
     reject_symlink_if_present(path, "Store root")?;
     create_private_directories(path)?;
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
@@ -19,11 +16,8 @@ pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn existing_root(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() || path.as_os_str().is_empty() {
-        return Err(StoreError::Invalid(
-            "SQLite Agent Store root must be an absolute path".into(),
-        ));
-    }
+    let normalized = normalized_root_path(path)?;
+    let path = normalized.as_path();
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             StoreError::NotFound(path.display().to_string())
@@ -37,6 +31,17 @@ pub(super) fn existing_root(path: &Path) -> Result<PathBuf> {
         ));
     }
     fs::canonicalize(path).map_err(io_error)
+}
+
+fn normalized_root_path(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() || path.as_os_str().is_empty() {
+        return Err(StoreError::Invalid(
+            "SQLite Agent Store root must be an absolute path".into(),
+        ));
+    }
+    // A trailing separator or `.` makes lstat follow the preceding link.
+    // Components remove that syntax without resolving links or collapsing `..`.
+    Ok(path.components().collect())
 }
 
 pub(super) fn prepare_owned_directory(path: &Path, label: &str) -> Result<()> {
@@ -176,15 +181,13 @@ pub(super) fn validate_open_file(path: &Path, file: &File, label: &str) -> Resul
             "{label} is not a regular file"
         )));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if path_metadata.dev() != file_metadata.dev() || path_metadata.ino() != file_metadata.ino()
-        {
-            return Err(StoreError::Corrupt(format!(
-                "{label} changed while opening"
-            )));
-        }
+    let opened =
+        same_file::Handle::from_file(file.try_clone().map_err(io_error)?).map_err(io_error)?;
+    let current = same_file::Handle::from_path(path).map_err(io_error)?;
+    if opened != current {
+        return Err(StoreError::Corrupt(format!(
+            "{label} changed while opening"
+        )));
     }
     Ok(())
 }

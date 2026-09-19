@@ -186,12 +186,10 @@ impl References {
             check(&stop)?;
             let object = store.put_cas(bytes).await?;
             check(&stop)?;
-            envelope
-                .frozen(ReferenceSnapshotRef {
-                    sha256: object.sha256,
-                    byte_len: object.byte_len,
-                })
-                .map_err(invalid)
+            envelope.into_frozen(ReferenceSnapshotRef {
+                sha256: object.sha256,
+                byte_len: object.byte_len,
+            })
         })
         .await
     }

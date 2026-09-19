@@ -170,7 +170,7 @@ fn exact_schema_rejects_missing_or_changed_waiting_predicate() {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            21
+            22
         );
         connection
             .execute_batch("DROP INDEX active_activations_waiting")

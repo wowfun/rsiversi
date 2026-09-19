@@ -201,6 +201,7 @@ async fn append_session(
                 SessionFactBody::TurnTerminal {
                     turn_id: turn.clone(),
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 }
             } else {
                 SessionFactBody::ModelEvent {
@@ -390,6 +391,7 @@ async fn benchmark_metadata(sessions: usize) {
                             SessionFactBody::TurnTerminal {
                                 turn_id: turn,
                                 outcome: TurnOutcome::Completed,
+                                result: None,
                             },
                         )
                         .unwrap(),
@@ -502,7 +504,9 @@ async fn benchmark_control_history(count: u64) {
                     sequence + 1,
                     AgentControlRecordBody::ActivationSettled {
                         activation_id,
-                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed,
+                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed {
+                            result: None,
+                        },
                     },
                 )
                 .unwrap(),

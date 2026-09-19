@@ -568,6 +568,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
             vec![SessionFactBody::TurnTerminal {
                 turn_id: first.turn_id.clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await

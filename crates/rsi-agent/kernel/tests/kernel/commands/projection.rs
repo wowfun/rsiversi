@@ -21,6 +21,78 @@ impl PinGate {
 }
 
 #[tokio::test]
+async fn resident_manifest_peek_never_resolves_cold_or_replaces_a_retained_generation() {
+    use rsi_agent_composition_protocol::{
+        CompositionInstance, CompositionManifest, CompositionOrigin,
+    };
+    use rsi_agent_turn_protocol::ResidentComposition;
+    let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    let calls = fixture.composition.calls.load(Ordering::SeqCst);
+    fixture.composition.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .kernel
+            .resident_composition(&fixture.session_id)
+            .unwrap(),
+        ResidentComposition::NotResident
+    ));
+    assert_eq!(fixture.composition.calls.load(Ordering::SeqCst), calls);
+    fixture.composition.reject.store(false, Ordering::SeqCst);
+    let manifest = Arc::new(
+        CompositionManifest::new(vec![CompositionInstance {
+            instance: "captured-a".into(),
+            plugin: "fixture.a".into(),
+            enabled: true,
+            origin: CompositionOrigin::Linked,
+        }])
+        .unwrap(),
+    );
+    let pin = fixture
+        .composition
+        .pin
+        .read()
+        .unwrap()
+        .clone()
+        .with_manifest(manifest.clone());
+    *fixture.composition.pin.write().unwrap() = pin;
+    let prepared = fixture
+        .kernel
+        .prepare_resume(&fixture.session_id)
+        .await
+        .unwrap();
+    fixture
+        .kernel
+        .submit(SubmitTurn {
+            reasoning_effort: None,
+            session: SubmitSession::Resume(prepared),
+            turn_id: TurnId::new("resident-manifest").unwrap(),
+            text: "retain generation".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    fixture.composition.reject.store(true, Ordering::SeqCst);
+    let calls = fixture.composition.calls.load(Ordering::SeqCst);
+    let ResidentComposition::Resident {
+        header,
+        manifest: captured,
+        source_digest,
+    } = fixture
+        .kernel
+        .resident_composition(&fixture.session_id)
+        .unwrap()
+    else {
+        panic!("resident evidence missing")
+    };
+    assert_eq!(header.session_id(), &fixture.session_id);
+    assert_eq!(captured.unwrap(), manifest);
+    assert_eq!(source_digest, "c".repeat(64));
+    assert_eq!(fixture.composition.calls.load(Ordering::SeqCst), calls);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn failed_cold_capture_yields_to_a_concurrently_published_resident_pin() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let prepared = fixture

@@ -258,12 +258,12 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
     );
 
     let mut previous = serde_json::to_value(&header).unwrap();
-    previous["format_version"] = json!(12);
+    previous["format_version"] = json!(14);
     assert!(
         serde_json::from_value::<SessionHeader>(previous)
             .unwrap_err()
             .to_string()
-            .contains("unsupported session format version 12")
+            .contains("unsupported session format version 14")
     );
 
     let mut value = serde_json::to_value(&header).unwrap();
@@ -306,6 +306,43 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_format() {
+    let header = SessionHeader::new(
+        SessionId::new("workspace-default").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("code-agent").unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let current = serde_json::to_value(&header).unwrap();
+    assert_eq!(current["format_version"], 16);
+    assert!(current.get("workspace_trust").is_none());
+    for version in [15, 14, 1] {
+        // Put the obsolete field before the version to prove decoding is not key-order dependent.
+        let wire = format!(
+            r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionHeader>(&wire)
+                .unwrap_err()
+                .to_string(),
+            format!("unsupported session format version {version}")
+        );
+    }
+    for field in ["workspace_trust", "unknown"] {
+        let mut invalid = current.clone();
+        invalid[field] = json!("trusted");
+        assert!(
+            serde_json::from_value::<SessionHeader>(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains(field)
+        );
+    }
 }
 
 #[test]
@@ -571,6 +608,7 @@ fn image_request_intent_outputs_and_partial_failure_are_bounded_refs_only() {
                 code: "provider.output_validation".into(),
                 message: "second image failed".into(),
             },
+            result: None,
         },
     ];
     let facts = bodies
@@ -632,6 +670,7 @@ fn tool_result_fact_persists_media_reference_without_media_bytes() {
             effect_id: EffectId::new("effect-1").unwrap(),
             identity,
             result,
+            conclusion: None,
         },
     )
     .unwrap();
@@ -713,6 +752,7 @@ fn entered_agent_and_completion_messages_keep_the_agent_text_bound() {
     ));
     assert!(matches!(
         body(InputMessageSource::Completion {
+            outcome: rsi_agent_session_protocol::ActivationOutcome::Completed { result: None },
             message_id: message_id.clone(),
             child_session_id: SessionId::new("source-child").unwrap(),
             activation_id: ActivationId::new("source-activation").unwrap(),
@@ -989,6 +1029,7 @@ fn assert_source_kind_projection(source: &ContinuationSource, text: &str) {
         ),
         (
             AgentMessageSource::Completion {
+                outcome: rsi_agent_session_protocol::ActivationOutcome::Completed { result: None },
                 child_session_id: SessionId::new("child").unwrap(),
                 activation_id: ActivationId::new("activation").unwrap(),
             },

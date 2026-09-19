@@ -28,6 +28,109 @@ fn cursor() -> ModelContextState {
 }
 
 #[test]
+fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation() {
+    let mut state = cursor();
+    let mut history = Vec::new();
+    let original_text = format!("HEAD{}TAIL", "界🦀".repeat(30_000));
+    let mut bodies = partial_tool_batch(Some(0));
+    let SessionFactBody::ToolResult { result, .. } = bodies.last_mut().unwrap() else {
+        panic!()
+    };
+    *result = ToolResult::new(json!({"value": original_text}), vec![], false).unwrap();
+    let mut second = bodies.last().unwrap().clone();
+    let SessionFactBody::ToolResult {
+        identity,
+        effect_id,
+        ..
+    } = &mut second
+    else {
+        panic!()
+    };
+    *identity = ToolResultIdentity::new("owner", "second", "missing-1", "b".repeat(64)).unwrap();
+    *effect_id = EffectId::new("second").unwrap();
+    bodies.push(second);
+    append(&mut state, &mut history, bodies);
+    let unpruned = wire(&state);
+    assert!(!unpruned.contains("middle pruned"));
+    append(
+        &mut state,
+        &mut history,
+        vec![
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new("interrupted").unwrap(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            },
+            accepted("current", "continue"),
+        ],
+    );
+    let pruned = wire(&state);
+    assert!(pruned.contains("middle pruned"));
+    assert!(pruned.len() < unpruned.len() / 2);
+    assert_eq!(
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
+        pruned
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&history)).unwrap();
+    assert_eq!(wire(&replay), pruned);
+    assert!(history.iter().any(|fact| {
+        serde_json::to_string(fact.as_ref())
+            .unwrap()
+            .contains(&original_text)
+    }));
+
+    // Keep a separate recent unit large enough to make the pruned tool batch
+    // selectable. A raw candidate would exceed the plan's pruned original size.
+    append(
+        &mut state,
+        &mut history,
+        model_bodies(
+            "current",
+            "tail",
+            ModelPurpose::Conversation,
+            &"tail ".repeat(15_000),
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let planned = state
+        .plan_compaction(
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::ProviderContextLimit),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_string(planned.request.messages())
+            .unwrap()
+            .contains("middle pruned")
+    );
+    append(
+        &mut state,
+        &mut history,
+        model_bodies(
+            "current",
+            "pruned-summary",
+            ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            "Prior tool evidence summarized.",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(state.summary_installed(&EffectId::new("pruned-summary").unwrap()));
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&history)).unwrap();
+    assert_eq!(wire(&replay), wire(&state));
+    assert_eq!(
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
+        wire(&state)
+    );
+}
+
+#[test]
 fn pressure_without_selectable_history_is_optional_but_forced_pressure_is_a_limit() {
     let mut state = cursor();
     let mut history = Vec::new();
@@ -45,6 +148,7 @@ fn pressure_without_selectable_history_is_optional_but_forced_pressure_is_a_limi
         SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("old").unwrap(),
             outcome: TurnOutcome::Completed,
+            result: None,
         },
         accepted("current", "next short task"),
     ]);
@@ -89,6 +193,7 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
                     SessionFactBody::TurnTerminal {
                         turn_id: TurnId::new(turn).unwrap(),
                         outcome: TurnOutcome::Completed,
+                        result: None,
                     },
                 ],
             );
@@ -333,6 +438,7 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
             )
             .unwrap(),
             result: ToolResult::new(json!({"result": "partial result"}), vec![], false).unwrap(),
+            conclusion: None,
         });
     }
     bodies
@@ -355,6 +461,7 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
                 effect: None,
                 reason: "fixture stopped".into(),
             },
+            result: None,
         });
         bodies.push(accepted("current", "Original task"));
         append(&mut state, &mut history, bodies);
@@ -416,6 +523,7 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new("current").unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         );
         let expected = wire(&state);
@@ -453,6 +561,7 @@ fn missed_source_pressure_opportunity_does_not_poison_later_replay() {
                         effect: None,
                         reason: "fixture stopped".into(),
                     },
+                    result: None,
                 },
             ],
         );
@@ -543,6 +652,7 @@ fn encoded_plan_bound_keeps_long_identifier_history_recoverable() {
             bodies.push(SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new(turn).unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             });
             append(&mut state, &mut history, bodies);
         }
@@ -691,6 +801,7 @@ fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64
         vec![SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("old").unwrap(),
             outcome: TurnOutcome::Completed,
+            result: None,
         }],
     );
     let old_end = history.last().unwrap().seq();
@@ -868,6 +979,7 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
         vec![SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("current").unwrap(),
             outcome: TurnOutcome::Completed,
+            result: None,
         }],
     );
     for (after_seq, reused) in [(0, true), (old_end, false)] {
@@ -993,6 +1105,7 @@ fn long_lived_turns(replace_instructions: bool) {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new(turn).unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         );
     }
@@ -1047,6 +1160,7 @@ fn check_instruction_supersession(tombstone: bool) {
             SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new("old").unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
             accepted("current", "current task"),
             instruction("current", "workspace", !tombstone, "CURRENT_WORKSPACE"),
@@ -1177,6 +1291,7 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
         vec![SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("current").unwrap(),
             outcome: TurnOutcome::Completed,
+            result: None,
         }],
     );
     for (after, reuse) in [(0, true), (old_end, false)] {
@@ -1216,4 +1331,39 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
         child.ingest(ContextPage::FinishSeed).unwrap();
         assert_eq!(wire(&child).contains("TRANSITIVE_PRIVATE_SUMMARY"), reuse);
     }
+}
+
+#[test]
+fn both_request_paths_reject_orphans_while_legacy_projection_keeps_partial_evidence() {
+    let mut semantic = cursor();
+    let mut legacy = ContextFold::new(header("instructions")).unwrap();
+    let facts = vec![
+        SessionFact::new(1, 1, accepted("orphan", "read the evidence")).unwrap(),
+        SessionFact::new(
+            2,
+            2,
+            SessionFactBody::ToolResult {
+                turn_id: TurnId::new("orphan").unwrap(),
+                effect_id: EffectId::new("orphan-tool").unwrap(),
+                identity: ToolResultIdentity::new(
+                    "owner",
+                    "request",
+                    "missing-call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+                result: ToolResult::new(json!({}), vec![], false).unwrap(),
+                conclusion: None,
+            },
+        )
+        .unwrap(),
+    ];
+    legacy.apply(&facts).unwrap();
+    let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
+    semantic.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert!(
+        matches!(semantic.build(vec![]), Err(ContextError::Invalid(message)) if message.contains("orphan"))
+    );
+    assert!(legacy.project(ContextLimits::default()).is_ok());
+    assert!(legacy.request(ContextLimits::default(), vec![]).is_err());
 }

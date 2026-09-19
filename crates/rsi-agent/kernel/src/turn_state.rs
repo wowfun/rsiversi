@@ -4,6 +4,7 @@ pub(super) fn apply_recovered_fact(
     turns: &mut BTreeMap<TurnId, TurnControl>,
     order: &mut Vec<TurnId>,
     budget: &TurnBudget,
+    header: &SessionHeader,
     fact: &SessionFact,
 ) -> Result<()> {
     match fact.body() {
@@ -16,8 +17,14 @@ pub(super) fn apply_recovered_fact(
                 ));
             }
             let mut control = TurnControl::new(fact.timestamp_ms(), fact.seq());
-            if let SessionFactBody::MessageTurnAccepted { activation_id, .. } = fact.body() {
+            if let SessionFactBody::MessageTurnAccepted {
+                activation_id,
+                message_ids,
+                ..
+            } = fact.body()
+            {
                 control.activation_id = Some(activation_id.clone());
+                control.initial_messages = message_ids.iter().cloned().collect();
             }
             if turns.insert(turn_id.clone(), control).is_some() {
                 return Err(KernelError::Invariant(
@@ -53,12 +60,23 @@ pub(super) fn apply_recovered_fact(
             })?;
             validate_budget_marker(budget, fact)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
+            super::execution::validate_tool_admission(header, turn, body)
+                .map_err(|error| KernelError::Invariant(error.to_string()))?;
+            super::structured::validate_conclusion(header, turn, body)
+                .map_err(|error| KernelError::Invariant(error.to_string()))?;
             let mut usage = turn.budget_usage;
             record_budget_usage(&mut usage, fact).map_err(KernelError::Invariant)?;
             check_budget_usage(budget, usage)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
             apply_executor_body(turn, body)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
+            if let SessionFactBody::ToolResult {
+                conclusion: Some(conclusion),
+                ..
+            } = body
+            {
+                turn.conclusion = Some((fact.seq(), conclusion.clone()));
+            }
             turn.budget_usage = usage;
         }
     }
@@ -71,6 +89,16 @@ pub(super) fn apply_executor_body(
 ) -> TurnResult<()> {
     if turn.terminal.is_some() {
         return Err(TurnError::Invalid("Fact follows a terminal turn".into()));
+    }
+    if turn.conclusion.is_some()
+        && !matches!(
+            body,
+            SessionFactBody::StepEnded { .. } | SessionFactBody::TurnTerminal { .. }
+        )
+    {
+        return Err(TurnError::Invalid(
+            "business Fact follows an accepted Tool conclusion".into(),
+        ));
     }
     if turn.budget_exhausted.is_some()
         && !matches!(
@@ -353,6 +381,7 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
                 .insert(
                     effect_id.clone(),
                     ActiveEffect::Tool {
+                        name: name.clone(),
                         source_selection,
                         effect_id: effect_id.clone(),
                         identity: identity.clone(),
@@ -646,6 +675,9 @@ pub(super) fn record_budget_usage(
 
 pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        initial_messages: turn.initial_messages.clone(),
+        claim_composition: turn.claim_composition.clone(),
+        conclusion: turn.conclusion.clone(),
         tool_source: turn.tool_source.clone(),
         seen_model_effects: turn.seen_model_effects.clone(),
         evidence_inline_bytes: turn.evidence_inline_bytes,
@@ -668,22 +700,24 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
 
 pub(super) fn canonicalize_terminal(body: SessionFactBody, cancelled: bool) -> SessionFactBody {
     match body {
+        SessionFactBody::TurnTerminal { turn_id, .. } if cancelled => {
+            SessionFactBody::TurnTerminal {
+                turn_id,
+                outcome: TurnOutcome::Cancelled,
+                result: None,
+            }
+        }
         SessionFactBody::TurnTerminal {
             turn_id,
-            outcome: _,
-        } if cancelled => SessionFactBody::TurnTerminal {
-            turn_id,
             outcome: TurnOutcome::Cancelled,
-        },
-        SessionFactBody::TurnTerminal {
-            turn_id,
-            outcome: TurnOutcome::Cancelled,
+            ..
         } => SessionFactBody::TurnTerminal {
             turn_id,
             outcome: TurnOutcome::Failed {
                 code: "executor.unrequested_cancellation".into(),
                 message: "executor proposed cancellation without a durable request".into(),
             },
+            result: None,
         },
         other => other,
     }
@@ -846,6 +880,7 @@ pub(super) fn turn_composition_error(error: AgentCompositionError) -> TurnError 
             TurnError::Invalid(bounded_diagnostic(&message))
         }
         AgentCompositionError::Unavailable { .. }
+        | AgentCompositionError::UnsupportedSeedCodec { .. }
         | AgentCompositionError::Domain(_)
         | AgentCompositionError::DefaultUnavailable { .. }
         | AgentCompositionError::Capacity => {

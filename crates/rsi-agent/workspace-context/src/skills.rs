@@ -23,49 +23,36 @@ pub enum SkillAudience {
 
 pub(super) fn project_boundary(
     cwd: &Path,
-    trust: WorkspaceTrust,
-    complete: &mut bool,
-) -> (Option<PathBuf>, Option<Arc<ProjectAuthority>>) {
-    let root = if trust == WorkspaceTrust::Trusted {
-        find_project_root(cwd, complete)
-    } else {
-        None
-    };
-    let authority = root.as_deref().and_then(|root| {
-        ProjectAuthority::open(root).map_or_else(
-            |_| {
-                *complete = false;
-                None
-            },
-            |value| Some(Arc::new(value)),
-        )
-    });
-    (root, authority)
+    observation: &mut Observation,
+) -> (Option<PathBuf>, bool) {
+    let root = find_project_root(cwd, observation);
+    let git_root = root.is_some();
+    let root = root.or_else(|| Some(cwd.to_path_buf()));
+    (root, git_root)
 }
 
 pub(super) fn discover_selected(
     config: &WorkspaceContextConfig,
+    cwd: &Path,
     root: Option<&Path>,
-    authority: Option<&Arc<ProjectAuthority>>,
-    complete: &mut bool,
+    observation: &mut Observation,
     budget: &mut SnapshotBudget,
 ) -> Result<Vec<SelectedSkill>, WorkspaceContextError> {
-    let mut selected = BTreeMap::new();
-    let mut inspected = 0;
+    let mut discovery = SkillDiscovery::default();
+    if let Some(root) = root {
+        for directory in directories_between(root, cwd)?.into_iter().rev() {
+            discovery.scan(
+                &directory.join(".agents/skills"),
+                Some(root),
+                observation,
+                budget,
+            )?;
+        }
+    }
     for path in &config.user_skill_roots {
-        discover_skills(path, None, &mut selected, &mut inspected, complete, budget)?;
+        discovery.scan(path, None, observation, budget)?;
     }
-    if let (Some(root), Some(authority)) = (root, authority) {
-        discover_skills(
-            &root.join(".agents/skills"),
-            Some(authority),
-            &mut selected,
-            &mut inspected,
-            complete,
-            budget,
-        )?;
-    }
-    Ok(selected.into_values().collect())
+    Ok(discovery.into_selected())
 }
 
 fn descriptor(skill: &SelectedSkill) -> SessionResourceDescriptor {
@@ -82,24 +69,17 @@ fn descriptor(skill: &SelectedSkill) -> SessionResourceDescriptor {
 pub(super) fn read_skills(
     config: &WorkspaceContextConfig,
     cwd: &Path,
-    trust: WorkspaceTrust,
     id: Option<&str>,
     audience: SkillAudience,
     mut budget: SnapshotBudget,
 ) -> Result<SessionResourceValue, WorkspaceContextError> {
-    let mut complete = true;
-    let (root, authority) = project_boundary(cwd, trust, &mut complete);
-    let selected = discover_selected(
-        config,
-        root.as_deref(),
-        authority.as_ref(),
-        &mut complete,
-        &mut budget,
-    )?;
-    if !complete {
-        return Err(WorkspaceContextError::Failed(
-            "skill catalog could not be read completely; refresh to retry".into(),
-        ));
+    let mut observation = Observation::default();
+    let (root, _) = project_boundary(cwd, &mut observation);
+    let selected = discover_selected(config, cwd, root.as_deref(), &mut observation, &mut budget)?;
+    if let Some(diagnostic) = observation.diagnostic {
+        return Err(WorkspaceContextError::Failed(format!(
+            "skill catalog could not be read completely; {diagnostic}; refresh to retry"
+        )));
     }
     let eligible = |skill: &&SelectedSkill| match audience {
         SkillAudience::Human => skill.user_invocable,
@@ -108,26 +88,32 @@ pub(super) fn read_skills(
     let value = if let Some(id) = id {
         let skill = selected
             .iter()
-            .filter(eligible)
             .find(|skill| skill.name == id)
             .ok_or_else(|| {
-                WorkspaceContextError::Invalid("skill is unavailable to this caller".into())
+                WorkspaceContextError::Invalid("skill was not found in the current catalog".into())
             })?;
+        if !eligible(&skill) {
+            let message = match audience {
+                SkillAudience::Human => "skill does not allow user invocation",
+                SkillAudience::Model => "skill does not allow model invocation",
+            };
+            return Err(WorkspaceContextError::Invalid(message.into()));
+        }
         budget.reserve(
             MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES + MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES,
         )?;
-        let invocation = read_bounded_utf8(
-            &skill.path,
-            skill.project_authority.as_deref(),
-            &mut complete,
-            &budget.cancellation,
-        )
-        .and_then(|raw| selected_skill_invocation(skill, &raw, &mut complete));
-        let invocation = invocation.filter(|_| complete).ok_or_else(|| {
-            WorkspaceContextError::Failed(
-                "skill changed or could not be read; refresh to retry".into(),
-            )
-        })?;
+        let invocation = read_skill_invocation(skill, &mut observation, &budget.cancellation);
+        let invocation = invocation
+            .filter(|_| observation.is_complete())
+            .ok_or_else(|| {
+                WorkspaceContextError::Failed(format!(
+                    "skill changed or could not be read; {}; refresh to retry",
+                    observation
+                        .diagnostic
+                        .as_deref()
+                        .unwrap_or("invalid optional skill content"),
+                ))
+            })?;
         SessionResourceValue::Read {
             resource: descriptor(skill),
             text: invocation.text,

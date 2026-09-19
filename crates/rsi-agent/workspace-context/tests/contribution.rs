@@ -132,6 +132,7 @@ async fn verify_closed(root: impl AsRef<std::path::Path>) {
 fn snapshot(instructions: bool) -> WorkspaceContextSnapshot {
     WorkspaceContextSnapshot {
         complete: true,
+        diagnostic: None,
         instructions_sha256: if instructions { "a" } else { "b" }.repeat(64),
         instructions: instructions.then(|| "Workspace instructions".into()),
         skill_catalog_sha256: "c".repeat(64),
@@ -409,11 +410,20 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
     let before = kernel.domain_states(claim.session_id()).await.unwrap();
     let mut incomplete = snapshot(false);
     incomplete.complete = false;
+    let source_failure = "resolve skill directory: permission denied at \"skills/denied\"";
+    incomplete.diagnostic = Some(source_failure.into());
     *fixture.source.snapshot.lock().unwrap() = incomplete;
-    assert_eq!(enter(&kernel, &claim, "incomplete").await, 0);
+    assert_eq!(enter(&kernel, &claim, "incomplete").await, 1);
+    let after = kernel.domain_states(claim.session_id()).await.unwrap();
+    for (old, new) in before.iter().zip(&after) {
+        let mut expected = old.snapshot.state().value().clone();
+        expected["incomplete_reported"] = serde_json::json!(true);
+        assert_eq!(&expected, new.snapshot.state().value());
+    }
+    assert_eq!(enter(&kernel, &claim, "still-incomplete").await, 0);
     assert_eq!(
         kernel.domain_states(claim.session_id()).await.unwrap(),
-        before
+        after
     );
     *fixture.source.snapshot.lock().unwrap() = snapshot(false);
     assert_eq!(enter(&kernel, &claim, "tombstone").await, 1);
@@ -423,6 +433,21 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
         .await
         .unwrap()
         .facts;
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(
+                fact.body(),
+                SessionFactBody::InputMessageEntered { content, .. }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        AgentMessageContent::Text { text } if text.contains(source_failure)
+                    ))
+            ))
+            .count(),
+        1,
+        "source detail is persisted once per incomplete episode"
+    );
     assert_eq!(
         facts
             .iter()
@@ -776,6 +801,8 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     }
     let child = kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),

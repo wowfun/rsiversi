@@ -211,7 +211,7 @@ impl Fixture {
         let pin = AgentCompositionPin::new(
             AgentPresetId::new("test-agent").unwrap(),
             "c".repeat(64),
-            Arc::new(EmptyTools),
+            Arc::new(SourceOnlyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             domains,
             commands,

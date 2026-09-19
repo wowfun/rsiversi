@@ -11,6 +11,7 @@ async fn sqlite_history(store: &SqliteStore, name: &str) -> SessionId {
         SessionFactBody::TurnTerminal {
             turn_id: turn.clone(),
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     )
     .unwrap();

@@ -40,6 +40,8 @@ async fn mutation_fixture(
     let child = SessionId::new("mutation-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -299,6 +301,7 @@ async fn activation_terminal_cannot_bypass_its_atomic_settlement() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: claim.turn_id().clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await;
@@ -337,6 +340,7 @@ async fn rejected_direct_terminal_keeps_agent_mutations_available() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new("wrong-terminal-turn").unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await;
@@ -440,6 +444,8 @@ async fn cancelled_terminal_drain_reopens_only_after_the_last_mutation_finishes(
 async fn cancelled_spawn_commit_is_recoverable_by_exact_retry() {
     let (kernel, workers, observed, memory, _lease, claim, _) = mutation_fixture(false).await;
     let mut request = SpawnAgentRequest {
+        output_contract: None,
+        role: None,
         model: None,
         reasoning_effort: None,
         cancellation: CancellationToken::new(),

@@ -229,6 +229,9 @@ impl Driver {
                 limit,
             });
         }
+        if state.concluded {
+            return Err(DriveFailure::Turn(TurnOutcome::Completed));
+        }
         if state.completed_model_without_successor {
             return Err(DriveFailure::Turn(TurnOutcome::Interrupted {
                 effect: Some(EffectKind::Model),
@@ -1305,7 +1308,7 @@ impl Driver {
         else {
             return Err(fatal("settlement lacks a ToolIntent"));
         };
-        let proposals = self
+        let settlement = self
             .tool_settlement_proposals(claim, composition, &intent, &result)
             .await?;
         let body = SessionFactBody::ToolResult {
@@ -1313,8 +1316,10 @@ impl Driver {
             effect_id: effect_id.clone(),
             identity: identity.clone(),
             result,
+
+            conclusion: settlement.conclusion,
         };
-        let returned = if proposals.is_empty() {
+        let returned = if settlement.domains.is_empty() {
             let facts = self
                 .publish_apply(claim, fold, vec![body])
                 .await
@@ -1330,7 +1335,7 @@ impl Driver {
                     claim,
                     rsi_agent_turn_protocol::DomainMutation {
                         request_id,
-                        proposals,
+                        proposals: settlement.domains,
                         facts: vec![body],
                     },
                 )
@@ -1358,6 +1363,15 @@ impl Driver {
             .commit(identity)
             .map_err(|error| tool_failure(&error))?;
         self.clear_tracked_tool(claim, identity);
+        if matches!(
+            returned.body(),
+            SessionFactBody::ToolResult {
+                conclusion: Some(_),
+                ..
+            }
+        ) {
+            return Err(DriveFailure::Turn(TurnOutcome::Completed));
+        }
         Ok(returned)
     }
 

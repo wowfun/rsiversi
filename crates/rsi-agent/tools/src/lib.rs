@@ -8,6 +8,7 @@ mod questions;
 pub use questions::QuestionToolsFactory;
 
 use async_trait::async_trait;
+use rsi_agent_session_protocol::DelegationRole;
 use rsi_agent_session_protocol::{
     ForkTurnSelection, MAXIMUM_AGENT_IDENTIFIER_BYTES, MessageId, SessionId,
 };
@@ -24,35 +25,43 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 const DEFAULT_WAIT_MS: u64 = 30_000;
 const MAXIMUM_WAIT_MS: u64 = 570_000;
 
-/// Ordinary contribution factory for the six native Agent control Tools.
+/// Ordinary contribution factory for native Agent control Tools.
 #[derive(Clone, Debug, Default)]
 pub struct AgentToolsFactory;
 
 #[async_trait]
 impl PluginFactory for AgentToolsFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        if !desired.is_null() {
-            return Err(MetaError::InvalidInput(
-                "Agent Tools configuration must be null".into(),
-            ));
-        }
-        Ok(PreparedActivation::with_state(Value::Null, (), 0)
-            .requiring_local::<ToolRegistrarContract>()
-            .requiring_local::<TurnServiceContract>())
+        let config = parse_config(desired)?;
+        let bytes = serde_json::to_vec(desired)
+            .map_err(|error| MetaError::InvalidInput(error.to_string()))?
+            .len();
+        // Encoded bytes charge string payloads across configuration and prepared roles.
+        // The per-role allowance is for bounded container overhead, not persona text.
+        let retained = config.roles.len() * 16 * 1024 + bytes * 3;
+        Ok(
+            PreparedActivation::with_state(desired.clone(), config, retained)
+                .requiring_local::<ToolRegistrarContract>()
+                .requiring_local::<TurnServiceContract>(),
+        )
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let (): () = plan.take_state()?;
+        let config: PreparedConfig = plan.take_state()?;
+        let roles = Arc::new(config.roles);
         let registrar = plan.local::<ToolRegistrarContract>()?;
         let turns = plan.local::<TurnServiceContract>()?;
-        let registrations =
-            registrations(&turns).map_err(|error| MetaError::Activation(error.to_string()))?;
+        let registrations = registrations(&turns, &roles, config.read_structured_results)
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let lease = registrar
             .register_batch(registrations)
             .map_err(|error| MetaError::Activation(error.to_string()))?;
@@ -65,8 +74,62 @@ impl PluginFactory for AgentToolsFactory {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleConfig {
+    persona: Option<String>,
+    allow: Option<BTreeSet<String>>,
+    #[serde(default)]
+    deny: BTreeSet<String>,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    #[serde(default)]
+    roles: BTreeMap<String, RoleConfig>,
+    #[serde(default)]
+    read_structured_results: bool,
+}
+struct PreparedConfig {
+    roles: BTreeMap<String, DelegationRole>,
+    read_structured_results: bool,
+}
+fn parse_config(desired: &Value) -> rsi_meta::Result<PreparedConfig> {
+    let config: Config = if desired.is_null() {
+        Config::default()
+    } else {
+        serde_json::from_value(desired.clone())
+            .map_err(|error| MetaError::InvalidInput(error.to_string()))?
+    };
+    if config.roles.len() > 32 {
+        return Err(MetaError::InvalidInput(
+            "at most 32 delegation roles".into(),
+        ));
+    }
+    let roles = config
+        .roles
+        .into_iter()
+        .map(|(name, config)| {
+            let role = DelegationRole {
+                name: name.clone(),
+                persona: config.persona,
+                allow: config.allow,
+                deny: config.deny,
+            };
+            role.validate()
+                .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+            Ok((name, role))
+        })
+        .collect::<rsi_meta::Result<_>>()?;
+    Ok(PreparedConfig {
+        roles,
+        read_structured_results: config.read_structured_results,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 enum NativeTool {
+    ReadResult,
     Spawn,
     Send,
     Followup,
@@ -77,14 +140,27 @@ enum NativeTool {
 
 #[derive(Debug)]
 struct NativeExecutor {
+    roles: Arc<BTreeMap<String, DelegationRole>>,
     kind: NativeTool,
     turns: Arc<dyn TurnService>,
 }
 
 fn registrations(
     turns: &Arc<dyn TurnService>,
+    roles: &Arc<BTreeMap<String, DelegationRole>>,
+    read_structured_results: bool,
 ) -> rsi_tools_protocol::Result<Vec<ToolRegistration>> {
     let specs = [
+        (
+            NativeTool::ReadResult,
+            "read_agent_result",
+            "Read the exact structured result identified by a child's successful Completion. Never infer the latest result.",
+            json!({
+                "type":"object", "properties": {"child_session_id":{"type":"string"},"activation_id":{"type":"string"},"turn_id":{"type":"string"},"fact_seq":{"type":"integer","minimum":1}},
+                "required":["child_session_id","activation_id","turn_id","fact_seq"],"additionalProperties":false
+            }),
+            30_000,
+        ),
         (
             NativeTool::Spawn,
             "spawn_agent",
@@ -149,7 +225,11 @@ fn registrations(
     ];
     specs
         .into_iter()
-        .map(|(kind, name, description, parameters, timeout_ms)| {
+        .filter(|(kind, ..)| read_structured_results || !matches!(kind, NativeTool::ReadResult))
+        .map(|(kind, name, description, mut parameters, timeout_ms)| {
+            if matches!(kind, NativeTool::Spawn) && !roles.is_empty() {
+                parameters["properties"]["role"] = json!({"type":"string","enum":roles.keys().collect::<Vec<_>>(),"description":"Configured child persona and Tool restriction; does not grant permissions."});
+            }
             let scheduling = if matches!(kind, NativeTool::Wait) {
                 ToolScheduling::ExclusiveFinal
             } else {
@@ -160,6 +240,7 @@ fn registrations(
                     .with_scheduling(scheduling),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms },
                 executor: Arc::new(NativeExecutor {
+                    roles: roles.clone(),
                     kind,
                     turns: Arc::clone(turns),
                 }),
@@ -197,6 +278,15 @@ impl NativeExecutor {
         caller: &AgentCallerAuthority,
     ) -> rsi_tools_protocol::Result<ToolResult> {
         let arguments: SpawnArguments = parse(arguments)?;
+        let role = arguments
+            .role
+            .as_ref()
+            .map(|name| {
+                self.roles.get(name).cloned().ok_or_else(|| {
+                    rsi_tools_protocol::ToolError::InvalidInput("unknown configured role".into())
+                })
+            })
+            .transpose()?;
         let fork_turns = arguments
             .fork_turns
             .as_deref()
@@ -207,6 +297,8 @@ impl NativeExecutor {
         match self
             .turns
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role,
                 model: arguments.model,
                 reasoning_effort: arguments.reasoning_effort,
                 cancellation: execution.cancellation.clone(),
@@ -433,6 +525,17 @@ impl ToolExecutor for NativeExecutor {
             );
         };
         match self.kind {
+            NativeTool::ReadResult => {
+                let locator = parse(arguments)?;
+                match self
+                    .turns
+                    .read_agent_result(caller.as_ref(), &locator)
+                    .await
+                {
+                    Ok(value) => tool_ok(value, "Structured child result".into()),
+                    Err(error) => tool_error("result_unavailable", error.to_string()),
+                }
+            }
             NativeTool::Spawn => self.spawn(arguments, &execution, caller.as_ref()).await,
             NativeTool::Send | NativeTool::Followup => {
                 self.send(arguments, &execution, caller.as_ref()).await
@@ -447,6 +550,7 @@ impl ToolExecutor for NativeExecutor {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArguments {
+    role: Option<String>,
     model: Option<rsi_ai_protocol::ModelRef>,
     reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     task_name: String,
@@ -545,6 +649,18 @@ fn tool_error(code: &str, message: impl Into<String>) -> rsi_tools_protocol::Res
 mod tests {
     use super::*;
 
+    #[test]
+    fn structured_consumer_requires_explicit_trusted_configuration() {
+        assert!(!parse_config(&Value::Null).unwrap().read_structured_results);
+        assert!(!parse_config(&json!({})).unwrap().read_structured_results);
+        let config = parse_config(
+            &json!({"read_structured_results": true, "roles":{"review":{"allow":[]}}}),
+        )
+        .unwrap();
+        assert!(config.read_structured_results);
+        assert_eq!(config.roles["review"].allow, Some(BTreeSet::new()));
+        assert!(parse_config(&json!({"read_structured_results": "true"})).is_err());
+    }
     #[test]
     fn derived_identities_are_scoped_to_the_exact_caller_turn() {
         let first = deterministic_session("agent", "session-a", "turn-a", "call-1");

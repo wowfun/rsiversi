@@ -381,3 +381,14 @@ ability to ignore unrelated unavailable codecs. The Kernel never decodes an inte
 or installs Tools after the catalog is sealed. A new fork selects the current
 composition and applies the existing per-Domain fork policy; integrations whose
 catalog must stay with their selected generation reset to their initial state.
+
+A structured conclusion must settle the exact started `report_result` Intent,
+including its effect and retained-result identity, under the initial activation's
+frozen output contract. Other Tools cannot publish structured conclusions even
+through a settlement contributor. Kernel publication and replay enforce this
+binding before accepting any result or accompanying Domain mutation.
+Terminal outcome selection and its result reference use the same admitted Turn
+snapshot after pending mutations drain. A conclusion that settles before terminal
+admission must not become a missing-output failure. Descendant cancellation uses
+that same final outcome. The terminal drain fences new ordinary Fact publication;
+the final installation rechecks that fence after staging outside the global lock.

@@ -9,10 +9,13 @@ pub(super) fn ending_facts(
     base_seq: u64,
     proposed: &TurnOutcome,
 ) -> TurnResult<Vec<SessionFact>> {
+    let outcome = super::structured::completion_outcome(claim.header(), original, proposed);
     let terminal = canonicalize_terminal(
         SessionFactBody::TurnTerminal {
             turn_id: claim.turn_id().clone(),
-            outcome: proposed.clone(),
+            outcome: outcome.clone(),
+
+            result: super::structured::result_reference(claim, original, &outcome),
         },
         original.cancel_requested,
     );

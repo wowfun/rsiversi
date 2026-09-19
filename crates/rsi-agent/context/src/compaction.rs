@@ -1,5 +1,6 @@
 //! Pure pressure planning, source binding and summary installation.
 
+use crate::pruning::InteractionUnit;
 use crate::{
     ContextBuilderIdentity, ContextError, ContextFold, ContextLimits, Result, encoded_message_bytes,
 };
@@ -10,11 +11,11 @@ use rsi_agent_session_protocol::{
 };
 use rsi_ai_protocol::{
     ContentBlock, FinishReason, LanguageOutput, LanguageProfile, LanguageRequest, LanguageSettings,
-    Message, MessageContent, MessageRole, ModelRef, ToolChoice,
+    Message, MessageRole, ModelRef, ToolChoice,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 const TAIL_BYTES: usize = 64 * 1024;
 const PLAN_SOURCES: usize = 1024;
@@ -64,14 +65,6 @@ struct InstalledSummary {
 enum InstructionKind {
     Agent(String),
     SkillCatalog,
-}
-
-struct InteractionUnit {
-    turn: TurnId,
-    first: usize,
-    count: usize,
-    bytes: usize,
-    complete: bool,
 }
 
 impl SemanticState {
@@ -227,6 +220,30 @@ fn summary_message(text: &str) -> Result<Message> {
 fn invalid(message: impl Into<String>) -> ContextError {
     ContextError::Invalid(message.into())
 }
+fn view_digest(messages: &[Cow<'_, Message>]) -> Result<(String, u64)> {
+    #[derive(Default)]
+    struct Writer {
+        hash: Sha256,
+        bytes: u64,
+    }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("context encoding overflow"))?;
+            self.hash.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer::default();
+    serde_json::to_writer(&mut writer, messages).map_err(|error| invalid(error.to_string()))?;
+    Ok((hex::encode(writer.hash.finalize()), writer.bytes))
+}
+
 fn encoded<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|error| invalid(error.to_string()))
 }
@@ -347,21 +364,36 @@ impl ContextFold {
     }
 
     pub(crate) fn semantic_messages(&self) -> Result<Vec<Message>> {
+        let mut projected = self.projected_turns()?;
+        self.semantic_messages_from(self.turns.iter().flat_map(|turn| {
+            projected
+                .remove(&turn.id)
+                .expect("projected Turn")
+                .into_owned()
+                .into_iter()
+                .map(Cow::Owned)
+        }))
+        .map(|messages| messages.into_iter().map(Cow::into_owned).collect())
+    }
+
+    fn semantic_messages_from<'a>(
+        &'a self,
+        projected: impl Iterator<Item = Cow<'a, Message>>,
+    ) -> Result<Vec<Cow<'a, Message>>> {
         let mut messages = Vec::with_capacity(self.retained_messages + 2);
-        messages.extend(self.system_message.iter().cloned());
+        messages.extend(self.system_message.iter().map(Cow::Borrowed));
         if let Some(summary) = self
             .semantic
             .as_ref()
             .and_then(|state| state.summary.as_ref())
         {
-            messages.push(summary_message(&summary.text)?);
+            messages.push(Cow::Owned(summary_message(&summary.text)?));
         }
-        messages.extend(
-            self.turns
-                .iter()
-                .flat_map(|turn| turn.messages.iter().cloned()),
-        );
-        crate::without_unscoped_provider_state(messages)
+        messages.extend(projected);
+        messages
+            .into_iter()
+            .filter_map(|message| crate::without_unscoped_provider_message(message).transpose())
+            .collect()
     }
 
     pub(crate) fn semantic_project(&self, limits: ContextLimits) -> Result<crate::ModelContext> {
@@ -389,12 +421,19 @@ impl ContextFold {
         if !self.assemblers.is_empty() {
             return Err(invalid("cannot compact an unfinished interaction"));
         }
+        let projected = self.projected_turns()?;
+        let view = self.semantic_messages_from(
+            self.turns
+                .iter()
+                .flat_map(|turn| projected[&turn.id].iter().map(Cow::Borrowed)),
+        )?;
+        let (view_sha256, original_bytes) = view_digest(&view)?;
+        let limits = self.retention_limits.unwrap_or_default();
         let optional = force.is_none();
         let trigger = if let Some(trigger) = force {
             trigger
-        } else if self
-            .semantic_project(self.retention_limits.unwrap_or_default())
-            .is_err()
+        } else if view.len() > limits.max_messages
+            || original_bytes > limits.max_bytes as u64
             || state.sources.len() >= PLAN_SOURCES
         {
             CompactionTrigger::CanonicalLimit
@@ -420,9 +459,7 @@ impl ContextFold {
             return Ok(None);
         };
 
-        let view = self.semantic_messages()?;
-        let original = encoded(&view)?;
-        let selected = self.compaction_selections(shrink)?;
+        let selected = self.compaction_selections_from(shrink, &projected)?;
         if selected.is_empty() {
             return if optional && matches!(trigger, CompactionTrigger::Usage { .. }) {
                 Ok(None)
@@ -445,14 +482,11 @@ impl ContextFold {
                 (source.session.clone(), source.turn.clone()),
                 source.clone(),
             );
-            let turn = self
-                .turns
-                .iter()
-                .find(|turn| turn.id == selection.turn)
+            let messages = projected
+                .get(&selection.turn)
                 .ok_or_else(|| invalid("missing selected Turn"))?;
             materialized.extend_from_slice(
-                &turn.messages
-                    [selection.first as usize..(selection.first + selection.count) as usize],
+                &messages[selection.first as usize..(selection.first + selection.count) as usize],
             );
         }
         let plan = ContextCompactionPlan {
@@ -468,8 +502,8 @@ impl ContextFold {
             prior: state.summary.as_ref().map(|summary| summary.prior.clone()),
             trigger,
             through_seq: self.through_seq,
-            view_sha256: hex::encode(Sha256::digest(&original)),
-            original_bytes: original.len() as u64,
+            view_sha256,
+            original_bytes,
             maximum_text_bytes: 32 * 1024,
             maximum_output_tokens: profile.max_output_reserve_tokens().min(8192),
         };
@@ -483,51 +517,27 @@ impl ContextFold {
         Ok(Some(PlannedCompaction { plan, request }))
     }
 
-    fn interaction_units(&self) -> Result<Vec<InteractionUnit>> {
-        // Terminal interruption can leave holes in an ordered Tool batch. Keep
-        // that whole partial batch as evidence, outside summary selection.
+    fn projected_turns(&self) -> Result<crate::pruning::ProjectedTurns<'_>> {
+        crate::pruning::project(
+            self.turns
+                .iter()
+                .map(|turn| (&turn.id, turn.messages.as_slice())),
+        )
+    }
+
+    // Coordinates refer to original messages; byte weights must come from the
+    // pruned JSON view, while pruning thresholds themselves count codepoints.
+    fn interaction_units(
+        &self,
+        projected: &crate::pruning::ProjectedTurns<'_>,
+    ) -> Result<Vec<InteractionUnit>> {
         let mut units = Vec::new();
         for turn in &self.turns {
-            let mut index = 0;
-            while index < turn.messages.len() {
-                let first = index;
-                let message = &turn.messages[index];
-                if message.role() == MessageRole::Tool {
-                    return Err(invalid("orphan Tool result in compaction input"));
-                }
-                index += 1;
-                let calls: Vec<&str> = message
-                    .content()
-                    .iter()
-                    .filter_map(|content| match content {
-                        MessageContent::ToolCall(call) => Some(call.id.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let mut complete = true;
-                for call in calls {
-                    if turn.messages.get(index).is_some_and(|result| result.content().iter().any(|content| matches!(content, MessageContent::ToolResult { call_id, .. } if call_id == call))) {
-                        index += 1;
-                    } else if turn.terminal {
-                        complete = false;
-                    } else {
-                        return Err(invalid("unfinished or misordered live Tool batch in compaction input"));
-                    }
-                }
-                let bytes = turn.messages[first..index]
-                    .iter()
-                    .map(encoded_message_bytes)
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .sum::<usize>();
-                units.push(InteractionUnit {
-                    turn: turn.id.clone(),
-                    first,
-                    count: index - first,
-                    bytes,
-                    complete,
-                });
-            }
+            units.extend(crate::pruning::units(
+                &turn.id,
+                &projected[&turn.id],
+                turn.terminal,
+            )?);
         }
         Ok(units)
     }
@@ -554,12 +564,16 @@ impl ContextFold {
         tail_start
     }
 
-    fn compaction_selections(&self, shrink: bool) -> Result<Vec<CompactionSelection>> {
+    fn compaction_selections_from(
+        &self,
+        shrink: bool,
+        projected: &crate::pruning::ProjectedTurns<'_>,
+    ) -> Result<Vec<CompactionSelection>> {
         let state = self
             .semantic
             .as_ref()
             .ok_or_else(|| invalid("builder does not support compaction"))?;
-        let units = self.interaction_units()?;
+        let units = self.interaction_units(projected)?;
         let current = self.turns.back().ok_or(ContextError::TooLarge)?;
         let original_input = current
             .messages
@@ -612,12 +626,7 @@ impl ContextFold {
             if next_bytes > PLAN_SELECTION_BYTES {
                 break;
             }
-            let ordinal = *self
-                .turn_index
-                .get(&turn)
-                .ok_or_else(|| invalid("missing selected Turn"))?;
-            let messages =
-                &self.turns[self.relative_index(ordinal)?].messages[first..first + count];
+            let messages = &projected[&turn][first..first + count];
             // The placeholder already includes the array brackets. Count a
             // separator per unit, including one conservative trailing comma.
             let source_bytes =
@@ -672,11 +681,14 @@ impl ContextFold {
                 return false;
             }
         }
+        let Ok(projected) = self.projected_turns() else {
+            return false;
+        };
         if !self
-            .compaction_selections(false)
+            .compaction_selections_from(false, &projected)
             .is_ok_and(|selections| selections == plan.selections)
             && !self
-                .compaction_selections(true)
+                .compaction_selections_from(true, &projected)
                 .is_ok_and(|selections| selections == plan.selections)
         {
             return false;
@@ -722,12 +734,13 @@ impl ContextFold {
                 return false;
             }
         }
-        self.semantic_messages()
-            .and_then(|view| encoded(&view))
-            .is_ok_and(|bytes| {
-                hex::encode(Sha256::digest(&bytes)) == plan.view_sha256
-                    && bytes.len() as u64 == plan.original_bytes
-            })
+        self.semantic_messages_from(
+            self.turns
+                .iter()
+                .flat_map(|turn| projected[&turn.id].iter().map(Cow::Borrowed)),
+        )
+        .and_then(|view| view_digest(&view))
+        .is_ok_and(|(sha256, bytes)| sha256 == plan.view_sha256 && bytes == plan.original_bytes)
     }
 
     pub(crate) fn finish_semantic(
@@ -801,13 +814,17 @@ impl ContextFold {
         }
         let mut view: Vec<Message> = self.system_message.iter().cloned().collect();
         view.push(summary_message(&text)?);
+        let mut projected = crate::pruning::project(
+            self.turns
+                .iter()
+                .map(|turn| (&turn.id, replacements[&turn.id].as_slice())),
+        )?;
         for turn in &self.turns {
             view.extend(
-                replacements
-                    .get(&turn.id)
-                    .expect("captured Turn")
-                    .iter()
-                    .cloned(),
+                projected
+                    .remove(&turn.id)
+                    .expect("projected Turn")
+                    .into_owned(),
             );
         }
         let bytes = encoded(&crate::without_unscoped_provider_state(view)?)?.len();
@@ -906,5 +923,50 @@ impl ContextFold {
             .as_ref()
             .and_then(|state| state.summary.as_ref())
             .is_some_and(|summary| &summary.prior.effect == effect)
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use rsi_ai_protocol::MessageContent;
+
+    #[test]
+    fn borrowed_digest_matches_owned_json_after_reasoning_removal() {
+        let plain = Message::user_text("界🦀\\\"\n".repeat(10_000)).unwrap();
+        let visible = Message::assistant(vec![MessageContent::Text {
+            text: "answer".into(),
+        }])
+        .unwrap();
+        let mixed = Message::assistant(vec![
+            MessageContent::Reasoning {
+                text: "private".into(),
+                evidence: None,
+            },
+            visible.content()[0].clone(),
+        ])
+        .unwrap();
+        let reasoning = Message::assistant(vec![MessageContent::Reasoning {
+            text: "private only".into(),
+            evidence: None,
+        }])
+        .unwrap();
+        let borrowed: Vec<_> = [&plain, &mixed, &reasoning]
+            .into_iter()
+            .filter_map(|message| {
+                crate::without_unscoped_provider_message(Cow::Borrowed(message)).transpose()
+            })
+            .collect::<Result<_>>()
+            .unwrap();
+        assert!(matches!(borrowed[0], Cow::Borrowed(_)));
+        assert!(matches!(borrowed[1], Cow::Owned(_)));
+        let expected = encoded(&[&plain, &visible]).unwrap();
+        assert_eq!(
+            view_digest(&borrowed).unwrap(),
+            (
+                hex::encode(Sha256::digest(&expected)),
+                expected.len() as u64
+            )
+        );
     }
 }

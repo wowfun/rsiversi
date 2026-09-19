@@ -2,6 +2,32 @@ use super::*;
 use rsi_agent_store_protocol::StoreFactSuffix;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
 
+/// Only this module can construct or mutate an admitted capture envelope.
+#[derive(Debug, serde::Serialize)]
+#[serde(transparent)]
+pub(super) struct ValidatedEnvelope(ReferenceSnapshotEnvelope);
+impl ValidatedEnvelope {
+    fn new(envelope: ReferenceSnapshotEnvelope) -> Result<Self> {
+        envelope.validate().map_err(invalid)?;
+        Ok(Self(envelope))
+    }
+    pub(super) fn into_frozen(self, snapshot: ReferenceSnapshotRef) -> Result<FrozenReference> {
+        let reference = FrozenReference {
+            snapshot,
+            metadata: self.0.metadata,
+            preview: self.0.preview,
+        };
+        reference.validate().map_err(invalid)?;
+        Ok(reference)
+    }
+}
+#[cfg(test)]
+impl ValidatedEnvelope {
+    fn as_envelope(&self) -> &ReferenceSnapshotEnvelope {
+        &self.0
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Consume the bounded suffix so its Facts drop before CAS publication."
@@ -10,7 +36,7 @@ pub(super) fn capture(
     source: &SessionHeader,
     target: &SessionHeader,
     suffix: StoreFactSuffix,
-) -> Result<ReferenceSnapshotEnvelope> {
+) -> Result<ValidatedEnvelope> {
     suffix.validate(MAXIMUM_REFERENCE_SCAN_FACTS, MAXIMUM_REFERENCE_SCAN_BYTES)?;
     let mut parts = Vec::new();
     let mut remaining = MAXIMUM_REFERENCE_TEXT_BYTES;
@@ -101,8 +127,7 @@ pub(super) fn capture(
             .into(),
         text,
     };
-    envelope.validate().map_err(invalid)?;
-    Ok(envelope)
+    ValidatedEnvelope::new(envelope)
 }
 
 #[derive(Eq, PartialEq)]
@@ -243,6 +268,43 @@ mod tests {
     fn text(text: &str) -> Vec<AgentMessageContent> {
         vec![AgentMessageContent::Text { text: text.into() }]
     }
+    #[test]
+    fn validated_capture_preserves_wire_bytes_and_checks_the_returned_cas_reference() {
+        let header = header();
+        let captured = || {
+            capture(
+                &header,
+                &header,
+                suffix(
+                    0,
+                    vec![input(
+                        InputMessageSource::Human {
+                            message_id: MessageId::new("human").unwrap(),
+                        },
+                        text("visible \\\n界"),
+                    )],
+                ),
+            )
+            .unwrap()
+        };
+        let envelope = captured();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(bytes, serde_json::to_vec(&envelope.0).unwrap());
+        let byte_len = u64::try_from(bytes.len()).unwrap();
+        let snapshot = ReferenceSnapshotRef {
+            sha256: "a".repeat(64),
+            byte_len,
+        };
+        let expected = envelope.0.frozen(snapshot.clone()).unwrap();
+        assert_eq!(envelope.into_frozen(snapshot).unwrap(), expected);
+        for (sha256, byte_len) in [(String::new(), byte_len), ("a".repeat(64), 0)] {
+            assert!(
+                captured()
+                    .into_frozen(ReferenceSnapshotRef { sha256, byte_len })
+                    .is_err()
+            );
+        }
+    }
     fn model(purpose: ModelEventPurpose, delta: ContentDelta) -> SessionFactBody {
         SessionFactBody::ModelEvent {
             turn_id: TurnId::new("turn").unwrap(),
@@ -272,6 +334,7 @@ mod tests {
             ),
         )
         .unwrap()
+        .as_envelope()
         .frozen(ReferenceSnapshotRef {
             sha256: "b".repeat(64),
             byte_len: 100,
@@ -363,17 +426,23 @@ mod tests {
                             false,
                         )
                         .unwrap(),
+                        conclusion: None,
                     },
                 ],
             ),
         )
         .unwrap();
         assert!(
-            exported.text.contains("visible-human") && exported.text.contains("visible-assistant")
+            exported.as_envelope().text.contains("visible-human")
+                && exported.as_envelope().text.contains("visible-assistant")
         );
-        assert!(!exported.text.contains("secret"), "{}", exported.text);
-        assert_eq!(exported.metadata.retained_after_seq, 0);
-        assert_eq!(exported.metadata.retained_through_seq, 10);
+        assert!(
+            !exported.as_envelope().text.contains("secret"),
+            "{}",
+            exported.as_envelope().text
+        );
+        assert_eq!(exported.as_envelope().metadata.retained_after_seq, 0);
+        assert_eq!(exported.as_envelope().metadata.retained_through_seq, 10);
     }
     #[test]
     fn streaming_deltas_coalesce_without_joining_distinct_model_blocks() {
@@ -421,10 +490,15 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(envelope.text.contains("Hello 世界"));
-        assert_eq!(envelope.text.matches("[Assistant").count(), 2);
-        assert!(envelope.text.contains("A visible human image prompt"));
-        assert!(!envelope.text.contains("hidden"));
+        assert!(envelope.as_envelope().text.contains("Hello 世界"));
+        assert_eq!(envelope.as_envelope().text.matches("[Assistant").count(), 2);
+        assert!(
+            envelope
+                .as_envelope()
+                .text
+                .contains("A visible human image prompt")
+        );
+        assert!(!envelope.as_envelope().text.contains("hidden"));
     }
     #[test]
     fn utf8_content_preview_and_source_coordinates_keep_their_exact_bounds() {
@@ -441,11 +515,16 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(envelope.text.len() <= MAXIMUM_REFERENCE_TEXT_BYTES);
-        assert!(envelope.preview.len() <= MAXIMUM_REFERENCE_PREVIEW_BYTES);
-        assert!(envelope.text.starts_with(&envelope.preview));
+        assert!(envelope.as_envelope().text.len() <= MAXIMUM_REFERENCE_TEXT_BYTES);
+        assert!(envelope.as_envelope().preview.len() <= MAXIMUM_REFERENCE_PREVIEW_BYTES);
+        assert!(
+            envelope
+                .as_envelope()
+                .text
+                .starts_with(&envelope.as_envelope().preview)
+        );
         assert_eq!(
-            envelope.metadata.omissions,
+            envelope.as_envelope().metadata.omissions,
             vec![
                 ReferenceOmission::FactLimit,
                 ReferenceOmission::ContentBytes
@@ -455,10 +534,10 @@ mod tests {
         assert_eq!(value["metadata"]["through_seq"], "9007199254740993");
         let decoded: ReferenceSnapshotEnvelope = serde_json::from_value(value).unwrap();
         decoded.validate().unwrap();
-        assert_eq!(decoded, envelope);
-        let mut invalid = envelope;
+        assert_eq!(decoded, envelope.0);
+        let mut invalid = envelope.0;
         invalid.preview.push('x');
-        assert!(invalid.validate().is_err());
+        assert!(ValidatedEnvelope::new(invalid).is_err());
         assert!(
             capture(
                 &header,
@@ -500,6 +579,7 @@ mod tests {
                 .await
                 .unwrap();
             let reference = envelope
+                .as_envelope()
                 .frozen(ReferenceSnapshotRef {
                     sha256: object.sha256,
                     byte_len: object.byte_len,

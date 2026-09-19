@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+jsonschema.workspace = true
 rsi-workspace-path = { path = "../../rsi-workspace/path" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-approval-protocol = { path = "../../rsi-approval/protocol" }

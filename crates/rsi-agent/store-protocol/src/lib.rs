@@ -30,7 +30,7 @@ pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 21;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 22;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1843,6 +1843,18 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Store does not support Session inspection".into(),
         ))
     }
+    /// Reads one exact indexed message without loading the pending mailbox.
+    /// Validates the selected entry against the same snapshot's durable control tail.
+    async fn read_agent_message(
+        &self,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        let _ = (session_id, message_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support exact message reads".into(),
+        ))
+    }
     /// Reads the complete bounded pending mailbox and one optional message status atomically.
     async fn read_agent_mailbox(
         &self,
@@ -2132,6 +2144,7 @@ mod tests {
                 SessionFactBody::TurnTerminal {
                     turn_id: TurnId::new("terminal-correlation").unwrap(),
                     outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap(),
@@ -2244,6 +2257,7 @@ mod tests {
                 SessionFactBody::TurnTerminal {
                     turn_id: TurnId::new("second").unwrap(),
                     outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap(),

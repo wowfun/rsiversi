@@ -105,6 +105,7 @@ impl Fixture {
             identity,
             result: rsi_tools_protocol::ToolResult::new(json!({"exit_code":7}), vec![], true)
                 .unwrap(),
+            conclusion: None,
         })
     }
     fn input(&mut self, human: bool) {

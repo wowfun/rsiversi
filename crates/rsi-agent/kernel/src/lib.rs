@@ -569,6 +569,9 @@ struct LiveWatermarks {
 }
 
 struct TurnControl {
+    initial_messages: BTreeSet<MessageId>,
+    claim_composition: Option<AgentCompositionPin>,
+    conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
     evidence_inline_bytes: usize,
     tool_source: Option<Arc<tool_origin::ToolSource>>,
     seen_model_effects: Arc<BTreeSet<EffectId>>,
@@ -645,6 +648,7 @@ enum ActiveEffect {
         next_index: u32,
     },
     Tool {
+        name: String,
         source_selection: rsi_agent_session_protocol::ModelSelection,
         effect_id: EffectId,
         identity: rsi_tools_protocol::ToolResultIdentity,
@@ -656,6 +660,9 @@ enum ActiveEffect {
 impl TurnControl {
     fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            initial_messages: BTreeSet::new(),
+            claim_composition: None,
+            conclusion: None,
             tool_source: None,
             seen_model_effects: Arc::new(BTreeSet::new()),
             evidence_inline_bytes: 0,
@@ -811,6 +818,7 @@ mod lifecycle;
 mod notifications;
 mod projection;
 mod resource;
+mod structured;
 use notifications::{SessionWatch, SessionWatchHub};
 mod observation;
 mod recovery;

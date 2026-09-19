@@ -38,7 +38,33 @@ catalog. Those historical versions become ordinary summary candidates. Additive
 instructions stay protected until an explicit replacement of their source;
 instructions from other sources retain their protection.
 
-Builder 2.5.0 renders frozen reference previews as user data with exact recorded
+Builder 2.6.0 prunes historical Tool-result text at view time. The fold and its
+checkpoint retain the original projected messages. Above 8,192 Unicode code
+points, the view keeps the first 4,096 and last 1,024, separated by
+`\n\n[... tool result middle pruned ...]\n\n`. Text budgets span all text blocks
+of one result; non-text blocks retain their order. The JSON fallback used when a
+Tool has no content is also text and may cease to be complete JSON after pruning.
+The latest complete interaction unit and every incomplete unit remain intact.
+An ordered partial prefix is readable; orphan or misordered results are invalid.
+Summary planning still rejects an unfinished live interaction.
+
+Ordinary requests, summary input and selection budgets, view digests, replay
+eligibility and post-install shrink checks use the same pure projection. One planning
+call reuses a single projected history for pressure, selection and materialization.
+Unchanged turns borrow their retained messages; only turns containing a pruned
+result are copied. Replay eligibility also shares one projection across its checks.
+Planning and replay hash the borrowed semantic view directly into a counting
+SHA-256 writer, without copying unchanged messages or buffering their JSON.
+Provider-private reasoning is removed under the same projection rules as ordinary
+requests; the view bytes and durable digests remain identical.
+Stable message coordinates and raw Fact/source digests do not change. Equal identity,
+prefix and position produce equal views; a child with additional input need not
+match its parent's former view. Pruning occurs on every view, independently of
+the existing reported-Usage summary trigger. It does not relax raw materialization
+bounds. Older builder summaries and caches are ineligible under the new identity;
+fallback to raw Facts can reach those bounds.
+
+The builder renders frozen reference previews as user data with exact recorded
 read coordinates. It performs no CAS reads. It also binds newly selected source spans plus the exact previously
 installed summary. That prior is an inductive proof: it is usable only after
 its own sources and prior were validated in this same replay/fork selection.
@@ -134,3 +160,9 @@ final envelope buffer. The complete envelope counts against the existing byte
 bound. The generic builder releases the copied opaque payload before allocating
 the final shared envelope. These allocation rules preserve the serialized format,
 binding checks and optional-cache failure behavior.
+
+Semantic request construction and compaction both reject orphan or misordered
+Tool results. Legacy non-semantic `ContextFold::project` may retain an orphan
+as partial evidence, but `ContextFold::request` rejects it at the AI request
+validator. Neither public request path sends an orphan to a provider. Unit shape discovery performs no JSON byte accounting. Compaction
+measures the pruned messages only after shape validation.

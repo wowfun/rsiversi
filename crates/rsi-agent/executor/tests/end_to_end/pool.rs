@@ -711,6 +711,7 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: claim.turn_id().clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await

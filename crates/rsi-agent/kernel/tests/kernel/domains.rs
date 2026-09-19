@@ -35,7 +35,7 @@ fn domain_composition() -> (Arc<DomainComposition>, DomainHandle<bool>) {
     let pin = AgentCompositionPin::new(
         AgentPresetId::new("test-agent").unwrap(),
         "a".repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(SourceOnlyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         catalog,
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -77,6 +77,7 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
                 false,
             )
             .unwrap(),
+            conclusion: None,
         };
         if mode == "cancelled" {
             run.kernel
@@ -546,6 +547,8 @@ async fn unresolvable_domain_commit_closes_execution_but_preserves_queryable_his
     assert!(matches!(
         run.kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 caller,
@@ -697,6 +700,7 @@ async fn control_only_domain_work_exhausts_record_budget_and_rejects_the_whole_m
                 SessionFactBody::TurnTerminal {
                     turn_id: run.claim.turn_id().clone(),
                     outcome,
+                    result: None,
                 },
             ],
         )
@@ -1478,6 +1482,8 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
         let child = SessionId::new(format!("domain-child-{name}")).unwrap();
         let caller = control_tool_caller(&reopened, &invoking).await;
         let request = || SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -1659,4 +1665,109 @@ async fn cold_projection_and_resume_supply_original_baseline_before_composition_
         assert_eq!(seed.states(), std::slice::from_ref(&baseline));
     }
     drop(captures);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // A barrier holds the accepted conclusion across terminal admission.
+async fn ending_waits_for_the_admitted_structured_conclusion() {
+    use rsi_agent_session_protocol::{InitialOutputContract, OutputContract, ToolConclusion};
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let (composition, domain) = domain_composition();
+    let contract = OutputContract::new(serde_json::json!({"type":"object"})).unwrap();
+    let message = mailbox_message("structured-race-input");
+    let header = header("structured-race")
+        .with_initial_output(Some(InitialOutputContract {
+            message_id: message.message_id.clone(),
+            contract: contract.clone(),
+        }))
+        .unwrap();
+    let initial = PreparedFreshSession::new(header, composition.pin.clone()).unwrap();
+    let kernel = AgentKernel::recover_with_clock(store.clone(), composition, Arc::new(FixedClock))
+        .await
+        .unwrap();
+    let workers = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: SubmitSession::Fresh(initial),
+            message,
+            delivery: MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("structured-race-worker".into()).unwrap();
+    let claim = kernel
+        .claim("structured-race-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    tool_origin::publish_model_source(&kernel, &claim, "report", "report_result", &snapshot())
+        .await;
+    let effect = EffectId::new("report-effect").unwrap();
+    let identity =
+        ToolResultIdentity::new("report-owner", "report-effect", "report", "a".repeat(64)).unwrap();
+    for body in [
+        SessionFactBody::ToolIntent {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect.clone(),
+            source_model_effect_id: EffectId::new("source-model").unwrap(),
+            identity: identity.clone(),
+            name: "report_result".into(),
+            arguments: serde_json::json!({}),
+            approval: None,
+            parallel_safe: false,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect.clone(),
+            identity: identity.clone(),
+        },
+    ] {
+        let facts = kernel
+            .publish(&claim, vec![body])
+            .await
+            .unwrap()
+            .published();
+        kernel
+            .flush(&claim, facts.last().unwrap().seq())
+            .await
+            .unwrap();
+    }
+    let result = SessionFactBody::ToolResult {
+        turn_id: claim.turn_id().clone(),
+        effect_id: effect,
+        identity,
+        result: rsi_tools_protocol::ToolResult::new(serde_json::json!({}), vec![], false).unwrap(),
+        conclusion: Some(ToolConclusion {
+            structured: Some(contract.summarize(&serde_json::json!({})).unwrap()),
+        }),
+    };
+    let mutation = rsi_agent_turn_protocol::DomainMutation {
+        request_id: rsi_agent_session_protocol::DomainRequestId::new("conclusion").unwrap(),
+        proposals: vec![domain.propose(DomainRevision::new(1), &true).unwrap()],
+        facts: vec![result.clone()],
+    };
+    store.pause_next_agent_commit_before_apply();
+    let settlement = {
+        let kernel = kernel.clone();
+        let claim = claim.clone();
+        tokio::spawn(async move { kernel.commit_domains(&claim, mutation).await })
+    };
+    store.wait_until_agent_commit_is_before_apply().await;
+    let ending = kernel.finish_turn(&claim, &TurnOutcome::Completed);
+    tokio::pin!(ending);
+    assert!(futures_util::poll!(&mut ending).is_pending());
+    assert!(matches!(kernel.publish(&claim, vec![result]).await,
+        Err(TurnError::Invalid(message)) if message == "Turn is finishing"));
+    store.release_agent_commit_before_apply();
+    let receipt = settlement.await.unwrap().unwrap();
+    let terminal = ending.await.unwrap();
+    let seq = receipt.commit().fact_span().unwrap().first_seq();
+    assert!(
+        matches!(terminal.body(), SessionFactBody::TurnTerminal {
+        outcome: TurnOutcome::Completed, result: Some(reference), ..
+    } if reference.fact_seq == seq),
+        "{terminal:?}"
+    );
+    kernel.shutdown(workers).await.unwrap();
 }

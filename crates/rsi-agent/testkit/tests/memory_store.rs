@@ -131,6 +131,7 @@ async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_atomic_appe
                     SessionFactBody::TurnTerminal {
                         turn_id: unknown,
                         outcome: TurnOutcome::Completed,
+                        result: None,
                     },
                 )
                 .unwrap(),
@@ -212,6 +213,7 @@ async fn memory_store_passes_the_shared_mechanical_contract() {
             SessionFactBody::TurnTerminal {
                 turn_id: turn,
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap(),
@@ -255,6 +257,7 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
             SessionFactBody::TurnTerminal {
                 turn_id: TurnId::new("turn-1").unwrap(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap(),

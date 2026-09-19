@@ -29,6 +29,8 @@ async fn waiting_root(
     assert_eq!(root_claim.session_id(), &root);
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -195,6 +197,8 @@ async fn transient_ancestor_settlement_failure_is_retried_without_restart() {
     let child_id = SessionId::new("session-settlement-retry-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -285,6 +289,8 @@ async fn reserved_child_completion_settles_at_full_parent_mailbox_occupancy() {
     let child_id = SessionId::new("session-reserved-completion-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),

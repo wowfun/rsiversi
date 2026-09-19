@@ -103,6 +103,11 @@ seed SHA-256 and fresh/restoring mode; a saved external manifest therefore canno
 catalog built for another manifest. The immutable seed is supplied inside the
 same fresh Local isolation as the registrars, before any Profile leaf activates.
 Unchanged definitions may share a pin only when these inputs also match.
+An owner-detected seed codec mismatch survives failed activation as a closed,
+generation-local diagnostic. It reports typed saved/expected identities and the
+new-conversation action after rollback. Other Profile activation failures retain
+their generic redaction. A recorded mismatch also prevents sealing if a plugin
+ignores its failed state lookup.
 
 A valid executable source snapshot may explicitly mark only its current generation
 inputs unavailable with a static, redacted reason supplied by the source owner.

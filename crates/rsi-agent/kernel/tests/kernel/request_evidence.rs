@@ -167,6 +167,7 @@ async fn evidence_references_require_original_inline_bytes_in_the_same_session()
             vec![SessionFactBody::TurnTerminal {
                 turn_id: claim.turn_id().clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await

@@ -13,6 +13,16 @@ the Turn.
 
 ## Decision
 
+Historical Tool-result pruning is a pure view operation over retained original
+messages, not a rewrite of Facts or checkpoint contents. The default builder's
+semantic identity changes to 2.6.0 because summary view digests include that
+projection. The owning Context contract defines the fixed budgets and protected
+units. The same projection is used before planning and after candidate summary
+installation; comparing pruned input against unpruned candidates would reject
+valid shrinking summaries. DSH's 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720
+pruner supplies the head/tail budgets, but its pressure-triggered log replacement
+does not define RSI's eager view-time mechanism.
+
 Each ModelIntent freezes a typed Conversation or ContextCompaction purpose.
 Compaction binds builder identity, Header, selected source spans/digests,
 transitive prior summary, Usage horizon and output limits. The pure cursor plans

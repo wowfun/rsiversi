@@ -11,7 +11,7 @@ pub struct WorkspaceSkillRequests {
 }
 
 impl WorkspaceSkillRequests {
-    /// Extracts at most 4,096 candidate tokens from bounded direct Human messages.
+    /// Extracts at most 4,096 distinct candidate names from bounded direct Human messages.
     pub fn from_messages(messages: &[&AgentMessage]) -> Result<Self, WorkspaceContextError> {
         if messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
             || messages.iter().any(|message| {
@@ -43,7 +43,7 @@ impl WorkspaceSkillRequests {
         Ok(())
     }
 
-    /// Recognizes the first token on the first nonempty line of direct-user text.
+    /// Recognizes a leading slash invocation and dollar references throughout prose.
     pub fn push_text(&mut self, text: &str) -> Result<(), WorkspaceContextError> {
         let mut words = text
             .lines()
@@ -56,13 +56,22 @@ impl WorkspaceSkillRequests {
         } else {
             token.strip_prefix('/')
         };
-        let Some(name) = name.filter(|name| valid_skill_name(name)) else {
-            return Ok(());
-        };
+        if let Some(name) = name.filter(|name| valid_skill_name(name)) {
+            self.push_name(name)?;
+        }
+        for token in super::skill_input::dollar_tokens(text) {
+            if !token.name.is_empty() {
+                self.push_name(token.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn push_name(&mut self, name: &str) -> Result<(), WorkspaceContextError> {
         if self.seen.contains(name) {
             return Ok(());
         }
-        if self.names.len() >= 4096 {
+        if self.seen.len() >= 4096 {
             return Err(WorkspaceContextError::Capacity);
         }
         self.seen.insert(name.to_owned());

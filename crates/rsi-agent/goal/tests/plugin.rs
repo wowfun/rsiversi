@@ -451,6 +451,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
                     effect_id: effect.clone(),
                     identity: identity.clone(),
                     result: result.clone(),
+                    conclusion: None,
                 },
             )
             .unwrap(),

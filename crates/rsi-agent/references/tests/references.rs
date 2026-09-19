@@ -37,6 +37,7 @@ fn terminal(turn: &str) -> SessionFactBody {
     SessionFactBody::TurnTerminal {
         turn_id: TurnId::new(turn).unwrap(),
         outcome: TurnOutcome::Completed,
+        result: None,
     }
 }
 async fn append(

@@ -16,12 +16,26 @@ and contribution resolver; source refresh cannot mix their authority. A source c
 other global factories. Unknown or unsupported contribution identities fail
 before a Tool stage is sealed or any session capacity is reserved.
 
-Workspace trust is an immutable Header decision. Configured user instruction
-and skill roots remain trusted inputs; project `AGENTS.md` and project skills
-are eligible only for a trusted Session. Project discovery acquires one owned
-root directory capability, then keeps enumeration, metadata, and source reads
-relative to it. Project symlinks are omissions, not alternate authorities, and
-an incomplete observation cannot replace the last-good durable context.
+Selected Session workspaces supply project `AGENTS.md` and skills by default,
+alongside configured user instructions and skills. Discovery does not grant Tool
+approval, Sandbox privileges, remote authentication or Workspace registration.
+Selecting a workspace accepts its instruction and skill sources as model context,
+including later edits and directory-link targets. A malicious checkout can
+therefore influence model behavior; the product does not claim prompt-injection
+isolation for those sources. Project skills take precedence over identically named
+RSI-configured and personal skills: a checkout can replace what `/name`,
+`/skill name` or `$name` resolves to, including a familiar personal skill name.
+The selected logical source is shared by listing, preview and invocation.
+The rationale belongs to the
+[workspace discovery decision](../../../.agents/notes/implemented/simplification/2026-09-19-default-workspace-context.md).
+Project instruction reads remain
+relative to an owned project directory capability and do not follow symlinks.
+Skill roots authorize directory-link targets, including outside the project;
+skill files themselves must not be symlinks. Skill metadata and body reads use
+the same resolved directory handle for each observation. Discovery, source
+selection and read bounds belong to the
+[workspace source contract](../workspace-context/README.md). An incomplete
+observation cannot replace the last-good durable context.
 
 Subagent control authority is process-local and claim-scoped. The executor
 derives `AgentCallerAuthority` from the exact live claim and started Tool effect and injects it as a

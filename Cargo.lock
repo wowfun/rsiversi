@@ -4453,6 +4453,8 @@ dependencies = [
  "rsi-process-local",
  "rsi-process-output-api",
  "rsi-projection",
+ "rsi-pty",
+ "rsi-pty-protocol",
  "rsi-retrieval",
  "rsi-sandbox",
  "rsi-sandbox-local",
@@ -4760,6 +4762,7 @@ name = "rsi-agent-session-protocol"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "jsonschema",
  "rsi-ai-protocol",
  "rsi-approval-protocol",
  "rsi-media-protocol",
@@ -4796,6 +4799,7 @@ dependencies = [
  "rsi-meta",
  "rsi-sandbox",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",
@@ -4892,6 +4896,7 @@ dependencies = [
  "cap-std",
  "hex",
  "libc",
+ "pulldown-cmark",
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
@@ -5533,10 +5538,13 @@ dependencies = [
 name = "rsi-configuration-api"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-mcp-protocol",
+ "rsi-session-protocol",
  "serde",
  "serde_json",
  "url",
@@ -6156,9 +6164,11 @@ dependencies = [
  "async-trait",
  "getrandom 0.3.4",
  "hex",
+ "portable-pty",
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",
+ "rsi-sandbox-local",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -6193,6 +6203,34 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "rsi-pty"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-pty-protocol",
+ "rsi-sandbox",
+ "sha2",
+ "tokio",
+ "vt100",
+]
+
+[[package]]
+name = "rsi-pty-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "rsi-process",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6255,6 +6293,7 @@ dependencies = [
  "libc",
  "rsi-meta",
  "rsi-sandbox",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -6339,6 +6378,8 @@ dependencies = [
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-process",
+ "rsi-pty-protocol",
  "rsi-sandbox",
  "rsi-session-protocol",
  "rsi-tools-protocol",
@@ -6445,6 +6486,7 @@ dependencies = [
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta-contract",
+ "rsi-pty-protocol",
  "rsi-sandbox",
  "rsi-user-questions-protocol",
  "rsi-workspace-protocol",
@@ -6680,6 +6722,7 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-todo",
  "rsi-agent-turn-protocol",
+ "rsi-agent-workspace-context",
  "rsi-ai-protocol",
  "rsi-api-device-api",
  "rsi-api-protocol",

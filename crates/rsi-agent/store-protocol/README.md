@@ -1,5 +1,9 @@
 # rsi-agent-store-protocol
 
+Exact message reads return only the selected indexed mailbox entry, including its
+terminal state. They validate it against the durable control tail in the same
+snapshot and never materialize or count unrelated pending message bodies.
+
 Finite suffix capture returns a read-time Fact horizon and prefix digest from
 the same metadata snapshot as its bounded backward page. The caller supplies
 count and encoded-byte limits; providers check lengths before copying bodies,
@@ -13,7 +17,7 @@ cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
 
-Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (21). Schema 20
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (22). Schema 21
 and earlier versions are rejected before recovery or writes; there is no implicit
 migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.

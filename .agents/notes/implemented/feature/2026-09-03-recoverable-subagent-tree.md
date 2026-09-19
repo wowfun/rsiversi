@@ -25,6 +25,49 @@ arguments also cannot be trusted to name the calling Session, Turn, or tree.
 
 ## Decision
 
+Configured delegation roles contribute persona text and exact Tool allow/deny
+sets. They grant no sandbox or trust authority. Spawn freezes the normalized
+role digest and effective names in the child Header; ancestor intersections and
+cold-catalog intersections cannot broaden that set. Exact spawn retries compare
+the saved role request instead of rebuilding a changed source catalog. A scoped
+ToolRuntime filters discovery and prepare while preserving exact retained-result
+ownership. An invented or hidden Tool keeps the existing `tool.not_found` Turn
+failure with no ToolIntent, start or I/O. This deliberately differs from DSH's
+recoverable error-result path. Persona is frozen instruction text, not an
+enforcement mechanism.
+
+Initial spawn requests may freeze a bounded output contract. This follows DSH's
+programmatic initial-request scope while retaining RSI's continuable child
+Sessions: follow-ups and grandchildren receive no inherited schema. A private
+exclusive `report_result` Tool validates locally under the finite DSH schema
+subset with Draft 7. Bad values are error results; natural completion without a
+valid report becomes `structured_output.missing` and follows the existing failed
+activation descendant-cancellation rule. No implicit model retry is introduced.
+
+A typed settlement conclusion shares the ToolResult Fact, and optional domain
+updates share that exact atomic transaction. The resident Turn retains reporting
+results across executor replacement; the Executor stops after durable acceptance.
+The Kernel owns outcome canonicalization, descendant waiting, and final completion.
+Values remain solely in ToolResult Facts. Terminal and activation metadata carry
+small exact references. Indexed parent Completion lookup establishes final success
+before `read_agent_result` reads one exact child Fact and checks its digests. This
+avoids a new historical activation index and does not confuse a completed Turn
+with an activation still waiting for descendants. Whole-message encoding is
+bounded by the existing completion reservation, including escaping and metadata.
+
+Delegation and output contracts share the current Session format. Older Session files are
+rejected untouched; pre-release policy favors one explicit format boundary over
+migration or implicit reinterpretation. `jsonschema` 0.33 becomes a production
+dependency with default features disabled; remote references are rejected before
+validator construction. The Session protocol owns schema admission, so this
+validator and its transitive dependencies also enter Web, native presentation and
+standalone client-fixture compilation graphs. Disabling default features prevents
+remote resolver facilities; it does not remove that build cost. Splitting schema
+admission from result validation could reduce those graphs, but must preserve
+identical Header decoding and schema rejection across targets rather than turn
+validation off with a Cargo feature. This cost is accepted by the current shared
+validated-type boundary; a future split needs separate build and artifact-size evidence.
+
 The [Tool model origin decision](../architecture/2026-09-14-tool-model-origin.md)
 supersedes only frozen-route inheritance and claim-only spawn authority: children
 freeze the actual request that produced their authenticated Tool call. The
@@ -53,7 +96,8 @@ policy, workspace, trust decision, and preset identity without mutating or
 truncating the parent.
 
 The model-facing interface contains exactly `spawn_agent`, `send_message`,
-`followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents`. These Tools
+`followup_task`, `wait_agent`, `interrupt_agent`, `list_agents`, and
+`read_agent_result`. These Tools
 are thin adapters over `TurnService`. The executor derives an
 `AgentCallerAuthority` from the sealed live claim and injects it through the
 typed Tool execution-extension seam; no model argument carries a root identity,
@@ -178,3 +222,13 @@ Recursive cancellation remains cooperative for safe-Rust work. Restricted Linux
 process execution supplies OS containment, while an unconfined descendant that
 escapes its process group can outlive hard process death as recorded by the
 Service Host decision.
+
+The standard model-facing spawn intentionally does not accept arbitrary schemas.
+Its result reader is therefore disabled by default; trusted embeddings with a
+programmatic producer explicitly enable `read_structured_results` in the Agent
+Tools contribution. This keeps schema choice at the existing owner instead of
+adding an unplanned model-controlled producer. Compiled validators and schema
+digests are shared by process-local OutputContract clones, while durable encoding
+remains schema-only. Kernel independently fences ToolIntent publication and replay
+against the frozen delegation set; only the exact initial activation's report
+helper may bypass that ordinary set.

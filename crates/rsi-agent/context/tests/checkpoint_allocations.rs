@@ -105,6 +105,7 @@ fn full_builder_preserves_v7_payload_and_v6_envelope_without_a_third_full_copy()
                 SessionFactBody::TurnTerminal {
                     turn_id: turn,
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap(),
@@ -123,12 +124,14 @@ fn full_builder_preserves_v7_payload_and_v6_envelope_without_a_third_full_copy()
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // Exact v7 fold inside its v6 envelope, with Session 14 and builder 2.5.0.
-    // Rebinding only those two versions to 13 / 2.4.0 reproduces the audited
-    // f3c7a352 oracle d17d4323502379278d4936ea1203b3a15110242a3494d46b72e7df95efd677cb.
+    // Exact v7 fold/v6 envelope with Session 16 and builder 2.6.0.
+    // Rebinding only the Header's format and removed workspace-trust field,
+    // then both envelope checksums, exactly recovers the Session 15 oracle
+    // 33f1e2f8964b04e21337cae1cd789f70a3ee98cbcbbea642bcea2c895e1539b9.
+    // All payload bytes and Fact-prefix digests remain unchanged.
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "b2527575decf8a97f49976f0bd7e38a35b26331bbcf45cb530596122dac77702"
+        "092a2720249c31276d7bc3d7a4b56a86cbbb4b4defc4603b225afd7df3c14495"
     );
     assert!(
         additional < 3 * bytes.len(),

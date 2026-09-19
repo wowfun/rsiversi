@@ -31,6 +31,7 @@ async fn completed_history(store: &SqliteStore, count: u64) -> (SessionId, TurnI
             SessionFactBody::TurnTerminal {
                 turn_id: accepted.body().turn_id().clone(),
                 outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap();

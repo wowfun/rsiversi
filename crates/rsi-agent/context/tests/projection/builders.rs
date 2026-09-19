@@ -123,6 +123,7 @@ fn complete_facts() -> Vec<Arc<SessionFact>> {
         SessionFactBody::TurnTerminal {
             turn_id: turn,
             outcome: TurnOutcome::Completed,
+            result: None,
         },
     ])
     .into_iter()

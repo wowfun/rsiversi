@@ -182,13 +182,44 @@ impl TurnExecution for AgentKernel {
     }
 
     fn composition(&self, claim: &TurnClaim) -> TurnResult<AgentCompositionPin> {
-        let state = lock_state(&self.inner);
+        let (composition, output) = {
+            let state = lock_state(&self.inner);
+            self.validate_claim(&state, claim)?;
+            let session = state
+                .sessions
+                .get(claim.session_id())
+                .ok_or(TurnError::StaleClaim)?;
+            let turn = session
+                .turns
+                .get(claim.turn_id())
+                .ok_or(TurnError::StaleClaim)?;
+            if let Some(composition) = &turn.claim_composition {
+                return Ok(composition.clone());
+            }
+            (
+                session.composition.clone(),
+                structured::contract(claim.header(), turn).cloned(),
+            )
+        };
+        // Provider catalog callbacks and schema construction must not hold the global lock.
+        let mut composition = composition.for_delegation(claim.header().delegation_policy());
+        if let Some(contract) = output {
+            composition = composition
+                .with_output_contract(
+                    &format!("{}:{}", claim.session_id(), claim.turn_id()),
+                    contract,
+                )
+                .map_err(turn_composition_error)?;
+        }
+        let mut state = lock_state(&self.inner);
         self.validate_claim(&state, claim)?;
-        state
+        let turn = state
             .sessions
-            .get(claim.session_id())
-            .map(|session| session.composition.clone())
-            .ok_or(TurnError::StaleClaim)
+            .get_mut(claim.session_id())
+            .and_then(|session| session.turns.get_mut(claim.turn_id()))
+            .ok_or(TurnError::StaleClaim)?;
+        // A concurrent reader may have installed the one retained reporting runtime.
+        Ok(turn.claim_composition.get_or_insert(composition).clone())
     }
 
     fn agent_caller(&self, claim: &TurnClaim) -> TurnResult<AgentCallerAuthority> {
@@ -762,7 +793,8 @@ impl TurnExecution for AgentKernel {
         }
         {
             let state = lock_state(&self.inner);
-            self.validate_claim(&state, claim)?;
+            let turn = self.validate_claim(&state, claim)?;
+            validate_publication_gate(turn, &bodies)?;
         }
         for body in &bodies {
             evidence::validate_references(
@@ -871,6 +903,23 @@ impl TurnExecution for AgentKernel {
     }
 }
 
+fn turn_is_ending(turn: &TurnControl) -> bool {
+    turn.claim
+        .as_ref()
+        .is_some_and(|claim| claim.mutations.is_ending())
+}
+
+fn validate_publication_gate(turn: &TurnControl, bodies: &[SessionFactBody]) -> TurnResult<()> {
+    if turn_is_ending(turn)
+        && !bodies
+            .iter()
+            .any(|body| matches!(body, SessionFactBody::TurnTerminal { .. }))
+    {
+        return Err(TurnError::Invalid("Turn is finishing".into()));
+    }
+    Ok(())
+}
+
 pub(super) enum PublishAdmission {
     Complete(PublishAttempt),
     ProcessPressure(Vec<SessionFactBody>),
@@ -901,12 +950,21 @@ pub(super) fn stage_execution_facts(
             ));
         }
         let body = canonicalize_terminal(body, turn.cancel_requested);
+        validate_tool_admission(claim.header(), &turn, &body)?;
+        super::structured::validate_conclusion(claim.header(), &turn, &body)?;
         apply_executor_body(&mut turn, &body)?;
         next_seq = next_seq
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
         let fact = SessionFact::new(next_seq, kernel.inner.clock.now_ms().max(1), body)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        if let SessionFactBody::ToolResult {
+            conclusion: Some(conclusion),
+            ..
+        } = fact.body()
+        {
+            turn.conclusion = Some((fact.seq(), conclusion.clone()));
+        }
         bytes = bytes
             .checked_add(fact.encoded_len())
             .ok_or_else(|| TurnError::Invalid("Fact bytes overflowed".into()))?;
@@ -924,6 +982,7 @@ pub(super) fn try_publish_once(
     let (original, header, base_seq) = {
         let state = lock_state(&kernel.inner);
         let original = kernel.validate_claim(&state, claim)?;
+        validate_publication_gate(original, &bodies)?;
         if !state.accepting {
             return Err(TurnError::ShuttingDown);
         }
@@ -941,6 +1000,9 @@ pub(super) fn try_publish_once(
             session.live_seq().map_err(turn_kernel_error)?,
         )
     };
+    let terminal_publication = bodies
+        .iter()
+        .any(|body| matches!(body, SessionFactBody::TurnTerminal { .. }));
     let StagedExecutionFacts {
         turn: mut staged,
         facts,
@@ -953,7 +1015,10 @@ pub(super) fn try_publish_once(
         kernel.inner.clock.now_ms().max(1),
     )?;
     let mut state = lock_state(&kernel.inner);
-    kernel.validate_claim(&state, claim)?;
+    let turn = kernel.validate_claim(&state, claim)?;
+    if !terminal_publication && turn_is_ending(turn) {
+        return Err(TurnError::Invalid("Turn is finishing".into()));
+    }
     if !state.accepting {
         return Err(TurnError::ShuttingDown);
     }
@@ -1032,6 +1097,28 @@ pub(super) fn validate_intent_price(
     {
         return Err(TurnError::Invalid(
             "model price quote differs from frozen Session pricing".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Frozen Tool restrictions are authoritative at publication and durable replay,
+/// independently of the Executor's filtered catalog. The initial report helper
+/// is installed by Kernel outside that ordinary catalog for its exact activation.
+pub(super) fn validate_tool_admission(
+    header: &SessionHeader,
+    turn: &TurnControl,
+    body: &SessionFactBody,
+) -> TurnResult<()> {
+    if let SessionFactBody::ToolIntent { name, .. } = body
+        && header
+            .delegation_policy()
+            .is_some_and(|policy| !policy.tools().contains(name))
+        && !(name == rsi_agent_session_protocol::REPORT_RESULT_TOOL
+            && super::structured::contract(header, turn).is_some())
+    {
+        return Err(TurnError::Invalid(
+            "ToolIntent is outside the frozen delegation policy".into(),
         ));
     }
     Ok(())

@@ -14,7 +14,8 @@ commits only the preceding prefix and leaves the returned batch unpublished.
 That batch may still use the same explicit budget fallback; publication errors
 and failed or uncertain flushes never permit fallback or another Prepare.
 
-Normal, parallel and retained Tool results share one settlement path. Pure
+Normal, parallel and retained Tool results share one settlement path. A recovered
+accepted conclusion is latched for the remainder of that Turn. Pure
 ToolSettlement contributors receive the exact durable intent and result plus
 bounded current domain states. Their typed proposals and the result enter one
 Kernel DomainMutation; the retained Tool identity is retired only after durable

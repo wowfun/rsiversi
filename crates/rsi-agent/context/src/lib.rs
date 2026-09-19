@@ -6,6 +6,7 @@
 
 mod builder;
 mod compaction;
+mod pruning;
 pub use compaction::{PlannedCompaction, validate_summary_output};
 mod default_provider;
 
@@ -27,7 +28,7 @@ use rsi_media_protocol::{MediaDescriptor, MediaKind};
 use rsi_tools_protocol::{ToolContent, ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use thiserror::Error;
@@ -182,11 +183,21 @@ impl ContextFold {
         header
             .validate()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        let system_message = if header.settings().system_prompt().is_empty() {
+        let mut instructions = header.settings().system_prompt().to_owned();
+        if let Some(persona) = header
+            .delegation_policy()
+            .and_then(|policy| policy.persona())
+        {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(persona);
+        }
+        let system_message = if instructions.is_empty() {
             None
         } else {
             Some(
-                Message::system_text(header.settings().system_prompt())
+                Message::system_text(instructions)
                     .map_err(|error| ContextError::Invalid(error.to_string()))?,
             )
         };
@@ -1074,33 +1085,42 @@ fn build_request(
     }
 }
 
+fn has_unscoped_provider_state(message: &Message) -> bool {
+    message.role() == rsi_ai_protocol::MessageRole::Assistant
+        && message
+            .content()
+            .iter()
+            .any(|block| matches!(block, MessageContent::Reasoning { .. }))
+}
+
+fn without_unscoped_provider_message(
+    message: Cow<'_, Message>,
+) -> Result<Option<Cow<'_, Message>>> {
+    if !has_unscoped_provider_state(&message) {
+        return Ok(Some(message));
+    }
+    let content = message
+        .content()
+        .iter()
+        .filter(|block| !matches!(block, MessageContent::Reasoning { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    if content.is_empty() {
+        return Ok(None);
+    }
+    Message::assistant(content)
+        .map(|message| Some(Cow::Owned(message)))
+        .map_err(|error| ContextError::Invalid(error.to_string()))
+}
+
 fn without_unscoped_provider_state(messages: Vec<Message>) -> Result<Vec<Message>> {
-    if !messages.iter().any(|message| {
-        message.role() == rsi_ai_protocol::MessageRole::Assistant
-            && message
-                .content()
-                .iter()
-                .any(|block| matches!(block, MessageContent::Reasoning { .. }))
-    }) {
+    if !messages.iter().any(has_unscoped_provider_state) {
         return Ok(messages);
     }
     messages
         .into_iter()
-        .filter_map(|message| {
-            if message.role() != rsi_ai_protocol::MessageRole::Assistant {
-                return Some(Ok(message));
-            }
-            let content = message
-                .content()
-                .iter()
-                .filter(|block| !matches!(block, MessageContent::Reasoning { .. }))
-                .cloned()
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then(|| {
-                Message::assistant(content)
-                    .map_err(|error| ContextError::Invalid(error.to_string()))
-            })
-        })
+        .filter_map(|message| without_unscoped_provider_message(Cow::Owned(message)).transpose())
+        .map(|message| message.map(Cow::into_owned))
         .collect()
 }
 

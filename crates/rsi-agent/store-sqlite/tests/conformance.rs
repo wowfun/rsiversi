@@ -145,6 +145,7 @@ fn terminal_fact(seq: u64, turn: u64) -> SessionFact {
         SessionFactBody::TurnTerminal {
             turn_id: TurnId::new(format!("turn-{turn}")).unwrap(),
             outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+            result: None,
         },
     )
     .unwrap()
@@ -624,6 +625,9 @@ async fn ready_index_schema_rejects_nonwaking_next_step_rows() {
             message: AgentMessage {
                 message_id: message.clone(),
                 source: AgentMessageSource::Completion {
+                    outcome: rsi_agent_session_protocol::ActivationOutcome::Completed {
+                        result: None,
+                    },
                     child_session_id: SessionId::new("ready-target-source").unwrap(),
                     activation_id: rsi_agent_session_protocol::ActivationId::new(
                         "ready-target-activation",
@@ -696,6 +700,7 @@ async fn sqlite_store_passes_the_shared_mechanical_contract() {
             SessionFactBody::TurnTerminal {
                 turn_id: turn,
                 outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap(),
@@ -2101,4 +2106,55 @@ async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery
     drop(recovered);
     SqliteStore::verify(target.path()).unwrap();
     drop(live);
+}
+
+#[tokio::test]
+async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("exact-message").unwrap();
+    let selected = MessageId::new("selected").unwrap();
+    let unrelated = MessageId::new("unrelated").unwrap();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header(session.as_str())),
+                facts: vec![],
+                controls: vec![
+                    accepted_message_control(1, &session, &selected),
+                    accepted_message_control(2, &session, &unrelated),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let expected = store
+        .read_agent_message(&session, &selected)
+        .await
+        .unwrap()
+        .unwrap();
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_messages SET message_json = 'invalid' WHERE message_id = ?1",
+            [unrelated.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        store.read_agent_message(&session, &selected).await.unwrap(),
+        Some(expected)
+    );
+    assert!(matches!(
+        store.read_agent_message(&session, &unrelated).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store.read_agent_mailbox(&session, None).await,
+        Err(StoreError::Corrupt(_))
+    ));
 }

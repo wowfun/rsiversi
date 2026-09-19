@@ -186,6 +186,8 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
     let child_id = SessionId::new("session-cold-tree-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -257,6 +259,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let child_id = SessionId::new("session-interrupt-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -280,6 +284,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let grandchild_id = SessionId::new("session-interrupt-grandchild").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -305,6 +311,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let leaf_id = SessionId::new("session-interrupt-leaf").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
             model: None,
             reasoning_effort: None,
             cancellation: CancellationToken::new(),
@@ -336,6 +344,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 cancellation: CancellationToken::new(),
@@ -478,6 +488,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 cancellation: CancellationToken::new(),

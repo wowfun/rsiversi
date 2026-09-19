@@ -1,5 +1,9 @@
 # rsi-agent-store-sqlite
 
+One-shot reset requests expose a bounded receipt notification independently of
+the serialized reset operation. A backup location becomes observable immediately
+after the root move, including while subsequent initialization is still pending.
+
 Bounded suffix reads first admit row lengths and then fetch that contiguous
 range in one ascending query within the same snapshot. No rejected Fact body
 is materialized. Integrity-check failures preserve a bounded SQLite diagnostic.
@@ -23,6 +27,30 @@ The factory retains one startup failure category and its configured root for its
 direct owner. Schema diagnostics include expected and actual versions; other
 categories omit backend text and stored content. Taking the diagnostic consumes
 it. Generic Profile diagnostics remain redacted.
+
+Explicit `SqliteStore::reset_and_open` bypasses schema interpretation, acquires
+the existing root's writer lease, and atomically moves the entire root into an
+exclusively created private sibling backup container before opening a fresh
+Store. The backup retains the database, WAL, CAS, staging, and original writer
+lock. Before mutation, an existing nonempty root must contain a regular
+`sessions.sqlite3` file or a real `cas` directory; an unrelated directory is
+rejected without creating a lock or changing its permissions. These are layout
+markers, not schema checks. Missing and empty roots simply initialize. The result reports the backup path;
+failures after the move retain and report that same backup. Existing backups are
+never overwritten or deleted. Root symlinks are rejected, including paths ending
+in separators or `.`; root checks normalize this syntax without resolving links
+or collapsing `..`. Ordinary open and offline verification use the same rule.
+Lock-file identity is
+checked after acquisition on every platform, so a waiter holding a moved lock
+cannot open the replacement root under the old lease. Reset is a deliberate root
+replacement; ordinary open and verification never move or remove the writer lock.
+The factory accepts an explicit process-local one-shot request, shared by clones,
+with a structured receipt for its direct owner. Configuration cannot request a
+reset. After success subsequent activation uses ordinary open; after failure it
+returns the retained failure without reopening, retrying or making another backup.
+An unwound attempt remains failed too; only successful completion permits ordinary
+opens through that request.
+A fresh explicit startup request is required to retry a failed reset.
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
 A bounded cache retains 256 Session proofs across a recent FIFO and a reused
@@ -135,7 +163,7 @@ Every admitted blocking database or CAS job retains the complete Store owner,
 including its writer lease, even after its async waiter is cancelled. The three
 connections share that lifetime: clean shutdown closes both readers first
 and the writer last, checkpointing the WAL into `sessions.sqlite3`, then explicitly
-unlocks and closes the persistent writer-lock file. The lock path is never removed.
+unlocks and closes the persistent writer-lock file. Ordinary operation never removes the lock path.
 The main
 database is therefore a complete standalone copy after the final Store handle
 and operation close. A live backup must still use SQLite's backup facilities or
@@ -151,7 +179,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 21 admits frozen human reference content and the current mandatory Agent-preset
+The exact schema version 22 admits frozen human reference content and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one
@@ -188,3 +216,13 @@ large JSON bodies retain their SQL projection and aggregate page admission.
 Indexed text is checked as a borrowed SQLite value before owned allocation:
 storage type, UTF-8 and owning protocol byte bounds fail as corruption. Existing
 JSON projection and page-lookahead gates remain in force.
+
+The opt-in `test-support` reader measurements distinguish permit admission,
+blocking-worker scheduling, total reader work and projected-JSON decoding.
+The remainder includes SQL, row extraction, page checks and other reader work;
+it is not reported as pure SQL CPU time. Capture is explicit and retains at
+most 4096 completed samples. Default builds contain no timing instrumentation.
+
+The Agent CI job explicitly lints this feature and runs its ordinary tests,
+including a small warm-reader case with exact sample and validation counts.
+The larger contention report remains an ignored opt-in test using the same case.

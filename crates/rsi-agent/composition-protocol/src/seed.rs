@@ -1,10 +1,10 @@
 //! Opaque, bounded pre-activation Domain inputs; semantic decoding stays with owners.
-use crate::{AgentCompositionError, Result};
+use crate::{AgentCompositionError, DomainError, Result};
 use rsi_agent_session_protocol::{
     DomainIdentity, DomainSnapshot, MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS,
 };
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Structurally validated complete Domain values supplied before catalog sealing.
 #[derive(Clone, Debug)]
@@ -98,6 +98,49 @@ pub struct AgentGenerationInputs {
     pub seed: AgentGenerationSeed,
     /// This build restores a saved baseline and must not substitute current data.
     pub restoring: bool,
+    codec_mismatch: Arc<OnceLock<(DomainIdentity, DomainIdentity)>>,
+}
+impl AgentGenerationInputs {
+    /// Starts one private build with its own closed diagnostic channel.
+    pub fn new(seed: AgentGenerationSeed, restoring: bool) -> Self {
+        Self {
+            seed,
+            restoring,
+            codec_mismatch: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Selects an owner's exact codec and records mismatches for composition.
+    ///
+    /// # Errors
+    /// Returns missing state or an unsupported codec without decoding the state.
+    pub fn seed_state(&self, expected: &DomainIdentity) -> Result<&DomainSnapshot> {
+        let state = self
+            .seed
+            .states()
+            .iter()
+            .find(|state| state.identity().id() == expected.id())
+            .ok_or_else(|| DomainError::MissingState(expected.clone()))?;
+        if state.identity() != expected {
+            let stored = state.identity().clone();
+            let _first_mismatch = self.codec_mismatch.set((stored.clone(), expected.clone()));
+            return Err(AgentCompositionError::UnsupportedSeedCodec {
+                stored,
+                expected: expected.clone(),
+            });
+        }
+        Ok(state)
+    }
+
+    /// Returns the first owner-detected mismatch; never arbitrary plugin text.
+    pub fn seed_codec_error(&self) -> Option<AgentCompositionError> {
+        self.codec_mismatch.get().map(|(stored, expected)| {
+            AgentCompositionError::UnsupportedSeedCodec {
+                stored: stored.clone(),
+                expected: expected.clone(),
+            }
+        })
+    }
 }
 /// Nominal private-generation input capability.
 #[derive(Debug)]
@@ -111,6 +154,38 @@ impl rsi_meta::LocalContract for AgentGenerationInputsContract {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::DomainStateValue;
+    #[test]
+    fn codec_diagnostics_are_typed_sticky_and_local_to_one_build() {
+        let seed = AgentGenerationSeed::new(vec![state("saved", "private-state".into())]).unwrap();
+        let inputs = AgentGenerationInputs::new(seed.clone(), true);
+        let current = DomainIdentity::new("saved", 1).unwrap();
+        assert_eq!(inputs.seed_state(&current).unwrap(), &seed.states()[0]);
+        assert!(inputs.seed_codec_error().is_none());
+        assert!(matches!(
+            inputs.seed_state(&DomainIdentity::new("absent", 1).unwrap()),
+            Err(AgentCompositionError::Domain(DomainError::MissingState(_)))
+        ));
+        assert!(inputs.seed_codec_error().is_none());
+        let expected = DomainIdentity::new("saved", 2).unwrap();
+        let error = inputs.clone().seed_state(&expected).unwrap_err();
+        assert_eq!(
+            error,
+            AgentCompositionError::UnsupportedSeedCodec {
+                stored: current.clone(),
+                expected
+            }
+        );
+        assert!(!error.to_string().contains("private-state"));
+        assert!(error.to_string().contains("start a new conversation"));
+        let _other_error = inputs.seed_state(&DomainIdentity::new("saved", 3).unwrap());
+        assert_eq!(inputs.seed_codec_error(), Some(error));
+        assert!(inputs.seed_state(&current).is_ok());
+        assert!(
+            AgentGenerationInputs::new(seed, false)
+                .seed_codec_error()
+                .is_none()
+        );
+    }
     fn state(name: &str, value: serde_json::Value) -> DomainSnapshot {
         DomainSnapshot::new(
             DomainIdentity::new(name, 1).unwrap(),

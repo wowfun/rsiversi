@@ -1,5 +1,15 @@
 # rsi-agent-session-protocol
 
+Format 16 freezes optional `DelegationPolicy` in child Headers: selected role,
+persona, normalized role digest and at most 64 ordered effective Tool names.
+This records a monotone restriction, not a permission grant or an executable
+generation pin. Initial structured-output contracts are optional;
+follow-up activations do not inherit their schema. Headers carry the selected
+canonical workspace without a workspace-trust field. Header fingerprints and
+fork bindings include the complete Header. All other format versions are
+rejected before validating current Header fields, without migration or file
+rewriting. Current Headers reject unknown fields.
+
 Human message content may include a frozen Session reference. The Agent-owned
 reference binds a bounded preview and immutable CAS envelope to the source and
 original target Header fingerprints. It is user data, never instruction authority.
@@ -59,7 +69,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 14 is accepted; format 13 and all earlier formats are unsupported. The
+format 16 is accepted; all other formats are unsupported. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 
@@ -99,7 +109,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 14), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 16), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
@@ -181,3 +191,37 @@ Reference envelope admission allows six encoded bytes per text/preview byte plus
 16 KiB of provenance. This includes worst-case JSON control-character escaping;
 decoded text and preview retain their independent 1 MiB and 8 KiB limits. Draft
 and recorded page requests share `validate_reference_page_bounds`.
+
+Initial structured output is frozen with the spawn message identity in the child
+Header. It does not apply to follow-up activations or descendants. The accepted
+value lives once in its ToolResult Fact; conclusion metadata, the Turn terminal,
+ActivationSettled and the parent's Completion carry bounded references only.
+References bind child, activation, Turn, exact Fact sequence, schema/value digests
+and a 2 KiB preview. Exact parent Completion lookup proves final successful
+activation settlement before the Kernel reads the referenced Fact. No latest
+result or history scan is authoritative. The complete encoded Completion message
+must fit the existing 8 KiB reservation.
+
+Output schemas use the local Draft 7 validator with remote resolution disabled
+and the DSH finite, object-root subset. Schemas are at most 64 KiB, values 256 KiB;
+refs and unrecognized keywords are rejected. Missing valid output at natural
+completion fails with `structured_output.missing`, without a synthetic retry.
+
+`DelegationPolicy::role_sha256` identifies normalized requested role configuration
+for exact spawn retries; it is not a digest of the effective Tool intersection.
+The immutable Header fingerprint covers the effective policy, including its Tool
+set. Durable Store ownership/integrity is required; this is not a signature against
+a party capable of rewriting both Header and fingerprint. Current catalogs and
+ancestor restrictions still intersect the frozen set before new admission.
+
+Output contracts validate schema structure and Draft 7 syntax at construction;
+they compile the value validator lazily once per shared contract, only when used
+to validate a result. Bounded encoding computes digests and a preview without
+materializing the complete encoded value. Digests identify exact compact JSON
+bytes, including object key order; contract equality uses the same identity.
+Process-local clones share the lazily compiled value; serialization remains schema-only.
+Schemas permit at most 64 total `oneOf` branches
+across the complete schema. Value rejection identifies the first failing instance
+and schema JSON pointers (each capped at 256 characters), without embedding the
+rejected value. Summarization encodes the bounded value once for validation size,
+digest and UTF-8 preview.

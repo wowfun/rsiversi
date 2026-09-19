@@ -21,6 +21,54 @@ impl fmt::Debug for AgentCompositionSnapshot {
 }
 
 impl AgentCompositionSnapshot {
+    /// Borrows the pure preset compiler/catalog without building generations.
+    pub const fn presets(&self) -> &AgentPresetCatalog {
+        &self.presets
+    }
+
+    /// Captures a flat redacted manifest without preparing any factory.
+    ///
+    /// # Errors
+    /// Returns an error when the compiled identities exceed manifest bounds.
+    pub fn manifest(
+        &self,
+        snapshot: &rsi_meta_profile::ProfileSnapshot,
+    ) -> rsi_agent_composition_protocol::Result<rsi_agent_composition_protocol::CompositionManifest>
+    {
+        use rsi_agent_composition_protocol::{
+            CompositionInstance, CompositionManifest, CompositionOrigin,
+        };
+        use rsi_meta_profile::ProfileResolver as _;
+        fn visit(
+            snapshot: &AgentCompositionSnapshot,
+            nodes: &[rsi_meta_profile::SnapshotNode],
+            parent_enabled: bool,
+            rows: &mut Vec<CompositionInstance>,
+        ) {
+            for node in nodes {
+                let enabled = parent_enabled && node.enabled();
+                if let Some(plugin) = node.plugin() {
+                    let origin = snapshot.contributions.resolve(plugin).map_or(
+                        CompositionOrigin::Unresolved,
+                        |factory| match factory.identity() {
+                            rsi_meta::FactoryIdentity::Linked { .. } => CompositionOrigin::Linked,
+                            rsi_meta::FactoryIdentity::Native { .. } => CompositionOrigin::Native,
+                        },
+                    );
+                    rows.push(CompositionInstance {
+                        instance: node.id().into(),
+                        plugin: plugin.to_string(),
+                        enabled,
+                        origin,
+                    });
+                }
+                visit(snapshot, node.children(), enabled, rows);
+            }
+        }
+        let mut rows = Vec::new();
+        visit(self, snapshot.nodes(), true, &mut rows);
+        CompositionManifest::new(rows)
+    }
     /// Freezes application-selected preset and contribution authority together.
     pub fn new(presets: AgentPresetCatalog, contributions: AgentContributionCatalog) -> Self {
         Self {
@@ -86,6 +134,7 @@ impl AgentCompositionSource for AgentCompositionSnapshot {
 }
 
 pub(crate) struct GenerationIdentity {
+    pub(crate) manifest: Arc<rsi_agent_composition_protocol::CompositionManifest>,
     program_digest: String,
     seed_sha256: [u8; 32],
     restoring: bool,
@@ -106,6 +155,7 @@ impl GenerationIdentity {
         program_digest: &str,
         catalog: Arc<AgentContributionCatalog>,
         inputs: &rsi_agent_composition_protocol::AgentGenerationInputs,
+        manifest: Arc<rsi_agent_composition_protocol::CompositionManifest>,
     ) -> Self {
         let mut digest = Sha256::new();
         digest.update(b"rsi.agent.generation.v3");
@@ -114,6 +164,7 @@ impl GenerationIdentity {
         digest.update([u8::from(inputs.restoring)]);
         crate::catalog::hash_field(&mut digest, inputs.seed.sha256());
         Self {
+            manifest,
             seed_sha256: *inputs.seed.sha256(),
             restoring: inputs.restoring,
             program_digest: program_digest.to_owned(),

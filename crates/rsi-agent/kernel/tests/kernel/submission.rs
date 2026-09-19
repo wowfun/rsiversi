@@ -158,6 +158,7 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
                     SessionFactBody::TurnTerminal {
                         turn_id: turn_id.clone(),
                         outcome: TurnOutcome::Completed,
+                        result: None,
                     },
                 )
                 .unwrap(),
@@ -354,6 +355,7 @@ async fn caller_turn_id_retry_after_terminal_pruning_does_not_reexecute() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: first.turn_id.clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -479,7 +481,7 @@ async fn shutdown_releases_resident_generation_pins_while_service_handles_escape
     let pin = AgentCompositionPin::new(
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(SourceOnlyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -781,6 +783,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: first.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1032,6 +1035,7 @@ async fn cancellation_single_assigns_cancelled_even_if_executor_reports_complete
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id.clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1151,6 +1155,7 @@ async fn checkpoint_maintenance_reads_the_exact_prefix_including_queued_turns() 
             vec![SessionFactBody::TurnTerminal {
                 turn_id: first.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1196,6 +1201,7 @@ async fn checkpoint_maintenance_rejects_a_foreign_terminal_claim() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1249,6 +1255,7 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1304,6 +1311,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id,
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1583,6 +1591,7 @@ async fn executor_cannot_classify_cancellation_without_a_durable_request() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id.clone(),
                 outcome: TurnOutcome::Cancelled,
+                result: None,
             }],
         )
         .await
@@ -1630,6 +1639,7 @@ async fn terminal_outcome_and_fact_are_hidden_until_their_prefix_is_durable() {
             vec![SessionFactBody::TurnTerminal {
                 turn_id: submitted.turn_id.clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             }],
         )
         .await
@@ -1749,6 +1759,7 @@ async fn message_admission_waits_for_terminal_control_before_and_after_store_app
                 vec![SessionFactBody::TurnTerminal {
                     turn_id: submitted.turn_id.clone(),
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 }],
             )
             .await

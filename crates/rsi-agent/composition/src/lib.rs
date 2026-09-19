@@ -264,6 +264,7 @@ impl Generation {
             self.contributions.clone(),
             self.owner.clone(),
         )
+        .map(|pin| pin.with_manifest(self.identity.manifest.clone()))
     }
 }
 
@@ -581,16 +582,16 @@ impl CompositionState {
             .source
             .snapshot()
             .map_err(|_| unavailable(preset_id, "Agent catalog snapshot unavailable"))?;
-        let inputs = Arc::new(AgentGenerationInputs {
-            seed: match seed {
+        let inputs = Arc::new(AgentGenerationInputs::new(
+            match seed {
                 Some(seed) => seed.clone(),
                 None => snapshot
                     .seeds
                     .clone()
                     .map_err(|reason| unavailable(preset_id, reason))?,
             },
-            restoring: seed.is_some(),
-        });
+            seed.is_some(),
+        ));
         let presets = snapshot.presets.clone();
         let compile_preset_id = preset_id.clone();
         let compilation = blocking_with_build_admission(
@@ -630,6 +631,7 @@ impl CompositionState {
             return generation.pin();
         }
 
+        let manifest = Arc::new(snapshot.manifest(&candidate.snapshot())?);
         let resolver: Arc<dyn ProfileResolver> = snapshot.contributions.clone();
         let generation_plan = ProfileGenerationPlan::resolve(candidate, resolver)
             .map_err(|error| profile_unavailable(preset_id, &error))?;
@@ -637,6 +639,7 @@ impl CompositionState {
             generation_plan.source_digest(),
             Arc::clone(&snapshot.contributions),
             &inputs,
+            manifest,
         );
         let cancellation = self.shutdown.child_token();
         let mut cancel_on_drop = CancelBuildOnDrop::new(cancellation.clone());
@@ -666,6 +669,10 @@ impl CompositionState {
     #[expect(
         clippy::too_many_arguments,
         reason = "Both owned admission permits and the cancellation token must cross the staging boundary."
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep ordered generation activation, sealing, and rollback in one lifecycle."
     )]
     async fn build_unpublished_generation(
         self: &Arc<Self>,
@@ -728,7 +735,7 @@ impl CompositionState {
                     env!("CARGO_PKG_VERSION"),
                     UpdateMode::RestartRequired,
                     Arc::new(AgentRegistrarFactory {
-                        inputs,
+                        inputs: inputs.clone(),
                         registrar: unpublished.registrar(),
                         domains: unpublished.domain_stage.registrar(),
                         contributions: unpublished.contribution_stage.registrar(),
@@ -759,14 +766,19 @@ impl CompositionState {
             if self.shutdown.is_cancelled() {
                 return Err(AgentCompositionError::ShuttingDown);
             }
-            return Err(profile_unavailable(preset_id, &error));
+            return Err(inputs
+                .seed_codec_error()
+                .unwrap_or_else(|| profile_unavailable(preset_id, &error)));
         }
         if cancellation.is_cancelled() {
             let _clean = unpublished.rollback().await;
             return Err(self.cancelled_build_error(preset_id));
         }
 
-        if let Err(error) = unpublished.seal(&generation_context, preset_id) {
+        if let Err(error) = inputs
+            .seed_codec_error()
+            .map_or_else(|| unpublished.seal(&generation_context, preset_id), Err)
+        {
             let _clean = unpublished.rollback().await;
             return Err(error);
         }

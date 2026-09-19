@@ -37,7 +37,9 @@ pub use continuation::{
 };
 mod projection;
 mod resource;
-pub use projection::{SessionProjectionChanges, SessionProjections, SessionProjectionsContract};
+pub use projection::{
+    ResidentComposition, SessionProjectionChanges, SessionProjections, SessionProjectionsContract,
+};
 pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;
 pub use command::{SessionCommands, SessionCommandsContract};
@@ -340,6 +342,10 @@ pub struct ClaimMessage {
 /// Exact retries recover the original child and initial message without another write.
 #[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
+    /// Trusted initial-activation contract; not exposed as a model-authored schema.
+    pub output_contract: Option<rsi_agent_session_protocol::OutputContract>,
+    /// Configured role selected by the trusted Tool adapter, never a model permission object.
+    pub role: Option<rsi_agent_session_protocol::DelegationRole>,
     /// Explicit child route; absent inherits the producing request's route and effort.
     pub model: Option<rsi_ai_protocol::ModelRef>,
     /// Explicit child effort, allowed only with an explicit child model.
@@ -581,6 +587,17 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         let _ = request;
         Err(TurnError::Invalid(
             "this Turn service does not support subagents".into(),
+        ))
+    }
+    /// Reads an exact structured result only after its successful final Completion.
+    async fn read_agent_result(
+        &self,
+        caller: &AgentCallerAuthority,
+        locator: &rsi_agent_session_protocol::AgentResultLocator,
+    ) -> Result<serde_json::Value> {
+        let _ = (caller, locator);
+        Err(TurnError::Invalid(
+            "this Turn service does not expose structured results".into(),
         ))
     }
     /// Sends one durable message across an authorized adjacent Agent edge.

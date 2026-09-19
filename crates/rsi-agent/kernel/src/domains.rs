@@ -185,7 +185,10 @@ impl AgentKernel {
         let original = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
-            if turn.terminal.is_some() || turn.budget_exhausted.is_some() {
+            if turn.terminal.is_some()
+                || turn.budget_exhausted.is_some()
+                || turn.conclusion.is_some()
+            {
                 return Err(TurnError::Invalid(
                     "domain work follows the Turn ending boundary".into(),
                 ));
@@ -199,7 +202,15 @@ impl AgentKernel {
         };
         let mut staged = clone_turn_control(&original);
         for fact in &facts {
+            super::structured::validate_conclusion(claim.header(), &staged, fact.body())?;
             apply_executor_body(&mut staged, fact.body())?;
+            if let SessionFactBody::ToolResult {
+                conclusion: Some(conclusion),
+                ..
+            } = fact.body()
+            {
+                staged.conclusion = Some((fact.seq(), conclusion.clone()));
+            }
         }
         staged.budget_usage = turn_state::enforce_domain_budget(
             claim.header().settings().turn_budget(),

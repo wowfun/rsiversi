@@ -1,12 +1,13 @@
 use super::*;
 use rsi_agent_composition_protocol::{
     ContributionKind, ContributionRegistration, DomainCatalog, DomainDefinition, DomainHandle,
-    ToolSettlementContext, ToolSettlementContributor, ValidatedDomainProposal,
+    ToolSettlementContext, ToolSettlementContributor,
 };
 use rsi_agent_session_protocol::{ContributionId, DomainIdentity, EffectId};
 
 #[derive(Debug)]
 struct Settlement {
+    conclude: bool,
     state: DomainHandle<u64>,
     calls: AtomicUsize,
 }
@@ -14,7 +15,9 @@ impl ToolSettlementContributor for Settlement {
     fn settle(
         &self,
         context: &ToolSettlementContext<'_>,
-    ) -> rsi_agent_composition_protocol::ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> rsi_agent_composition_protocol::ContributionResult<
+        rsi_agent_composition_protocol::ToolSettlement,
+    > {
         assert!(
             matches!(context.intent.body(),SessionFactBody::ToolIntent{name,..} if name=="echo")
         );
@@ -22,13 +25,20 @@ impl ToolSettlementContributor for Settlement {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let view = &context.domains[0];
         let count = self.state.decode(&view.snapshot).unwrap();
-        Ok(vec![
-            self.state.propose(view.revision, &(count + 1)).unwrap(),
-        ])
+        Ok(rsi_agent_composition_protocol::ToolSettlement {
+            domains: vec![self.state.propose(view.revision, &(count + 1)).unwrap()],
+            conclusion: self
+                .conclude
+                .then_some(rsi_agent_session_protocol::ToolConclusion { structured: None }),
+        })
     }
 }
 
 async fn setup(stack: &BaseStack) -> (Arc<Settlement>, FiberHandle) {
+    setup_conclusion(stack, false).await
+}
+
+async fn setup_conclusion(stack: &BaseStack, conclude: bool) -> (Arc<Settlement>, FiberHandle) {
     let definition = DomainDefinition::new(
         DomainIdentity::new("fixture.settlement", 1).unwrap(),
         &0_u64,
@@ -37,6 +47,7 @@ async fn setup(stack: &BaseStack) -> (Arc<Settlement>, FiberHandle) {
     .unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let callback = Arc::new(Settlement {
+        conclude,
         state: domains.bind(&definition).unwrap(),
         calls: AtomicUsize::new(0),
     });
@@ -348,4 +359,68 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
     drop(tool_lease);
     assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language_fiber, executor).await;
+}
+
+#[tokio::test]
+async fn conclusion_and_domain_update_share_the_exact_result_commit() {
+    let stack = BaseStack::activate().await;
+    let (callback, callbacks) = setup_conclusion(&stack, true).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+        })
+        .unwrap();
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_calls_script(
+            &[("first", "echo", "{}"), ("never", "echo", "{}")],
+        ))])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("concluding.provider", provider.clone())
+        .await;
+    let executor = stack.activate_executor("concluding-executor").await;
+    let (submitted, outcome) = stack.submit_and_wait("conclude after one result").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(callback.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64)
+        .await
+        .unwrap()
+        .facts;
+    let fact = facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact.body(),
+                SessionFactBody::ToolResult {
+                    conclusion: Some(_),
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let controls = stack
+        .store
+        .read_controls(&submitted.session_id, 0, 64)
+        .await
+        .unwrap()
+        .records;
+    assert!(controls.iter().any(|record| matches!(record.body(), rsi_agent_session_protocol::AgentControlRecordBody::DomainStateCommitted { commit } if commit.fact_span().is_some_and(|span| span.first_seq() == fact.seq() && span.count() == 1))));
+    drop(lease);
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
 }

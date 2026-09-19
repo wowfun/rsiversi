@@ -505,6 +505,7 @@ impl TurnExecution for FullBeforePublish {
                 SessionFactBody::TurnTerminal {
                     turn_id: claim.turn_id().clone(),
                     outcome: outcome.clone(),
+                    result: None,
                 },
             )
             .unwrap(),
@@ -658,6 +659,7 @@ fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
                 SessionFactBody::TurnTerminal {
                     turn_id,
                     outcome: TurnOutcome::Completed,
+                    result: None,
                 },
             )
             .unwrap(),
@@ -916,6 +918,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
                     SessionFactBody::TurnTerminal {
                         turn_id: claim.turn_id().clone(),
                         outcome: TurnOutcome::Completed,
+                        result: None,
                     },
                 )
                 .unwrap(),

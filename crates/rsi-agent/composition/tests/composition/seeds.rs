@@ -32,6 +32,14 @@ impl PluginFactory for SeedFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let inputs = plan.local::<AgentGenerationInputsContract>()?;
+        // The owner deliberately ignores the mismatch to test the final seal guard.
+        if let Err(error) = inputs.seed_state(&identity()) {
+            assert!(matches!(
+                error,
+                AgentCompositionError::UnsupportedSeedCodec { .. }
+            ));
+            return Ok(());
+        }
         let snapshot = inputs
             .seed
             .find(&identity())
@@ -82,6 +90,10 @@ fn seed(value: ConfigValue) -> AgentGenerationSeed {
     .unwrap()
 }
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One generation lifecycle proves cache reuse and isolation after failed restores."
+)]
 async fn saved_seed_reconstructs_exact_tools_before_sealing_and_partitions_cache_identity() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("presets");
@@ -152,11 +164,34 @@ async fn saved_seed_reconstructs_exact_tools_before_sealing_and_partitions_cache
     let again = service.pin(&id, Some(&saved)).await.unwrap();
     assert_eq!(restored.source_digest(), again.source_digest());
     assert_eq!(*factory.activated.lock().unwrap(), [false, false, true]);
+    let invalid = service
+        .pin(&id, Some(&seed(serde_json::json!(false))))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        invalid.to_string(),
+        "Agent preset default is unavailable: activating an Agent contribution failed"
+    );
+    let wrong_codec = AgentGenerationSeed::new(vec![DomainSnapshot::new(
+        DomainIdentity::new("fixture.manifest", 2).unwrap(),
+        DomainStateValue::new("private-state".into()).unwrap(),
+    )])
+    .unwrap();
+    let error = service.pin(&id, Some(&wrong_codec)).await.unwrap_err();
+    assert_eq!(
+        error,
+        AgentCompositionError::UnsupportedSeedCodec {
+            stored: DomainIdentity::new("fixture.manifest", 2).unwrap(),
+            expected: identity(),
+        }
+    );
+    assert!(!error.to_string().contains("private-state"));
     assert!(
         service
-            .pin(&id, Some(&seed(serde_json::json!(false))))
+            .pin(&id, Some(&saved))
             .await
-            .is_err()
+            .unwrap()
+            .same_generation(&restored)
     );
     assert_eq!(beta.tools().definitions()[0].name(), "beta");
     drop((alpha, beta, restored, again));

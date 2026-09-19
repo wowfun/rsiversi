@@ -1,8 +1,6 @@
 //! One pure prepublication stage shared by fresh and retained Tool results.
 use super::*;
-use rsi_agent_composition_protocol::{
-    ContributionKind, ToolSettlementContext, ValidatedDomainProposal,
-};
+use rsi_agent_composition_protocol::{ContributionKind, ToolSettlement, ToolSettlementContext};
 
 impl Driver {
     pub(super) async fn tool_settlement_proposals(
@@ -11,22 +9,29 @@ impl Driver {
         composition: &AgentCompositionPin,
         intent: &SessionFact,
         result: &ToolResult,
-    ) -> std::result::Result<Vec<ValidatedDomainProposal>, DriveFailure> {
+    ) -> std::result::Result<ToolSettlement, DriveFailure> {
         let entries = composition.contributions().entries();
-        if !entries
-            .iter()
-            .any(|entry| matches!(entry.kind(), ContributionKind::ToolSettlement(_)))
-        {
-            return Ok(Vec::new());
-        }
         let SessionFactBody::ToolIntent {
-            turn_id, effect_id, ..
+            turn_id,
+            effect_id,
+            name,
+            ..
         } = intent.body()
         else {
             return Err(fatal("settlement requires a ToolIntent"));
         };
         if turn_id != claim.turn_id() {
             return Err(fatal("settlement intent belongs to another Turn"));
+        }
+        let mut settlement = ToolSettlement {
+            conclusion: structured_conclusion(composition, name, result).map_err(fatal)?,
+            ..ToolSettlement::default()
+        };
+        if !entries
+            .iter()
+            .any(|entry| matches!(entry.kind(), ContributionKind::ToolSettlement(_)))
+        {
+            return Ok(settlement);
         }
         let domains = tokio::time::timeout(
             Duration::from_secs(30),
@@ -46,7 +51,7 @@ impl Driver {
             result,
             domains: &domains,
         };
-        let mut proposals = Vec::new();
+
         let mut identities = std::collections::BTreeSet::new();
         for entry in entries {
             let ContributionKind::ToolSettlement(callback) = entry.kind() else {
@@ -66,7 +71,10 @@ impl Driver {
                             format!("{}: {}", entry.id(), bounded(&error.to_string())),
                         )
                     })?;
-            if proposals.len().saturating_add(additions.len())
+            if settlement
+                .domains
+                .len()
+                .saturating_add(additions.domains.len())
                 > rsi_agent_session_protocol::MAXIMUM_SESSION_DOMAINS
             {
                 return Err(failed(
@@ -74,16 +82,41 @@ impl Driver {
                     "too many domain proposals",
                 ));
             }
-            for proposal in additions {
+            if let Some(conclusion) = additions.conclusion
+                && settlement.conclusion.replace(conclusion).is_some()
+            {
+                return Err(failed(
+                    "tool.settlement_conflict",
+                    "multiple conclusions for one result",
+                ));
+            }
+            for proposal in additions.domains {
                 if !identities.insert(proposal.snapshot().identity().id().to_owned()) {
                     return Err(failed(
                         "tool.settlement_conflict",
                         "multiple proposals target one domain",
                     ));
                 }
-                proposals.push(proposal);
+                settlement.domains.push(proposal);
             }
         }
-        Ok(proposals)
+        Ok(settlement)
+    }
+}
+
+fn structured_conclusion(
+    composition: &AgentCompositionPin,
+    name: &str,
+    result: &ToolResult,
+) -> rsi_agent_session_protocol::Result<Option<rsi_agent_session_protocol::ToolConclusion>> {
+    if name == rsi_agent_session_protocol::REPORT_RESULT_TOOL
+        && !result.is_error
+        && let Some(contract) = composition.output_contract()
+    {
+        Ok(Some(rsi_agent_session_protocol::ToolConclusion {
+            structured: Some(contract.summarize(&result.value)?),
+        }))
+    } else {
+        Ok(None)
     }
 }

@@ -768,6 +768,8 @@ async fn human_wait_releases_tree_admission_and_cancelled_resume_does_not_retain
     for index in 0..2 {
         kernel
             .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
                 model: None,
                 reasoning_effort: None,
                 cancellation: CancellationToken::new(),

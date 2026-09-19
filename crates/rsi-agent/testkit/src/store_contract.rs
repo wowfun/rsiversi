@@ -509,6 +509,7 @@ pub async fn assert_mechanical_store_contract(
             SessionFactBody::TurnTerminal {
                 turn_id: message_turn_id.clone(),
                 outcome: TurnOutcome::Completed,
+                result: None,
             },
         )
         .unwrap(),
@@ -663,7 +664,7 @@ pub async fn assert_mechanical_store_contract(
                         13,
                         AgentControlRecordBody::ActivationSettled {
                             activation_id,
-                            outcome: ActivationOutcome::Completed,
+                            outcome: ActivationOutcome::Completed { result: None },
                         },
                     )
                     .unwrap(),
@@ -1052,8 +1053,6 @@ pub async fn assert_mechanical_store_contract(
         header.agent_preset_id().clone(),
         header.settings().clone(),
     )
-    .unwrap()
-    .with_workspace_trust(header.workspace_trust())
     .unwrap();
     store
         .commit_agent(AtomicAgentCommit {
@@ -1268,6 +1267,7 @@ pub async fn assert_mechanical_store_contract(
                         message_id: MessageId::new(format!("bounded-message-{offset}")).unwrap(),
                         source: if offset == 0 {
                             AgentMessageSource::Completion {
+                outcome: rsi_agent_session_protocol::ActivationOutcome::Completed { result: None },
                                 child_session_id: first_child_id.clone(),
                                 activation_id: reservation_activation.clone(),
                             }
@@ -1374,7 +1374,7 @@ pub async fn assert_mechanical_store_contract(
                         100,
                         AgentControlRecordBody::ActivationSettled {
                             activation_id: reservation_activation,
-                            outcome: ActivationOutcome::Completed,
+                            outcome: ActivationOutcome::Completed { result: None },
                         },
                     )
                     .unwrap(),
@@ -1538,6 +1538,21 @@ pub async fn assert_mechanical_store_contract(
         .unwrap()
         .selected
         .unwrap();
+    assert_eq!(
+        store
+            .read_agent_message(&session_id, &promoted_message_id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&promoted)
+    );
+    assert!(
+        store
+            .read_agent_message(&session_id, &MessageId::new("absent").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(promoted.target, MessageTarget::NextTurn);
     assert!(promoted.wake_required);
     let inspection = store.inspect_session(&session_id).await.unwrap();

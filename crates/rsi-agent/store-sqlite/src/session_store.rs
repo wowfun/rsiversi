@@ -1272,6 +1272,37 @@ impl SessionStore for SqliteStore {
         }).await
     }
 
+    async fn read_agent_message(
+        &self,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let message_id = message_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let tail = transaction
+                .query_row(
+                    "SELECT control_seq FROM sessions WHERE session_id = ?1",
+                    [session_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+            let entry = read_indexed_message(&transaction, &session_id, &message_id)?;
+            if let Some(entry) = &entry {
+                entry.validate(decode_u64("mailbox durable control sequence", tail)?)?;
+            }
+            transaction.commit().map_err(sql_error)?;
+            Ok(entry)
+        })
+        .await
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -1296,38 +1327,7 @@ impl SessionStore for SqliteStore {
             let durable_fact_seq = decode_u64("mailbox durable Fact sequence", durable_fact_seq)?;
             let durable_control_seq =
                 decode_u64("mailbox durable control sequence", durable_control_seq)?;
-            let selected = selected_message_id
-                .as_ref()
-                .map(|message_id| {
-                    transaction
-                        .query_row(
-                            "SELECT length(CAST(message_json AS BLOB)),
-                                    CASE WHEN length(CAST(message_json AS BLOB)) <= ?3
-                                         THEN message_json END,
-                                    message_source, root_session_id, target, wake_required,
-                                    accepted_control_seq, state,
-                                    length(CAST(state_json AS BLOB)),
-                                    CASE WHEN length(CAST(state_json AS BLOB)) <= ?4
-                                         THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
-                             FROM agent_messages
-                             WHERE session_id = ?1 AND message_id = ?2",
-                            params![
-                                session_id.as_str(),
-                                message_id.as_str(),
-                                i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                                    .expect("mailbox page bound fits SQLite INTEGER"),
-                                i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
-                                    .expect("message state bound fits SQLite INTEGER"),
-                            ],
-                            indexed_message_row,
-                        )
-                        .optional()
-                        .map_err(sql_error)
-                        .and_then(|row| row.map(decode_indexed_message).transpose())
-                })
-                .transpose()?
-                .flatten();
+            let selected = selected_message_id.as_ref().map(|id| read_indexed_message(&transaction, &session_id, id)).transpose()?.flatten();
             let pending_count = transaction
                 .query_row(
                     "SELECT COUNT(*) FROM agent_messages
@@ -2137,4 +2137,37 @@ pub(super) fn read_agent_subtree(
     };
     snapshot.validate()?;
     Ok(snapshot)
+}
+
+fn read_indexed_message(
+    connection: &Connection,
+    session_id: &SessionId,
+    message_id: &MessageId,
+) -> Result<Option<StoreAgentMessage>> {
+    connection
+                        .query_row(
+                            "SELECT length(CAST(message_json AS BLOB)),
+                                    CASE WHEN length(CAST(message_json AS BLOB)) <= ?3
+                                         THEN message_json END,
+                                    message_source, root_session_id, target, wake_required,
+                                    accepted_control_seq, state,
+                                    length(CAST(state_json AS BLOB)),
+                                    CASE WHEN length(CAST(state_json AS BLOB)) <= ?4
+                                         THEN state_json END,
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
+                             FROM agent_messages
+                             WHERE session_id = ?1 AND message_id = ?2",
+                            params![
+                                session_id.as_str(),
+                                message_id.as_str(),
+                                i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
+                                    .expect("mailbox page bound fits SQLite INTEGER"),
+                                i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
+                                    .expect("message state bound fits SQLite INTEGER"),
+                            ],
+                            indexed_message_row,
+                        )
+                        .optional()
+                        .map_err(sql_error)
+                        .and_then(|row| row.map(decode_indexed_message).transpose())
 }

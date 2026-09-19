@@ -342,6 +342,8 @@ struct StoreInner {
     >,
     #[cfg(feature = "test-support")]
     fact_page_barrier: Arc<Mutex<Option<FactPagePause>>>,
+    #[cfg(feature = "test-support")]
+    reader_measurements: Arc<Mutex<Option<Vec<test_support::ReaderMeasurement>>>>,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
@@ -527,6 +529,8 @@ impl SqliteStore {
                 validation_barrier: Mutex::new(None),
                 #[cfg(feature = "test-support")]
                 fact_page_barrier: Arc::new(Mutex::new(None)),
+                #[cfg(feature = "test-support")]
+                reader_measurements: Arc::new(Mutex::new(None)),
                 cas_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
@@ -575,19 +579,36 @@ impl SqliteStore {
     async fn with_database<T, F>(
         admission: Arc<Semaphore>,
         closed_message: &'static str,
+        #[cfg(feature = "test-support")] measurements: Option<
+            Arc<Mutex<Option<Vec<test_support::ReaderMeasurement>>>>,
+        >,
         operation: F,
     ) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
+        #[cfg(feature = "test-support")]
+        let queued = std::time::Instant::now();
         let permit = admission
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io(closed_message.into()))?;
+        #[cfg(feature = "test-support")]
+        let dispatched = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            operation()
+            #[cfg(feature = "test-support")]
+            let measurement = test_support::ReaderProbe::start(
+                measurements,
+                queued,
+                dispatched,
+                std::any::type_name::<T>(),
+            );
+            let result = operation();
+            #[cfg(feature = "test-support")]
+            drop(measurement);
+            result
         })
         .await
         .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
@@ -602,6 +623,8 @@ impl SqliteStore {
         Self::with_database(
             Arc::clone(&self.inner.writer_admission),
             "SQLite writer admission closed",
+            #[cfg(feature = "test-support")]
+            None,
             move || {
                 let mut connection = owner.connections.writer.lock().map_err(|_| {
                     StoreError::Io("SQLite writer connection mutex was poisoned".into())
@@ -621,6 +644,8 @@ impl SqliteStore {
         Self::with_database(
             Arc::clone(&self.inner.reader_admission),
             "SQLite reader admission closed",
+            #[cfg(feature = "test-support")]
+            Some(self.inner.reader_measurements.clone()),
             move || {
                 let mut connection = owner.connections.reader.lock().map_err(|_| {
                     StoreError::Io("SQLite reader connection mutex was poisoned".into())
@@ -650,6 +675,8 @@ impl SqliteStore {
         Self::with_database(
             Arc::clone(&self.inner.validation_admission),
             "SQLite validation admission closed",
+            #[cfg(feature = "test-support")]
+            None,
             move || {
                 let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
                     StoreError::Io("SQLite validation connection mutex was poisoned".into())
@@ -800,6 +827,8 @@ mod append;
 mod cas;
 mod domain;
 mod filesystem;
+mod reset;
+pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt, SqliteStoreResetRequest};
 mod preparation;
 mod session_store;
 mod suffix;
@@ -833,6 +862,7 @@ use validation::{
 #[derive(Clone, Debug, Default)]
 pub struct SqliteStoreFactory {
     startup_failure: Arc<Mutex<Option<SqliteStoreStartupFailure>>>,
+    reset: Option<SqliteStoreResetRequest>,
 }
 
 /// Safe startup diagnostic for the factory's direct composition owner.
@@ -865,6 +895,14 @@ pub enum SqliteStoreStartupFailureKind {
 }
 
 impl SqliteStoreFactory {
+    /// Uses one explicit reset request shared across clones and later factories.
+    pub fn with_reset_once(reset: SqliteStoreResetRequest) -> Self {
+        Self {
+            reset: Some(reset),
+            ..Self::default()
+        }
+    }
+
     /// Consumes this factory's latest activation failure, if any.
     pub fn take_startup_failure(&self) -> Option<SqliteStoreStartupFailure> {
         self.startup_failure.lock().ok()?.take()
@@ -887,6 +925,11 @@ impl PluginFactory for SqliteStoreFactory {
         config
             .validate()
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        if let Some(reset) = &self.reset {
+            reset
+                .bind(&config.root)
+                .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        }
         let retained = store_config_retained_bytes(&config)?;
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -900,27 +943,31 @@ impl PluginFactory for SqliteStoreFactory {
         let config = plan.take_state::<SqliteStoreConfig>()?;
         let root = config.root;
         let open_root = root.clone();
-        let store = tokio::task::spawn_blocking(move || SqliteStore::open(open_root))
-            .await
-            .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
-            .map_err(|error| {
-                let kind = match &error {
-                    StoreError::SchemaMismatch { expected, actual } => {
-                        SqliteStoreStartupFailureKind::SchemaMismatch {
-                            expected: *expected,
-                            actual: *actual,
-                        }
+        let reset = self.reset.clone();
+        let store = tokio::task::spawn_blocking(move || match reset {
+            Some(reset) => reset.open(&open_root),
+            None => SqliteStore::open(open_root),
+        })
+        .await
+        .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
+        .map_err(|error| {
+            let kind = match &error {
+                StoreError::SchemaMismatch { expected, actual } => {
+                    SqliteStoreStartupFailureKind::SchemaMismatch {
+                        expected: *expected,
+                        actual: *actual,
                     }
-                    StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
-                    StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
-                    StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
-                    _ => SqliteStoreStartupFailureKind::Invalid,
-                };
-                if let Ok(mut diagnostic) = self.startup_failure.lock() {
-                    *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
                 }
-                MetaError::Activation(error.to_string())
-            })?;
+                StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
+                StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
+                StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
+                _ => SqliteStoreStartupFailureKind::Invalid,
+            };
+            if let Ok(mut diagnostic) = self.startup_failure.lock() {
+                *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
+            }
+            MetaError::Activation(error.to_string())
+        })?;
         let store: Arc<dyn SessionStore> = Arc::new(store);
         let supply = plan
             .context()

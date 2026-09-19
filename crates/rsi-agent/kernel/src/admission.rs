@@ -74,6 +74,14 @@ impl AgentKernel {
             return Ok(None);
         };
         let drain = self.drain_agent_mutations(claim).await?;
+        // The drain fences new Fact publication and joins already admitted settlements.
+        // Outcome selection therefore observes the same conclusion as terminal staging.
+        let effective = {
+            let state = lock_state(&self.inner);
+            let turn = self.validate_claim(&state, claim)?;
+            super::structured::completion_outcome(claim.header(), turn, proposed_outcome)
+        };
+        let proposed_outcome = &effective;
         if !matches!(proposed_outcome, TurnOutcome::Completed) {
             let descendants = descendant_session_ids(&self.inner.store, claim.session_id()).await?;
             let cancellations = descendants.iter().map(|child_session_id| async move {
@@ -182,7 +190,7 @@ impl AgentKernel {
         }
         let expected_control_seq = mailbox.durable_control_seq;
 
-        let activation_outcome = activation_outcome(&outcome);
+        let activation_outcome = activation_outcome(&outcome, terminal_result(&terminal));
         let settled_controls = activation_terminal_controls(
             expected_control_seq,
             terminal.timestamp_ms(),
@@ -207,6 +215,7 @@ impl AgentKernel {
                     &activation_id,
                     parent_session_id,
                     &outcome,
+                    terminal_result(&terminal),
                     terminal.timestamp_ms(),
                 )
                 .await?,
@@ -291,6 +300,7 @@ impl AgentKernel {
         activation_id: &rsi_agent_session_protocol::ActivationId,
         parent_session_id: &SessionId,
         outcome: &TurnOutcome,
+        result: Option<rsi_agent_session_protocol::AgentResultRef>,
         timestamp_ms: u64,
     ) -> TurnResult<AtomicSessionAppend> {
         self.fence_pending_terminal(parent_session_id).await?;
@@ -350,9 +360,20 @@ impl AgentKernel {
                     source: AgentMessageSource::Completion {
                         child_session_id: child_session_id.clone(),
                         activation_id: activation_id.clone(),
+                        outcome: activation_outcome(outcome, result.clone()),
                     },
                     content: vec![AgentMessageContent::Text {
-                        text: completion_message(outcome),
+                        text: result.as_ref().map_or_else(
+                            || completion_message(outcome),
+                            |result| {
+                                format!(
+                                    "{} Read the structured result with read_agent_result: {}",
+                                    completion_message(outcome),
+                                    serde_json::to_string(&result.locator())
+                                        .expect("result locator encoding")
+                                )
+                            },
+                        ),
                     }],
                     options: MessageOptions::default(),
                 },
@@ -527,7 +548,7 @@ impl AgentKernel {
                     timestamp_ms,
                     AgentControlRecordBody::ActivationSettled {
                         activation_id: active.activation_id.clone(),
-                        outcome: activation_outcome(&outcome),
+                        outcome: activation_outcome(&outcome, terminal_result(terminal)),
                     },
                     &mailbox.pending_promotable_message_ids,
                 )?;
@@ -546,6 +567,7 @@ impl AgentKernel {
                             &active.activation_id,
                             parent_session_id,
                             &outcome,
+                            terminal_result(terminal),
                             timestamp_ms,
                         )
                         .await?,
@@ -691,5 +713,12 @@ impl AgentKernel {
         } else {
             health.global_error = Some(diagnostic);
         }
+    }
+}
+
+fn terminal_result(terminal: &SessionFact) -> Option<rsi_agent_session_protocol::AgentResultRef> {
+    match terminal.body() {
+        SessionFactBody::TurnTerminal { result, .. } => result.clone(),
+        _ => None,
     }
 }

@@ -16,6 +16,11 @@ recorded reference in the current Session or its actual inherited direct-parent
 interval; they accept no arbitrary digest. Human draft previews use the same
 envelope verification with the actual original target Header.
 
+Fresh capture returns a private, immutable validated-envelope type before encoding
+and CAS publication. Descriptor construction consumes its unchanged metadata and
+preview, checking the returned CAS reference without revalidating the full text.
+External and durable envelopes retain complete validation at their read boundary.
+
 The owner retains the two most recently verified immutable CAS envelopes. Cache
 hits still check the exact snapshot length, target Header, metadata and preview;
 only CAS I/O, hashing and decoding are reused. Eviction affects no durable state.

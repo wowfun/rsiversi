@@ -37,6 +37,21 @@ fn select_generation(inner: &KernelInner, session_id: &SessionId) -> TurnResult<
 
 #[async_trait]
 impl SessionProjections for AgentKernel {
+    fn resident_composition(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ResidentComposition> {
+        use rsi_agent_turn_protocol::ResidentComposition;
+        Ok(match select_generation(&self.inner, session_id)? {
+            Selection::Resident(header, pin) => ResidentComposition::Resident {
+                header,
+                source_digest: pin.source_digest().into(),
+                manifest: pin.manifest(),
+            },
+            Selection::Loading(_) => ResidentComposition::Loading,
+            Selection::Cold => ResidentComposition::NotResident,
+        })
+    }
     fn watch_projection_changes(
         &self,
         session_id: &SessionId,
