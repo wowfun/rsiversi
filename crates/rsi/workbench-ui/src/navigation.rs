@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NavigationCommand {
+    /// Acknowledge an explicitly displayed attention cut.
+    MarkRead {
+        /// Exact source identity and coordinates.
+        position: rsi_navigation_api::attention::Position,
+    },
     /// Begin a new query under a new view ticket.
     Query {
         /// Exact bounded filter.
@@ -35,6 +40,8 @@ pub enum NavigationCommand {
 }
 #[derive(Debug, Default, Serialize)]
 struct View {
+    attention: Option<rsi_navigation_api::attention::Page>,
+    attention_notice: Option<String>,
     ticket: String,
     filter: NavigationFilter,
     entries: Vec<NavigationEntry>,
@@ -52,6 +59,7 @@ struct State {
 #[derive(Debug)]
 pub struct NavigationFeature {
     client: NavigationClient,
+    attention: Option<rsi_navigation_api::attention::Client>,
     state: Mutex<State>,
     work: Work,
     refresh: watch::Sender<()>,
@@ -94,7 +102,18 @@ impl NavigationFeature {
         })
     }
     async fn execute(&self, command: NavigationCommand) -> Result<()> {
+        if let NavigationCommand::MarkRead { position } = command {
+            self.attention
+                .as_ref()
+                .ok_or("Attention navigation unavailable")?
+                .mark_read(position)
+                .await
+                .map_err(error)?;
+            self.refresh_attention().await;
+            return Ok(());
+        }
         let (filter, mut after) = match command {
+            NavigationCommand::MarkRead { .. } => unreachable!("handled above"),
             NavigationCommand::Query { filter } => {
                 filter.validate().map_err(error)?;
                 (filter, None)
@@ -144,8 +163,13 @@ impl NavigationFeature {
             }
             after = page.next;
         };
-        *self.state.lock().expect("navigation view poisoned") = State {
+        let mut state = self.state.lock().expect("navigation view poisoned");
+        let attention = state.view.attention.take();
+        let attention_notice = state.view.attention_notice.take();
+        *state = State {
             view: View {
+                attention,
+                attention_notice,
                 ticket: rsi_ui::fresh_identity("navigation")?,
                 filter,
                 entries: page.entries,
@@ -157,6 +181,24 @@ impl NavigationFeature {
             after: page.next,
         };
         Ok(())
+    }
+    async fn refresh_attention(&self) -> bool {
+        let Some(client) = &self.attention else {
+            return false;
+        };
+        let result = client.read().await;
+        let mut state = self.state.lock().expect("navigation attention view");
+        let (page, notice) = match result {
+            Ok(page) => (Some(page), None),
+            Err(_) => (
+                state.view.attention.clone(),
+                Some("Activity refresh unavailable; showing the last observation".to_owned()),
+            ),
+        };
+        let changed = state.view.attention != page || state.view.attention_notice != notice;
+        state.view.attention = page;
+        state.view.attention_notice = notice;
+        changed
     }
 }
 /// Nominal per-application navigation presentation capability.
@@ -177,6 +219,10 @@ impl PluginFactory for NavigationFeatureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (refresh, mut changes) = watch::channel(());
         let feature = Arc::new(NavigationFeature {
+            attention: rsi_navigation_api::attention::Client::new(
+                plan.local::<rsi_api_protocol::ApiClientContract>()?,
+            )
+            .ok(),
             client: NavigationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?)
                 .map_err(meta)?,
             state: Mutex::default(),
@@ -189,6 +235,7 @@ impl PluginFactory for NavigationFeatureFactory {
                 filter: NavigationFilter::default(),
             })
             .await;
+        feature.refresh_attention().await;
         let supply = plan
             .context()
             .provide_local::<NavigationFeatureContract>(feature.clone())?;
@@ -199,11 +246,17 @@ impl PluginFactory for NavigationFeatureFactory {
                 .execution
                 .spawn(feature.work.tasks.track_future(async move {
                 let work = async {
-                    while changes.changed().await.is_ok() {
+                    let mut polling = AttentionPolling::default();
+                    loop {
+                        let refresh = tokio::select! {
+                            result = changes.changed() => {if result.is_err() {break;} true},
+                            () = background.work.execution.sleep(std::time::Duration::from_secs(polling.seconds)) => false,
+                        };
                         let Ok(_permit) = background.work.slot.acquire().await else {
                             break;
                         };
-                        changes.borrow_and_update();
+                        let refresh = refresh || changes.has_changed().unwrap_or(false);
+                        acknowledge_refresh(&mut changes, refresh);
                         let filter = background
                             .state
                             .lock()
@@ -211,19 +264,16 @@ impl PluginFactory for NavigationFeatureFactory {
                             .view
                             .filter
                             .clone();
-                        let result = background
-                            .execute(NavigationCommand::Query { filter })
-                            .await;
-                        background
-                            .state
-                            .lock()
-                            .expect("navigation view poisoned")
-                            .view
-                            .diagnostic = result.err();
-                        background
+                        if refresh {
+                            let result = background.execute(NavigationCommand::Query {filter}).await;
+                            background.state.lock().expect("navigation view poisoned").view.diagnostic = result.err();
+                        }
+                        let attention_changed = background.refresh_attention().await;
+                        polling.observe(refresh || attention_changed);
+                        if refresh || attention_changed { background
                             .work
                             .changed
-                            .send_modify(|revision| *revision = revision.saturating_add(1));
+                            .send_modify(|revision| *revision = revision.saturating_add(1)); }
                     }
                 };
                 tokio::select! { biased; () = background.stop.cancelled() => {}, () = work => {} }
@@ -269,5 +319,52 @@ impl rsi_ui::SurfaceRenderer for Card {
                 },
             ],
         })
+    }
+}
+
+fn acknowledge_refresh(changes: &mut watch::Receiver<()>, refresh: bool) {
+    if refresh {
+        changes.borrow_and_update();
+    }
+}
+struct AttentionPolling {
+    seconds: u64,
+}
+impl Default for AttentionPolling {
+    fn default() -> Self {
+        Self { seconds: 1 }
+    }
+}
+impl AttentionPolling {
+    fn observe(&mut self, changed: bool) {
+        self.seconds = if changed {
+            1
+        } else {
+            (self.seconds * 2).min(8)
+        };
+    }
+}
+#[cfg(test)]
+mod polling_tests {
+    use super::AttentionPolling;
+    #[test]
+    fn publication_after_an_idle_poll_decision_is_not_consumed() {
+        let (send, mut changes) = tokio::sync::watch::channel(());
+        let refresh = changes.has_changed().unwrap();
+        send.send_replace(());
+        super::acknowledge_refresh(&mut changes, refresh);
+        assert!(changes.has_changed().unwrap());
+        super::acknowledge_refresh(&mut changes, true);
+        assert!(!changes.has_changed().unwrap());
+    }
+    #[test]
+    fn unchanged_attention_backs_off_and_invalidation_restores_responsiveness() {
+        let mut polling = AttentionPolling::default();
+        for expected in [2, 4, 8, 8] {
+            polling.observe(false);
+            assert_eq!(polling.seconds, expected);
+        }
+        polling.observe(true);
+        assert_eq!(polling.seconds, 1);
     }
 }

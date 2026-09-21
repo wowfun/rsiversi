@@ -1,5 +1,11 @@
 # rsi-workbench-ui
 
+Navigation observes the bounded attention API with at most one poll or explicit
+navigation operation in flight. An unchanged page backs off from one to eight
+seconds; a local invalidation or changed page resets that delay. A failed refresh
+retains the last page with an explicit stale-state notice. Explicit reading
+acknowledgments are retained operations and never retried after uncertain results.
+
 Saving a model requires a string deployment identity in its provider definition
 that matches the selected model. Missing, null or mismatched identities are
 rejected before provider writes; incomplete entries cannot match one another by
@@ -58,3 +64,6 @@ read. It retains one 32-row page, explicit refresh and exact-ticket adjacent-pag
 commands. Desired and observed revision changes invalidate pagination; failed reads
 clear the old page. Both TUI `/plugins` and GUI Settings → Plugins consume this
 owner, whose admitted reads drain before feature retirement.
+
+Navigation only acknowledges coalesced invalidations when it will query the
+current filter; an attention-only timer tick cannot consume a later publication.

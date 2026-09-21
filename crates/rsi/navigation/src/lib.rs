@@ -29,7 +29,9 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
+mod attention;
 mod endpoint;
+pub use attention::AttentionFactory;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

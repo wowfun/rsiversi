@@ -1,5 +1,13 @@
 # rsi-navigation
 
+The ordinary `AttentionFactory` owns a separate version-1 Storage domain of
+explicit per-principal reading positions. It combines bounded Session activity
+metadata with eight ACP resident observations, never scans recent history, and
+does not persist runtime status. Two read slots and one nonqueued writer bound
+work; accepted writes survive waiter loss and retirement drains them. Its API
+returns pending targets before running, unknown and unread activity. A closed
+native durable cut is an unread update, not a guarantee of effect settlement.
+
 A failed backend commit closes this owner's query and mutation admission with an
 unknown outcome until Host restart reloads durable truth. Cached metadata cannot
 authorize another edit or cursor while its durable revision is uncertain.
@@ -24,3 +32,11 @@ global expected-revision CAS and holds the accepted operation through durable
 commit and publication if its caller disappears. Retirement closes admission
 before draining. Authenticated devices can edit navigation without a configuration
 grant. Archive affects navigation visibility only and does not cancel execution.
+
+Reading positions retain at most 4,096 records / 1 MiB. Admission evicts least
+recently acknowledged positions until both bounds fit; restart seeds that order
+from the durable key order. Eviction may show old activity as unread again, but
+cannot acknowledge it for another principal or prevent future acknowledgments.
+A failed eviction or write closes admission as an unknown outcome. Ready and
+closed external conversations retain unread observations according to their epoch
+and sequence, including history loaded from a remote peer.

@@ -11,6 +11,8 @@ use rsi_session_protocol::RecentSessionCursor;
 use rsi_workspace_protocol::WorkspaceId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+/// Current-owner attention and explicit reading-position operations.
+pub mod attention;
 
 /// Exact title and archive state; neither field mutates Session execution.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
