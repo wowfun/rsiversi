@@ -10,11 +10,18 @@ use rsi_configuration_api::{
     PluginStatusRequest, PluginStatusTarget,
 };
 use serde::{Deserialize, Serialize};
+mod leaves;
+pub use leaves::{LeafCommand, LeafView};
 
 /// Explicit read/refresh and version-bound page navigation.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginsCommand {
+    /// Reviewed single-leaf Host source management, with separate explicit grants.
+    Leaves {
+        /// Closed bounded owner operation.
+        command: LeafCommand,
+    },
     /// Discard the old page and read current revisions.
     Refresh,
     /// Select a distinct observation source and discard old pagination.
@@ -68,6 +75,8 @@ pub enum PluginsCommand {
 /// Bounded projection retained by both product clients.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PluginsView {
+    /// Separate reviewed Host source state; never contains configuration values.
+    pub leaves: LeafView,
     /// Whether this connection negotiated Exa credential management.
     pub exa_available: bool,
     /// Explicit redacted credential observation.
@@ -99,6 +108,8 @@ pub struct PluginsFeature {
     client: ConfigurationClient,
     mcp: Option<McpClient>,
     exa: Option<ExaClient>,
+    leaves: Option<rsi_configuration_api::leaf::Client>,
+    leaf_grants: bool,
     state: Mutex<PluginsView>,
     work: Work,
 }
@@ -111,6 +122,14 @@ impl PluginsFeature {
         let mut view = self.state.lock().expect("plugin view poisoned").clone();
         view.mcp_available = self.mcp.is_some();
         view.exa_available = self.exa.is_some();
+        view.leaves.available = self.leaves.is_some();
+        view.leaves.can_grant = self.leaf_grants
+            && view.leaves.catalog.as_ref().is_some_and(|catalog| {
+                matches!(
+                    catalog.principal,
+                    rsi_configuration_api::leaf::Principal::Local
+                )
+            });
         if let Some(page) = &view.page {
             view.guidance = page
                 .plugins
@@ -150,6 +169,9 @@ impl PluginsFeature {
     pub fn command(self: &Arc<Self>, command: PluginsCommand) -> BoxFuture<'static, Result<()>> {
         let owner = self.clone();
         self.work.run(async move {
+            if let PluginsCommand::Leaves { command } = command {
+                return owner.leaf_command(command).await;
+            }
             if matches!(
                 command,
                 PluginsCommand::ExaStatus
@@ -380,6 +402,14 @@ impl PluginFactory for PluginsFeatureFactory {
                 .map_err(meta)?,
             mcp: McpClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?).ok(),
             exa: ExaClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?).ok(),
+            leaves: rsi_configuration_api::leaf::Client::new(
+                plan.local::<rsi_api_protocol::ApiClientContract>()?,
+            )
+            .ok(),
+            leaf_grants: plan
+                .local::<rsi_api_protocol::ApiClientContract>()?
+                .operations()
+                .contains(&rsi_configuration_api::leaf::Operation::Grants.spec()),
             state: Mutex::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
         });

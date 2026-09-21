@@ -65,5 +65,15 @@ commands. Desired and observed revision changes invalidate pagination; failed re
 clear the old page. Both TUI `/plugins` and GUI Settings → Plugins consume this
 owner, whose admitted reads drain before feature retirement.
 
+Host leaf management is a distinct panel in this feature, using the reviewed
+`profile-leaves` API. It retains one bounded source page, four redacted proposals,
+256 receipt identities and one selected receipt. Local grant editing is explicit;
+Device and Agent scopes remain separate. Configuration text is parsed as exact
+bounded JSON in Rust and never enters a retained view. A commit accepts the
+displayed ticket/digest, records unknown replies without replay, and offers a
+query of that original ticket. Reconnection may recover owned proposals and
+receipt identities. Source save, directory durability and runtime application
+are displayed separately; old resident Sessions are not edited.
+
 Navigation only acknowledges coalesced invalidations when it will query the
 current filter; an attention-only timer tick cannot consume a later publication.

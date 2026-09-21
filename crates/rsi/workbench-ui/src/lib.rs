@@ -17,7 +17,8 @@ pub use navigation::{
     NavigationCommand, NavigationFeature, NavigationFeatureContract, NavigationFeatureFactory,
 };
 pub use plugins::{
-    PluginsCommand, PluginsFeature, PluginsFeatureContract, PluginsFeatureFactory, PluginsView,
+    LeafCommand, LeafView, PluginsCommand, PluginsFeature, PluginsFeatureContract,
+    PluginsFeatureFactory, PluginsView,
 };
 pub use setup::{
     CredentialView, Receipt, SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory,

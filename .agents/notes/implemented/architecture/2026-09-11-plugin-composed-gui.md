@@ -121,3 +121,9 @@ real-engine document input/paint and process-family PSS. Synthetic scenes prove
 neither live-provider latency nor physical display scanout. Visual inspection and
 body/input assertions exclude malformed or blank scenes. Native Windows/macOS
 remain outside this Linux delivery; Linux/WSL evidence does not establish them.
+
+
+The [reviewed Host leaf decision](2026-09-20-host-profile-leaf-management.md)
+adds a separately granted, redacted single-leaf source operation. It narrowly
+extends source management for explicitly authorized principals; the closed remote
+Settings namespace policy in this decision remains unchanged.

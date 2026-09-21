@@ -186,12 +186,26 @@ omits source and configuration. Preview does not prepare configuration semantics
 activate plugins, create temporary files, or acquire a persistent write lock.
 An invalid old source can be repaired if the proposed program compiles/resolves.
 
+`preview_host_leaf_edit` narrows this authority to an existing plugin leaf in a
+writable user Host root. It preserves the source's comments and prior steps,
+appends a strict root override, and prepares the enabled proposed graph before
+returning the ordinary consuming source transaction. Configuration replacements
+are literal exact JSON, limited to 64 KiB, 32 levels and 4,096 values. Instance
+identity uses the configuration API validator. Successful edits reuse the prior
+tree from the reviewed preview rather than compiling a separate unchanged edit. They are
+prepared even for a disabled target. Enabling under a disabled ancestor returns
+that ancestor as a blocking reason; the operation never edits a group, include,
+Application Profile or resident Session. Preparation proves configuration
+acceptance, not successful runtime activation.
+
 `commit_once` acquires a nonblocking cooperative lock on the opened parent
 directory, verifies that directory identity, the original root digest, and all
 captured prospective source fingerprints against the same frozen Host, then
 stages a private sibling, syncs it and atomically replaces only the selected root
 through its directory handle. Symlink components and special files are rejected.
 Conflicts require a fresh preview; the edit value cannot be replayed or retargeted.
+The review digest binds the native parent directory identity as well as source,
+dependencies and frozen composition, including when a retained proposal is reconstructed.
 The source limit is the catalog's existing document bound. Includes remain subject
 to the supplied Host's compiler bounds. Locking coordinates cooperating writers;
 it is not an atomic compare-and-swap against arbitrary external file writers.

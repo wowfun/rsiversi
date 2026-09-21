@@ -86,7 +86,7 @@ pub use profiles::{
     ProfileCatalogError, ProfileRow, ProfileSource,
 };
 #[cfg(unix)]
-pub use profiles::{ProfileEdit, ProfileEditError, ProfileEditReceipt};
+pub use profiles::{HostLeafEdit, ProfileEdit, ProfileEditError, ProfileEditReceipt};
 pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
 pub use rsi_apply_patch::maybe_run_apply_patch_helper;
 pub use rsi_session_protocol;

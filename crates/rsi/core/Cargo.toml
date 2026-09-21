@@ -143,6 +143,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 
 [dev-dependencies]
 rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }

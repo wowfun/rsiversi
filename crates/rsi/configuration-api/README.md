@@ -78,3 +78,32 @@ a search. The fixed `rsi.retrieval/exa` binding is not an AI provider slot.
 The Plugins wire contract is v2. It breaks v1 with an explicit target, asynchronous
 resident-generation lookup and optional health/watcher evidence. There is no v1
 migration or compatibility shim; in-tree clients use the v2 contract together.
+
+Host Profile leaf management uses separate `profile-leaves` version 1 operations.
+Its exact root identity, user Profile, leaf and enable/disable/configuration
+operation require an explicit Local-issued scope grant, including for a Local
+caller. Device callers also retain their existing configuration admission;
+Agent tools have a distinct Session principal and cannot inherit human authority.
+Local grant changes are unavailable through remote authentication.
+
+The source owner returns bounded redacted catalog metadata and prepared previews.
+A preview binds its proposal, original source, dependencies and frozen catalog to
+one Host epoch and ticket. It returns no configuration, source text or diagnostic
+payload from plugin code. Each caller may list and discard its own unused previews,
+including after losing a preparation reply. Commits retain
+one request identity and can be reconciled after reply loss; clients never retry
+an unknown write as a fresh operation. A caller may recover its at most 256 receipt
+ticket identities after reconnecting, then query the exact receipt. Source publication, directory durability
+and observed application are separate fields. A replaced Host reports old
+runtime tickets unavailable, never silently submits their writes again.
+Commit replies must echo the complete redacted preview. Malformed or conflicting
+mutation metadata remains unknown even when the JSON itself decoded successfully.
+
+Requests are at most 128 KiB, configuration 64 KiB / depth 32 / 4,096 values,
+catalog pages 64 leaves, responses 64 KiB, and grants 256 exact scopes. The owner
+retains at most four previews and 256 receipts, with two nonqueued read/prepare
+slots, four retained grant-change slots, and one source/grant writer. Admitted preparation and writes survive response
+loss; revocation closes scope admission before waiting for already admitted work.
+The revoked grant is published before that drain; unrelated mutations can proceed
+while old admitted work settles. Revocation acknowledgement still waits for the
+drain, and it never overwrites a subsequently issued grant revision.

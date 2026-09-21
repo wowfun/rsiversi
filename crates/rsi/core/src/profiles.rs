@@ -14,7 +14,7 @@ use thiserror::Error;
 #[cfg(unix)]
 mod edit;
 #[cfg(unix)]
-pub use edit::{ProfileEdit, ProfileEditError, ProfileEditReceipt};
+pub use edit::{HostLeafEdit, ProfileEdit, ProfileEditError, ProfileEditReceipt};
 
 /// Directory containing user-authored Application Profiles.
 pub const APPLICATION_PROFILE_DIRECTORY: &str = "application-profiles";

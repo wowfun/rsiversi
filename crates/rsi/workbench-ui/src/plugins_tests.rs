@@ -86,6 +86,8 @@ fn feature(
             client: ConfigurationClient::new(remote.clone()).unwrap(),
             mcp: None,
             exa: None,
+            leaves: None,
+            leaf_grants: false,
             state: Mutex::default(),
             work: Work::new(Execution::native(tokio::runtime::Handle::current())),
         }),
@@ -204,6 +206,8 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
         client: configuration.client.clone(),
         mcp: None,
         exa: Some(ExaClient::new(remote.clone()).unwrap()),
+        leaves: None,
+        leaf_grants: false,
         state: Mutex::default(),
         work: Work::new(Execution::native(tokio::runtime::Handle::current())),
     });

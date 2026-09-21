@@ -11,6 +11,8 @@ use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+mod leaf;
+pub use leaf::HostLeafEdit;
 
 /// Failure before source publication. No variant reports a Runtime apply result.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +35,15 @@ pub enum ProfileEditError {
     /// A source was a symlink, special file or lacked a stable native identity.
     #[error("Profile edit requires a regular source and a stable directory")]
     InvalidSource,
+    /// The selected identity is not one existing plugin leaf.
+    #[error("Profile target must be an existing plugin leaf")]
+    NotLeaf,
+    /// Enabling the leaf would remain blocked by this disabled ancestor.
+    #[error("Profile leaf is blocked by disabled ancestor {0}")]
+    DisabledAncestor(String),
+    /// The literal configuration exceeds the leaf editor's closed input bounds.
+    #[error("Profile leaf configuration exceeds its JSON bounds")]
+    ConfigurationBounds,
     /// A native operation failed before the root was published.
     #[error("Profile source operation failed: {0}")]
     Io(#[from] std::io::Error),
@@ -59,6 +70,7 @@ pub struct ProfileEdit<'host> {
     proposed: Vec<u8>,
     effective: HostProfileEditPreview,
     review_digest: String,
+    prepared: bool,
 }
 
 impl std::fmt::Debug for ProfileEdit<'_> {
@@ -68,6 +80,7 @@ impl std::fmt::Debug for ProfileEdit<'_> {
             .field("original_bytes", &self.original.len())
             .field("proposed_bytes", &self.proposed.len())
             .field("effective", &self.effective)
+            .field("prepared", &self.prepared)
             .finish_non_exhaustive()
     }
 }
@@ -125,6 +138,17 @@ impl<'host> ProfileEdit<'host> {
         let mut review = Sha256::new();
         super::hash_component(&mut review, b"domain", b"rsi.profile.edit.v1");
         super::hash_path(&mut review, b"path", &path);
+        let identity = directory.metadata()?;
+        super::hash_component(
+            &mut review,
+            b"directory-device",
+            &identity.dev().to_le_bytes(),
+        );
+        super::hash_component(
+            &mut review,
+            b"directory-inode",
+            &identity.ino().to_le_bytes(),
+        );
         super::hash_component(&mut review, b"original", &sha256(&original));
         super::hash_component(
             &mut review,
@@ -140,6 +164,7 @@ impl<'host> ProfileEdit<'host> {
             proposed: contents.to_vec(),
             effective,
             review_digest: hex::encode(review.finalize()),
+            prepared: false,
         };
         edit.check_root()?;
         // The compiled root must be the exact selected source, not a redirected path.
@@ -165,9 +190,14 @@ impl<'host> ProfileEdit<'host> {
         &self.proposed
     }
 
-    /// Redacted effective tree and resolved identities; plugin semantics are unprepared.
+    /// Redacted effective tree and resolved identities; see [`Self::is_prepared`].
     pub const fn effective(&self) -> &HostProfileEditPreview {
         &self.effective
+    }
+
+    /// Whether the enabled proposal and any changed disabled config were prepared.
+    pub const fn is_prepared(&self) -> bool {
+        self.prepared
     }
 
     /// Selected writable root; includes cannot be selected through this value.
