@@ -25,6 +25,40 @@ pub(crate) use display_error as error;
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
+    DelegationOpen {
+        pane: crate::SurfaceId,
+        generation: String,
+        key: String,
+    },
+    AttentionOpen {
+        pane: crate::SurfaceId,
+        position: rsi_navigation_api::attention::Position,
+        target: Option<rsi_navigation_api::attention::Target>,
+    },
+    ExternalCatalog {
+        #[serde(default)]
+        next: bool,
+    },
+    ExternalOpen {
+        pane: crate::SurfaceId,
+        id: rsi_acp_protocol::observation::ConversationId,
+    },
+    ExternalStart {
+        pane: crate::SurfaceId,
+        id: rsi_acp_protocol::observation::ConversationId,
+        endpoint: String,
+    },
+    ExternalControl {
+        pane: crate::SurfaceId,
+        generation: String,
+        command: rsi_client::ExternalCommand,
+    },
+    ExternalSource {
+        pane: crate::SurfaceId,
+        generation: String,
+        source: rsi_conversation::ExternalSource,
+        start: usize,
+    },
     AddSurface {
         pane: crate::SurfaceId,
     },
@@ -196,6 +230,12 @@ impl Command {
     fn affected_pane(&self) -> Option<crate::SurfaceId> {
         match self {
             Self::Open { pane, .. }
+            | Self::DelegationOpen { pane, .. }
+            | Self::AttentionOpen { pane, .. }
+            | Self::ExternalOpen { pane, .. }
+            | Self::ExternalStart { pane, .. }
+            | Self::ExternalControl { pane, .. }
+            | Self::ExternalSource { pane, .. }
             | Self::Create { pane, .. }
             | Self::Model { pane, .. }
             | Self::ModelRefresh { pane, .. }
@@ -209,6 +249,7 @@ impl Command {
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
             Self::ApplicationUiSurface { .. }
+            | Self::ExternalCatalog { .. }
             | Self::UiSurface { .. }
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
@@ -273,11 +314,14 @@ pub(crate) struct SettingsEditor {
 /// Ordinary shared GUI application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
 pub struct GuiApplication {
+    pub(crate) external: Option<Arc<dyn rsi_acp_protocol::service::ExternalConversations>>,
+    pub(crate) external_catalog: Mutex<crate::panes::ExternalCatalog>,
     pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
     pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
     pub(crate) navigation: Option<Arc<rsi_workbench_ui::NavigationFeature>>,
     pub(crate) ui: Arc<rsi_ui::Ui>,
     pub(crate) application_target: Option<Arc<rsi_ui::UiTarget>>,
+    pub(crate) history_search: Option<rsi_history_api::Client>,
     pub(crate) remote_ui: Option<rsi_ui_api::UiClient>,
     pub(crate) session: Arc<dyn rsi_session_protocol::SessionService>,
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
@@ -300,7 +344,7 @@ pub struct GuiApplication {
     pub(crate) terminal_reads: Arc<Semaphore>,
     pub(crate) terminal_writes: Arc<Semaphore>,
     pub(crate) tasks: TaskTracker,
-    stop: CancellationToken,
+    pub(crate) stop: CancellationToken,
     frames: ByteBudget,
     stream: Mutex<crate::frames::FrameState>,
     admission: Mutex<()>,
@@ -439,6 +483,7 @@ impl GuiApplication {
             "plugins": self.plugins.as_ref().map(|feature| feature.snapshot()),
             "setup": self.setup.as_ref().map(|feature| feature.view()),
             "navigation": self.navigation.as_ref().map(|feature| feature.view()),
+            "external_catalog": self.external.as_ref().map(|_|self.external_catalog.lock().expect("external catalog").clone()),
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": self.preferences,
             "ui_detail": details.ui,
@@ -485,8 +530,38 @@ impl GuiApplication {
         let id = self.stream.lock().expect("Web frame stream poisoned").id;
         (id > 0).then(|| id.to_string())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Closed application command dispatch forwards each operation to its owning feature"
+    )]
     async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
         match command {
+            Command::DelegationOpen {
+                pane,
+                generation,
+                key,
+            } => self.open_delegation(pane, &generation, &key).await,
+            Command::AttentionOpen {
+                pane,
+                position,
+                target,
+            } => self.open_attention(pane, position, target).await,
+            Command::ExternalCatalog { next } => self.refresh_external(next).await,
+            Command::ExternalOpen { pane, id } => self.open_external(pane, id).await,
+            Command::ExternalStart { pane, id, endpoint } => {
+                self.start_external(pane, id, &endpoint).await
+            }
+            Command::ExternalControl {
+                pane,
+                generation,
+                command,
+            } => self.external_control(pane, &generation, command).await,
+            Command::ExternalSource {
+                pane,
+                generation,
+                source,
+                start,
+            } => self.external_source(pane, &generation, source, start).await,
             Command::AddSurface { pane } => self.add_surface(pane),
             Command::CloseSurface { pane } => self.close_surface(pane).await,
             Command::Plugins { command } => {
@@ -608,7 +683,14 @@ impl PluginFactory for GuiApplicationFactory {
             .lookup_local::<rsi_session_files::SessionFilesContract>()
             .is_some();
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
+        let api = plan
+            .context()
+            .lookup_local::<rsi_api_protocol::ApiClientContract>();
         let app = Arc::new(GuiApplication {
+            external: plan
+                .context()
+                .lookup_local::<rsi_acp_protocol::service::ExternalConversationsContract>(),
+            external_catalog: Mutex::new(crate::panes::ExternalCatalog::default()),
             plugins: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::PluginsFeatureContract>(),
@@ -623,10 +705,10 @@ impl PluginFactory for GuiApplicationFactory {
                 .context()
                 .lookup_local::<rsi_ui::UiTargetContract>()
                 .filter(|target| target.kind() == rsi_ui::TargetKind::Application),
-            remote_ui: plan
-                .context()
-                .lookup_local::<rsi_api_protocol::ApiClientContract>()
-                .and_then(|client| rsi_ui_api::UiClient::new(client).ok()),
+            history_search: api
+                .clone()
+                .and_then(|api| rsi_history_api::Client::new(api).ok()),
+            remote_ui: api.and_then(|client| rsi_ui_api::UiClient::new(client).ok()),
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,

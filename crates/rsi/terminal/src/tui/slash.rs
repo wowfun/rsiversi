@@ -7,10 +7,26 @@ use termina::event::KeyEvent;
 const BUILTINS: &[(&str, &str)] = &[
     ("help", "Commands and keyboard shortcuts"),
     (
+        "history",
+        "Search conversation text: /history <session-id|external:id> <query>",
+    ),
+    (
+        "attention",
+        "Pending requests, running conversations and unread activity",
+    ),
+    (
         "markdown",
         "Render assistant Markdown: /markdown [on|off]; process-local",
     ),
     ("plugins", "Read and refresh observed plugin status"),
+    (
+        "profiles",
+        "Review Host leaf changes, explicit grants and source receipts",
+    ),
+    (
+        "external",
+        "Configured external agents, permissions and observed history",
+    ),
     (
         "reference",
         "Frozen conversation reference: /reference [session_id]",
@@ -832,7 +848,7 @@ mod tests {
         ));
         ui.next().await;
         assert!(ui.diagnostic.contains("read denied"));
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 10);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), BUILTINS.len() - 1);
         assert!(
             !ui.popup
                 .as_ref()
@@ -885,7 +901,7 @@ mod tests {
             .unwrap()
             .render(42, 12)
             .unwrap();
-        assert_eq!(ui.selected, 10);
+        assert_eq!(ui.selected, BUILTINS.len() - 1);
         assert!(ui.diagnostic.contains("permission revoked"));
     }
     #[tokio::test]
@@ -1006,7 +1022,7 @@ mod tests {
         let mut ui = Ui::default();
         let mut editor = editor::Editor::with_text("/".into(), 1024);
         ui.update(&editor, None);
-        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 10);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), BUILTINS.len() - 1);
         editor.replace_text("/log deepseek").unwrap();
         for _ in 0..9 {
             editor.key(KeyCode::Left.into()).unwrap();

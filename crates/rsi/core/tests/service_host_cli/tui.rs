@@ -1,17 +1,27 @@
+#[path = "tui/language.rs"]
+mod language;
 use super::*;
 #[path = "tui/capture.rs"]
 mod capture;
 use capture::RawCapture;
 #[path = "tui/dialogs.rs"]
 mod dialogs;
+#[path = "tui/external.rs"]
+mod external;
+#[path = "tui/history.rs"]
+mod history;
 #[path = "tui/live.rs"]
 mod live;
 #[path = "tui/navigation.rs"]
 mod navigation;
+#[path = "tui/profiles.rs"]
+mod profiles;
 #[path = "tui/resources.rs"]
 mod resources;
 #[path = "tui/setup.rs"]
 mod setup;
+#[path = "tui/workspace_review.rs"]
+mod workspace_review;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::time::{Duration, Instant};
 
@@ -382,6 +392,56 @@ async fn independent_addon_tui_and_headless_show_the_same_durable_business_state
     plan_application(Some(binary.into())).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit RSI_WORKBENCH_BINARY built from the independent addon fixture"]
+async fn independent_addon_tui_renders_saved_typed_result_and_literal_unicode() {
+    let binary =
+        std::env::var_os("RSI_WORKBENCH_BINARY").expect("build workbench-addon example first");
+    let (endpoint, state, provider) = gated_provider("fixture_echo").await;
+    *state.arguments.lock().unwrap() =
+        Some(serde_json::json!({"message":"中文 <script>literal</script>"}));
+    let mut fixture = CliFixture::new(&endpoint);
+    configure_independent(&mut fixture, binary.into());
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "typed-result"]);
+    terminal.capture_name = "typed-result".into();
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"Record a typed result\r");
+    tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
+        .await
+        .unwrap();
+    state.release.notify_one();
+    terminal.until("hello from daemon").await;
+    terminal.send(b"\t\x10");
+    terminal.select_menu("Card details").await;
+    terminal.until("fixture_echo").await;
+    terminal.until("Card details · Enter actions").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Recorded result").await;
+    terminal.until("Recorded tool result").await;
+    terminal.until("fixture.workbench.echo").await;
+    terminal.until("Generation label").await;
+    terminal.until("中文 <script>literal</script>").await;
+    terminal.resize(PtySize {
+        cols: 48,
+        rows: 28,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    terminal
+        .until_screen("complete narrow result dialog", |screen| {
+            screen.contains("Recorded tool result")
+                && screen
+                    .lines()
+                    .any(|line| line.contains("┌Detail") && line.contains('┐'))
+        })
+        .await;
+    terminal.send(b"\x1b");
+    terminal.absent("Recorded tool result").await;
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    provider.abort();
+}
+
 async fn plan_application(binary: Option<std::path::PathBuf>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -591,6 +651,14 @@ plugin = "rsi.session.tree.ui"
 kind = "plugin"
 id = "files-ui"
 plugin = "rsi.session.files.ui"
+[[steps]]
+kind = "plugin"
+id = "service-ui"
+plugin = "rsi.service.ui.client"
+[[steps]]
+kind = "plugin"
+id = "workspace-review-ui"
+plugin = "rsi.workspace.review.ui"
 [[steps]]
 kind = "plugin"
 id = "application"
@@ -1085,10 +1153,8 @@ async fn fullscreen_answers_live_questions_through_the_real_tool_and_provider_lo
         .unwrap();
     state.release.notify_one();
     terminal.until("1 questions").await;
-    terminal.send(b"\x10");
-    terminal.select_menu("Questions").await;
-    terminal.until("Live questions").await;
-    terminal.send(b"\r");
+    terminal.send(b"/attention\r");
+    terminal.select_menu("Answer question").await;
     terminal.until("Live question").await;
     terminal.send(b"2\rbecause verified\r");
     terminal.until("hello from daemon").await;
@@ -1116,10 +1182,8 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
         .unwrap();
     state.release.notify_one();
     terminal.until("1 approvals").await;
-    terminal.send(b"\x10");
-    terminal.select_menu("Approvals").await;
-    terminal.until("Live approvals").await;
-    terminal.send(b"\r");
+    terminal.send(b"/attention\r");
+    terminal.select_menu("Review permission").await;
     terminal.until("Review the prepared request").await;
     terminal.send(b"\r");
     terminal.until("Allow once").await;

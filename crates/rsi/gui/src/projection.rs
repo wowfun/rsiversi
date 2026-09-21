@@ -53,7 +53,7 @@ impl Serialize for Block {
             .flatten();
         let mut view = serializer.serialize_struct(
             "Block",
-            6 + usize::from(self.tool.is_some()) + usize::from(markdown.is_some()),
+            7 + usize::from(self.tool.is_some()) + usize::from(markdown.is_some()),
         )?;
         view.serialize_field("key", &self.key)?;
         view.serialize_field("role", &self.role)?;
@@ -61,6 +61,13 @@ impl Serialize for Block {
         view.serialize_field("text", &self.text)?;
         view.serialize_field("clipped", &self.clipped)?;
         view.serialize_field("sources", &self.sources.len())?;
+        view.serialize_field(
+            "external",
+            &self
+                .tool
+                .as_ref()
+                .and_then(ToolState::external_conversation),
+        )?;
         if let Some(tool) = &self.tool {
             view.serialize_field("tool", tool)?;
         }

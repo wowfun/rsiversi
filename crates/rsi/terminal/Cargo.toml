@@ -7,6 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ui-api = { path = "../ui-api" }
+rsi-service-ui = { path = "../service-ui" }
+rsi-history-api = { path = "../history-api" }
+rsi-navigation-api = { path = "../navigation-api" }
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-workbench-ui = { path = "../workbench-ui" }
@@ -38,6 +43,7 @@ futures-util.workspace = true
 getrandom.workspace = true
 ratatui.workspace = true
 hex.workspace = true
+sha2.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }

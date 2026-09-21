@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { Button } from '../vendor/dsh/primitives/Button.tsx'
 import { input, run, useView, useSelected, type McpServer, type PluginsView } from './bridge.ts'
-export function Plugins() {
-  const view = useView(view => view?.plugins), [busy,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
+import { ProfileLeaves } from './profile-leaves.tsx'
+export function Plugins({loading=false}:{loading?:boolean}) {
+  const view = useView(view => view?.plugins), [working,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
+  const busy = loading || working
   const selected = useSelected(value => value)
   const agentPreset = useView(view => view?.surfaces[selected]?.agent_preset)
   const session = useView(view => view?.surfaces[selected]?.session)
@@ -17,6 +19,7 @@ export function Plugins() {
   })()
   const label = (value: string) => value.replaceAll('_',' ')
   return <section className="plugins-panel" aria-label="Plugins">
+    {view?.leaves?.available && <ProfileLeaves view={view.leaves} busy={busy} command={value => command({kind:'leaves',command:value})}/>}
     <div className="actions"><h2>Plugins</h2><Button disabled={busy} onClick={() => command({kind:'refresh'})}>Refresh plugin status</Button></div>
     <div className="actions" aria-label="Plugin observation source">
       <Button disabled={busy} onClick={() => command({kind:'select',target:{kind:'host'}})}>Host plugins</Button>

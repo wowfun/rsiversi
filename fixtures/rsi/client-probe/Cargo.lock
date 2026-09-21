@@ -1272,6 +1272,7 @@ name = "rsi-tools-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
@@ -1279,6 +1280,7 @@ dependencies = [
  "rsi-workspace-path",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio-util",
 ]

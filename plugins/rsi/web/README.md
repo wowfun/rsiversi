@@ -1,5 +1,18 @@
 # Web document bridge
 
+Needs attention renders the shared Rust workbench's bounded activity projection.
+It displays unknown ownership and truncation explicitly; request buttons send exact
+targets back to Rust. The document does not infer execution from recent history,
+persist running flags or maintain its own observation poller.
+
+External conversation panes render the Rust controller's distinct identity,
+observations and exact permission options. They have no native Goal, preset or
+model controls. Close peer is explicit; switching panes only detaches observation.
+Unknown prompt replies retain the entered text and disable sending that same draft
+until the user edits it. The document never retries a prompt. Unsaved external
+text is retained only for the current document connection, under a 16-draft / 1 MiB
+limit; it does not enter the native durable submission ledger.
+
 IndexedDB schema 4 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Upgrade
 validates both old pane ledgers, migrates their records and commits one aggregate
@@ -61,13 +74,17 @@ reopening an unchanged question or approval rebuilds its actionable controls.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 
-The composer retains its complete input and action rows when expanded extension
-state or attachments consume vertical space. Its border does not become a clipping
+Composer actions wrap within the available width so every action, including Send,
+remains reachable on narrow screens. The composer retains its complete input and
+action rows when expanded extension state or attachments consume vertical space.
+Its border does not become a clipping
 viewport through flex shrink. Narrow workbenches scroll when their content needs
 more height; transcript and extension content retain their own scrolling regions.
 An unchanged composer action label retains its text node through draft-save
 callbacks. Replacing the pointer target between native mouse down and up can
 cancel WebKit click activation even when the button itself remains enabled.
+The draft-status row reserves one line across ordinary save completion, so
+removing the transient saving notice does not move a pressed composer control.
 
 From the repository, install the document toolchain with
 `npm ci --ignore-scripts --prefix plugins/rsi/web`, then run
@@ -288,3 +305,32 @@ leave a visible notice. Renderer initialization failure disposes its scoped styl
 and terminal instead of leaving a partially mounted view.
 Taking control applies the current viewport size even if the viewport has not
 changed since the read-only attachment was opened.
+The document input queue is a lazy 64-KiB ring including in-flight bytes. Each
+accepted byte is copied into the ring and once into a dispatch batch; retries
+retain that batch. A successful write alone removes its prefix. Overflow and
+uncertain failure stop input without replay.
+At document ingress, Worker JSON texts are decoded once and native decoded frames
+are consumed directly. Renderer offers retain their byte-limit validation and
+the existing acknowledgement and lease protocol.
+
+Successful, exactly paired external delegation Tool cards remain visible in Chat
+as compact navigation entries. Trajectory retains the full Tool text; opening
+the card attaches the existing Host conversation and never submits another prompt.
+
+Settings → Plugins also presents reviewed Host leaf management through the shared
+Rust workbench. Configuration input crosses the bridge as text so exact JSON
+numbers are parsed in Rust. The document retains only an ephemeral input draft;
+source selection, grants, preparation, commits and receipt reconciliation stay
+with their Rust owners. Saved source, directory durability and current runtime
+application have distinct labels. Unknown writes expose the original receipt
+query and do not offer a repeated save for that ticket.
+
+Reference descriptors use the exact envelope-2 source/capture contract. Draft
+schema 3, which stores obsolete reference envelopes, is not migrated: opening it
+fails without modifying its rows or database version. Schema 1 and 2 drafts have
+no references and retain their validated migration. Unsupported reference metadata
+is never translated into a new selection or silently removed from an uncertain
+submission.
+
+External panes keep their switch guard through same-generation frames; only a
+confirmed new binding clears it. Both buttons and keyboard submission respect it.

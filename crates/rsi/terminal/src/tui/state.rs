@@ -8,8 +8,12 @@ use rsi_ai_protocol::ModelRef;
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Login,
+    External,
+    ExternalOpen(rsi_acp_protocol::observation::ConversationId),
+    Attention,
     SetupModels,
     Plugins(rsi_workbench_ui::PluginsCommand),
+    Profiles,
     IntegrationCredential(super::setup::IntegrationCredential),
     RecallPrompt(u64),
     Help,
@@ -20,6 +24,7 @@ pub(super) enum Action {
     New,
     Recent,
     References,
+    HistoryRequest(Box<rsi_history_api::Request>),
     FilePicker(rsi_session_files_ui::FilePickerRequest),
     InsertFile(String),
     ReferenceSources(Option<rsi_session_protocol::RecentSessionCursor>),
@@ -84,6 +89,8 @@ impl Menu {
             items: vec![
                 ("New session".into(), Action::New),
                 ("Recent sessions".into(), Action::Recent),
+                ("External conversations".into(), Action::External),
+                ("Needs attention".into(), Action::Attention),
                 (
                     "Draft references · capture, preview, remove".into(),
                     Action::References,
@@ -100,6 +107,7 @@ impl Menu {
                     "Plugins".into(),
                     Action::Plugins(rsi_workbench_ui::PluginsCommand::Refresh),
                 ),
+                ("Host Profiles".into(), Action::Profiles),
                 ("Subagent sessions".into(), Action::Agents),
                 ("Return to parent session".into(), Action::Parent),
                 ("Session commands".into(), Action::Commands),

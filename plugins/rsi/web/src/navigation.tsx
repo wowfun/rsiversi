@@ -7,10 +7,27 @@ export function Navigation() {
   const nav = view?.navigation
   const [query, setQuery] = useState(''), [archived, setArchived] = useState(false), [workspace, setWorkspace] = useState<string | null>(null)
   const [path, setPath] = useState(''), [edit, setEdit] = useState<NavigationEntry>(), [title, setTitle] = useState('')
+  const [pendingStarts,setPendingStarts]=useState<Record<string,string>>({})
+  const external=view?.external_catalog
+  const startExternal=async (endpoint:string)=>{
+    const id=pendingStarts[endpoint]??`external_${crypto.randomUUID()}`
+    setPendingStarts(value=>({...value,[endpoint]:id}))
+    await input.open({action:'external_start',id,endpoint})
+    setPendingStarts(value=>{const next={...value};delete next[endpoint];return next})
+  }
   const filter = {query, archived, workspace}
   const search = () => input.command({action: 'navigate', command: {kind: 'query', filter}})
   const mutate = (entry: NavigationEntry, metadata: NavigationEntry['metadata']) => input.command({action: 'navigate', command: {kind: 'replace', ticket: nav?.ticket, session: entry.session, metadata}})
   return <>
+    <section className="attention-navigation" aria-label="Needs attention"><div className="section-heading"><h2>Needs attention</h2><span className="count">{nav?.attention?.entries.length ?? 0}</span></div>
+      {nav?.attention_notice && <p role="status" className="hint">{nav.attention_notice}</p>}
+      <div className="nav-list">{nav?.attention?.entries.map(row=><div key={`${row.position.conversation.kind}:${row.position.conversation.id}`} className="attention-row">
+        <button className="nav-item" onClick={()=>void run(()=>input.open({action:'attention_open',position:row.position,target:null}))}><strong>{row.status==='unread'?'New activity':row.status==='waiting'?'Waiting for you':row.status==='running'?'Running':'Unknown'}</strong><small>{row.position.conversation.kind} · {row.position.conversation.id}</small></button>
+        {row.targets.map((target,index)=><Button key={index} size="sm" onClick={()=>void run(()=>input.open({action:'attention_open',position:row.position,target}))}>{target.kind==='native'&&target.request.kind==='question'?'Answer question':'Review permission'} {index+1}</Button>)}
+      </div>)}</div>
+      {nav?.attention?.truncated && <p className="hint">Showing bounded active conversations. Open a conversation to see all requests.</p>}
+      {nav?.attention && !nav.attention.entries.length && <p className="hint">No conversations need attention.</p>}
+    </section>
     <div className="section-heading"><h2>Workspaces</h2><Button id="refresh" size="sm" aria-label="Refresh workspaces and conversations" onClick={() => void run(async () => {await input.command({action:'refresh'}); await search()})}>↻</Button></div>
     <div id="workspaces" className="nav-list">{view?.catalog.workspaces.map(item => <div key={item.id} className="workspace-row"><button className="nav-item" title={item.path} onClick={() => void run(() => input.open({action:'create', workspace:item.id}))}><strong>{basename(item.path)}</strong><small>{item.path}</small></button><Button size="sm" aria-label={`Filter ${basename(item.path)}`} onClick={() => {setWorkspace(item.id); void run(() => input.command({action:'navigate',command:{kind:'query',filter:{...filter,workspace:item.id}}}))}}>⌕</Button></div>)}</div>
     {!view?.catalog.workspaces.length && <p className="hint">Add a directory on your service to start.</p>}
@@ -25,5 +42,11 @@ export function Navigation() {
     {nav && !nav.entries.length && <p className="hint">{nav.more ? `Scanned ${nav.scanned} conversations. Continue searching.` : 'No matching conversations.'}</p>}
     {nav?.more && <Button id="sessions-next" size="sm" onClick={() => void run(() => input.command({action:'navigate',command:{kind:'next',ticket:nav.ticket}}))}>Continue conversations</Button>}
     {edit && <form className="rename-session" onSubmit={e => {e.preventDefault(); void run(async () => {await mutate(edit,{...edit.metadata,title:title || null}); setEdit(undefined)})}}><label>Conversation title<input aria-label="Conversation title" value={title} onChange={e => setTitle(e.target.value)} maxLength={256}/></label><Button type="submit" size="sm">Save title</Button><Button size="sm" onClick={() => setEdit(undefined)}>Cancel</Button></form>}
+    {external && <section className="external-navigation" aria-label="External agents"><div className="section-heading"><h2>External agents</h2><Button size="sm" aria-label="Refresh external conversations" onClick={()=>void run(()=>input.command({action:'external_catalog',next:false}))}>↻</Button></div>
+      {external.endpoints.filter(endpoint=>endpoint.enabled).map(endpoint=><Button key={endpoint.id} size="sm" onClick={()=>void run(()=>startExternal(endpoint.id))}>{pendingStarts[endpoint.id]?'Check start':'Start'} {endpoint.id}</Button>)}
+      {!external.endpoints.some(endpoint=>endpoint.enabled) && <p className="hint">No external agents enabled in this Host Profile.</p>}
+      <div className="nav-list">{external.conversations.map(item=><button className="nav-item" key={item.id} title={item.id} onClick={()=>void run(()=>input.open({action:'external_open',id:item.id}))}><strong>{item.endpoint}</strong><small>{basename(item.cwd)}</small></button>)}</div>
+      {external.more && <Button size="sm" onClick={()=>void run(()=>input.command({action:'external_catalog',next:true}))}>More external conversations</Button>}
+    </section>}
   </>
 }

@@ -94,6 +94,7 @@ pub(crate) struct TerminalSurfaces {
     fiber: FiberHandle,
     has_ui: bool,
     has_files: bool,
+    has_service_ui: bool,
 }
 impl TerminalSurfaces {
     pub async fn start(
@@ -132,6 +133,23 @@ impl TerminalSurfaces {
                 .lookup_local::<rsi_session_files::SessionFilesContract>()
                 .is_some();
         register_ui_targets(&mut catalog, has_ui, has_files)?;
+        let has_service_ui = has_ui
+            && parent
+                .lookup_local::<rsi_api_protocol::ApiClientContract>()
+                .is_some_and(|api| rsi_ui_api::UiClient::new(api).is_ok());
+        if has_service_ui {
+            catalog
+                .register_local_contract::<rsi_service_ui::ReaderContract>()
+                .map_err(error)?;
+            catalog
+                .register_linked(
+                    "rsi.service.ui.target",
+                    env!("CARGO_PKG_VERSION"),
+                    UpdateMode::RestartRequired,
+                    Arc::new(rsi_service_ui::TargetFactory),
+                )
+                .map_err(error)?;
+        }
         let parent = parent
             .clone()
             .isolate_local_fresh::<ShellContract>()
@@ -164,6 +182,7 @@ impl TerminalSurfaces {
             fiber,
             has_ui,
             has_files,
+            has_service_ui,
         })
     }
 
@@ -194,6 +213,13 @@ impl TerminalSurfaces {
             entries.push(ProfileEntry::new(
                 "ui-target",
                 "rsi.session.ui-target",
+                ConfigValue::Null,
+            ));
+        }
+        if self.has_service_ui {
+            entries.push(ProfileEntry::new(
+                "service-ui-target",
+                "rsi.service.ui.target",
                 ConfigValue::Null,
             ));
         }

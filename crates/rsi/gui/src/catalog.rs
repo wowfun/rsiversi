@@ -71,6 +71,9 @@ impl GuiApplication {
             catalog.models_more = page.has_more;
             catalog.models = page.models;
         }
+        if matches!(command, Command::Refresh) && self.external.is_some() {
+            self.refresh_external(false).await?;
+        }
         Ok(())
     }
 }

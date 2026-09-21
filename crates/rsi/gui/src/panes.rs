@@ -1,5 +1,8 @@
+#[path = "external.rs"]
+mod external;
 #[path = "file_input.rs"]
 mod file_input;
+pub(crate) use external::ExternalCatalog;
 #[path = "images.rs"]
 pub(crate) mod images;
 #[path = "inline.rs"]
@@ -36,6 +39,7 @@ use std::{
 
 #[derive(Debug, Default)]
 pub(crate) struct Pane {
+    external: Mutex<Option<Arc<external::Attachment>>>,
     closed: std::sync::atomic::AtomicBool,
     switching: tokio::sync::Mutex<()>,
     revision: Mutex<Arc<()>>,
@@ -211,6 +215,14 @@ impl Pane {
         *self.revision.lock().expect("Web pane revision poisoned") = Arc::new(());
     }
     pub(crate) fn stamp(&self, ui: u64) -> crate::frames::PaneStamp {
+        if let Some(current) = self.external.lock().expect("external pane").as_ref() {
+            return crate::frames::PaneStamp {
+                generation: Some(current.generation),
+                pane: self.revision.lock().expect("pane revision").clone(),
+                renderer: Some(current.controller.revision()),
+                ui,
+            };
+        }
         let current = self.current.lock().expect("Web pane poisoned");
         crate::frames::PaneStamp {
             generation: current.as_ref().map(|current| current.generation),
@@ -245,6 +257,20 @@ impl Pane {
         ui: &rsi_ui::Ui,
         project: impl FnOnce(serde_json::Value, Option<&Transcript>) -> T,
     ) -> T {
+        if let Some(current) = self.external.lock().expect("external pane").as_ref() {
+            let view = current.controller.view();
+            let mut source = current.source.lock().expect("external source");
+            if source
+                .as_ref()
+                .is_some_and(|source| source.source.epoch() != view.observed.snapshot.epoch)
+            {
+                source.take();
+            }
+            return project(
+                serde_json::json!({"kind":"external","generation":current.generation.to_string(),"selection":self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(),"external":view,"external_source":*source,"attention_focus":*current.focus.lock().expect("external attention focus")}),
+                None,
+            );
+        }
         let current = self.current.lock().expect("Web pane poisoned").clone();
         let Some(current) = current else {
             return project(serde_json::Value::Null, None);
@@ -269,6 +295,10 @@ impl Pane {
             (preview.revision.to_string(), preview.value.clone())
         };
         let metadata = serde_json::json!({
+            "kind":"native","conversation":rsi_conversation::ConversationIdentity::Native(current.id.clone()),
+            "capabilities":rsi_conversation::ConversationCapabilities::native(
+                current.controller.goal_changes().borrow().as_ref().is_some_and(std::result::Result::is_ok),
+                current.creation.is_some() && !current.durable.load(std::sync::atomic::Ordering::Acquire), true),
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
@@ -304,6 +334,129 @@ async fn finish_retirement(
 }
 
 impl GuiApplication {
+    pub(crate) async fn open_delegation(
+        self: &Arc<Self>,
+        index: crate::SurfaceId,
+        generation: &str,
+        key: &str,
+    ) -> Result<()> {
+        let attachment = self.pane(index)?.attachment(generation)?;
+        let id = {
+            let state = attachment
+                .renderer
+                .state
+                .lock()
+                .expect("delegation presentation");
+            let transcript = state.history.as_ref().unwrap_or(&state.transcript);
+            let value = transcript
+                .blocks
+                .iter()
+                .find(|block| block.key == key)
+                .and_then(|block| block.tool.as_ref())
+                .and_then(rsi_conversation::ToolState::external_conversation)
+                .ok_or("This block has no current external conversation target")?;
+            rsi_acp_protocol::observation::ConversationId::new(value).map_err(error)?
+        };
+        self.open_external(index, id).await
+    }
+    pub(crate) async fn open_attention(
+        self: &Arc<Self>,
+        index: crate::SurfaceId,
+        position: rsi_navigation_api::attention::Position,
+        target: Option<rsi_navigation_api::attention::Target>,
+    ) -> Result<()> {
+        use rsi_conversation::ConversationIdentity;
+        use rsi_navigation_api::attention::Target;
+        use rsi_session_protocol::ActivityRequest;
+        position.validate().map_err(error)?;
+        match &position.conversation {
+            ConversationIdentity::Native(id) => {
+                self.open(index, id.clone(), None).await?;
+                if let Some(target) = target {
+                    let Target::Native { request } = target else {
+                        return Err("Attention backend changed".into());
+                    };
+                    let pane = self.pane(index)?;
+                    let attachment = pane
+                        .current
+                        .lock()
+                        .expect("native attention")
+                        .clone()
+                        .ok_or("Conversation closed")?;
+                    let generation = attachment.generation.to_string();
+                    let detail = match request {
+                        ActivityRequest::Approval { turn, request: id } => {
+                            let pending =
+                                attachment.handle.pending_approvals().await.map_err(error)?;
+                            let request = pending
+                                .iter()
+                                .find(|request| {
+                                    request.id == id
+                                        && request.subject.turn_id() == turn.as_str()
+                                        && request.subject.session_id() == attachment.id.as_str()
+                                })
+                                .ok_or("Approval is no longer pending")?;
+                            serde_json::json!({"pane":index,"generation":generation,"kind":"approval","request":request})
+                        }
+                        ActivityRequest::Question { turn, request: id } => {
+                            let pending =
+                                attachment.handle.pending_questions().await.map_err(error)?;
+                            let request = pending
+                                .iter()
+                                .find(|request| {
+                                    request.id == id
+                                        && request.turn_id == turn.as_str()
+                                        && request.session_id == attachment.id.as_str()
+                                })
+                                .ok_or("Question is no longer pending")?;
+                            serde_json::json!({"pane":index,"generation":generation,"kind":"question","request":request})
+                        }
+                    };
+                    pane.attachment(&generation)?;
+                    let mut details = self.details.lock().expect("attention detail");
+                    details.begin()?;
+                    details.interaction = Some(detail);
+                }
+            }
+            ConversationIdentity::External(id) => {
+                self.open_external(index, id.clone()).await?;
+                if let Some(target) = target {
+                    let Target::External {
+                        ref generation,
+                        ref request,
+                    } = target
+                    else {
+                        return Err("Attention backend changed".into());
+                    };
+                    let pane = self.pane(index)?;
+                    let current = pane
+                        .external
+                        .lock()
+                        .expect("external attention")
+                        .clone()
+                        .ok_or("Conversation closed")?;
+                    if !current
+                        .controller
+                        .view()
+                        .observed
+                        .permissions
+                        .iter()
+                        .any(|pending| &pending.generation == generation && &pending.id == request)
+                    {
+                        return Err("External permission is no longer pending".into());
+                    }
+                    *current.focus.lock().expect("external focus") = Some(target);
+                    pane.changed();
+                }
+            }
+        }
+        if let Some(navigation) = &self.navigation {
+            navigation
+                .command(rsi_workbench_ui::NavigationCommand::MarkRead { position })
+                .await?;
+        }
+        Ok(())
+    }
     fn pane(&self, pane: crate::SurfaceId) -> Result<Arc<Pane>> {
         self.panes
             .lock()
@@ -348,6 +501,7 @@ impl GuiApplication {
         }
         let current = pane.current.lock().expect("GUI surface poisoned").take();
         finish_retirement(&self.panes, id, async {
+            pane.detach_external().await;
             if let Some(current) = current {
                 let detached = self
                     .details
@@ -735,6 +889,7 @@ impl GuiApplication {
             durable: std::sync::atomic::AtomicBool::new(durable),
             history_work: tokio::sync::Semaphore::new(1),
         });
+        pane.detach_external().await;
         let old = {
             let mut current = pane.current.lock().expect("Web pane poisoned");
             if let Some(old) = current.as_ref() {

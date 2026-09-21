@@ -39,7 +39,7 @@ export function Setup({close}: {close: () => void}) {
   return <section className="setup-panel" aria-label="Settings">
     <div className="settings-header"><div className="setup-heading"><div><span className="eyebrow">Application settings</span><h1>{tab === 'plugins' ? 'Plugins' : 'Models & access'}</h1><p className="hint">{tab === 'plugins' ? 'Current service observations. Refresh to read again.' : 'Changes apply to new conversations. Each step saves independently.'}</p></div><Button onClick={close} aria-label="Close settings">×</Button></div>
     <nav className="settings-tabs" aria-label="Settings sections"><Button aria-pressed={tab === 'models'} onClick={() => setTab('models')}>Models & access</Button><Button aria-pressed={tab === 'plugins'} onClick={() => {setTab('plugins');act(() => input.command({action:'plugins',command:{kind:'refresh'}}))}}>Plugins</Button></nav></div>
-    {tab === 'plugins' ? <Plugins/> : <>
+    {tab === 'plugins' ? <Plugins loading={busy}/> : <>
     {!setup?.allowed && <p className="permission-note">Configuration is read only for this connection. A service administrator can grant this device access.</p>}
     <Button disabled={busy} size="sm" onClick={() => act(() => command({kind:'refresh'}))}>Refresh setup status</Button>
     {setup?.diagnostic && <p role="alert" className="settings-error">{setup.diagnostic}</p>}

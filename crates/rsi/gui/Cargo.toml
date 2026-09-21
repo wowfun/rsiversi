@@ -11,6 +11,9 @@ default = []
 test-support = []
 
 [dependencies]
+rsi-history-api = { path = "../history-api" }
+rsi-navigation-api = { path = "../navigation-api" }
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-workbench-ui = { path = "../workbench-ui" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
 bytes.workspace = true

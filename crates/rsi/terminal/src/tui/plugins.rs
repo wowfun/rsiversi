@@ -12,7 +12,7 @@ impl Client {
         self.spawn_detail(async move {
             // Failed reads publish a redacted unavailable state, with a refresh action.
             let _result = feature.command(command).await;
-            Ok(Update::Plugins(feature.snapshot()))
+            Ok(Update::Plugins(Box::new(feature.snapshot())))
         });
         self.state.info("Reading plugin status…");
     }
@@ -30,6 +30,9 @@ impl State {
             "Refresh plugin status".into(),
             Action::Plugins(PluginsCommand::Refresh),
         )];
+        if view.leaves.available {
+            actions.push(("Manage Host Profiles".into(), Action::Profiles));
+        }
         actions.push((
             "Host plugins".into(),
             Action::Plugins(PluginsCommand::Select {

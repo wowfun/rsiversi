@@ -1,5 +1,30 @@
 # rsi-terminal
 
+`/profiles` opens reviewed Host leaf management from Home or a Native conversation.
+It uses the same Rust workbench as Settings → Plugins, preserving the conversation
+draft while editing. Source selection, exact Local-issued grants, configuration
+preparation, review acceptance and original receipt queries are explicit actions.
+The bounded JSON editor passes text to Rust; leaving the panel does not cancel an
+admitted source operation. Saved source and runtime application have separate labels.
+
+`/attention` is available at home and within native conversations. It reads the
+Host's bounded activity view, prioritizes exact pending requests and opens the
+selected Native or External conversation. Native requests retain Session/Turn
+identity; ACP permissions retain connection generation and request identity.
+Reading positions are acknowledged after attachment. Escape detaches the view;
+refresh never restarts execution. The menu has at most 257 choices and reports
+truncation. It does not continuously watch hidden historical conversations.
+
+`/external` opens configured external conversations from either the unattached
+home or a native Session. It uses the shared external controller and an application
+scene with no invented native Session header. Enter sends one text prompt; Ctrl+P
+opens exact permission options, history and explicit peer controls. Escape detaches
+the external view and retains its draft within this TUI lifetime. External menus
+page saved conversations and accept mouse choices only from their current rendered
+revision. Source windows advance by raw bytes, including UTF-8 boundaries. The Host retains
+the peer. Only Close peer ends that connection. Native model, Goal and preset
+controls remain with the native Session view.
+
 The resident input loop captures a bounded scene snapshot. JSON encoding and
 linked decoding, source validation, layout and cell rendering run on blocking
 workers. Home and attached Sessions use the same render job. Each loop admits
@@ -383,3 +408,18 @@ Home, Session switches and renderer replacement in this TUI process only.
 Fresh, resumed, forked and `/new` Sessions discover project instructions and
 skills from their selected workspace by default. `--trust-workspace` is not an
 application option; after `--`, it remains ordinary application input.
+
+`/history <session-id|external:id> <query>` opens lexical conversation text search
+in the current draft's workspace. Coverage and omissions remain visible before
+matches. Explicit actions advance one indexing batch, open and page an original,
+and select a displayed page or one of its first 128 nonempty lines for freezing.
+The reference preview then offers the ordinary Add-to-draft action. Querying or
+reading never sends a model prompt; the existing draft remains owned by its
+Session. This text search is separate from recent-session metadata navigation.
+
+The [service UI client](../service-ui/README.md) contributes Service extensions
+to actual Session surfaces with a negotiated API connection. Its standard views
+reuse the terminal form editor and generation-fenced actions.
+
+Opening an external attention target retains the attached conversation even if
+recording its read position fails; the status shows that failure independently.

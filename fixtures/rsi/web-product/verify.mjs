@@ -194,7 +194,7 @@ try {
       await page.locator("#pane-tab-main").click();
       await left.getByRole("textbox", { name: "Main message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
-      await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
+      await page.getByRole("region", {name:"Needs attention",exact:true}).getByRole("button", {name:"Answer question 1",exact:true}).click();
       await page.getByRole("button", { name: "Teal", exact: true }).click();
       await page.getByRole("textbox", { name: "What matters for this change?" }).fill("Preserve independent drafts and explicit ownership.");
       await page.screenshot({ path: join(report, `${name}-question.png`) });
@@ -306,7 +306,7 @@ try {
       await page.locator("#workspaces .nav-item").first().click();
       await left.getByRole("textbox", { name: "Main message" }).fill("Please run the failing command");
       await left.getByRole("button", { name: "Send ↗" }).click();
-      await left.locator(".pending button").filter({ hasText: "Review:" }).click();
+      await page.getByRole("region", {name:"Needs attention",exact:true}).getByRole("button", {name:"Review permission 1",exact:true}).click();
       await page.screenshot({ path: join(report, `${name}-approval.png`) });
       await page.getByRole("button", { name: "Allow once", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();

@@ -295,6 +295,11 @@ fn bootstrap(
         ("session-ui", "rsi.session.ui", ConfigValue::Null),
         ("tree-ui", "rsi.session.tree.ui", ConfigValue::Null),
         ("files-ui", "rsi.session.files.ui", ConfigValue::Null),
+        (
+            "workspace-review-ui",
+            "rsi.workspace.review.ui",
+            ConfigValue::Null,
+        ),
         ("setup", "rsi.workbench.setup", ConfigValue::Null),
         ("plugins", "rsi.workbench.plugins", ConfigValue::Null),
         ("navigation", "rsi.workbench.navigation", ConfigValue::Null),

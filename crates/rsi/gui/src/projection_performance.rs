@@ -1,5 +1,6 @@
 //! Opt-in Linux thread-CPU comparison of the actual bounded projection.
-//! Uncached serialization below is copied from 6bf9809:crates/rsi/web/src/projection.rs.
+//! Uncached serialization starts from 6bf9809:crates/rsi/web/src/projection.rs,
+//! with the current external-conversation field retained on both paths.
 //! Its JSON is asserted identical before timing. This isolates caching, not an old binary.
 use super::*;
 use std::{hint::black_box, sync::atomic::Ordering};
@@ -12,7 +13,7 @@ impl Serialize for Uncached<'_> {
             .flatten();
         let mut view = serializer.serialize_struct(
             "Block",
-            6 + usize::from(self.0.tool.is_some()) + usize::from(markdown.is_some()),
+            7 + usize::from(self.0.tool.is_some()) + usize::from(markdown.is_some()),
         )?;
         view.serialize_field("key", &self.0.key)?;
         view.serialize_field("role", &self.0.role)?;
@@ -20,6 +21,14 @@ impl Serialize for Uncached<'_> {
         view.serialize_field("text", &self.0.text)?;
         view.serialize_field("clipped", &self.0.clipped)?;
         view.serialize_field("sources", &self.0.sources.len())?;
+        view.serialize_field(
+            "external",
+            &self
+                .0
+                .tool
+                .as_ref()
+                .and_then(ToolState::external_conversation),
+        )?;
         if let Some(tool) = &self.0.tool {
             view.serialize_field("tool", tool)?;
         }

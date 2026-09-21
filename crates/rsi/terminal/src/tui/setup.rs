@@ -40,9 +40,14 @@ pub(super) enum Command {
     Help,
     Markdown(Option<bool>),
     Plugins,
+    Profiles,
+    External,
+    ExternalOpen(rsi_acp_protocol::observation::ConversationId),
+    Attention,
     New,
     Resume(Option<SessionId>),
     Reference(Option<SessionId>),
+    History(rsi_history_api::ConversationIdentity, String),
     Quit,
     Invalid,
 }
@@ -53,6 +58,9 @@ pub(super) fn command(text: &str) -> Option<Command> {
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
         ["/plugins"] => Some(Command::Plugins),
+        ["/profiles"] => Some(Command::Profiles),
+        ["/external"] => Some(Command::External),
+        ["/attention"] => Some(Command::Attention),
         ["/help"] => Some(Command::Help),
         ["/markdown"] => Some(Command::Markdown(None)),
         ["/markdown", "on"] => Some(Command::Markdown(Some(true))),
@@ -62,6 +70,18 @@ pub(super) fn command(text: &str) -> Option<Command> {
         ["/resume"] => Some(Command::Resume(None)),
         ["/resume", id] => {
             Some(SessionId::new(*id).map_or(Command::Invalid, |id| Command::Resume(Some(id))))
+        }
+        ["/history", source, query @ ..] if !query.is_empty() => {
+            let id = if let Some(id) = source.strip_prefix("external:") {
+                rsi_acp_protocol::observation::ConversationId::new(id)
+                    .map(rsi_history_api::ConversationIdentity::External)
+                    .map_err(|_| ())
+            } else {
+                SessionId::new(*source)
+                    .map(rsi_history_api::ConversationIdentity::Native)
+                    .map_err(|_| ())
+            };
+            Some(id.map_or(Command::Invalid, |id| Command::History(id, query.join(" "))))
         }
         ["/reference"] => Some(Command::Reference(None)),
         ["/reference", id] => {
@@ -78,7 +98,8 @@ pub(super) fn command(text: &str) -> Option<Command> {
         }),
         [
             "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume"
-            | "/reference" | "/plugins" | "/markdown",
+            | "/reference" | "/history" | "/plugins" | "/profiles" | "/markdown" | "/external"
+            | "/attention",
             ..,
         ] => Some(Command::Invalid),
         _ => None,

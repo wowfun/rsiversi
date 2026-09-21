@@ -4,7 +4,9 @@ import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { NativeDocument } from "./src/native.ts";
 import { MountTable } from "/mounts.js";
 import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
+import { openHistoryPicker } from "./history-picker.js";
 import { openFilePicker } from "./file-picker.js";
+import { externalPaneClass } from "./external-pane.js";
 function referenceOrigin(meta) {
   return meta.source.kind === "native" ? `Session ${meta.source.binding.session_id}` : `${meta.source.owner}/${meta.source.id} · observed epoch ${meta.source.epoch}`;
 }
@@ -115,6 +117,7 @@ function clearView() {
   publish(undefined); view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
   clearImages();
   for (const pane of panes.values()) pane.reset();
+  ExternalPane.clearDrafts();
   $("detail").close();
 }
 function failWorker(error, current = connection) {
@@ -392,6 +395,7 @@ class Pane {
     });
     this.attach = button("Add images", () => this.imageInput.click(), "quiet");
     this.addReference = button("Reference session", () => this.showReferencePicker(), "quiet");
+    this.searchHistory = button("Search history", () => openHistoryPicker(this, view, call, button), "quiet");
     this.addFile = button("@ File path", () => openFilePicker(this, call, button), "quiet");
     this.referenceList = element("div", "draft-references");
     this.referenceList.setAttribute("aria-label", "Conversation references");
@@ -403,7 +407,7 @@ class Pane {
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
-    actions.append(this.attach, this.addFile, this.addReference, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
+    actions.append(this.attach, this.addFile, this.addReference, this.searchHistory, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
     this.composer.append(this.resourcePreview, this.completionPanel, this.referenceList, this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.recovery, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
@@ -529,6 +533,7 @@ class Pane {
   renderReferences() {
     const editor = this.editor;
     this.addReference.disabled = !editor || !!this.bindingError || editor.transferring || this.switching || editor.references.length >= 4;
+    this.searchHistory.disabled = !editor || !!this.bindingError || editor.transferring || this.switching || editor.references.length >= 4;
     this.addFile.disabled = !editor || !!this.bindingError || editor.transferring || this.switching;
     const key = `${this.generation}:${editor?.referencesRevision}`;
     if (editor === this.referenceEditor && key === this.referenceKey) return;
@@ -903,6 +908,7 @@ class Pane {
     if (snapshot && !snapshot.entries.length) this.extensionView.append(element("p", "", "No extension views in this preset"));
   }
   render(data, models) {
+    this.historyContext = data ? {session:data.session,path:data.path} : undefined;
     const changed = this.generation !== data?.generation;
     if (this.selection !== data?.selection) { this.selection = data?.selection; this.switching = false; }
     if (changed) {
@@ -1007,12 +1013,14 @@ class Pane {
         if (block.markdown) entry.text.replaceChildren(markdown(block.markdown));
         else entry.text.textContent = block.text;
       }
+      entry.node.classList.toggle("delegation", Boolean(block.external));
       entry.clipped.hidden = !block.clipped;
-      const sourceKey = JSON.stringify([block.tool, block.sources, this.uiCards]);
+      const sourceKey = JSON.stringify([block.tool, block.external, block.sources, this.uiCards]);
       if (sourceKey !== entry.sourceKey) {
         entry.sourceKey = sourceKey;
         entry.sources.replaceChildren();
         if (this.uiCards) entry.sources.append(button("Card details", () => this.action("ui_block", { key: block.key }), "quiet"));
+        if (block.external) entry.sources.append(button("Open external conversation", () => this.action("delegation_open", { key: block.key }), "quiet"));
         if (block.sources > 0) entry.sources.append(button("Inspect sources", () => this.action("inspect_block", { key: block.key }), "quiet"));
         if (block.tool) {
           for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"], ["rejection", "Inspect rejection"]]) {
@@ -1038,6 +1046,7 @@ class Pane {
 function basename(path) { return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path; }
 function sameModel(left, right) { return left.deployment === right.deployment && left.model === right.model; }
 const panes = new Map();
+const ExternalPane = externalPaneClass({element,button,command,perform});
 function select(index) {
   selected = index;
   for (const [key, pane] of panes) { pane.node.classList.toggle("selected", key === index); pane.node.hidden = key !== index; }
@@ -1048,7 +1057,7 @@ async function openInSelected(fields) {
   if (!pane) throw new Error("Open a conversation surface first");
   if (pane.switching) throw new Error("This pane is still opening a conversation");
   pane.switching = true;
-  pane.input.disabled = true; pane.model.disabled = true; pane.send.disabled = true; pane.steer.disabled = true;
+  for (const control of [pane.input,pane.model,pane.send,pane.steer]) if(control)control.disabled=true;
   try {
     await pane.flush().catch(() => {});
     const editor = pane.editor;
@@ -1065,9 +1074,9 @@ function render(next) {
   rendererSlots = [];
   view = next;
   if (next.notice !== lastNotice) { lastNotice = next.notice; notify(next.notice); }
-  for (const [key, pane] of panes) if (!Object.hasOwn(next.surfaces, key)) { pane.resizeObserver.disconnect(); if (pane.visibleFrame) cancelAnimationFrame(pane.visibleFrame); pane.reset(); pane.node.remove(); panes.delete(key); }
+  for (const [key, pane] of panes) if (!Object.hasOwn(next.surfaces, key) || (pane.kind === "external") !== (next.surfaces[key]?.kind === "external")) { pane.resizeObserver?.disconnect(); if (pane.visibleFrame) cancelAnimationFrame(pane.visibleFrame); pane.reset(); pane.node.remove(); panes.delete(key); }
   for (const [key, data] of Object.entries(next.surfaces)) {
-    if (!panes.has(key)) panes.set(key, new Pane(key));
+    if (!panes.has(key)) panes.set(key, data?.kind === "external" ? new ExternalPane(key) : new Pane(key));
     const pane = panes.get(key);
     pane.enterSubmit = next.preferences?.enter_submit ?? false;
     pane.hint.textContent = pane.enterSubmit ? "Enter to send · Shift Enter for a new line" : "Ctrl / ⌘ Enter to send · Enter for a new line";

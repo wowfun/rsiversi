@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+rsi-workspace-review-ui = { path = "../workspace-review-ui" }
 rsi-workbench-ui = { path = "../workbench-ui" }
 async-trait.workspace = true
 serde.workspace = true

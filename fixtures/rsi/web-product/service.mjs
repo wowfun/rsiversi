@@ -81,7 +81,11 @@ async function startProvider(onRequest) {
         response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
       }
       let name; let argumentsValue;
-      if (!completedTool && prompt.includes("record an inline patch")) {
+      if (!completedTool && prompt.includes("start an external delegation")) {
+        name = "external_agent"; argumentsValue = { operation: "start", endpoint: "sdk-agent" };
+      } else if (!completedTool && prompt.includes("record a typed addon result")) {
+        name = "fixture_echo"; argumentsValue = { message: "中文 · typed result <script>literal</script>" };
+      } else if (!completedTool && prompt.includes("record an inline patch")) {
         name = "apply_patch"; argumentsValue = { patch: "*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n" };
       } else if (!completedTool && prompt.includes("observe background job")) {
         name = "bash"; argumentsValue = { command: "printf 'job-ready\\n'; while [ ! -f job-release ]; do sleep 0.05; done; printf 'job-done\\n'", run_in_background: true };
@@ -169,6 +173,7 @@ export async function startService({ binary, assets, report, configure, onReques
     };
     await startProcess();
     return { origin, workspace, run, provider, close,
+      probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart() { await stopProcess(); await startProcess(); },
       register(label) {
         const receipt = JSON.parse(run(["--profile", "devices", "register", label]).stdout);

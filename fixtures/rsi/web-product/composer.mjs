@@ -136,6 +136,21 @@ export async function verifyComposer(page) {
     return { inactiveEncodes, bounded, retained: pane.editor.text === previous };
   });
   assert.deepEqual(accounting, { inactiveEncodes: 0, bounded: true, retained: true });
+  const saveGeometry = await page.evaluate(async () => {
+    const pane = panes.get("main"), store = connection.drafts, edit = store.edit;
+    let release, entered;
+    const held = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    store.edit = async function (...args) { entered(); await held; return edit.apply(this, args); };
+    try {
+      pane.edit("Save without moving pointer targets"); await started;
+      const saving = pane.draftStatus.getBoundingClientRect().height;
+      const completion = pane.editor.saving;
+      release(); await completion;
+      return { saving, saved: pane.draftStatus.getBoundingClientRect().height };
+    } finally { release(); store.edit = edit; }
+  });
+  assert(saveGeometry.saving > 0 && Math.abs(saveGeometry.saved - saveGeometry.saving) < 0.5, JSON.stringify(saveGeometry));
   const close = await page.evaluate(async () => {
     const pane = panes.get("main"), store = connection.drafts;
     const inactive = new DraftEditor(store, await store.ensure("main", "failed-inactive", "c".repeat(64)));
@@ -153,5 +168,5 @@ export async function verifyComposer(page) {
     return {error, preserved, saved:(await store.get("main", "failed-inactive")).text};
   });
   assert.deepEqual(close, {error:"injected inactive save failure",preserved:true,saved:"unsaved inactive input"});
-  return { header_before_draft: switching, restored_draft: true, overlapping_flows: races.length, automatic_reconciliation: true, failed_save_releases_admission: true, cached_utf8_accounting: true, inactive_close_recovery: true };
+  return { header_before_draft: switching, restored_draft: true, overlapping_flows: races.length, automatic_reconciliation: true, failed_save_releases_admission: true, cached_utf8_accounting: true, inactive_close_recovery: true, save_geometry: saveGeometry };
 }

@@ -74,6 +74,8 @@ pub(super) async fn run(
     workspace: &Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     selection: SessionSelection,
     setup: &mut setup::Ui,
+    external: &mut external::Ui,
+    profiles: &mut profiles::Ui,
     terminal: &mut terminal::Terminal,
     presentation: &mut crate::presentation::Owner,
     input: &mut mpsc::Receiver<input::Input>,
@@ -112,8 +114,39 @@ pub(super) async fn run(
     let _cancel_render = render_stop.clone().drop_guard();
     let mut dirty = true;
     let mut dimensions = terminal::size();
+    let mut navigation_active = (external.active, profiles.active);
     let outcome = loop {
-        if menu.is_some() || setup.active {
+        if let Some(session_id) = external.native.take() {
+            let application = application.clone();
+            let workspace = workspace.clone();
+            attaching = Some(Box::pin(async move {
+                attachment(
+                    resolve_application_handle(
+                        &application,
+                        &workspace,
+                        SessionSelection::Resume {
+                            session_id,
+                            cwd: None,
+                        },
+                    )
+                    .await?,
+                    true,
+                    None,
+                )
+                .await
+            }));
+            dirty = true;
+        }
+        if navigation_active != (external.active, profiles.active) {
+            navigation_active = (external.active, profiles.active);
+            render_stop.cancel();
+            rendering = None;
+            render_stop = stop.child_token();
+            epoch += 1;
+            view = render::View::default();
+            dirty = true;
+        }
+        if profiles.active || external.active || menu.is_some() || setup.active {
             slash.hide();
         } else {
             slash.update(&editor, None);
@@ -136,6 +169,8 @@ pub(super) async fn run(
             () = stop.cancelled() => break Ok(None),
             () = &mut *terminate => break Ok(None),
             change = changes.changed() => { change.map_err(error)?; render_stop.cancel(); rendering = None; render_stop = stop.child_token(); epoch += 1; dirty = true; },
+            () = external.next() => {dirty=true;},
+                () = profiles.next() => {dirty=true;},
             () = setup.next() => { if !setup.active {status=setup.notice();} dirty = true; },
             ack = terminal.presented.changed() => { ack.map_err(error)?; if let Some(frame)=terminal.presented.borrow_and_update().as_ref() && frame.presentation==epoch {view=frame.view.clone(); slash.presented(&view); } },
             delivery = async { match &mut copying { Some(work) => work.await, None => std::future::pending().await } } => {
@@ -174,9 +209,13 @@ pub(super) async fn run(
                     input::Input::Closed => break Ok(None),
                     input::Input::Rejected(message) => status = message.into(),
                     input::Input::Terminal(termina::Event::Paste(text)) => {
+                        if profiles.active {profiles.paste(&text);continue;}
+                            if external.active {external.paste(&text);continue;}
                         if setup.active { setup.paste(text); } else if slash.paste(&text) || menu.is_some() {} else if let Err(problem) = editor.insert(&text) { status = problem.into(); }
                     }
                     input::Input::Terminal(termina::Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                        if profiles.active {profiles.key(key);continue;}
+                            if external.active {external.key(key);continue;}
                         if setup.active { setup.key(key); if !setup.active { status = setup.notice(); } continue; }
                         let control = key.modifiers.contains(Modifiers::CONTROL);
                         if slash.help { slash.key(key, &mut editor); continue; }
@@ -202,18 +241,25 @@ pub(super) async fn run(
                                     } else if label == "Exit" { break Ok(None); }
                                     else if label == "/help" { slash.open_help(); }
                                     else if label == "/login" { setup.open(setup::Command::Login(None), false); }
+                                    else if label == "/external" {external.open();}
+                                    else if label == "/profiles" {profiles.open();}
+                                    else if label == "/attention" {external.open_attention();}
                                     else if label == "/model" { setup.open(setup::Command::Models, false); }
                                     else { let application = application.clone(); let cursor = if label == "More sessions…" { recent.clone() } else { None }; history = Some(Box::pin(async move { application.list_recent(cursor.as_ref(), 128).await.map_err(error) })); }
                                 },
                                 _ => {},
                             }
                         } else if control && key.code == KeyCode::Char('p') {
-                            selected = 0; status.clear(); menu = Some(Menu { title: "Actions", hint: "Enter select · Esc back", items: vec![("/login".into(), None), ("/model".into(), None), ("Recent sessions".into(), None), ("Exit".into(), None), ("/help".into(), None)] });
+                            selected = 0; status.clear(); menu = Some(Menu { title: "Actions", hint: "Enter select · Esc back", items: vec![("/login".into(), None), ("/model".into(), None), ("Recent sessions".into(), None), ("/external".into(),None), ("/profiles".into(),None), ("/attention".into(),None), ("Exit".into(), None), ("/help".into(), None)] });
                         } else if (key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT)) || (control && key.code == KeyCode::Char('s')) {
                             if let Some(command) = setup::command(editor.text()) {
                                 if editor.cursor()!=editor.text().len() || matches!(command,setup::Command::Invalid) {status="Invalid command or cursor not at end. Draft retained; /help lists usage.".into();continue;}
                                 editor.take();
                                 match command {
+                                    setup::Command::Attention => external.open_attention(),
+                                    setup::Command::ExternalOpen(id) => external.open_conversation(id),
+                                    setup::Command::External => external.open(),
+                                    setup::Command::Profiles => profiles.open(),
                                     setup::Command::Quit => break Ok(None),
                                     setup::Command::Help => slash.open_help(),
                                     setup::Command::Markdown(mode) => { *markdown = mode.unwrap_or(!*markdown); status = super::markdown_status(*markdown).into(); editor.take(); },
@@ -225,7 +271,7 @@ pub(super) async fn run(
                             } else {status="Choose a model with /login or /model first. Draft retained; nothing was sent.".into();}
                         } else if let Err(problem) = editor.key(key) { status = problem.into(); }
                     }
-                    input::Input::Terminal(termina::Event::Mouse(mouse)) => { if terminal.presented.borrow().as_ref().is_some_and(|frame| frame.presentation==epoch && (frame.buffer.area.width,frame.buffer.area.height)==terminal::size()) {if setup.active {setup.mouse(mouse,&view.0);} else if let Some(menu) = &menu { if let Some(index) = view.0.choice_at(mouse.column, mouse.row) && index < menu.items.len() && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) { selected = index; } } else {slash.mouse(mouse,&view.0);}} },
+                    input::Input::Terminal(termina::Event::Mouse(mouse)) => { if terminal.presented.borrow().as_ref().is_some_and(|frame| frame.presentation==epoch && (frame.buffer.area.width,frame.buffer.area.height)==terminal::size()) {if profiles.active {profiles.mouse(mouse,&view.0);} else if external.active {external.mouse(mouse,&view.0);}else if setup.active {setup.mouse(mouse,&view.0);} else if let Some(menu) = &menu { if let Some(index) = view.0.choice_at(mouse.column, mouse.row) && index < menu.items.len() && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) { selected = index; } } else {slash.mouse(mouse,&view.0);}} },
                     input::Input::Terminal(_) => {},
                 }
             },
@@ -235,7 +281,7 @@ pub(super) async fn run(
                 if dimensions != (width, height) { dimensions = (width, height); dirty = true; }
                 if !dirty || rendering.is_some() { continue; }
                 let base = Scene::from(ApplicationScene { title: "RSI · No session attached".into(), explanation: "Connect a provider with /login, or choose a saved model with /model.".into(), input: rsi_terminal_ui::scene::Draft::capture(&editor).map_err(error)?, status: if menu.is_some() { String::new() } else { status.clone() }, field: Some(String::new()), hint: if slash.popup.is_some() {"↑/↓ select · Tab fill · Esc hide"} else {"Enter send · Ctrl+J line · /help"}.into(), completion: if setup.active || slash.help || menu.is_some() { None } else { slash.popup.clone() }, ..ApplicationScene::default() });
-                let scene = if setup.active { base.with_dialog(setup.scene().map_err(error)?) } else if slash.help { base.with_dialog(slash.scene().map_err(error)?) } else if let Some(menu) = &menu { base.with_dialog(Scene::from(ApplicationScene { title: menu.title.into(), items: menu.items.iter().map(|(label, _)| label.clone()).collect(), selected, hint: menu.hint.into(), status: status.clone(), ..ApplicationScene::default() })) } else { Ok(base) }.map_err(error)?;
+                let scene = if profiles.active {profiles.scene()} else if external.active {external.scene()} else if setup.active { base.with_dialog(setup.scene().map_err(error)?) } else if slash.help { base.with_dialog(slash.scene().map_err(error)?) } else if let Some(menu) = &menu { base.with_dialog(Scene::from(ApplicationScene { title: menu.title.into(), items: menu.items.iter().map(|(label, _)| label.clone()).collect(), selected, hint: menu.hint.into(), status: status.clone(), ..ApplicationScene::default() })) } else { Ok(base) }.map_err(error)?;
                 revision += 1;
                 let request = rsi_terminal_ui::wire::Request { identity: rsi_terminal_ui::wire::Identity { attachment: 0, presentation: epoch, revision }, width, height, bytes: 0 };
                 rendering = Some(presentation.render(request, scene, render_stop.clone())); dirty = false;

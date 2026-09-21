@@ -285,6 +285,19 @@ fn register_session_views(
         "rsi.session.files.ui",
         ConfigValue::Null,
     ));
+    builder
+        .register_linked(
+            "rsi.workspace.review.ui",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_workspace_review_ui::Factory),
+        )
+        .map_err(failure)?;
+    entries.push(ProfileEntry::new(
+        "workspace-review-ui",
+        "rsi.workspace.review.ui",
+        ConfigValue::Null,
+    ));
     entries.push(ProfileEntry::new("ui", "rsi.ui", ConfigValue::Null));
     entries.push(ProfileEntry::new(
         "session-ui",

@@ -1,5 +1,21 @@
 # rsi-gui
 
+Attention navigation uses the shared workbench's bounded current-owner view.
+Opening a target revalidates its exact Native Session/Turn/request or External
+connection/request identity. Native requests open the existing interaction detail;
+external requests focus the matching permission group. The displayed source cut
+is explicitly acknowledged per authenticated principal after attachment. Native
+and External pane metadata both expose their actual backend capabilities.
+
+A conversation surface selects either the native Session controller or a detached
+external controller. Switching retires the old observation, never the Host-owned
+external peer. External panes have text submission, exact peer permission choices,
+observed history and explicit cancel/close/resume/load controls. Native model,
+Goal, preset, terminal and extension controls are absent from external panes.
+Every action and raw source delivery checks the surface attachment generation.
+External catalog pages contain at most 64 observations and only configured endpoint
+identities. The document cannot supply launch paths, environment or commands.
+
 Resource previews carry a generation-local monotone revision. Clearing, starting
 and completing a read advance it; document rendering compares this identity
 without serializing the preview body. Draft reference rows similarly follow the
@@ -367,3 +383,7 @@ API lane. Detach always releases local follower state, even if the remote detach
 
 Workspace selection creates Sessions with default project instruction and skill
 discovery; creation commands and draft reuse carry no workspace-trust setting.
+
+History search uses the shared history API through the generation-fenced human
+reference bridge. Freeze requests must name the pane's actual target Session;
+source workspace and original evidence are independently checked by their owner.
