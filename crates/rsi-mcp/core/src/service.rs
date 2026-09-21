@@ -1,7 +1,7 @@
 use crate::{
     discovery::discover,
     error::{McpError, Result},
-    transport::Connection,
+    transport::{Connection, REQUEST_TIMEOUT},
 };
 use rsi_credentials_protocol::CredentialsResolve;
 use rsi_mcp_protocol::{
@@ -81,6 +81,7 @@ struct Verified {
 #[derive(Debug)]
 struct Entry {
     config: ServerConfig,
+    all_tools: bool,
     target_sha256: String,
     retired: AtomicBool,
     epoch: AtomicU64,
@@ -90,12 +91,15 @@ struct Entry {
     verified: Mutex<Option<Verified>>,
     last: Mutex<Option<Arc<FrozenServer>>>,
     failure: Mutex<Option<McpError>>,
+    settlement_failed: Arc<AtomicBool>,
+    own_settlement_failed: AtomicBool,
 }
 impl Entry {
-    fn new(config: ServerConfig) -> Self {
+    fn new(config: ServerConfig, all_tools: bool, settlement_failed: Arc<AtomicBool>) -> Self {
         Self {
             target_sha256: config.target_sha256(),
             config,
+            all_tools,
             retired: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             refresh: Arc::new(Semaphore::new(1)),
@@ -104,6 +108,8 @@ impl Entry {
             verified: Mutex::new(None),
             last: Mutex::new(None),
             failure: Mutex::new(None),
+            settlement_failed,
+            own_settlement_failed: AtomicBool::new(false),
         }
     }
     fn invalidate(&self) {
@@ -130,26 +136,35 @@ impl Entry {
         }
         Ok((verified.manifest.clone(), verified.connection.clone()))
     }
-    async fn shutdown(&self) {
+    async fn close_connection(&self, connection: &Connection) -> Result<()> {
+        connection.shutdown().await.inspect_err(|_| {
+            self.own_settlement_failed.store(true, Ordering::Release);
+            self.settlement_failed.store(true, Ordering::Release);
+        })
+    }
+    async fn shutdown(&self) -> bool {
         self.retired.store(true, Ordering::Release);
         self.invalidate();
         // A connecting refresh keeps its permit until its connection is closed.
         let _permit = self.refresh.acquire().await;
         let value = self.verified.lock().expect("MCP entry poisoned").take();
         if let Some(value) = value {
-            value.connection.shutdown().await;
+            let _failed = self.close_connection(&value.connection).await;
         }
         self.tasks.close();
         self.tasks.wait().await;
+        self.own_settlement_failed.load(Ordering::Acquire)
     }
 }
 /// Process-wide MCP owner. Only complete verified catalogs enter fresh compositions.
 pub struct McpService {
+    all_tools: bool,
     seed: Mutex<Option<SeedCache>>,
     entries: RwLock<BTreeMap<String, Arc<Entry>>>,
     configure: Arc<Semaphore>,
     tasks: TaskTracker,
     closed: AtomicBool,
+    settlement_failed: Arc<AtomicBool>,
     credentials: Arc<dyn CredentialsResolve>,
     process: Arc<dyn DuplexProcess>,
     sandbox: Arc<dyn Sandbox>,
@@ -189,15 +204,27 @@ impl McpService {
         sandbox: Arc<dyn Sandbox>,
     ) -> Self {
         Self {
+            all_tools: false,
             entries: RwLock::new(BTreeMap::new()),
             seed: Mutex::new(None),
             configure: Arc::new(Semaphore::new(1)),
             tasks: TaskTracker::new(),
             closed: AtomicBool::new(false),
+            settlement_failed: Arc::new(AtomicBool::new(false)),
             credentials,
             process,
             sandbox,
         }
+    }
+    /// Selects all discovered Tools for an explicitly private service owner.
+    pub fn new_with_all_discovered_tools(
+        credentials: Arc<dyn CredentialsResolve>,
+        process: Arc<dyn DuplexProcess>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> Self {
+        let mut owner = Self::new(credentials, process, sandbox);
+        owner.all_tools = true;
+        owner
     }
     fn entry(&self, id: &str) -> Result<Arc<Entry>> {
         if self.closed.load(Ordering::Acquire) {
@@ -235,7 +262,11 @@ impl McpService {
                 {
                     old.remove(&config.id).expect("selected entry")
                 } else {
-                    Arc::new(Entry::new(config))
+                    Arc::new(Entry::new(
+                        config,
+                        self.all_tools,
+                        self.settlement_failed.clone(),
+                    ))
                 };
                 entries.insert(entry.config.id.clone(), entry);
             }
@@ -247,16 +278,22 @@ impl McpService {
         };
         let (send, receive) = oneshot::channel();
         self.tasks.spawn(async move {
+            let mut failed = false;
             for (_, entry) in old {
-                entry.shutdown().await;
+                failed |= entry.shutdown().await;
             }
             drop(permit);
-            let _ = send.send(());
+            let _ = send.send(failed);
         });
-        tokio::time::timeout(std::time::Duration::from_secs(30), receive)
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(30), receive)
             .await
             .map_err(|_| McpError::Timeout)?
-            .map_err(|_| McpError::Disconnected)
+            .map_err(|_| McpError::Disconnected)?;
+        if failed {
+            Err(McpError::Disconnected)
+        } else {
+            Ok(())
+        }
     }
     /// Captures all current complete manifests synchronously, without discovery or network work.
     ///
@@ -401,6 +438,7 @@ impl McpService {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<Value> {
+        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
         if !frozen
             .tools
             .iter()
@@ -413,6 +451,7 @@ impl McpService {
             "tools/call",
             json!({"name":raw_name,"arguments":arguments}),
             cancellation,
+            deadline,
         )
         .await
     }
@@ -423,11 +462,18 @@ impl McpService {
         uri: &str,
         cancellation: CancellationToken,
     ) -> Result<Value> {
+        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
         if !frozen.resources.iter().any(|resource| resource.uri == uri) {
             return Err(McpError::NotFound);
         }
-        self.request(frozen, "resources/read", json!({"uri":uri}), cancellation)
-            .await
+        self.request(
+            frozen,
+            "resources/read",
+            json!({"uri":uri}),
+            cancellation,
+            deadline,
+        )
+        .await
     }
     async fn request(
         &self,
@@ -435,6 +481,7 @@ impl McpService {
         method: &str,
         params: Value,
         cancellation: CancellationToken,
+        deadline: tokio::time::Instant,
     ) -> Result<Value> {
         let entry = self.entry(&frozen.id).map_err(|error| {
             if error == McpError::NotFound {
@@ -450,13 +497,19 @@ impl McpService {
         if current.sha256 != frozen.sha256 {
             return Err(McpError::CatalogChanged);
         }
-        tokio::select! { () = cancellation.cancelled() => Err(McpError::Cancelled), value = connection.request(method, params) => value }
+        let result = tokio::select! { biased; () = cancellation.cancelled() => Err(McpError::Cancelled), value = connection.request_until(method, params, deadline) => value };
+        // Dropping an unconfirmed started exchange retires its epoch. Return only
+        // after the controlled writer has settled; queued cancellation stays cheap.
+        if !connection.valid() {
+            entry.close_connection(&connection).await?;
+        }
+        result
     }
     /// Stops admission and awaits all endpoint/child settlement.
     ///
     /// # Panics
     /// Panics if an earlier panic poisoned the owner state lock.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
         let _permit = self.configure.acquire().await;
         let entries = self
@@ -475,6 +528,11 @@ impl McpService {
         }
         self.tasks.close();
         self.tasks.wait().await;
+        if self.settlement_failed.load(Ordering::Acquire) {
+            Err(McpError::Disconnected)
+        } else {
+            Ok(())
+        }
     }
 }
 impl Drop for McpService {
@@ -508,7 +566,7 @@ async fn refresh_owned(
     entry.epoch.fetch_add(1, Ordering::AcqRel);
     let previous = entry.verified.lock().expect("MCP entry poisoned").take();
     if let Some(previous) = previous {
-        previous.connection.shutdown().await;
+        entry.close_connection(&previous.connection).await?;
     }
     let mut guard = RefreshGuard {
         entry: entry.clone(),
@@ -524,7 +582,7 @@ async fn refresh_owned(
         )
         .await?;
         guard.connection = Some(connection.clone());
-        let mut discovered = discover(&connection, &entry.config, false).await;
+        let mut discovered = discover(&connection, &entry.config, false, entry.all_tools).await;
         if connection.silent_probe()
             && discovered == Err(McpError::Timeout)
             && matches!(
@@ -534,10 +592,10 @@ async fn refresh_owned(
         {
             // Only a silent discovery probe permits one legacy restart. It has
             // executed no Tool, and its process is reaped before reconnecting.
-            connection.shutdown().await;
+            entry.close_connection(&connection).await?;
             connection = Connection::connect(&entry.config, credentials, process, sandbox).await?;
             guard.connection = Some(connection.clone());
-            discovered = discover(&connection, &entry.config, true).await;
+            discovered = discover(&connection, &entry.config, true, entry.all_tools).await;
         }
         let manifest = discovered?;
         if entry.retired.load(Ordering::Acquire) {
@@ -564,7 +622,7 @@ async fn refresh_owned(
         }
         Err(error) => {
             if let Some(connection) = &guard.connection {
-                connection.shutdown().await;
+                entry.close_connection(connection).await?;
             }
             *entry.failure.lock().expect("MCP failure poisoned") = Some(error);
             Err(error)

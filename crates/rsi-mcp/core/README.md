@@ -1,5 +1,20 @@
 # rsi-mcp
 
+A private protocol owner may explicitly construct a service with
+`new_with_all_discovered_tools`. This constructor policy selects every discovered
+Tool in that service's frozen manifest, within the same aggregate limits. It
+does not change the normal configured-name policy, modify Settings or grant
+authority to any other service. Selection remains frozen in the manifest and
+must be compared again before restoring a saved Session.
+
+`McpToolsFactory::with_service` binds a prepared private MCP service explicitly
+instead of looking up the standing Host service. Its owner prepares discovery
+and supplies the matching frozen manifest before Agent catalog publication,
+retains that exact service through admitted work, and shuts it down after
+settlement. The ordinary global factory and private factory use the same Tool,
+Domain and contribution registration path; private providers never modify the
+Host's configured endpoints or inherit its credentials implicitly.
+
 The ordinary MCP owner retains connection work through cancellation and retirement.
 Fresh composition obtains a verified manifest snapshot; offline restoration receives
 its saved Domain seed. HTTP and managed stdio implement the same finite RPC owner,
@@ -25,6 +40,22 @@ are not dispatched. Ordinary HTTP RPCs finish on the first complete correlated
 response; preceding notifications are processed in order, and trailing events
 are outside that exchange. Subscriptions retain their separate stream lifetime.
 HTTP request bodies are bounded and encoded once before dispatch.
+Business requests retain their exact connection epoch through preparation and
+waiting. At most nine requests may be outstanding per connection, including
+preparation and the single active exchange; further requests fail with Busy.
+Prepared requests wait fairly at the exchange gate with at most 1 MiB of encoded
+payload each. The 30-second business deadline includes preparation, waiting and
+exchange, and is never renewed on dispatch. Caller cancellation or timeout before
+exchange only releases admission. Once exchange starts, uncertainty retires the
+epoch; queued work fails with that epoch and never migrates or replays. Discovery
+retains its sequential negotiation and separate probe deadline.
+An uncertain started request awaits the retired connection's shutdown before
+returning, including managed stdio child reaping and pipe settlement. Cancellation
+before exchange admission leaves a healthy connection available. This local
+settlement does not establish completion of work on a remote HTTP peer.
+Resource listing constructs the full frozen descriptor list; exact reads construct
+only the selected descriptor and require canonical opaque IDs. Empty registered
+resource sources remain visible through the Agent Sources operation.
 As in the SSE field grammar, bare `data` means an empty data field. An event
 containing only empty data still fails the JSON-RPC payload check; empty data
 lines surrounding a valid JSON value contribute ordinary JSON whitespace.
@@ -47,3 +78,7 @@ Only absent, empty, or `message` event names dispatch JSON-RPC. Other named
 SSE events are ignored after bounded framing, including non-JSON keep-alives.
 `id` and `retry` fields are ignored: this transport does not implement SSE
 reconnection or Last-Event-ID replay. Event names reset at every blank line.
+
+Failed process settlement remains a service shutdown error. Configuration reports
+settlement failure for entries retired by that operation; historical failure in a
+different entry does not reject later unrelated configuration changes.

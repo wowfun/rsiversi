@@ -143,15 +143,19 @@ impl DuplexProcess for Unused {
 #[tokio::test(start_paused = true)]
 async fn configuration_wait_is_bounded_but_retirement_keeps_admission_until_settled() {
     let service = McpService::new(Arc::new(Unused), Arc::new(Unused), Arc::new(Unused));
-    let entry = Arc::new(Entry::new(ServerConfig {
-        id: "held".into(),
-        enabled: true,
-        tools: vec![],
-        transport: TransportConfig::StreamableHttp {
-            url: "http://127.0.0.1/".into(),
-            credential: None,
+    let entry = Arc::new(Entry::new(
+        ServerConfig {
+            id: "held".into(),
+            enabled: true,
+            tools: vec![],
+            transport: TransportConfig::StreamableHttp {
+                url: "http://127.0.0.1/".into(),
+                credential: None,
+            },
         },
-    }));
+        false,
+        Arc::new(AtomicBool::new(false)),
+    ));
     let held = entry.refresh.clone().acquire_owned().await.unwrap();
     service
         .entries
@@ -175,5 +179,6 @@ async fn configuration_wait_is_bounded_but_retirement_keeps_admission_until_sett
     drop(held);
     tokio::time::timeout(std::time::Duration::from_secs(1), service.shutdown())
         .await
+        .unwrap()
         .unwrap();
 }

@@ -68,7 +68,7 @@ async fn complete_discovery_preserves_metadata_and_credentials_are_resolved_for_
             fixture.credentials_seen.load(Ordering::Acquire)
         );
         assert!(credentials.resolutions.load(Ordering::Acquire) >= 7);
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -114,7 +114,7 @@ async fn reconnect_never_substitutes_old_schema_and_retains_last_verified_manife
     );
     assert!(!service.status()[0].ready);
     assert!(service.manifest().is_err());
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn list_changed_invalidates_the_idle_epoch_before_a_tool_can_start() {
         McpError::CatalogChanged
     );
     assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 #[tokio::test]
@@ -176,20 +176,17 @@ async fn cancellation_after_send_closes_epoch_and_does_not_replay_the_call() {
             .await
     });
     fixture.started.notified().await;
-    assert_eq!(
-        service
-            .call(
-                &frozen,
-                "echo",
-                json!({"message":"overlap"}),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap_err(),
-        McpError::Busy
+    let overlap = service.call(
+        &frozen,
+        "echo",
+        json!({"message":"overlap"}),
+        CancellationToken::new(),
     );
+    tokio::pin!(overlap);
+    assert!(futures_util::poll!(&mut overlap).is_pending());
     cancel.cancel();
     assert_eq!(call.await.unwrap().unwrap_err(), McpError::Cancelled);
+    assert_eq!(overlap.await.unwrap_err(), McpError::Disconnected);
     fixture.release.notify_one();
     assert_eq!(
         service
@@ -204,7 +201,7 @@ async fn cancellation_after_send_closes_epoch_and_does_not_replay_the_call() {
         McpError::Disconnected
     );
     assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 #[tokio::test]
@@ -231,7 +228,7 @@ async fn malformed_correlation_and_repeated_cursors_never_publish_a_partial_mani
         );
         assert!(service.manifest().is_err());
         assert!(service.status()[0].last_verified_sha256.is_none());
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -261,7 +258,7 @@ async fn remote_error_remains_explicit_and_does_not_discard_a_verified_connectio
         McpError::RemoteError
     );
     assert!(service.status()[0].ready);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -283,7 +280,7 @@ async fn encoded_responses_fail_before_decoding_or_manifest_publication() {
     );
     assert!(service.manifest().is_err());
     assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -320,7 +317,7 @@ async fn removed_endpoint_invalidates_frozen_calls_without_dispatch() {
         McpError::NotFound
     );
     assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -372,7 +369,7 @@ async fn sse_exchange_and_watch_accept_legal_framing_independently_of_writes() {
                 .await
                 .unwrap();
                 assert_eq!(service.status()[0].error, Some(McpError::CatalogChanged));
-                service.shutdown().await;
+                service.shutdown().await.unwrap();
                 fixture.shutdown().await;
             }
         }
@@ -405,7 +402,7 @@ async fn streaming_watch_ignores_large_comment_traffic_but_remains_cancellable()
         .await
         .unwrap();
         assert_eq!(service.status()[0].error, Some(McpError::CatalogChanged));
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -417,7 +414,7 @@ async fn measure_single_flight_busy_cancellation_and_rediscovery() {
 }
 
 #[tokio::test]
-async fn concurrent_call_rejection_and_cancelled_mutation_never_replay() {
+async fn concurrent_call_waiting_and_cancelled_mutation_never_replay() {
     single_flight_cases(&[2], false).await;
 }
 
@@ -460,34 +457,34 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
         })
     };
     fixture.started.notified().await;
-    let mut waiting = tokio::task::JoinSet::new();
+    let mut waiting = Vec::new();
+    let mut busy_ns = Vec::new();
     for _ in 1..callers {
-        let service = service.clone();
-        let frozen = frozen.clone();
-        waiting.spawn(async move {
-            let begin = std::time::Instant::now();
-            let result = service
-                .call(
-                    &frozen,
-                    "echo",
-                    json!({"message":"peer"}),
-                    CancellationToken::new(),
-                )
-                .await;
-            (result, begin.elapsed().as_nanos())
-        });
+        let begin = std::time::Instant::now();
+        let mut request = Box::pin(service.call(
+            &frozen,
+            "echo",
+            json!({"message":"peer"}),
+            CancellationToken::new(),
+        ));
+        match futures_util::poll!(request.as_mut()) {
+            std::task::Poll::Pending => waiting.push(request),
+            std::task::Poll::Ready(result) => {
+                assert_eq!(result, Err(McpError::Busy));
+                busy_ns.push(begin.elapsed().as_nanos());
+            }
+        }
     }
-    let mut busy_ns = vec![];
-    while let Some(result) = waiting.join_next().await {
-        let (result, time) = result.unwrap();
-        assert_eq!(result, Err(McpError::Busy));
-        busy_ns.push(time);
-    }
+    let queued = waiting.len();
+    assert_eq!(queued, callers.saturating_sub(1).min(8));
     busy_ns.sort_unstable();
     let begin = std::time::Instant::now();
     cancel.cancel();
     assert_eq!(running.await.unwrap(), Err(McpError::Cancelled));
     let cancel_ns = begin.elapsed().as_nanos();
+    for request in waiting {
+        assert_eq!(request.await, Err(McpError::Disconnected));
+    }
     assert!(!service.status()[0].ready);
     assert_eq!(
         service
@@ -518,10 +515,10 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
     if report {
         eprintln!(
             "single_flight {}",
-            json!({"modern":modern,"callers":callers,"admitted":1,"busy":busy_ns.len(),"busy_ns":busy_ns,"cancel_ns":cancel_ns,"rediscovery_ns":refresh_ns,"rediscovery_requests":refresh_requests,"mutation_dispatches":1})
+            json!({"modern":modern,"callers":callers,"admitted":1,"queued":queued,"busy":busy_ns.len(),"busy_ns":busy_ns,"cancel_ns":cancel_ns,"rediscovery_ns":refresh_ns,"rediscovery_requests":refresh_requests,"mutation_dispatches":1})
         );
     }
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -557,7 +554,7 @@ async fn first_sse_response_survives_duplicate_and_mismatched_coalesced_tail() {
         assert!(value.to_string().contains("first response"));
         assert!(!value.to_string().contains("poison"));
         assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -589,7 +586,7 @@ async fn sse_first_response_at_the_total_limit_ignores_coalesced_trailing_bytes(
         .await
         .unwrap();
     assert_eq!(value["content"][0]["text"], "near-limit");
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -613,7 +610,7 @@ async fn sse_prefix_overflow_still_rejects_without_publishing_a_catalog() {
         McpError::Capacity
     );
     assert!(!service.status()[0].ready);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -639,6 +636,157 @@ async fn oversized_encoded_request_fails_before_http_dispatch_and_keeps_readines
     );
     assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
     assert!(service.status()[0].ready);
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order() {
+    let fixture = HttpFixture::start(Mode {
+        wait_call: true,
+        ..Mode::default()
+    })
+    .await;
+    let service = Arc::new(fixture.service(Arc::new(Credentials::default())));
+    service.configure(fixture.config()).await.unwrap();
+    let frozen = service
+        .refresh("fixture", CancellationToken::new())
+        .await
+        .unwrap();
+    let peer = service.clone();
+    let schema = frozen.clone();
+    let active = tokio::spawn(async move {
+        peer.call(
+            &schema,
+            "echo",
+            json!({"message":"active"}),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    fixture.started.notified().await;
+    let tokens = (0..8).map(|_| CancellationToken::new()).collect::<Vec<_>>();
+    let mut waiting = tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| {
+            Box::pin(service.call(
+                &frozen,
+                "echo",
+                json!({"message":format!("queued-{index}")}),
+                token.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for call in &mut waiting {
+        assert!(futures_util::poll!(call.as_mut()).is_pending());
+    }
+    assert_eq!(
+        service
+            .call(
+                &frozen,
+                "echo",
+                json!({"message":"overflow"}),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err(),
+        McpError::Busy
+    );
+    assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
+    tokens[0].cancel();
+    assert_eq!(waiting.remove(0).await.unwrap_err(), McpError::Cancelled);
+    drop(waiting.remove(0));
+    // A rejected oversized payload must release its total-admission slot.
+    assert_eq!(
+        service
+            .call(
+                &frozen,
+                "echo",
+                json!({"message":"x".repeat(rsi_mcp_protocol::MAXIMUM_FRAME_BYTES)}),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err(),
+        McpError::Capacity
+    );
+    let mut last = Box::pin(service.call(
+        &frozen,
+        "echo",
+        json!({"message":"last"}),
+        CancellationToken::new(),
+    ));
+    assert!(futures_util::poll!(last.as_mut()).is_pending());
+    fixture.mode.lock().unwrap().wait_call = false;
+    fixture.release.notify_one();
+    assert_eq!(
+        active.await.unwrap().unwrap()["content"][0]["text"],
+        "active"
+    );
+    for (index, call) in waiting.into_iter().enumerate() {
+        assert_eq!(
+            call.await.unwrap()["content"][0]["text"],
+            format!("queued-{}", index + 2)
+        );
+    }
+    assert_eq!(last.await.unwrap()["content"][0]["text"], "last");
+    assert_eq!(fixture.calls.load(Ordering::Acquire), 8);
+    service.shutdown().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_business_call_keeps_its_original_deadline_after_dispatch() {
+    let fixture = HttpFixture::start(Mode {
+        wait_call: true,
+        ..Mode::default()
+    })
+    .await;
+    let service = Arc::new(fixture.service(Arc::new(Credentials::default())));
+    service.configure(fixture.config()).await.unwrap();
+    let frozen = service
+        .refresh("fixture", CancellationToken::new())
+        .await
+        .unwrap();
+    let peer = service.clone();
+    let schema = frozen.clone();
+    let first = tokio::spawn(async move {
+        peer.call(
+            &schema,
+            "echo",
+            json!({"message":"first"}),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    fixture.started.notified().await;
+    tokio::time::pause();
+    let peer = service.clone();
+    let schema = frozen.clone();
+    let mut second = Box::pin(async move {
+        peer.call(
+            &schema,
+            "echo",
+            json!({"message":"second"}),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    assert!(futures_util::poll!(second.as_mut()).is_pending());
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    fixture.release.notify_one();
+    // Resume real I/O before waiting on the fixture socket; simulated time must
+    // not auto-advance to the active deadline merely because the socket is idle.
+    tokio::time::resume();
+    first.await.unwrap().unwrap();
+    let second = tokio::spawn(second);
+    fixture.started.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(11)).await;
+    assert_eq!(second.await.unwrap().unwrap_err(), McpError::Timeout);
+    tokio::time::resume();
+    fixture.release.notify_one();
+    assert_eq!(fixture.calls.load(Ordering::Acquire), 2);
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }

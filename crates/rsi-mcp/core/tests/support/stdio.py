@@ -57,6 +57,15 @@ for raw in sys.stdin.buffer:
         result = {'tools': [{'name': 'echo', 'inputSchema': {'type': 'object', 'properties': {'message': {'type': 'string'}}, 'required': ['message'], 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}}]}
     elif method == 'tools/call':
         os.write(2, b'stderr noise\n' * 20000)
+        if mode == 'cancel-write':
+            def stop_then_write(_signal, _frame):
+                with open(sys.argv[2] + '.stopping', 'w') as marker: marker.write('stopping')
+                while not os.path.exists(sys.argv[2] + '.release'): time.sleep(0.001)
+                with open(sys.argv[2] + '.late', 'w') as marker: marker.write('settled write')
+                sys.exit(0)
+            signal.signal(signal.SIGTERM, stop_then_write)
+            with open(sys.argv[2], 'w') as marker: marker.write(str(os.getpid()))
+            time.sleep(60)
         if mode == 'stall':
             with open(sys.argv[2], 'w') as marker:
                 marker.write(str(os.getpid()))

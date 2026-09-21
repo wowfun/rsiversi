@@ -66,6 +66,7 @@ pub(crate) async fn discover(
     connection: &Connection,
     config: &ServerConfig,
     legacy: bool,
+    all_tools: bool,
 ) -> Result<Arc<FrozenServer>> {
     let (version, response) = connection.handshake(legacy).await?;
     let capabilities = response
@@ -115,7 +116,7 @@ pub(crate) async fn discover(
     let tools = definitions
         .into_iter()
         .map(|definition| FrozenTool {
-            selected: config.tools.contains(&definition.name),
+            selected: all_tools || config.tools.contains(&definition.name),
             public_name: public_tool_name(&config.id, &definition.name),
             definition,
         })

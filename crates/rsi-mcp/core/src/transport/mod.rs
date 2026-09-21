@@ -15,6 +15,9 @@ mod protocol;
 mod stdio;
 mod subscription;
 mod wire;
+
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug)]
 pub(crate) struct State {
     failure: Mutex<Option<McpError>>,
@@ -59,6 +62,7 @@ pub(crate) struct Connection {
     next: AtomicU64,
     silent_probe: AtomicBool,
     admission: Semaphore,
+    outstanding: Semaphore,
     parameters: Mutex<std::collections::BTreeMap<String, Vec<rsi_mcp_protocol::HttpParameter>>>,
 }
 impl std::fmt::Debug for Connection {
@@ -116,6 +120,7 @@ impl Connection {
             next: AtomicU64::new(1),
             silent_probe: AtomicBool::new(false),
             admission: Semaphore::new(1),
+            outstanding: Semaphore::new(9),
             parameters: Mutex::new(std::collections::BTreeMap::new()),
         }))
     }
@@ -131,45 +136,67 @@ impl Connection {
             peer.close();
         }
     }
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         self.close();
         match &self.transport {
-            Transport::Http(peer) => peer.shutdown().await,
+            Transport::Http(peer) => {
+                peer.shutdown().await;
+                Ok(())
+            }
             Transport::Stdio(peer) => peer.shutdown().await,
         }
     }
-    pub async fn request(&self, method: &str, mut params: Value) -> Result<Value> {
-        let _permit = self.admission.try_acquire().map_err(|_| McpError::Busy)?;
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let timeout =
+            if method == "server/discover" && matches!(self.transport, Transport::Stdio(_)) {
+                std::time::Duration::from_secs(2)
+            } else {
+                REQUEST_TIMEOUT
+            };
+        self.request_until(method, params, tokio::time::Instant::now() + timeout)
+            .await
+    }
+    pub async fn request_until(
+        &self,
+        method: &str,
+        mut params: Value,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value> {
         if let Some(error) = self.failure() {
             return Err(error);
         }
+        let _outstanding = self.outstanding.try_acquire().map_err(|_| McpError::Busy)?;
         let id = self.next.fetch_add(1, Ordering::Relaxed).to_string();
         self.state.request_meta(&mut params)?;
         let headers = self.parameter_headers(method, &params)?;
         let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         let bytes = wire::encode(&request)?;
-        let timeout =
-            if method == "server/discover" && matches!(self.transport, Transport::Stdio(_)) {
-                std::time::Duration::from_secs(2)
-            } else {
-                std::time::Duration::from_secs(30)
-            };
+        let body = http::RequestBody::new(&request, bytes);
+        drop(request);
+        let _permit = tokio::select! { biased;
+            () = self.state.stop.cancelled() => return Err(self.failure().unwrap_or(McpError::Disconnected)),
+            () = tokio::time::sleep_until(deadline) => return Err(McpError::Timeout),
+            permit = self.admission.acquire() => permit.map_err(|_| McpError::Disconnected)?,
+        };
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(McpError::Timeout);
+        }
         let mut guard = ExchangeGuard {
             connection: self,
             settled: false,
         };
         let future = async {
             match &self.transport {
-                Transport::Http(peer) => {
-                    peer.exchange(http::RequestBody::new(&request, bytes), &headers, Some(&id))
-                        .await
-                }
-                Transport::Stdio(peer) => peer.exchange(bytes, Some(&id)).await,
+                Transport::Http(peer) => peer.exchange(body, &headers, Some(&id)).await,
+                Transport::Stdio(peer) => peer.exchange(body.into_bytes(), Some(&id)).await,
             }
         };
         let value = tokio::select! {
             () = self.state.stop.cancelled() => Err(self.failure().unwrap_or(McpError::Disconnected)),
-            value = tokio::time::timeout(timeout, future) => value.map_err(|_| McpError::Timeout)?,
+            value = tokio::time::timeout_at(deadline, future) => value.map_err(|_| McpError::Timeout)?,
         };
         // An ordinary remote RPC error settles this exact exchange; it is not a disconnect.
         let value = value.map_err(|error| self.failure().unwrap_or(error));
@@ -202,7 +229,7 @@ impl Connection {
             connection: self,
             settled: false,
         };
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(REQUEST_TIMEOUT, async {
             match &self.transport {
                 Transport::Http(peer) => {
                     peer.set_version(version);

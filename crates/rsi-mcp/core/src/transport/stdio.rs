@@ -232,7 +232,7 @@ impl Stdio {
         self.state.invalidate();
         self.process.terminate();
     }
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         self.close();
         let reader = self.reader.lock().expect("MCP reader poisoned").take();
         if let Some(reader) = reader {
@@ -246,7 +246,10 @@ impl Stdio {
         if let Some(responder) = responder {
             let _ = responder.await;
         }
-        let _ = self.process.wait().await;
+        self.process
+            .wait_settlement()
+            .await
+            .map_err(|_| McpError::Disconnected)
     }
 }
 impl Drop for Stdio {

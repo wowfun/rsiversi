@@ -103,3 +103,8 @@ local deterministic tests.
 Fresh seed capture checks current connection readiness on every call, then reuses
 the immutable encoded seed while all frozen server identities are unchanged.
 Repeated pins do not clone schemas or re-encode the complete manifest.
+
+Stdio retirement propagates Process settlement errors. The service latches any
+failed settlement, including replaced or cancelled connections, and reports it
+after draining all endpoints at shutdown; plugin disposal cannot claim a clean
+shutdown after a reaping or pipe-settlement failure.

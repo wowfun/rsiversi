@@ -153,11 +153,11 @@ impl McpOwner {
         failure.map_or(Ok(()), Err)
     }
     /// Retires startup refresh and all protocol/process ownership.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> crate::error::Result<()> {
         self.stop.cancel();
         self.tasks.close();
         self.tasks.wait().await;
-        self.service.shutdown().await;
+        self.service.shutdown().await
     }
 }
 /// Local owner capability for product status, configuration and composition wiring.
@@ -223,9 +223,9 @@ impl PluginFactory for McpFactory {
             "retire MCP owner and settings",
             Box::new(move || {
                 Box::pin(async move {
-                    cleanup.shutdown().await;
+                    let result = cleanup.shutdown().await;
                     drop(registration);
-                    Ok(())
+                    result.map_err(|error| error.to_string())
                 })
             }),
         )?;

@@ -55,7 +55,7 @@ async fn modern_started_calls_keep_fresh_credentials_and_cancel_without_replay()
         4,
         "discover, tools, resources and call each resolve credentials"
     );
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
     fixture.shutdown().await;
 }
 
@@ -115,7 +115,7 @@ async fn modern_http_metadata_headers_results_resources_and_subscription_use_rea
             Err(McpError::CatalogChanged)
         );
         assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -150,7 +150,7 @@ async fn modern_discovery_errors_and_bad_subscription_acknowledgments_never_down
         );
         assert!(!service.status()[0].ready);
         assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }
@@ -189,7 +189,7 @@ async fn unfinished_or_unknown_modern_results_cannot_be_published_as_success_or_
         );
         assert_eq!(service.status()[0].ready, ready, "{fault}");
         assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
         fixture.shutdown().await;
     }
 }

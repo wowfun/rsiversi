@@ -1,4 +1,4 @@
-use super::{State, wire};
+use super::{REQUEST_TIMEOUT, State, wire};
 use crate::error::{McpError, Result};
 use futures_util::StreamExt;
 use reqwest::{
@@ -33,6 +33,9 @@ impl RequestBody {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         }
+    }
+    pub(super) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
     fn encode(value: &Value) -> Result<Self> {
         Ok(Self::new(value, wire::encode(value)?))
@@ -425,12 +428,9 @@ impl Http {
                     loop {
                         match events.next(&mut input)? {
                             wire::EventStep::Message(value) => {
-                                tokio::time::timeout(
-                                    std::time::Duration::from_secs(30),
-                                    inner.server_message(&value),
-                                )
-                                .await
-                                .map_err(|_| McpError::Timeout)??;
+                                tokio::time::timeout(REQUEST_TIMEOUT, inner.server_message(&value))
+                                    .await
+                                    .map_err(|_| McpError::Timeout)??;
                             }
                             wire::EventStep::Yield => tokio::task::yield_now().await,
                             wire::EventStep::NeedInput => break,
