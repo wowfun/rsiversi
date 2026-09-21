@@ -5,6 +5,11 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod addon;
+mod addon_discovery;
+pub use addon_discovery::{
+    AddonDiscoveryCursor, AddonDiscoveryEntry, AddonDiscoveryPage, AddonDiscoverySnapshot,
+    MAXIMUM_ADDON_DISCOVERY_BYTES, MAXIMUM_ADDON_DISCOVERY_ITEMS,
+};
 #[cfg(unix)]
 mod addon_store;
 #[cfg(unix)]

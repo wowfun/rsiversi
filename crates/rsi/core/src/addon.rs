@@ -417,6 +417,14 @@ pub struct StandardAddonSet {
 }
 
 impl StandardAddonSet {
+    pub(crate) fn exported_contracts(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.addons.iter().flat_map(|addon| {
+            addon
+                .exports
+                .iter()
+                .map(|export| (addon.id.as_str(), export.key))
+        })
+    }
     /// Freezes an ordered set, rejecting all duplicate identities before use.
     pub fn new(addons: impl IntoIterator<Item = StandardAddon>) -> rsi_host::Result<Self> {
         let mut frozen = Vec::new();

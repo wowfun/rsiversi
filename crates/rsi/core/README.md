@@ -241,6 +241,9 @@ when its Profile enables it. Build-time UI assets are ordinary application
 factories consuming the existing assets contract, with their build revision
 included in the frozen identity. No runtime JavaScript discovery is implied.
 
+The public [addon testkit](../addon-testkit/README.md) exercises generation
+replacement and teardown through the SDK with author-supplied semantic probes.
+
 `StandardComposition::with_addons` carries the same immutable declarations into
 preview and embedded/daemon startup. The Agent compiler and contribution catalog
 are derived from the declared Agent factories, including the built-in tools and
@@ -269,6 +272,14 @@ Factory metadata uses the public addon byte/depth/platform/count limits; schema
 traversal retains only a depth-bounded iterator stack. A preset manager records
 its declaring composition identity, and attaching or later changing addon inputs
 cannot silently pair an old compiler with a different contribution catalog.
+
+`StandardAddonSet::discovery` captures a read-only snapshot of factory metadata,
+explicitly exported Local contract names and, when supplied, one Agent pin's Tool
+definitions and output declarations. It neither prepares factories nor reads
+configuration values. Exact lookup and pages share that snapshot. Each page has
+at most 64 entries and 256 KiB of compact JSON. Continuation cursors belong to
+one snapshot object; another capture rejects them even when its declarations
+look equal. Reading metadata grants no execution or mutation capability.
 
 Local native addon storage uses `NativeAddonStore` on Unix. Installation reads an
 explicit bounded TOML manifest and a regular artifact beneath its retained source

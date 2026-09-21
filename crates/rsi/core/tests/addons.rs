@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+#[path = "addons/discovery.rs"]
+mod discovery;
 use rsi::{
     AddonScope, AgentPresetManager, StandardAddon, StandardAddonBuilder, StandardAddonSet,
     StandardComposition,

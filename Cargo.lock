@@ -4654,6 +4654,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-addon-testkit"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi",
+ "rsi-host",
+ "rsi-meta",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-agent-composition"
 version = "0.0.1"
 dependencies = [
