@@ -54,8 +54,11 @@ There is no remove, move, ID/plugin/source replacement, generic node replace,
 deep merge, or missing-target skip.
 
 TOML configuration accepts only the JSON-compatible subset and rejects datetime
-values. Literal `config` and `config_rhai` are mutually exclusive, as are
-literal `enabled` and `enabled_rhai`. Rhai computes only one complete config or
+values. `config_json` supplies one literal JSON string when nulls or exact
+JSON numbers cannot be represented by TOML. It is parsed without expression
+evaluation, bounded before parsing and then checked against the same JSON depth
+and aggregate limits. `config`, `config_json` and `config_rhai` are mutually
+exclusive, as are literal `enabled` and `enabled_rhai`. Rhai computes only one complete config or
 enabled value. Evaluation is bounded and pure: scripts can read the frozen
 `paths`, `platform`, and `defines` values, but receive no Context, service,
 environment, filesystem, network, or process access. Operation, expression,

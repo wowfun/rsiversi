@@ -887,3 +887,53 @@ fn candidate_changes_distinguish_identity_placement_kind_and_isolation() {
         ]
     );
 }
+
+#[test]
+fn literal_json_keeps_exact_numbers_and_nulls_and_rejects_conflicting_forms() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile.toml");
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let exact = r#"{"maximum":18446744073709551615,"decimal":1.0000000000000001,"optional":null,"values":[null,1e+400]}"#;
+    let make = |patch: bool, json: &str, extra: &str| {
+        let source = if patch {
+            "format=1\n[[steps]]\nkind='plugin'\nid='leaf'\nplugin='test.plugin'\n[[steps]]\nkind='patch'\ntarget='leaf'\n"
+        } else {
+            "format=1\n[[steps]]\nkind='plugin'\nid='leaf'\nplugin='test.plugin'\n"
+        };
+        let literal = toml::Value::String(json.into()).to_string();
+        format!("{source}config_json={literal}\n{extra}")
+    };
+    for patch in [false, true] {
+        std::fs::write(&root, make(patch, exact, "")).unwrap();
+        let candidate = compiler.compile(&ProfileProgram::from_file(&root)).unwrap();
+        assert_eq!(candidate.leaves()[0].config().to_string(), exact);
+        for (json, extra) in [
+            ("null", ""),
+            (exact, "config_rhai='()'"),
+            (exact, "config={}"),
+            ("{secret-fixture", ""),
+        ] {
+            std::fs::write(&root, make(patch, json, extra)).unwrap();
+            let result = compiler.compile(&ProfileProgram::from_file(&root));
+            if json == "null" && extra.is_empty() {
+                assert_eq!(
+                    result.unwrap().leaves()[0].config(),
+                    &serde_json::Value::Null
+                );
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(!error.contains("secret-fixture"));
+            }
+        }
+    }
+    let limits = ProfileLimits {
+        maximum_config_bytes: 128,
+        ..ProfileLimits::default()
+    };
+    let compiler = ProfileCompiler::new(environment(temp.path()), limits);
+    std::fs::write(&root, make(false, &format!("\"{}\"", "x".repeat(129)), "")).unwrap();
+    assert!(matches!(
+        compiler.compile(&ProfileProgram::from_file(&root)),
+        Err(ProfileError::CapacityExceeded { .. })
+    ));
+}

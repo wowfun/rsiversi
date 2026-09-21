@@ -262,11 +262,53 @@ impl Host {
         path: impl Into<std::path::PathBuf>,
         contents: &[u8],
     ) -> Result<HostProfileEditPreview> {
+        self.edit_preview(path.into(), contents, None)
+    }
+
+    /// Prepares the enabled candidate without activating plugins or writing sources.
+    /// The caller supplies blocking-work admission and retains the work until it ends.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn prepare_file_edit(
+        &self,
+        runtime: &Runtime,
+        path: impl Into<std::path::PathBuf>,
+        contents: &[u8],
+    ) -> Result<HostProfileEditPreview> {
+        self.edit_preview(path.into(), contents, Some(runtime))
+    }
+
+    /// Validates one frozen factory configuration without activating a Fiber.
+    /// This also supports reviewing a disabled leaf whose config is being replaced.
+    pub fn prepare_configuration(
+        &self,
+        runtime: &Runtime,
+        plugin: &PluginId,
+        config: ConfigValue,
+    ) -> Result<()> {
+        drop(runtime.prepare(self.catalog.resolve(plugin)?, config)?);
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn edit_preview(
+        &self,
+        path: std::path::PathBuf,
+        contents: &[u8],
+        runtime: Option<&Runtime>,
+    ) -> Result<HostProfileEditPreview> {
         let program = self.configured_program(ProfileProgram::from_file(path));
         let compiler = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone());
         let previous = compiler.compile(&program).ok();
         let candidate = compiler.preview_file_edit(&program, contents)?;
         let leaves = self.resolve_preview_leaves(&candidate)?;
+        if let Some(runtime) = runtime {
+            for leaf in candidate.leaves() {
+                let factory = self.catalog.resolve(leaf.plugin())?;
+                // Meta bounds preparation, contains plugin panics and drops the
+                // resulting proof; there is no activation or namespace mutation.
+                drop(runtime.prepare(factory, leaf.config().clone())?);
+            }
+        }
         let sources = candidate
             .watch_paths()
             .iter()

@@ -1513,19 +1513,14 @@ impl<'a> CompileState<'a> {
         self.validate_identifier("instance", &raw.id)?;
         self.validate_identifier("plugin", &raw.plugin)?;
         let enabled = self.evaluate_enabled(&raw.id, raw.enabled, raw.enabled_rhai.as_deref())?;
-        if raw.config.is_some() && raw.config_rhai.is_some() {
-            return Err(ProfileError::InvalidProgram(format!(
-                "plugin `{}` sets both config and config_rhai",
-                raw.id
-            )));
-        }
-        let config = match (raw.config, raw.config_rhai.as_deref()) {
-            (Some(value), None) => toml_to_json(value, "config")?,
-            (None, Some(expression)) => self.evaluate_config(&raw.id, expression)?,
-            (None, None) => Value::Null,
-            (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
-        };
-        bounded_json_bytes(&config, self.compiler.limits.maximum_config_bytes)?;
+        let config = self
+            .config_value(
+                &raw.id,
+                raw.config,
+                raw.config_rhai.as_deref(),
+                raw.config_json.as_deref(),
+            )?
+            .unwrap_or(Value::Null);
         Ok(PluginNode {
             id: raw.id.into(),
             plugin: raw.plugin.into(),
@@ -1545,40 +1540,34 @@ impl<'a> CompileState<'a> {
             target,
             config,
             config_rhai,
+            config_json,
             enabled,
             enabled_rhai,
             isolation,
             append,
         } = raw;
         self.validate_identifier("patch target", &target)?;
-        if config.is_some() && config_rhai.is_some() {
-            return Err(ProfileError::InvalidProgram(format!(
-                "patch `{target}` sets both config and config_rhai"
-            )));
-        }
         if enabled.is_some() && enabled_rhai.is_some() {
             return Err(ProfileError::InvalidProgram(format!(
                 "patch `{target}` sets both enabled and enabled_rhai"
             )));
         }
-        let operation_count = usize::from(config.is_some() || config_rhai.is_some())
-            + usize::from(enabled.is_some() || enabled_rhai.is_some())
-            + usize::from(isolation.is_some())
-            + usize::from(append.is_some());
+        let operation_count =
+            usize::from(config.is_some() || config_rhai.is_some() || config_json.is_some())
+                + usize::from(enabled.is_some() || enabled_rhai.is_some())
+                + usize::from(isolation.is_some())
+                + usize::from(append.is_some());
         if operation_count != 1 {
             return Err(ProfileError::InvalidProgram(format!(
                 "patch `{target}` must declare exactly one operation"
             )));
         }
-        let config = match (config, config_rhai.as_deref()) {
-            (Some(config), None) => Some(toml_to_json(config, "patch config")?),
-            (None, Some(expression)) => Some(self.evaluate_config(&target, expression)?),
-            (None, None) => None,
-            (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
-        };
-        if let Some(config) = &config {
-            bounded_json_bytes(config, self.compiler.limits.maximum_config_bytes)?;
-        }
+        let config = self.config_value(
+            &target,
+            config,
+            config_rhai.as_deref(),
+            config_json.as_deref(),
+        )?;
         let isolation = isolation.map(|value| value.validate(self)).transpose()?;
         let append = append
             .map(|nodes| {
@@ -1676,6 +1665,43 @@ impl<'a> CompileState<'a> {
             (None, None) => Ok(true),
             (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
         }
+    }
+
+    fn config_value(
+        &self,
+        id: &str,
+        literal: Option<toml::Value>,
+        expression: Option<&str>,
+        json: Option<&str>,
+    ) -> Result<Option<Value>> {
+        if usize::from(literal.is_some())
+            + usize::from(expression.is_some())
+            + usize::from(json.is_some())
+            > 1
+        {
+            return Err(ProfileError::InvalidProgram(format!(
+                "node `{id}` declares multiple configuration forms"
+            )));
+        }
+        let value = if let Some(value) = literal {
+            toml_to_json(value, "config")?
+        } else if let Some(expression) = expression {
+            self.evaluate_config(id, expression)?
+        } else if let Some(json) = json {
+            if json.len() > self.compiler.limits.maximum_config_bytes {
+                return Err(ProfileError::CapacityExceeded {
+                    resource: "literal JSON bytes",
+                    maximum: self.compiler.limits.maximum_config_bytes,
+                });
+            }
+            serde_json::from_str(json).map_err(|_| {
+                ProfileError::InvalidProgram(format!("node `{id}` has invalid literal JSON"))
+            })?
+        } else {
+            return Ok(None);
+        };
+        bounded_json_bytes(&value, self.compiler.limits.maximum_config_bytes)?;
+        Ok(Some(value))
     }
 
     fn evaluate_config(&self, id: &str, expression: &str) -> Result<Value> {
@@ -1875,6 +1901,7 @@ struct RawPlugin {
     enabled_rhai: Option<String>,
     config: Option<toml::Value>,
     config_rhai: Option<String>,
+    config_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1883,6 +1910,7 @@ struct RawPatch {
     target: String,
     config: Option<toml::Value>,
     config_rhai: Option<String>,
+    config_json: Option<String>,
     enabled: Option<bool>,
     enabled_rhai: Option<String>,
     isolation: Option<RawIsolation>,

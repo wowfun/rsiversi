@@ -125,3 +125,13 @@ An invalid prior source has no comparison tree; it does not prevent previewing a
 valid repair. An unresolved proposed enabled factory rejects preview. This method
 performs no factory preparation, activation or write. Its caller owns the source
 transaction and must recheck captured inputs before committing a reviewed edit.
+
+`Host::prepare_file_edit` additionally prepares every enabled proposed leaf
+through an explicitly supplied Runtime, using the same compiled candidate and
+frozen resolver. It drops each preparation without activating a Fiber and returns
+the same redacted source identities and changes. This validates configuration,
+prepared-value bounds and requirements; it does not prove activation will
+succeed. A disabled leaf has no executable preparation. The caller owns blocking
+work admission, source-write authority, dependency CAS and receipt retention.
+`Host::prepare_configuration` validates one explicitly selected frozen factory
+and configuration through that Runtime, including a disabled proposed leaf.

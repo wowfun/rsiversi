@@ -436,3 +436,62 @@ fn edit_preview_resolves_the_frozen_catalog_and_can_repair_invalid_source_withou
         .replace("test.preview", "unknown");
     assert!(host.preview_file_edit(&path, unknown.as_bytes()).is_err());
 }
+
+#[tokio::test]
+async fn prepared_edit_rejects_plugin_configuration_without_activation_or_source_writes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct Validate(Arc<AtomicUsize>);
+    #[async_trait]
+    impl PluginFactory for Validate {
+        fn prepare(&self, value: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if value.get("valid") != Some(&Value::Bool(true)) {
+                return Err(MetaError::InvalidInput(
+                    "fixture rejected configuration".into(),
+                ));
+            }
+            Ok(PreparedActivation::new(value.clone()))
+        }
+        async fn activate(&self, _: ActivationPlan) -> rsi_meta::Result<()> {
+            panic!("review must never activate a plugin")
+        }
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("root.toml");
+    let original = b"format=1\n";
+    std::fs::write(&path, original).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut builder = HostBuilder::without_paths("prepared-edit");
+    builder
+        .register_linked(
+            "test.validate",
+            "1",
+            UpdateMode::Replayable,
+            Arc::new(Validate(calls.clone())),
+        )
+        .unwrap();
+    let host = builder.build().unwrap();
+    let runtime = rsi_meta::Runtime::new(rsi_meta::RuntimeLimits::default()).unwrap();
+    let proposed = "format=1\n[[steps]]\nkind='plugin'\nid='leaf'\nplugin='test.validate'\n[steps.config]\nvalid=true\nsecret='fixture-secret'\n";
+    let pure = host.preview_file_edit(&path, proposed.as_bytes()).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let prepared = host
+        .prepare_file_edit(&runtime, &path, proposed.as_bytes())
+        .unwrap();
+    assert_eq!(prepared, pure);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!format!("{prepared:?}").contains("fixture-secret"));
+    let invalid = proposed.replace("valid=true", "valid=false");
+    assert!(host.preview_file_edit(&path, invalid.as_bytes()).is_ok());
+    assert!(
+        host.prepare_file_edit(&runtime, &path, invalid.as_bytes())
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(matches!(
+        runtime.shutdown().await,
+        rsi_meta::ShutdownOutcome::Complete(_)
+    ));
+}
