@@ -17,6 +17,14 @@ import threading
 import tempfile
 import time
 from tasks import ProviderControl, verify as verify_tasks
+from pressure import verify_writes
+from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
+from profiles import verify as verify_profiles
+from history import verify as verify_history
+from language import verify as verify_language
+from workspace_review import verify as verify_review, reply as review_reply
+from attention import verify as verify_attention, provider_reply as attention_reply
+from typed_results import verify as verify_typed, provider_reply as typed_reply
 
 parser = argparse.ArgumentParser(description=__doc__)
 for option in ('binary', 'driver', 'assets', 'report'):
@@ -33,6 +41,13 @@ parser.add_argument('--startup-close', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
 parser.add_argument('--terminals', action='store_true')
+parser.add_argument('--external', action='store_true')
+parser.add_argument('--profiles', action='store_true')
+parser.add_argument('--history', action='store_true')
+parser.add_argument('--workspace-review', action='store_true')
+parser.add_argument('--language', type=Path)
+parser.add_argument('--attention', action='store_true')
+parser.add_argument('--typed-results', action='store_true')
 args = parser.parse_args()
 if bool(args.live_env_file) != bool(args.live_model):
     parser.error('live mode requires both an authorized environment file and a model')
@@ -74,6 +89,10 @@ class Provider(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         delta = {'choices': [{'delta': {'role': 'assistant', 'content': 'Desktop conversation verified. 中文输入已收到。'}, 'finish_reason': None}]}
         done = {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12}}
+        delegation = (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
+        if delegation:
+            delta['choices'][0]['delta'] = {'role':'assistant', **delegation}
+            done['choices'][0]['finish_reason'] = 'tool_calls'
         self.wfile.write(('data: ' + json.dumps(delta) + '\n\ndata: ' + json.dumps(done) + '\n\ndata: [DONE]\n\n').encode())
 provider = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
 threading.Thread(target=provider.serve_forever, daemon=True).start()
@@ -87,8 +106,20 @@ env['XDG_RUNTIME_DIR'] = runtime_directory.name
 config = Path(env['XDG_CONFIG_HOME']) / 'rsi'
 host = config / 'host-profiles/fixture'; host.mkdir(parents=True)
 (host / 'host.profile.toml').write_text('format = 1\nsteps = []\n')
-(config / 'settings.json').write_text('{"rsi.agent":{}}')
+if args.profiles:
+    editable = config / 'host-profiles/editable'; editable.mkdir()
+    editable_source = editable / 'host.profile.toml'
+    editable_source.write_text('format = 1\nsteps = []\n')
+(config / 'settings.json').write_text(json.dumps({'rsi.agent':{'require_approval':True} if args.attention else {}}))
 workspace = args.report / 'workspace'; workspace.mkdir()
+if args.language:
+    language_position = json.loads(subprocess.check_output(['python3', str(Path(__file__).parent.parent/'lsp/prepare.py'), str(workspace), str(host/'host.profile.toml'), str(args.language)],text=True))
+if args.workspace_review:
+    def git(*arguments): subprocess.run(['/usr/bin/git', *arguments], cwd=workspace, check=True, capture_output=True)
+    git('init', '--quiet'); (workspace / 'card.txt').write_text('committed\n'); git('add', '.')
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+    (workspace / 'card.txt').write_text('before\n')
+if args.external: configure_external(host / 'host.profile.toml', workspace.resolve(), Path(env['XDG_STATE_HOME']) / 'rsi')
 daemon = None
 daemon_log = None
 daemon_metadata = None
@@ -204,6 +235,9 @@ try:
         session = None
         raise SystemExit(0)
     until(lambda: script(r'return document.querySelector("#workbench")?.hidden===false'), 45)
+    if args.profiles:
+        verify_profiles(script, button, lambda item: call('POST', root + f'/element/{eid(item)}/click', {}), until, screenshot, editable_source, args.report)
+    if args.external: verify_external(script, button, fill, until, screenshot, workspace, args.report)
     script(r'''window.fixtureSubmissions=[];window.fixtureInputEvents=[];const originalFetch=window.fetch;window.fetch=(path,options)=>{const route=String(path),tracked=/\/_call\/(?:prepare_submission|submit_submission|query_submission)$/.test(route),entry={route,bytes:typeof options?.body==='string'?options.body.length:null};if(tracked)window.fixtureSubmissions.push(entry);return originalFetch(path,options).then(response=>{if(tracked)entry.status=response.status;return response})};document.addEventListener('input',event=>{if(event.target.matches('textarea[aria-label="Main message"]'))window.fixtureInputEvents.push({length:event.target.value.length,trusted:event.isTrusted})});return true''')
     script(r'return document.querySelector(".nav-add summary")')
     item = script(r'return [...document.querySelectorAll("summary")].find(b=>b.textContent.trim()==="Add workspace")')
@@ -278,8 +312,15 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.language: verify_language(script, button, fill, until, screenshot, args.report, language_position, workspace)
+    if args.workspace_review: verify_review(script, button, fill, until, screenshot, workspace, args.report)
+    if args.history: verify_history(script, button, fill, until, screenshot, args.report)
+    if args.attention: verify_attention(script, button, fill, until, screenshot, args.report)
+    if args.typed_results: verify_typed(script, button, lambda item: call('POST', root + f'/element/{eid(item)}/click', {}), fill, until, screenshot, args.report)
+    if args.external: verify_delegation(script, button, fill, until, screenshot, workspace, args.report)
     if args.terminals:
         styles_before = script('return document.adoptedStyleSheets.length')
+        script(r'''const original=window.fetch;window.fetch=(path,options)=>{if(String(path)==='/_call/terminal'&&typeof options?.body==='string'){const input=JSON.parse(options.body);if(input.request?.type==='read'){window.fixtureTerminalRead=options.body;window.fixtureMainRead??=options.body}}const result=original(path,options);if(String(path).startsWith('/_frame')){window.fixtureFrameSeen=true;void result.then(response=>response.clone().json()).then(frame=>window.fixtureAssetOffer=frame.assets)}return result};return true''')
         button('Terminal'); button('New terminal')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
         typography = script('const s=getComputedStyle(document.querySelector(".xterm-rows"));return {family:s.fontFamily,size:s.fontSize,space:s.whiteSpace}')
@@ -287,10 +328,38 @@ try:
         def terminal_keys(text):
             item = element('.terminal-screen .xterm-helper-textarea')
             call('POST', root + f'/element/{eid(item)}/value', {'text': text + '\ue007', 'value': list(text + '\ue007')})
-        terminal_keys("printf 'native-pty-ok' > native-pty-result.txt; printf 'Native PTY 界\\n'")
+        until(lambda: script('return Boolean(window.fixtureTerminalRead)'))
+        script('void fetch("/_call/command",{method:"POST",body:JSON.stringify({action:"refresh"})});return true')
+        until(lambda: script('return window.fixtureFrameSeen===true'))
+        script('void fetch("/_call/command",{method:"POST",body:JSON.stringify({action:"refresh"})});return true')
+        until(lambda: script('return Boolean(window.fixtureAssetOffer?.catalog)'))
+        script(r'''window.fixturePressure={responses:[],busy:0,pending:0,stopped:false,ready:false};
+            const pressure=window.fixturePressure,input=JSON.parse(window.fixtureTerminalRead),terminals=[],followers=[];
+            const request=async(command)=>{const response=await fetch('/_call/terminal',{method:'POST',body:JSON.stringify({...input,request:command})});const value=JSON.parse(await response.text());return {response,value}};
+            const required=async command=>{const {response,value}=await request(command);if(!response.ok)throw Error(JSON.stringify(value));return value};
+            const read=async (attachment,probe=false)=>{let ack=null;while(!pressure.stopped){pressure.pending++;try{const {response,value}=await request({type:'read',attachment,ack});if(value.code==='busy')pressure.busy++;if(pressure.responses.length<256)pressure.responses.push({status:response.status,body:response.ok?'output':JSON.stringify(value)});if(response.ok)ack=value.ack;else if(value.code!=='busy'&&!(probe&&value.code==='failed'&&value.message==='Terminal attachment does not belong to this pane'))throw Error(JSON.stringify(value));}finally{pressure.pending--}await new Promise(resolve=>setTimeout(resolve,10))}};
+            window.fixturePressureCleanup=async()=>{pressure.stopped=true;await window.fixturePressureReaders;for(const terminal of terminals)await required({type:'close',terminal});pressure.cleaned=true};
+            (async()=>{for(let i=0;i<4;i++){const created=await required({type:'create',size:{rows:24,columns:80}});terminals.push(created.value.terminal.id);followers.push(created.value.id);for(let j=1;j<(i===3?7:8);j++)followers.push((await required({type:'attach',terminal:created.value.terminal.id})).value.id)}pressure.ready=true;window.fixturePressureReaders=Promise.all([...followers.map(id=>read(id)),...Array.from({length:8},()=>read("absent-pressure-probe",true))]).catch(error=>{pressure.error=String(error);pressure.stopped=true})})().catch(error=>pressure.error=String(error));return true''')
+        pressure = until(lambda: script('if(window.fixturePressure.error)throw Error(window.fixturePressure.error);return window.fixturePressure.busy>0?window.fixturePressure:null'))
+        assert pressure['pending'] > 0, pressure
+        # Re-evaluate one current frozen renderer URL, bypassing the module cache.
+        script(r'''window.fixtureAssetPressure=null;const offer=window.fixtureAssetOffer;if(!offer?.catalog?.renderers.length)throw Error('no renderer offer');const path='/rsi-renderers/'+offer.revision+'/'+offer.catalog.renderers[0].entry;(async()=>{const response=await fetch('/app.js');if(!response.ok)throw Error('asset rejected');await response.arrayBuffer();await import(path+'?native-pressure');window.fixtureAssetPressure={status:response.status,module:path,pending:window.fixturePressure.pending}})().catch(error=>window.fixtureAssetPressure={error:String(error)});return true''')
+        assets = until(lambda: script('return window.fixtureAssetPressure'))
+        assert 'error' not in assets and assets['status'] == 200 and assets['pending'] > 0, assets
+        terminal_keys("printf 'native-pty-ok' >> native-pty-result.txt; printf 'Native PTY 界\\n'")
         until(lambda: (workspace / 'native-pty-result.txt').exists())
         assert (workspace / 'native-pty-result.txt').read_text() == 'native-pty-ok'
         until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
+        script('void window.fixturePressureCleanup().catch(error=>window.fixturePressure.error=String(error));return true')
+        until(lambda: script('return window.fixturePressure.cleaned===true'))
+        pressure = script('return window.fixturePressure')
+        assert 'error' not in pressure, pressure
+        rejected = [json.loads(item['body']) for item in pressure['responses'] if item['status'] == 409]
+        busy = [item for item in rejected if item['code'] == 'busy']
+        assert pressure['busy'] > 0 and all(item['notAdmitted'] is True and item['retryable'] is True for item in busy), pressure
+        assert (workspace / 'native-pty-result.txt').read_bytes() == b'native-pty-ok'
+        (args.report / 'terminal-pressure.json').write_text(json.dumps({'readPressure':pressure,'asset':assets,'exactBytes':'native-pty-ok'}, indent=2))
+        verify_writes(script, terminal_keys, until, workspace, args.report)
         screenshot('terminal-writer.png')
         button('Hide terminal panel')
         until(lambda: script('return document.adoptedStyleSheets.length') == styles_before)
@@ -305,11 +374,18 @@ try:
         (args.report / 'terminals.json').write_text(json.dumps({'status':'passed','native_bash':True,'readonly_reattach':True,'explicit_takeover':True,'exit_code':7,'closed':True},indent=2))
     if args.tasks:
         verify_tasks(script, button, fill, until, screenshot, workspace, args.report, task_provider)
+    # Closing a Rust-owned detail is asynchronous even after native click delivery.
+    until(lambda: script('return !document.querySelector("dialog[open]")'))
     geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Send ↗"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')
     assert geometry['input'] >= 180 and geometry['overflow'] <= 1 and geometry['sendHit'], geometry
     script(r'''window.nativeAdmission=null;(async()=>{const cases=[['/_frame',undefined],['/_ack',JSON.stringify({frame_id:'18446744073709551615'})],['/_ack','x'.repeat(1025)],['/_call/command',undefined],['/_frame?'+ 'x'.repeat(2049),undefined]];const results=[];for(const [path,body] of cases){const response=await fetch(path,{method:body===undefined?'GET':'POST',body});results.push({status:response.status,text:await response.text()})}window.nativeAdmission=results})().catch(e=>window.nativeAdmission={error:String(e)});return true''')
     admission = until(lambda: script('return window.nativeAdmission'))
     assert all(item['status'] == 409 for item in admission), admission
+    for item in admission:
+        failure = json.loads(item['text'])
+        assert isinstance(failure['message'], str) and failure['code'] in ('busy', 'closed', 'invalid', 'failed'), failure
+        assert failure['notAdmitted'] is (failure['code'] != 'failed'), failure
+        assert failure['retryable'] is (failure['code'] == 'busy'), failure
     (args.report / 'native-admission.json').write_text(json.dumps(admission, indent=2))
     if args.save_failure:
         script(r'''window.fixturePut=IDBObjectStore.prototype.put;IDBObjectStore.prototype.put=function(){throw new DOMException('Injected draft write failure','QuotaExceededError')};return true''')
@@ -364,7 +440,7 @@ except Exception as error:
     if session:
         try:
             (args.report / 'failure.html').write_text(script(r'return document.documentElement.outerHTML'))
-            (args.report / 'failure-state.json').write_text(json.dumps({'requests': requests, 'document': script(r'return {goal:window.fixtureGoal,detail:document.querySelector("#detail")?.textContent?.slice(0,8192),submissions:window.fixtureSubmissions,events:window.fixtureInputEvents,input:[...document.querySelectorAll("textarea")].map(e=>({label:e.getAttribute("aria-label"),value:e.value,disabled:e.disabled})),status:document.querySelector(".pane-status")?.textContent,notice:document.querySelector("#notice")?.textContent}')}, ensure_ascii=False, indent=2))
+            (args.report / 'failure-state.json').write_text(json.dumps({'requests': requests, 'document': script(r'return {writePressure:window.fixtureWritePressure,pressure:window.fixturePressure,assetPressure:window.fixtureAssetPressure,goal:window.fixtureGoal,detail:document.querySelector("#detail")?.textContent?.slice(0,8192),submissions:window.fixtureSubmissions,events:window.fixtureInputEvents,input:[...document.querySelectorAll("textarea")].map(e=>({label:e.getAttribute("aria-label"),value:e.value,disabled:e.disabled})),status:document.querySelector(".pane-status")?.textContent,notice:document.querySelector("#notice")?.textContent}')}, ensure_ascii=False, indent=2))
             screenshot('failure.png')
         except Exception: pass
     raise

@@ -15,6 +15,8 @@ deletion input event: WebKit's WebDriver `clear` changes the DOM without updatin
 the draft editor through its input listener.
 Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
+After scenarios close a dialog, the final composer geometry check waits for the
+closed document view; native click delivery alone does not settle a Rust command.
 The native window also reads and refreshes Plugins status, reads the separate
 Exa credential status, and opens the typed retrieval Settings controls without
 submitting a model request. Screenshots, capabilities, request summaries and
@@ -87,3 +89,43 @@ Input-to-paint uses two animation frames, not a claim about physical display sca
 verifies native Bash-created file bytes, detaches and reattaches read-only, takes
 control explicitly, observes exit code 7 and closes the terminal. These screenshots
 and receipts are separate from browser and parser-only evidence.
+
+The terminal scenario also sends concurrent real native reads until the read lane
+returns structured Busy, then imports a renderer module and writes terminal input
+while reads remain pending. It records responses and exact file bytes; no native
+response is mocked. Eight real raw PTY readers then stop at filesystem barriers; eight 64 KiB
+writes fill the native write lane. Actual keyboard input receives Busy and must
+execute exactly once after release, with exact bytes checked in all eight readers.
+Adapter unit tests separately cover unknown-outcome non-replay. These are distinct evidence boundaries.
+
+`--external` additionally exercises the independent ACP SDK 1.4.0 Agent through
+actual WebKitGTK controls and the native bridge before configuring a Native model.
+It validates four-option permissions without a local always-grant, literal remote
+text, cancellation, 1,200-record replay, bounded display and process reaping.
+Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
+
+
+`--profiles` exercises Local grants, single-leaf preparation, reviewed source
+publication, and original receipt recovery through the native bridge. Its
+editable user Profile is separate from the running service source.
+`--attention` exercises exact native question and approval navigation, settlement,
+and removal from Needs attention with a deterministic provider.
+
+`--typed-results` executes the real `host_profile` catalog Tool and opens its
+recorded `rsi.profile-leaves` version 1 result through the native bridge. Portable
+addon execution and the independently linked addon are covered by their own
+fixtures; this scenario establishes the desktop recorded-contract presentation.
+
+`--history` exercises lexical search, original reread and Chinese fragment freezing
+through the actual native bridge, then reopens the captured draft reference.
+
+`--workspace-review` adds a real native patch in a dirty Git workspace and opens
+its interval summary, changed file and diff through the actual GUI bridge. It
+records `workspace-review.json` and screenshots and requires system Git.
+
+`--language /absolute/rust-analyzer` additionally queries and opens a definition
+through Service extensions and the native bridge, then reads hover. The fixed
+server and project are owned by the [language fixture](../lsp/README.md).
+It also pages a retained reference result after replacing the private source with
+an oversized file, verifies that explicit Repeat query rejects that current file,
+then restores the original and verifies Repeat query recovers.

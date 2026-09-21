@@ -75,12 +75,13 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 125
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
+          components: rust-analyzer
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -157,7 +158,7 @@ jobs:
       - name: Exercise the product Web application over TLS and HTTP/2
         id: web_product
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' }}
-        timeout-minutes: 30
+        timeout-minutes: 40
         working-directory: fixtures/rsi/web-product
         env:
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
@@ -183,6 +184,19 @@ jobs:
           npm test --prefix ../../../plugins/rsi/web
           npm ci --ignore-scripts
           npm test
+          cd ../../..
+          npm ci --ignore-scripts --prefix fixtures/rsi/acp
+          export RSI_ACP_SDK_NODE="$(command -v node)"
+          export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
+          cargo test --locked -p rsi-acp-host --test host independent_sdk_agent -- --ignored
+          cargo test --locked -p rsi-lsp pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored
+          cargo build --locked -p rsi --bin rsi --example profile-leaf-probe
+          export RSI_BINARY="$GITHUB_WORKSPACE/target/debug/rsi"
+          export RSI_WEB_ASSETS="$RSI_WEB_REPORT/assets"
+          node fixtures/rsi/acp/verify.mjs --binary "$RSI_BINARY" --output "$RUNNER_TEMP/rsi-acp-sdk-evidence"
+          node fixtures/rsi/acp/browser.mjs "$RUNNER_TEMP/rsi-acp-browser-evidence"
+          node fixtures/rsi/profile-management/browser.mjs "$RUNNER_TEMP/rsi-profile-browser-evidence"
+          node fixtures/rsi/lsp/browser.mjs "$RUNNER_TEMP/rsi-lsp-browser-evidence"
 
       - name: Exercise isolated Web terminal application
         id: web_terminals
@@ -248,6 +262,10 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-browser-logs
             ${{ runner.temp }}/rsi-web-evidence
+            ${{ runner.temp }}/rsi-acp-sdk-evidence
+            ${{ runner.temp }}/rsi-acp-browser-evidence
+            ${{ runner.temp }}/rsi-profile-browser-evidence
+            ${{ runner.temp }}/rsi-lsp-browser-evidence
             !${{ runner.temp }}/rsi-web-evidence/chromium-recovery/rsi
             !${{ runner.temp }}/rsi-web-evidence/firefox-recovery/rsi
             !${{ runner.temp }}/rsi-web-evidence/chromium-tasks/rsi
@@ -282,10 +300,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise Linux Bubblewrap enforcement
         if: runner.os == 'Linux'
@@ -395,7 +413,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 210
+    timeout-minutes: 250
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -414,6 +432,23 @@ jobs:
           workspaces: . -> target
       - name: Fetch native addon build fixture dependencies
         run: cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml
+      - name: Check generated linked addon with its pinned lockfile
+        timeout-minutes: 25
+        if: runner.os == 'Linux'
+        run: python3 fixtures/rsi/addon-linked-template/verify.py --report "$RUNNER_TEMP/rsi-linked-template-evidence"
+      - name: Check independent language source addon
+        timeout-minutes: 20
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/lsp-addon
+        run: |
+          cargo fmt --manifest-path fixtures/rsi/lsp-addon/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            rustup component add rust-analyzer
+            cargo build --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
+            python3 fixtures/rsi/lsp-addon/verify.py --binary "$CARGO_TARGET_DIR/debug/rsi-language-addon-example" --analyzer "$(rustup which rust-analyzer)" --report "$RUNNER_TEMP/rsi-language-addon-evidence"
+          fi
       - name: Check independent native addon fixture
         run: |
           cargo fmt --manifest-path fixtures/rsi/native-addon/Cargo.toml -- --check
@@ -421,7 +456,7 @@ jobs:
           cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets --all-features -- -D warnings
         timeout-minutes: 10
       - name: Lint standard rsi
-        run: cargo clippy --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
         run: |
@@ -437,7 +472,7 @@ jobs:
         timeout-minutes: 15
       - name: Compile standard rsi tests
         id: standard_build
-        run: cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: runner.os == 'Linux'
@@ -460,7 +495,7 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
@@ -530,9 +565,18 @@ jobs:
         if: runner.os == 'macOS'
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
-        run: cargo test --locked -p rsi -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
+        run: cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
 
+      - name: Preserve source addon acceptance evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-source-addon-evidence
+          path: |
+            ${{ runner.temp }}/rsi-linked-template-evidence
+            ${{ runner.temp }}/rsi-language-addon-evidence
+          if-no-files-found: warn
       - name: Preserve PTY evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
@@ -638,7 +682,7 @@ jobs:
 
   rsi-desktop:
     runs-on: ubuntu-24.04
-    timeout-minutes: 200
+    timeout-minutes: 215
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Linux desktop dependencies
@@ -649,7 +693,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.97.0
-          components: clippy,rustfmt
+          components: clippy,rustfmt,rust-analyzer
           targets: wasm32-unknown-unknown
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -691,6 +735,16 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 5
         run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-evidence" --daemon --window-close --restart --save-failure --refresh-during-click --tasks --foreign-binary "$GITHUB_WORKSPACE/target/debug/rsi-desktop"
+      - name: Exercise WebKitGTK external, Profile, history and language surfaces
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
+          for mode in external profiles history language workspace-review attention typed-results; do
+            mode_args=("--$mode")
+            if [[ "$mode" == language ]]; then mode_args+=("$RSI_RUST_ANALYZER"); fi
+            dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-$mode-evidence" "${mode_args[@]}"
+          done
       - name: Exercise missing frame acknowledgement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
@@ -720,7 +774,7 @@ jobs:
           name: rsi-desktop-evidence
           path: |
             ${{ runner.temp }}/rsi-desktop-evidence
-            ${{ runner.temp }}/rsi-desktop-ack-evidence
+            ${{ runner.temp }}/rsi-desktop-*-evidence
             ${{ runner.temp }}/rsi-desktop-terminal-evidence
             ${{ runner.temp }}/rsi-desktop-startup-evidence
             ${{ runner.temp }}/rsi-desktop-dist/bundle/receipt.json
