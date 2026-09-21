@@ -754,7 +754,33 @@ impl SessionStore for SqliteStore {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         let invoking_turn_id = invoking_turn_id.clone();
-        self.with_reader(move |connection| {
+        let historical = selection != ForkTurnSelection::None;
+        let key = ForkBoundaryKey {
+            session: session_id.clone(),
+            invoking: invoking_turn_id.clone(),
+            selection: selection.clone(),
+        };
+        if historical
+            && let Some(boundary) = self
+                .inner
+                .fork_boundaries
+                .lock()
+                .ok()
+                .and_then(|mut cache| cache.get(&key))
+        {
+            return Ok(boundary);
+        }
+        let owner = self.inner.clone();
+        let resolve = move |connection: &mut Connection| {
+            if historical
+                && let Some(boundary) = owner
+                    .fork_boundaries
+                    .lock()
+                    .ok()
+                    .and_then(|mut cache| cache.get(&key))
+            {
+                return Ok(boundary);
+            }
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
@@ -771,29 +797,62 @@ impl SessionStore for SqliteStore {
                     turn: invoking_turn_id.to_string(),
                 })
                 .and_then(|value| decode_u64("invoking acceptance sequence", value))?;
+            #[cfg(test)]
+            if historical {
+                owner.fork_resolutions.fetch_add(1, Ordering::Relaxed);
+                let barrier = owner.fork_barrier.lock().unwrap().take();
+                if let Some((entered, release)) = barrier {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                }
+            }
             let effective_turns = match selection {
                 ForkTurnSelection::None => 0,
-                ForkTurnSelection::All => transaction.query_row(
-                    "SELECT COUNT(*) FROM turns
+                ForkTurnSelection::All => transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM turns
                      WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2",
-                    params![session_id.as_str(), sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?],
-                    |row| row.get::<_, i64>(0),
-                ).map_err(sql_error).and_then(|value| decode_u64("completed turn count", value))?,
-                ForkTurnSelection::Last(count) => transaction.query_row(
-                    "SELECT COUNT(*) FROM (
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(sql_error)
+                    .and_then(|value| decode_u64("completed turn count", value))?,
+                ForkTurnSelection::Last(count) => transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM (
                        SELECT 1 FROM turns
                        WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2
                        ORDER BY terminal_seq DESC LIMIT ?3
                      )",
-                    params![session_id.as_str(), sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?, i64::try_from(count).unwrap_or(i64::MAX)],
-                    |row| row.get::<_, i64>(0),
-                ).map_err(sql_error).and_then(|value| decode_u64("completed turn count", value))?,
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?,
+                            i64::try_from(count).unwrap_or(i64::MAX)
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(sql_error)
+                    .and_then(|value| decode_u64("completed turn count", value))?,
             };
-            let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256, resolved_terminal_control_seq, terminal_control_prefix_sha256) =
-                if effective_turns == 0 {
-                    (0, 0, hex::encode(EMPTY_FACT_PREFIX_DIGEST), 0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))
-                } else {
-                    let (sequence, digest, control_seq, control_digest) = transaction
+            let (
+                resolved_after_seq,
+                resolved_terminal_seq,
+                terminal_prefix_sha256,
+                resolved_terminal_control_seq,
+                terminal_control_prefix_sha256,
+            ) = if effective_turns == 0 {
+                (
+                    0,
+                    0,
+                    hex::encode(EMPTY_FACT_PREFIX_DIGEST),
+                    0,
+                    hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
+                )
+            } else {
+                let (sequence, digest, control_seq, control_digest) = transaction
                     .query_row(
                         "SELECT terminal_seq, terminal_prefix_sha256, terminal_control_seq, terminal_control_prefix_sha256 FROM turns
                          WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2
@@ -805,9 +864,8 @@ impl SessionStore for SqliteStore {
                         |row| Ok((row.get::<_, i64>(0)?, bounded_text(row, 1, 64)?, row.get::<_, i64>(2)?, bounded_text(row, 3, 64)?)),
                     )
                     .map_err(sql_error)?;
-                    let resolved_terminal_seq =
-                        decode_u64("fork terminal sequence", sequence)?;
-                    let first_accepted = transaction
+                let resolved_terminal_seq = decode_u64("fork terminal sequence", sequence)?;
+                let first_accepted = transaction
                         .query_row(
                             "SELECT accepted_seq FROM (
                                SELECT accepted_seq, terminal_seq FROM turns
@@ -826,51 +884,53 @@ impl SessionStore for SqliteStore {
                         )
                         .map_err(sql_error)
                         .and_then(|value| decode_u64("first inherited acceptance", value))?;
-                    let resolved_after_seq = first_accepted.checked_sub(1).ok_or_else(|| {
-                        StoreError::Corrupt("first inherited acceptance is zero".into())
-                    })?;
-                    let interval_turns = transaction
-                        .query_row(
-                            "SELECT COUNT(*) FROM turns
+                let resolved_after_seq = first_accepted.checked_sub(1).ok_or_else(|| {
+                    StoreError::Corrupt("first inherited acceptance is zero".into())
+                })?;
+                let interval_turns = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM turns
                              WHERE session_id = ?1 AND accepted_seq > ?2 AND accepted_seq <= ?3",
-                            params![
-                                session_id.as_str(),
-                                sqlite_u64("fork interval start", resolved_after_seq)?,
-                                sqlite_u64("fork interval end", resolved_terminal_seq)?,
-                            ],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .map_err(sql_error)
-                        .and_then(|value| decode_u64("fork interval turn count", value))?;
-                    let interval_fact_turns = transaction
-                        .query_row(
-                            "SELECT COUNT(DISTINCT turn_id) FROM facts
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("fork interval start", resolved_after_seq)?,
+                            sqlite_u64("fork interval end", resolved_terminal_seq)?,
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(sql_error)
+                    .and_then(|value| decode_u64("fork interval turn count", value))?;
+                let interval_fact_turns = transaction
+                    .query_row(
+                        "SELECT COUNT(DISTINCT turn_id) FROM facts
                              WHERE session_id = ?1 AND seq > ?2 AND seq <= ?3",
-                            params![
-                                session_id.as_str(),
-                                sqlite_u64("fork interval start", resolved_after_seq)?,
-                                sqlite_u64("fork interval end", resolved_terminal_seq)?,
-                            ],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .map_err(sql_error)
-                        .and_then(|value| {
-                            decode_u64("fork interval Fact turn count", value)
-                        })?;
-                    if interval_turns != effective_turns
-                        || interval_fact_turns != effective_turns
-                    {
-                        return Err(StoreError::Invalid(
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("fork interval start", resolved_after_seq)?,
+                            sqlite_u64("fork interval end", resolved_terminal_seq)?,
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(sql_error)
+                    .and_then(|value| decode_u64("fork interval Fact turn count", value))?;
+                if interval_turns != effective_turns || interval_fact_turns != effective_turns {
+                    return Err(StoreError::Invalid(
                             "fork selection does not form a balanced contiguous completed-turn interval"
                                 .into(),
                         ));
-                    }
-                    validate_sha256("terminal-prefix digest", &digest)?;
-                    {
-                        validate_sha256("terminal control-prefix digest", &control_digest)?;
-                        (resolved_after_seq, resolved_terminal_seq, digest, decode_u64("terminal control sequence", control_seq)?, control_digest)
-                    }
-                };
+                }
+                validate_sha256("terminal-prefix digest", &digest)?;
+                {
+                    validate_sha256("terminal control-prefix digest", &control_digest)?;
+                    (
+                        resolved_after_seq,
+                        resolved_terminal_seq,
+                        digest,
+                        decode_u64("terminal control sequence", control_seq)?,
+                        control_digest,
+                    )
+                }
+            };
             let boundary = StoreForkBoundary {
                 resolved_terminal_control_seq,
                 terminal_control_prefix_sha256,
@@ -880,9 +940,16 @@ impl SessionStore for SqliteStore {
                 effective_turns,
             };
             transaction.commit().map_err(sql_error)?;
+            if historical && let Ok(mut cache) = owner.fork_boundaries.lock() {
+                cache.insert(key, boundary.clone());
+            }
             Ok(boundary)
-        })
-        .await
+        };
+        if historical {
+            self.with_validation(resolve).await
+        } else {
+            self.with_reader(resolve).await
+        }
     }
 
     async fn list_open_turns(

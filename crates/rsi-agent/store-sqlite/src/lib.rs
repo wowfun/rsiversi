@@ -46,6 +46,7 @@ use tokio::sync::Semaphore;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
+const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
 const EXPECTED_TABLES: [(&str, &str); 13] = [
     (
@@ -312,11 +313,45 @@ type FactPagePause = (
     std::sync::mpsc::Receiver<()>,
 );
 
+#[derive(Clone, PartialEq, Eq)]
+struct ForkBoundaryKey {
+    session: SessionId,
+    invoking: TurnId,
+    selection: ForkTurnSelection,
+}
+#[derive(Default)]
+struct ForkBoundaryCache(VecDeque<(ForkBoundaryKey, StoreForkBoundary)>);
+impl ForkBoundaryCache {
+    fn get(&mut self, key: &ForkBoundaryKey) -> Option<StoreForkBoundary> {
+        let index = self.0.iter().position(|(candidate, _)| candidate == key)?;
+        let entry = self.0.remove(index)?;
+        let boundary = entry.1.clone();
+        self.0.push_back(entry);
+        Some(boundary)
+    }
+    fn insert(&mut self, key: ForkBoundaryKey, boundary: StoreForkBoundary) {
+        if self.0.len() == FORK_BOUNDARY_CACHE_CAPACITY {
+            self.0.pop_front();
+        }
+        self.0.push_back((key, boundary));
+    }
+}
+
 struct StoreInner {
     connections: DatabaseConnections,
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
+    fork_boundaries: Mutex<ForkBoundaryCache>,
+    #[cfg(test)]
+    fork_resolutions: AtomicU64,
+    #[cfg(test)]
+    fork_barrier: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     validation_admission: Arc<Semaphore>,
     pins: Mutex<BTreeMap<SessionId, std::sync::Weak<preparation::PinnedProof>>>,
     pin_admission: Arc<Semaphore>,
@@ -509,6 +544,11 @@ impl SqliteStore {
                 writer_admission: Arc::new(Semaphore::new(1)),
                 reader_admission: Arc::new(Semaphore::new(1)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
+                fork_boundaries: Mutex::new(ForkBoundaryCache::default()),
+                #[cfg(test)]
+                fork_resolutions: AtomicU64::new(0),
+                #[cfg(test)]
+                fork_barrier: Mutex::new(None),
                 validation_admission: Arc::new(Semaphore::new(1)),
                 pins: Mutex::new(BTreeMap::new()),
                 pin_admission: Arc::new(Semaphore::new(VALIDATED_SESSION_CACHE_CAPACITY)),

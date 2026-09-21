@@ -74,6 +74,13 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
         store
             .inner
             .connections
+            .validation_reader
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+        store
+            .inner
+            .connections
             .reader
             .lock()
             .unwrap()
@@ -98,6 +105,13 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             }
             samples.push(vm);
         }
+        store
+            .inner
+            .connections
+            .validation_reader
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::empty(), None);
         store
             .inner
             .connections
@@ -234,4 +248,229 @@ async fn waiting_selection_work_and_pagination_ignore_unrelated_activations() {
             "waiting selection grew: {small} -> {large}"
         );
     }
+}
+
+#[tokio::test]
+async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (parent, turn) = completed_history(&store, 32).await;
+    let warm = seed_session(&store, "unrelated").await;
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *store.inner.fork_barrier.lock().unwrap() = Some((entered_tx, release_rx));
+    let worker = store.clone();
+    let id = parent.clone();
+    let invoking = turn.clone();
+    let first = tokio::spawn(async move {
+        worker
+            .resolve_fork_boundary(&id, &invoking, ForkTurnSelection::All)
+            .await
+    });
+    entered.await.unwrap();
+    let foreground = tokio::time::timeout(Duration::from_secs(2), async {
+        store.read_facts(&warm, 0, 1).await.unwrap();
+        assert_eq!(
+            store
+                .resolve_fork_boundary(&parent, &turn, ForkTurnSelection::None)
+                .await
+                .unwrap()
+                .effective_turns,
+            0
+        );
+        store
+            .append(AppendBatch {
+                session_id: warm.clone(),
+                expected_seq: 1,
+                header: None,
+                facts: vec![test_fact(2).into()],
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let worker = store.clone();
+    let id = parent.clone();
+    let invoking = turn.clone();
+    let second = tokio::spawn(async move {
+        worker
+            .resolve_fork_boundary(&id, &invoking, ForkTurnSelection::All)
+            .await
+    });
+    release.send(()).unwrap();
+    assert_eq!(second.await.unwrap().unwrap().effective_turns, 32);
+    foreground.expect("historical fork held the foreground reader");
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        store.inner.pin_admission.available_permits(),
+        VALIDATED_SESSION_CACHE_CAPACITY
+    );
+}
+
+#[tokio::test]
+async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (id, turn) = completed_history(&store, 4).await;
+    let all = store
+        .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+        .await
+        .unwrap();
+    let last = store
+        .resolve_fork_boundary(&id, &turn, ForkTurnSelection::Last(1))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            store
+                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+                .await
+                .unwrap(),
+            all
+        );
+        assert_eq!(
+            store
+                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::Last(1))
+                .await
+                .unwrap(),
+            last
+        );
+    }
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 2);
+    let terminal = SessionFact::new(
+        10,
+        1,
+        SessionFactBody::TurnTerminal {
+            turn_id: turn.clone(),
+            outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+            result: None,
+        },
+    )
+    .unwrap();
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 9,
+            header: None,
+            facts: vec![terminal.into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .await
+            .unwrap(),
+        all
+    );
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 2);
+    let next = test_fact(11);
+    let next_turn = next.body().turn_id().clone();
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 10,
+            header: None,
+            facts: vec![next.into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_fork_boundary(&id, &next_turn, ForkTurnSelection::All)
+            .await
+            .unwrap()
+            .effective_turns,
+        5
+    );
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 3);
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert_eq!(
+        store
+            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .await
+            .unwrap(),
+        all
+    );
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (id, _) = completed_history(&store, 258).await;
+    let turn = |index: u64| test_fact(index * 2 + 1).body().turn_id().clone();
+    for index in 1..=257 {
+        store
+            .resolve_fork_boundary(&id, &turn(index), ForkTurnSelection::Last(1))
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.inner.fork_boundaries.lock().unwrap().0.len(), 256);
+    assert_eq!(
+        store.inner.pin_admission.available_permits(),
+        VALIDATED_SESSION_CACHE_CAPACITY
+    );
+    let before = store.inner.fork_resolutions.load(Ordering::Relaxed);
+    store
+        .resolve_fork_boundary(&id, &turn(257), ForkTurnSelection::Last(1))
+        .await
+        .unwrap();
+    assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), before);
+    store
+        .resolve_fork_boundary(&id, &turn(1), ForkTurnSelection::Last(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.inner.fork_resolutions.load(Ordering::Relaxed),
+        before + 1
+    );
+    assert_eq!(store.inner.fork_boundaries.lock().unwrap().0.len(), 256);
+    assert!(
+        store
+            .resolve_fork_boundary(&id, &turn(1), ForkTurnSelection::Last(0))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .resolve_fork_boundary(
+                &id,
+                &TurnId::new("missing").unwrap(),
+                ForkTurnSelection::All
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.inner.fork_boundaries.lock().unwrap().0.len(), 256);
+}
+
+#[tokio::test]
+async fn poisoned_fork_cache_falls_back_to_validated_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (id, turn) = completed_history(&store, 2).await;
+    let worker = store.clone();
+    assert!(
+        std::thread::spawn(move || {
+            let _cache = worker.inner.fork_boundaries.lock().unwrap();
+            panic!("test cache poison");
+        })
+        .join()
+        .is_err()
+    );
+    assert_eq!(
+        store
+            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .await
+            .unwrap()
+            .effective_turns,
+        2
+    );
 }

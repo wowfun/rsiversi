@@ -146,6 +146,15 @@ the admitted worker even if its waiter has been cancelled. Long cold scans
 therefore do not hold the foreground reader or writer.
 Multi-statement reads, including fork selection,
 use a deferred transaction so watermarks and rows come from one WAL snapshot.
+Nonempty fork selections resolve on the validation lane. Empty selections retain
+the foreground indexed lookup. A Store-private LRU retains at most 256 successful
+fork boundaries, keyed by Session, invoking Turn and exact selection. Admission
+rechecks that cache; the worker publishes only after successful transaction
+completion, even if its waiter was cancelled. Append-only history keeps these
+boundaries immutable. Eviction and Store reopening require resolution again.
+This cache holds no Session pin or validation lease, never caches failures, and
+does not bypass the ordinary Session-validation gate. Cache failure falls back
+to resolution. Kernel still compares the complete saved fork origin.
 Descendant control snapshots drive lookups from the bounded recursive result
 rather than scanning the complete sessions table. Cursor-paged ready-message,
 Agent-child, waiting-activation, and ready-root reads select distinct first-page
