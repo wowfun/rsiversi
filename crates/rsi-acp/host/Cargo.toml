@@ -1,0 +1,31 @@
+[package]
+name = "rsi-acp-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-acp = { path = "../core" }
+rsi-acp-client = { path = "../client" }
+rsi-acp-protocol = { path = "../protocol" }
+rsi-acp-journal = { path = "../journal" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "fs"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

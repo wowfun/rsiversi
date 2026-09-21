@@ -9,6 +9,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-client-protocol-schema"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d595a79e1665d02c91c7dd1bedd118501e75cc0a3d5b1651b5150ec4c5c1e0d"
+dependencies = [
+ "anyhow",
+ "derive_more",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4500,6 +4515,116 @@ dependencies = [
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "vt100",
+]
+
+[[package]]
+name = "rsi-acp"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-acp-protocol",
+ "rsi-process",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-acp-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-acp-protocol",
+ "rsi-api",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-acp-client"
+version = "0.0.1"
+dependencies = [
+ "rsi-acp",
+ "rsi-acp-journal",
+ "rsi-acp-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-acp-host"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-acp",
+ "rsi-acp-client",
+ "rsi-acp-journal",
+ "rsi-acp-protocol",
+ "rsi-credentials-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-acp-journal"
+version = "0.0.1"
+dependencies = [
+ "rsi-acp-protocol",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-acp-protocol"
+version = "0.0.1"
+dependencies = [
+ "agent-client-protocol-schema",
+ "async-trait",
+ "jsonschema",
+ "rsi-meta-contract",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rsi-acp-tools"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-acp-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
