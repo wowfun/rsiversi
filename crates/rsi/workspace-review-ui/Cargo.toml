@@ -1,0 +1,24 @@
+[package]
+name = "rsi-workspace-review-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-ui = { path = "../ui" }
+rsi-client = { path = "../client" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+rsi-workspace-review-api = { path = "../workspace-review-api" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+[lints]
+workspace = true

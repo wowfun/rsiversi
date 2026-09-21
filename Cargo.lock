@@ -7262,6 +7262,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-workspace-review"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cap-std",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-acp-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-files",
+ "rsi-files-native-fs",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-storage",
+ "rsi-storage-domain",
+ "rsi-workspace-protocol",
+ "rsi-workspace-review-api",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-workspace-review-api"
+version = "0.0.1"
+dependencies = [
+ "rsi-agent-session-protocol",
+ "rsi-api-protocol",
+ "rsi-conversation",
+ "rsi-workspace-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-workspace-review-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-api-protocol",
+ "rsi-client",
+ "rsi-meta",
+ "rsi-session-protocol",
+ "rsi-ui",
+ "rsi-workspace-protocol",
+ "rsi-workspace-review-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-xtask"
 version = "0.0.1"
 dependencies = [
