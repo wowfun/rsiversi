@@ -14,6 +14,7 @@ async fn invalid_report_retries_valid_report_stops_before_later_tools_and_missin
         let lease = stack
             .tool_registrar
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
                 executor: Arc::new(EchoTool {

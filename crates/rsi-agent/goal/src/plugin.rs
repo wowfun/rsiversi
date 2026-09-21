@@ -282,6 +282,7 @@ impl PluginFactory for GoalFactory {
         let tool_lease = plan
             .local::<ToolRegistrarContract>()?
             .register_batch(vec![ToolRegistration {
+                output: None,
                 definition,
                 executor: Arc::new(ReportTool),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },

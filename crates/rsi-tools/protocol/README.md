@@ -62,7 +62,7 @@ execution registration timeout is within
 1..=600,000 milliseconds. The owner-declared `HumanInteraction` policy instead
 requires `exclusive_final` scheduling and ends on answer or cancellation; it
 has no implicit answer or timer. The current
-pre-release result shape is exactly `{ value, content, is_error }`; image
+pre-release result shape is exactly `{ value, content, is_error, enforcement }`; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.
 `safe_tool_text` decodes UTF-8 lossily and replaces exactly those disallowed
@@ -74,7 +74,7 @@ has no migration reader.
 
 ## Portable contributions
 
-`portable` owns the version-1 `rsi.tools.portable` duplex byte protocol. The linked
+`portable` owns the version-2 `rsi.tools.portable` duplex byte protocol. The linked
 bridge requires one explicitly named Portable supply and the exact Local
 ToolRegistrar. Describe returns a nonempty atomic batch of at most 64 bounded
 definitions with owner-declared finite timeout and scheduling. Describe contains
@@ -105,3 +105,29 @@ during encode. Tool content variants reject unknown fields. Each
 execution admits at most 256 Confine requests. These are this wire's limits;
 linked Tool values retain their own wider bounds. Oversize, unknown fields,
 extra messages/capabilities, wrong variants and missing terminal fail closed.
+
+## Output declarations
+
+`ToolRegistration::output` optionally declares the canonical successful result
+using a contract ID, positive version, JSON schema and SHA-256 schema digest.
+The digest covers compact JSON with recursively sorted object keys; declaration
+decoding verifies it. The declaration belongs to the immutable exact-name Tool
+catalog, outside model-facing `ToolDefinition` and durable `ToolResult`.
+Object constants and enum values compare without regard to property order;
+validation must not rewrite the producer's result or exact number spelling.
+An absent declaration means opaque JSON, not an inferred schema. Error results
+retain their existing shape and do not assert the successful output contract.
+
+Schemas use a bounded Draft 7 subset: scalar types, objects, arrays, properties,
+required, additionalProperties, items, enum, const and annotations. Boolean
+schemas are allowed. References, regular expressions and schema combinators are
+unsupported, so importing a declaration neither retrieves resources nor follows
+recursive schema graphs. Each declaration is at most 64 KiB, with schema depth
+32 and at most 1,024 schema nodes; a catalog admits at most 256 KiB of declarations
+including exact tool names. Batch admission checks the aggregate before mutation.
+
+`TypedToolOutput` serializes one Rust result, checks that canonical value against
+its declaration, and renders model content from the same result. It has no UI
+dependency. Portable imports validate successful foreign values before returning
+them to the Tool runtime. Consumers replaying persisted output must obtain the
+declaration from their saved composition baseline, never a replacement catalog.

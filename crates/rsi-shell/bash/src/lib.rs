@@ -331,6 +331,7 @@ mod linux {
         services: Arc<BashServices>,
     ) -> rsi_tools_protocol::Result<ToolRegistration> {
         Ok(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "bash",
                 "Run an exact Bash command. Foreground commands wait for the complete process group; use run_in_background for long-lived work. Nonzero exits, signals, and command timeout are normal outcomes.",

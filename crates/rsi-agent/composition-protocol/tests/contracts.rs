@@ -113,6 +113,55 @@ fn header(preset_id: &str) -> SessionHeader {
     .unwrap()
 }
 
+#[derive(Debug)]
+struct SessionSelection {
+    base: FakeComposition,
+    selected: Mutex<Vec<SessionHeader>>,
+}
+#[async_trait]
+impl AgentComposition for SessionSelection {
+    async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
+        self.base.default_preset_id().await
+    }
+    async fn pin(
+        &self,
+        _: &AgentPresetId,
+        _: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        panic!("Session draft must not bypass its Header-bound selector")
+    }
+    async fn pin_session(
+        &self,
+        header: &SessionHeader,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        self.selected.lock().unwrap().push(header.clone());
+        self.base.pin(header.agent_preset_id(), seed).await
+    }
+}
+
+#[tokio::test]
+async fn draft_creation_and_switch_both_use_exact_header_bound_selection() {
+    let source = Arc::new(SessionSelection {
+        base: FakeComposition {
+            failures: Mutex::new(BTreeSet::new()),
+            domains: rsi_agent_composition_protocol::DomainCatalog::default(),
+        },
+        selected: Mutex::new(Vec::new()),
+    });
+    let mut draft = AgentSessionDraft::new(header("alpha"), source.clone())
+        .await
+        .unwrap();
+    draft
+        .select_preset(AgentPresetId::new("beta").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        *source.selected.lock().unwrap(),
+        [header("alpha"), header("beta")]
+    );
+}
+
 #[tokio::test]
 async fn failed_switch_preserves_the_exact_prior_draft_and_success_moves_one_pin() {
     let composition = Arc::new(FakeComposition {

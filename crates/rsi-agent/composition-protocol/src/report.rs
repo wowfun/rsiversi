@@ -95,6 +95,11 @@ impl PreparedToolCall for PreparedReport {
 }
 #[async_trait]
 impl ToolRuntime for ReportTools {
+    fn output_declarations(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {
+        self.inner.output_declarations()
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.inner.definitions();
         definitions.push(self.report.definition.clone());

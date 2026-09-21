@@ -236,6 +236,7 @@ fn registrations(
                 ToolScheduling::Exclusive
             };
             Ok(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new(name, description, parameters)?
                     .with_scheduling(scheduling),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms },

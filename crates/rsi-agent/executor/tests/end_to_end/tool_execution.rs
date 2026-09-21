@@ -26,6 +26,7 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
     let lease = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {
@@ -105,6 +106,7 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
     let tool_lease = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {
@@ -166,6 +168,7 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(AuthenticatedEcho(EchoTool {
@@ -255,6 +258,7 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
     let observed_lane_parking_authority = Arc::new(AtomicBool::new(false));
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "parallel",
                 "parallel fixture",
@@ -356,6 +360,7 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
     let tools = Arc::clone(&stack.tool_registrar);
     let failed_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("fail", "fail", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
@@ -367,6 +372,7 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
         .unwrap();
     let successful_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
@@ -431,6 +437,7 @@ async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("uneven", "uneven", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
@@ -493,6 +500,7 @@ async fn exclusive_tool_is_a_durable_barrier_between_parallel_safe_runs() {
     let calls = Arc::new(AtomicUsize::new(0));
     let parallel_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("read", "read", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
@@ -505,6 +513,7 @@ async fn exclusive_tool_is_a_durable_barrier_between_parallel_safe_runs() {
         .unwrap();
     let exclusive_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("write", "write", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(EchoTool {
@@ -577,6 +586,7 @@ async fn exclusive_final_tool_is_rejected_before_effects_when_not_last_in_source
     let calls = Arc::new(AtomicUsize::new(0));
     let wait_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("wait_agent", "wait", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ExclusiveFinal),
@@ -589,6 +599,7 @@ async fn exclusive_final_tool_is_rejected_before_effects_when_not_last_in_source
         .unwrap();
     let echo_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(EchoTool {
@@ -681,6 +692,7 @@ async fn provider_attempt_budget_stops_a_model_tool_loop_with_durable_evidence()
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {
@@ -743,6 +755,7 @@ async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {
@@ -865,6 +878,7 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {
@@ -960,6 +974,7 @@ async fn failed_tool_result_is_retired_after_the_terminal_fact_is_durable() {
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "fail", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(FailingTool {

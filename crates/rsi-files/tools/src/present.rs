@@ -94,6 +94,7 @@ struct Entry {
 }
 pub(super) fn registration(files: Arc<dyn Files>) -> rsi_tools_protocol::Result<ToolRegistration> {
     Ok(ToolRegistration {
+        output: None,
         definition: ToolDefinition::new("present", "Present one to eight existing regular workspace files to the user. Paths are cwd-relative UTF-8 or exact path_hex bytes. The user can open current file contents; this declaration does not freeze the bytes.", json!({
             "type":"object", "properties":{"files":{"type":"array","minItems":1,"maxItems":8,"items":{
                 "type":"object","properties":{

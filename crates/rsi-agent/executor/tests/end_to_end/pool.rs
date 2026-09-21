@@ -242,6 +242,7 @@ async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning()
         let tools = Arc::clone(&stack.tool_registrar);
         let parking_lease = tools
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("park", "park", json!({"type":"object"}))
                     .unwrap()
                     .with_scheduling(ToolScheduling::ExclusiveFinal),
@@ -653,6 +654,7 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
     let _tool = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
             executor: Arc::new(EchoTool {

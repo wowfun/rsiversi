@@ -17,6 +17,35 @@ pub struct AgentContributionCatalog {
 }
 
 impl AgentContributionCatalog {
+    pub(crate) fn replacing(
+        &self,
+        replacements: impl IntoIterator<Item = ResolvedFactory>,
+    ) -> rsi_meta_profile::Result<Self> {
+        let mut derived = self.clone();
+        let mut seen = BTreeSet::new();
+        for factory in replacements {
+            let plugin = match factory.identity() {
+                FactoryIdentity::Linked { plugin, .. } | FactoryIdentity::Native { plugin, .. } => {
+                    plugin.clone()
+                }
+            };
+            if !seen.insert(plugin.clone()) {
+                return Err(ProfileError::InvalidProgram(
+                    "duplicate private factory identity".into(),
+                ));
+            }
+            if !derived.factories.contains_key(&plugin)
+                && derived.factories.len() == MAXIMUM_CATALOG_FACTORIES
+            {
+                return Err(ProfileError::CapacityExceeded {
+                    resource: "Agent catalog factories",
+                    maximum: MAXIMUM_CATALOG_FACTORIES,
+                });
+            }
+            derived.factories.insert(plugin, factory);
+        }
+        Ok(derived)
+    }
     /// Freezes exact executable identities selected by the application.
     ///
     /// Duplicate plugin identities are rejected rather than resolved by input

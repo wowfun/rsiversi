@@ -9,12 +9,14 @@ publish = false
 [dependencies]
 rsi-workspace-path = { path = "../../rsi-workspace/path" }
 async-trait.workspace = true
+jsonschema.workspace = true
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
 

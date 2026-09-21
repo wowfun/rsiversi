@@ -79,6 +79,32 @@ struct ToolFactory(Arc<Evidence>);
 struct Echo {
     label: String,
     evidence: Arc<Evidence>,
+    output: rsi_tools_protocol::TypedToolOutput<EchoOutput>,
+}
+#[derive(serde::Serialize)]
+struct EchoOutput {
+    label: String,
+    arguments: Value,
+}
+fn output() -> rsi_tools_protocol::TypedToolOutput<EchoOutput> {
+    rsi_tools_protocol::TypedToolOutput::new(
+        rsi_tools_protocol::ToolOutputDeclaration::new(
+            "fixture.workbench.echo",
+            1,
+            json!({
+                "type":"object", "properties":{
+                    "label":{"type":"string","title":"Generation label"},
+                    "arguments":{"type":"object","title":"Received arguments"}
+                }, "required":["label","arguments"], "additionalProperties":false
+            }),
+        )
+        .expect("fixture output schema"),
+        |value: &EchoOutput| {
+            vec![rsi_tools_protocol::ToolContent::Text {
+                text: format!("{}: {}", value.label, value.arguments),
+            }]
+        },
+    )
 }
 #[async_trait]
 impl ToolExecutor for Echo {
@@ -95,11 +121,10 @@ impl ToolExecutor for Echo {
                 () = execution.cancellation.cancelled() => return Err(rsi_tools_protocol::ToolError::Cancelled),
             }
         }
-        ToolResult::new(
-            json!({"label":self.label,"arguments":arguments}),
-            vec![],
-            false,
-        )
+        self.output.result(&EchoOutput {
+            label: self.label.clone(),
+            arguments,
+        })
     }
 }
 #[async_trait]
@@ -122,9 +147,11 @@ impl PluginFactory for ToolFactory {
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let label = plan.take_state::<String>()?;
+        let output = output();
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register(ToolRegistration {
+                output: Some(output.declaration().clone()),
                 definition: ToolDefinition::new(
                     "fixture_echo",
                     format!("Independent workbench {label}"),
@@ -135,6 +162,7 @@ impl PluginFactory for ToolFactory {
                 executor: Arc::new(Echo {
                     label,
                     evidence: self.0.clone(),
+                    output,
                 }),
             })
             .map_err(meta)?;

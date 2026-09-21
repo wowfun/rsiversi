@@ -395,6 +395,10 @@ async fn queued_direct_turns_each_invoke_only_their_own_skill_once() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sequence proves atomic domain behavior across last-good and tombstone recovery"
+)]
 async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
     let fixture = Fixture::new(snapshot(true)).await;
     let store = Arc::new(SqliteStore::open(fixture.temp.path().join("store")).unwrap());
@@ -415,11 +419,23 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
     *fixture.source.snapshot.lock().unwrap() = incomplete;
     assert_eq!(enter(&kernel, &claim, "incomplete").await, 1);
     let after = kernel.domain_states(claim.session_id()).await.unwrap();
+    assert_eq!(before.len(), after.len());
+    let mut matched = false;
     for (old, new) in before.iter().zip(&after) {
-        let mut expected = old.snapshot.state().value().clone();
-        expected["incomplete_reported"] = serde_json::json!(true);
-        assert_eq!(&expected, new.snapshot.state().value());
+        assert_eq!(old.snapshot.identity(), new.snapshot.identity());
+        if old.snapshot.identity().id() == "rsi.workspace-context" {
+            matched = true;
+            let mut expected = old.snapshot.state().value().clone();
+            expected["incomplete_reported"] = serde_json::json!(true);
+            assert_eq!(&expected, new.snapshot.state().value());
+        } else {
+            assert_eq!(
+                old, new,
+                "workspace updates must preserve other owners' domains"
+            );
+        }
     }
+    assert!(matched);
     assert_eq!(enter(&kernel, &claim, "still-incomplete").await, 0);
     assert_eq!(
         kernel.domain_states(claim.session_id()).await.unwrap(),

@@ -292,10 +292,63 @@ fn seal(
 
 fn echo_registration(name: &str) -> ToolRegistration {
     ToolRegistration {
+        output: None,
         definition: ToolDefinition::new(name, "echo", true.into()).unwrap(),
         timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
         executor: Arc::new(EchoTool),
     }
+}
+
+#[tokio::test]
+async fn output_catalog_admission_is_atomic_and_withdrawal_releases_its_budget() {
+    use rsi_tools_protocol::ToolOutputDeclaration;
+    let (fiber, provider) = activated().await;
+    let stage = provider.begin_stage().unwrap();
+    let registrar = stage.registrar();
+    let output = ToolOutputDeclaration::new(
+        "fixture.large",
+        1,
+        json!({"type":"object","description":"a".repeat(60 * 1024)}),
+    )
+    .unwrap();
+    let registration = |name: &str| {
+        let mut registration = echo_registration(name);
+        registration.output = Some(output.clone());
+        registration
+    };
+    let first = registrar
+        .register_batch((0..4).map(|i| registration(&format!("old-{i}"))).collect())
+        .unwrap();
+    assert!(matches!(
+        registrar.register_batch(vec![
+            echo_registration("must-not-leak"),
+            registration("overflow")
+        ]),
+        Err(ToolError::Capacity)
+    ));
+    drop(first);
+    let second = registrar.register_batch(vec![registration("new")]).unwrap();
+    let tools = stage.seal().unwrap();
+    drop(second);
+    assert_eq!(
+        tools
+            .definitions()
+            .iter()
+            .map(rsi_tools_protocol::ToolDefinition::name)
+            .collect::<Vec<_>>(),
+        ["new"]
+    );
+    assert_eq!(
+        tools
+            .output_declarations()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["new"]
+    );
+    assert_eq!(tools.output_declarations()["new"], output);
+    drop(tools);
+    assert!(fiber.dispose().await.is_clean());
 }
 
 #[tokio::test]
@@ -639,6 +692,7 @@ async fn catalog_withdrawal_cannot_recycle_admission_owned_by_active_bodies() {
         let tools = seal(
             &provider,
             vec![ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("hold", "hold admission", true.into()).unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
                     timeout_ms: 600_000,
@@ -728,6 +782,7 @@ async fn retained_wait_observes_settlement_without_an_unrelated_notification() {
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(StubbornTool {
@@ -782,6 +837,7 @@ async fn dropping_a_catalog_reclaims_settled_and_late_retained_results() {
         vec![
             echo_registration("echo"),
             ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("blocking", "blocking", true.into()).unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
                 executor: Arc::new(BlockingTool {
@@ -854,6 +910,7 @@ async fn sandbox_rejection_remains_structured_across_tool_execution() {
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("confine", "confine", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(ConfineTool),
@@ -908,6 +965,7 @@ async fn dropping_a_catalog_withdraws_prepared_calls_and_cancels_admitted_calls(
     let active_tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("wait", "wait", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(BlockingTool {
@@ -943,6 +1001,7 @@ async fn catalog_bounds_tool_count_and_per_call_timeout_before_seal() {
     assert!(
         registrar
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("too-slow", "", json!({})).unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
                     timeout_ms: 600_001
@@ -976,6 +1035,7 @@ async fn timeout_is_retained_until_the_orchestrator_commits_it() {
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "wait",
                 "wait until cancelled",
@@ -1027,6 +1087,7 @@ async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescentl
     assert!(
         registrar
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("invalid-human", "", json!({})).unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
                 executor: Arc::new(EchoTool),
@@ -1035,6 +1096,7 @@ async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescentl
     );
     let _lease = registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("human", "wait", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(rsi_tools_protocol::ToolScheduling::ExclusiveFinal),
@@ -1081,6 +1143,7 @@ async fn recursive_panic_payload_destruction_cannot_abandon_settlement() {
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("panic", "panic", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(RecursivePanicTool),
@@ -1208,6 +1271,7 @@ async fn cancellation_and_dropped_waiters_do_not_abandon_tool_settlement() {
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(StubbornTool {
@@ -1267,6 +1331,7 @@ async fn provider_cleanup_reports_unsettled_noncooperative_tools_within_its_boun
     let tools = seal(
         &provider,
         vec![ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(StubbornTool {
@@ -1303,3 +1368,39 @@ async fn provider_cleanup_reports_unsettled_noncooperative_tools_within_its_boun
 
 #[path = "tools/portable.rs"]
 mod portable;
+
+#[tokio::test]
+async fn output_catalog_admits_the_exact_encoded_limit() {
+    use rsi_tools_protocol::{MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES, ToolOutputDeclaration};
+    let (fiber, provider) = activated().await;
+    let stage = provider.begin_stage().unwrap();
+    let empty = ToolOutputDeclaration::new("fixture", 1, json!({"type":"object","description":""}))
+        .unwrap();
+    let mut outputs = std::collections::BTreeMap::new();
+    let mut registrations = Vec::new();
+    for index in 0..4 {
+        let size = if index == 3 { 65511 } else { 65536 };
+        let output = ToolOutputDeclaration::new(
+            "fixture",
+            1,
+            json!({"type":"object","description":"a".repeat(size - empty.encoded_len())}),
+        )
+        .unwrap();
+        assert_eq!(output.encoded_len(), size);
+        let name = format!("t{index}");
+        outputs.insert(name.clone(), output.clone());
+        let mut registration = echo_registration(&name);
+        registration.output = Some(output);
+        registrations.push(registration);
+    }
+    assert_eq!(
+        serde_json::to_vec(&outputs).unwrap().len(),
+        MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES
+    );
+    let lease = stage.registrar().register_batch(registrations).unwrap();
+    let tools = stage.seal().unwrap();
+    drop(lease);
+    assert_eq!(tools.output_declarations(), outputs);
+    drop(tools);
+    assert!(fiber.dispose().await.is_clean());
+}

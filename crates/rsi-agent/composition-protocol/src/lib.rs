@@ -16,8 +16,10 @@ mod manifest;
 mod report;
 mod scoped_tools;
 mod seed;
+mod tool_outputs;
 pub use manifest::{CompositionInstance, CompositionManifest, CompositionOrigin};
 pub use seed::{AgentGenerationInputs, AgentGenerationInputsContract, AgentGenerationSeed};
+pub use tool_outputs::ToolOutputCatalog;
 mod command;
 mod contribution;
 pub use command::{
@@ -206,6 +208,18 @@ impl fmt::Debug for AgentCompositionPin {
 /// Standing Agent-generation resolver.
 #[async_trait]
 pub trait AgentComposition: fmt::Debug + Send + Sync + 'static {
+    /// Resolves explicit Session-bound inputs before ordinary preset selection.
+    /// Owners must reject missing private inputs rather than use unrelated defaults.
+    ///
+    /// # Errors
+    /// Returns the same closed composition failures as `pin`.
+    async fn pin_session(
+        &self,
+        header: &SessionHeader,
+        seed: Option<&AgentGenerationSeed>,
+    ) -> Result<AgentCompositionPin> {
+        self.pin(header.agent_preset_id(), seed).await
+    }
     /// Reads the effective default identity from this resolver's catalog
     /// authority.
     ///
@@ -344,9 +358,7 @@ impl AgentSessionDraft {
         header: SessionHeader,
         composition_service: Arc<dyn AgentComposition>,
     ) -> Result<Self> {
-        let composition = composition_service
-            .pin(header.agent_preset_id(), None)
-            .await?;
+        let composition = composition_service.pin_session(&header, None).await?;
         if composition.preset_id() != header.agent_preset_id() {
             return Err(AgentCompositionError::InvalidInput(
                 "Agent composition returned a different preset identity".into(),
@@ -454,15 +466,15 @@ impl AgentSessionDraft {
         let header = self.header.clone();
         async move {
             next?;
-            let composition = service.pin(&preset_id, None).await?;
+            let header = header
+                .with_agent_preset_id(preset_id.clone())
+                .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
+            let composition = service.pin_session(&header, None).await?;
             if composition.preset_id() != &preset_id {
                 return Err(AgentCompositionError::InvalidInput(
                     "Agent composition returned a different preset identity".into(),
                 ));
             }
-            let header = header
-                .with_agent_preset_id(preset_id)
-                .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
             let baseline = DomainBaseline::new(composition.domains().clone())?;
             Ok(PreparedDraftPreset {
                 identity,
@@ -516,6 +528,14 @@ impl AgentSessionDraft {
 /// Closed composition failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentCompositionError {
+    /// Restored executable declarations differ from their saved baseline.
+    #[error("tool output declarations differ from the saved baseline; start a new conversation")]
+    OutputCatalogMismatch,
+    /// Legacy history cannot silently acquire newly declared output semantics.
+    #[error(
+        "saved baseline has no tool output declarations; start a new conversation to use typed tools"
+    )]
+    MissingOutputCatalog,
     /// A saved Domain requires a codec its owner no longer accepts.
     #[error(
         "unsupported saved Domain codec {stored:?}; expected {expected:?}; start a new conversation using the current preset"

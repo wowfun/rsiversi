@@ -170,6 +170,24 @@ struct CompositionService {
 
 #[async_trait]
 impl AgentComposition for CompositionService {
+    async fn pin_session(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        if self.state.shutdown.is_cancelled() {
+            return Err(AgentCompositionError::ShuttingDown);
+        }
+        if let Some(pin) = self.state.source.session_pin(header, seed)? {
+            if pin.preset_id() != header.agent_preset_id() {
+                return Err(AgentCompositionError::InvalidInput(
+                    "Session composition preset differs".into(),
+                ));
+            }
+            return Ok(pin);
+        }
+        self.pin(header.agent_preset_id(), seed).await
+    }
     async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
         self.state.default_preset_id().await
     }
@@ -367,6 +385,50 @@ impl UnpublishedGeneration {
         let builder = context
             .lookup_local::<ModelContextBuilderContract>()
             .ok_or_else(|| unavailable(preset_id, "Agent Profile requires one context builder"))?;
+        let stage = self
+            .stage
+            .take()
+            .expect("unsealed Agent generation owns its Tool stage");
+        let tools = stage
+            .seal()
+            .map_err(|_| unavailable(preset_id, "Tool catalog sealing failed"))?;
+        let outputs =
+            rsi_agent_composition_protocol::ToolOutputCatalog::new(tools.output_declarations())?;
+        self.tools = Some(tools);
+        let inputs = context
+            .lookup_local::<AgentGenerationInputsContract>()
+            .ok_or_else(|| unavailable(preset_id, "Agent generation inputs unavailable"))?;
+        let legacy = if inputs.restoring {
+            match rsi_agent_composition_protocol::ToolOutputCatalog::from_baseline(
+                inputs.seed.states(),
+            )? {
+                Some(saved) if saved != outputs => {
+                    return Err(AgentCompositionError::OutputCatalogMismatch);
+                }
+                None if !outputs.is_empty() => {
+                    return Err(AgentCompositionError::MissingOutputCatalog);
+                }
+                None => true,
+                Some(_) => false,
+            }
+        } else {
+            false
+        };
+        let _output_lease = if legacy {
+            None
+        } else {
+            let definition = rsi_agent_composition_protocol::DomainDefinition::new(
+                rsi_agent_composition_protocol::ToolOutputCatalog::identity(),
+                &outputs,
+                rsi_agent_composition_protocol::ToolOutputCatalog::validate,
+            )?;
+            let credential = context.registration_context().map_err(|_| {
+                unavailable(preset_id, "Tool output registration owner unavailable")
+            })?;
+            let (_, lease) =
+                definition.register(self.domain_stage.registrar().as_ref(), &credential)?;
+            Some(lease)
+        };
         self.domains = Some(
             self.domain_stage
                 .seal()
@@ -376,15 +438,6 @@ impl UnpublishedGeneration {
             self.contribution_stage
                 .seal()
                 .map_err(|_| unavailable(preset_id, "Agent execution catalog sealing failed"))?,
-        );
-        let stage = self
-            .stage
-            .take()
-            .expect("unsealed Agent generation owns its Tool stage");
-        self.tools = Some(
-            stage
-                .seal()
-                .map_err(|_| unavailable(preset_id, "Tool catalog sealing failed"))?,
         );
         self.context_builder = Some(builder);
         Ok(())

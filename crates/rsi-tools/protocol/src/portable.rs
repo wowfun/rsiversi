@@ -1,6 +1,8 @@
 //! Closed duplex protocol for trusted Portable tool contributors.
 
-use crate::{ToolCall, ToolDefinition, ToolError, ToolExecutionPolicy, ToolResult};
+use crate::{
+    ToolCall, ToolDefinition, ToolError, ToolExecutionPolicy, ToolOutputDeclaration, ToolResult,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -8,7 +10,7 @@ use std::path::PathBuf;
 /// Exact Portable contract name; service keys are selected by composition.
 pub const CONTRACT: &str = "rsi.tools.portable";
 /// Contract version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Maximum encoded bytes of one request or response frame.
 pub const MAXIMUM_FRAME_BYTES: usize = 256 * 1024;
 /// Maximum process-plan requests during one Tool execution.
@@ -32,6 +34,8 @@ pub enum Scheduling {
 pub struct Definition {
     /// Bounded model-visible declaration.
     pub definition: ToolDefinition,
+    /// Optional canonical successful-output declaration; absent means opaque JSON.
+    pub output: Option<ToolOutputDeclaration>,
     /// Owner-declared cooperative timeout, in milliseconds.
     pub timeout_ms: u64,
     /// Owner-declared overlap policy.

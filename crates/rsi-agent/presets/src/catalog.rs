@@ -298,6 +298,13 @@ pub struct AgentPresetCatalog {
 }
 
 impl AgentPresetCatalog {
+    /// Derives independent root/default authority using this exact frozen compiler.
+    ///
+    /// # Errors
+    /// Rejects invalid roots under the same rules as `new`.
+    pub fn with_config(&self, config: AgentPresetCatalogConfig) -> Result<Self> {
+        Self::new(config, self.compiler.clone())
+    }
     /// Replaces the frozen compiler while preserving discovery, default and
     /// shared authoring authority. Existing clones keep their own compiler.
     #[must_use]

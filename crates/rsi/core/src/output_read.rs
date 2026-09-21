@@ -45,6 +45,7 @@ impl PluginFactory for OutputReadToolFactory {
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register_batch(vec![ToolRegistration {
+                output: None,
                 definition,
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
                 executor: Arc::new(OutputReadTool(cache)),

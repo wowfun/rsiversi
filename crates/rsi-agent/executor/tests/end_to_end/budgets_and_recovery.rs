@@ -47,6 +47,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     let release = CancellationToken::new();
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
@@ -165,6 +166,7 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
     let release = CancellationToken::new();
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
@@ -277,6 +279,7 @@ async fn successfully_recovered_tool_releases_its_tracking_pin_after_commit() {
     let release = CancellationToken::new();
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
@@ -360,6 +363,7 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
     let release = CancellationToken::new();
     let tool_lease = tools
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
             executor: Arc::new(NonCooperativeTool {

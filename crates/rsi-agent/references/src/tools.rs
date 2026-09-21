@@ -36,6 +36,7 @@ impl PluginFactory for ReferenceToolsFactory {
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register_batch(vec![ToolRegistration {
+                output: None,
                 definition,
                 timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
                 executor: Arc::new(Read(plan.local::<ReferencesContract>()?)),

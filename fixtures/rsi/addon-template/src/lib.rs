@@ -65,6 +65,7 @@ impl NativeInstance for Instance {
                 }
                 Response::Description {
                     tools: vec![Definition {
+                        output: None,
                         definition: ToolDefinition::new(
                             "addon_echo",
                             "Echo JSON with the configured label",

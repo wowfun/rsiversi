@@ -23,6 +23,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+// Success scenarios share the provider's process-wide four-job admission.
+// Files provider tests separately own saturation and concurrent retirement evidence.
+static SCENARIOS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug)]
 struct Registrar(Arc<dyn ToolRegistrar>);
 #[async_trait]
@@ -148,6 +152,7 @@ async fn fixture_with_inspection(inspect: bool) -> (Runtime, Arc<dyn ToolRuntime
 
 #[tokio::test]
 async fn actual_catalog_reads_all_modes_from_pinned_cwd_and_never_fabricates_process_enforcement() {
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("cwd")).unwrap();
@@ -218,6 +223,7 @@ async fn actual_catalog_reads_all_modes_from_pinned_cwd_and_never_fabricates_pro
 
 #[tokio::test]
 async fn unknown_roots_parent_paths_symlinks_and_oversized_pages_cannot_expand_read_scope() {
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("cwd")).unwrap();
@@ -293,6 +299,7 @@ async fn unknown_roots_parent_paths_symlinks_and_oversized_pages_cannot_expand_r
 
 #[tokio::test]
 async fn directory_paths_are_cwd_relative_and_each_invocation_captures_a_fresh_snapshot() {
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("cwd/sub")).unwrap();
@@ -328,6 +335,7 @@ async fn directory_paths_are_cwd_relative_and_each_invocation_captures_a_fresh_s
     )
     .await
     .unwrap();
+    assert!(!next.is_error, "directory read failed: {}", next.value);
     assert_eq!(next.value["total"], 3);
     assert_eq!(next.value["entries"][0]["name"], "c");
     assert!(
@@ -349,6 +357,7 @@ async fn directory_paths_are_cwd_relative_and_each_invocation_captures_a_fresh_s
 #[tokio::test]
 async fn listed_non_utf8_filename_can_be_read_through_the_exact_byte_argument() {
     use std::os::unix::ffi::OsStrExt as _;
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("cwd")).unwrap();
@@ -383,6 +392,7 @@ async fn listed_non_utf8_filename_can_be_read_through_the_exact_byte_argument() 
 
 #[tokio::test]
 async fn present_checks_regular_files_with_pinned_read_authority_and_releases_every_token() {
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("cwd")).unwrap();
@@ -575,6 +585,7 @@ impl rsi_files_protocol::Files for OneTokenFiles {
 }
 #[tokio::test]
 async fn present_releases_each_metadata_token_before_opening_the_next_file() {
+    let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("cwd")).unwrap();

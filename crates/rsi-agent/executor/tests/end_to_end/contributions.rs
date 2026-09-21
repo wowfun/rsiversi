@@ -228,6 +228,7 @@ async fn policy_constraints_accumulate_and_denial_never_starts_the_tool() {
         let lease = stack
             .tool_registrar
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
                     .unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
@@ -389,6 +390,7 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
     let tool = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
             executor: Arc::new(EchoTool {
@@ -530,6 +532,7 @@ async fn post_tool_contribution_observes_one_source_ordered_durable_batch() {
     let lease = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(EchoTool {

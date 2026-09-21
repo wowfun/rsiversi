@@ -39,6 +39,8 @@ mod domains;
 mod seeds;
 #[path = "composition/snapshots.rs"]
 mod snapshots;
+#[path = "composition/tool_outputs.rs"]
+mod tool_outputs;
 
 #[derive(Debug)]
 struct NoopFactory;
@@ -266,6 +268,18 @@ impl PluginFactory for ProbeFactory {
             .to_owned();
         let lease = registrar
             .register(ToolRegistration {
+                output: plan
+                    .config()
+                    .get("output_kind")
+                    .and_then(ConfigValue::as_str)
+                    .map(|kind| {
+                        rsi_tools_protocol::ToolOutputDeclaration::new(
+                            "fixture.probe",
+                            1,
+                            serde_json::json!({"type":kind}),
+                        )
+                        .unwrap()
+                    }),
                 definition: ToolDefinition::new(
                     format!("probe-{marker}"),
                     "composition probe",

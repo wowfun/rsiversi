@@ -83,11 +83,13 @@ impl PluginFactory for PortableToolsFactory {
             };
             let name = tool.definition.name().to_owned();
             registrations.push(ToolRegistration {
+                output: tool.output.clone(),
                 definition: tool.definition.with_scheduling(scheduling),
                 timeout: ToolTimeoutPolicy::Execution {
                     timeout_ms: tool.timeout_ms,
                 },
                 executor: Arc::new(Executor {
+                    output: tool.output,
                     name,
                     capability: capability.clone(),
                 }),
@@ -125,6 +127,7 @@ fn call_error(error: &MetaError) -> ToolError {
 
 #[derive(Debug)]
 struct Executor {
+    output: Option<rsi_tools_protocol::ToolOutputDeclaration>,
     name: String,
     capability: Capability,
 }
@@ -153,7 +156,13 @@ impl ToolExecutor for Executor {
             // Observe the driver's terminal before relinquishing Tool body ownership.
             while matches!(call.recv().await, Ok(Some(_))) {}
         }
-        result
+        let result = result?;
+        if !result.is_error
+            && let Some(output) = &self.output
+        {
+            output.validate_value(&result.value)?;
+        }
+        Ok(result)
     }
 }
 

@@ -4511,9 +4511,11 @@ dependencies = [
  "rsi-agent-context",
  "rsi-agent-presets",
  "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
  "rsi-meta",
  "rsi-meta-profile",
  "rsi-meta-scope",
+ "rsi-sandbox",
  "rsi-tools",
  "rsi-tools-protocol",
  "serde_json",
@@ -6812,6 +6814,7 @@ name = "rsi-tools-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
@@ -6819,6 +6822,7 @@ dependencies = [
  "rsi-workspace-path",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio-util",
 ]

@@ -73,6 +73,7 @@ async fn serial_and_parallel_results_invoke_settlement_once_per_effect() {
         let lease = stack
             .tool_registrar
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
                     .unwrap()
                     .with_scheduling(if parallel {
@@ -163,6 +164,7 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
     let tool_lease = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
             executor: Arc::new(EchoTool {
@@ -369,6 +371,7 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
     let lease = stack
         .tool_registrar
         .register(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
             executor: Arc::new(EchoTool {

@@ -136,6 +136,14 @@ impl NativeInstance for Instance {
                     .into_iter()
                     .map(|name| {
                         Ok(Definition {
+                            output: Some(
+                                rsi_tools_protocol::ToolOutputDeclaration::new(
+                                    "fixture.native.result",
+                                    1,
+                                    json!({"type":"object"}),
+                                )
+                                .map_err(|error| error.to_string())?,
+                            ),
                             definition: ToolDefinition::new(
                                 name,
                                 DESCRIPTION,

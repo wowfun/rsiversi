@@ -176,6 +176,7 @@ impl PluginFactory for WorkspaceSkillToolsFactory {
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register(ToolRegistration {
+                output: None,
                 definition,
                 timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
                 executor: Arc::new(SkillTool(plan.local::<WorkspaceContextContract>()?)),

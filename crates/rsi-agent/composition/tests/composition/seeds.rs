@@ -57,6 +57,7 @@ impl PluginFactory for SeedFactory {
         let tool = plan
             .local::<ToolRegistrarContract>()?
             .register(ToolRegistration {
+                output: None,
                 definition: ToolDefinition::new(&names[0], "frozen manifest tool", true.into())
                     .unwrap(),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },

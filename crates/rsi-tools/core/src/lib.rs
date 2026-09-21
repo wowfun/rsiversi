@@ -415,6 +415,24 @@ impl ToolRegistrar for Registrar {
             .next_registration
             .checked_add(registrations.len() as u64)
             .ok_or_else(|| ToolError::Execution("registration identity exhausted".into()))?;
+        let output_bytes = inner
+            .definitions
+            .values()
+            .map(|entry| &entry.definition)
+            .chain(registrations.iter())
+            .filter_map(|registration| {
+                registration
+                    .output
+                    .as_ref()
+                    .map(|output| registration.definition.name().len() + 3 + output.encoded_len())
+            })
+            .fold((2, false), |(bytes, separator), length| {
+                (bytes + usize::from(separator) + length, true)
+            })
+            .0;
+        if output_bytes > rsi_tools_protocol::MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES {
+            return Err(ToolError::Capacity);
+        }
         let mut members = Vec::with_capacity(registrations.len());
         for definition in registrations {
             inner.next_registration += 1;
@@ -472,6 +490,18 @@ fn withdraw_batch(state: &Weak<StageState>, members: &[BatchMember]) {
 
 #[async_trait]
 impl ToolRuntime for Registry {
+    fn output_declarations(&self) -> BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {
+        self.definitions
+            .iter()
+            .filter_map(|(name, entry)| {
+                entry
+                    .definition
+                    .output
+                    .clone()
+                    .map(|output| (name.clone(), output))
+            })
+            .collect()
+    }
     fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
         self.definitions
             .values()

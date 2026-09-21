@@ -21,6 +21,23 @@ impl fmt::Debug for AgentCompositionSnapshot {
 }
 
 impl AgentCompositionSnapshot {
+    /// Derives a private source from explicit presets, exact factories and validated inputs.
+    /// It preserves the original catalog's Local/Portable isolation declarations.
+    ///
+    /// # Errors
+    /// Rejects repeated replacement identities and the ordinary factory capacity bound.
+    pub fn derive_private(
+        &self,
+        presets: AgentPresetCatalog,
+        replacements: impl IntoIterator<Item = rsi_meta::ResolvedFactory>,
+        seed: rsi_agent_composition_protocol::AgentGenerationSeed,
+    ) -> rsi_meta_profile::Result<Self> {
+        Ok(Self {
+            presets,
+            contributions: Arc::new(self.contributions.replacing(replacements)?),
+            seeds: Ok(seed),
+        })
+    }
     /// Borrows the pure preset compiler/catalog without building generations.
     pub const fn presets(&self) -> &AgentPresetCatalog {
         &self.presets
@@ -112,6 +129,22 @@ impl AgentCompositionSnapshot {
 /// the composition provider never falls back to its cached generation on error.
 /// Existing pins remain valid independently of subsequent source publication.
 pub trait AgentCompositionSource: fmt::Debug + Send + Sync + 'static {
+    /// Selects an already prepared application-owned private Session generation.
+    /// This is synchronous and performs no provider work. The owner validates exact
+    /// Header/baseline binding and returns an error for missing private inputs.
+    ///
+    /// # Errors
+    /// Returns a composition failure when private inputs cannot be selected safely.
+    fn session_pin(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<
+        Option<rsi_agent_composition_protocol::AgentCompositionPin>,
+    > {
+        let _ = (header, seed);
+        Ok(None)
+    }
     /// Captures one compiler/catalog pair for the entire build.
     ///
     /// # Errors

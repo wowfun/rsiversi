@@ -31,6 +31,8 @@ enum Behavior {
     InvalidTimeout,
     EmptyDescription,
     InvalidConfine,
+    InvalidOutput,
+    ErrorOutput,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,14 @@ struct Endpoint {
 impl Endpoint {
     fn definitions(&self) -> Vec<Definition> {
         let definition = Definition {
+            output: Some(
+                rsi_tools_protocol::ToolOutputDeclaration::new(
+                    "fixture.echo",
+                    1,
+                    json!({"type":"object"}),
+                )
+                .unwrap(),
+            ),
             definition: ToolDefinition::new(
                 "native_echo",
                 "Portable echo",
@@ -128,6 +138,13 @@ impl ServiceEndpoint for Endpoint {
                 }
                 if !matches!(self.behavior, Behavior::Missing) {
                     let mut result = ToolResult::new(call.arguments, Vec::new(), false).unwrap();
+                    if matches!(
+                        self.behavior,
+                        Behavior::InvalidOutput | Behavior::ErrorOutput
+                    ) {
+                        result.value = json!("private-value");
+                        result.is_error = matches!(self.behavior, Behavior::ErrorOutput);
+                    }
                     if matches!(self.behavior, Behavior::ForgedEnforcement) {
                         result.enforcement.push(
                             TestSandbox
@@ -233,6 +250,31 @@ fn call() -> ToolCall {
         arguments: json!({"answer":42}),
     }
 }
+
+#[tokio::test]
+async fn portable_rejects_invalid_success_but_preserves_tool_owned_errors() {
+    for behavior in [Behavior::InvalidOutput, Behavior::ErrorOutput] {
+        let Harness { runtime, stage, .. } = harness(behavior).await;
+        let tools = stage.seal().unwrap();
+        let prepared = tools.prepare("output-check", call()).unwrap();
+        let identity = prepared.identity().clone();
+        let result = prepared.start(tool_start(CancellationToken::new())).await;
+        if matches!(behavior, Behavior::InvalidOutput) {
+            assert!(!result.unwrap_err().to_string().contains("private-value"));
+            assert!(matches!(
+                tools.query(&identity).unwrap(),
+                RetainedToolResult::Failed(_)
+            ));
+        } else {
+            let result = result.unwrap();
+            assert!(result.is_error);
+            assert_eq!(result.value, json!("private-value"));
+        }
+        tools.commit(&identity).unwrap();
+        drop(tools);
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
 #[tokio::test]
 async fn portable_registration_and_execution_use_the_existing_atomic_stage() {
     for behavior in [Behavior::Echo, Behavior::Confine] {
@@ -245,6 +287,10 @@ async fn portable_registration_and_execution_use_the_existing_atomic_stage() {
         assert_eq!(bridge.snapshot().state, rsi_meta::FiberState::Active);
         let tools = stage.seal().unwrap();
         assert_eq!(tools.definitions().len(), 1);
+        assert_eq!(
+            tools.output_declarations()["native_echo"].contract_id(),
+            "fixture.echo"
+        );
         assert_eq!(
             tools.definitions()[0].scheduling(),
             ToolScheduling::ParallelSafe

@@ -1,5 +1,21 @@
 # rsi-agent-composition
 
+Session-specific composition remains an explicit application-owned input. Before
+ordinary preset resolution, `AgentCompositionSource::session_pin` may return an
+already prepared exact pin for a validated Header and optional saved baseline.
+It performs no activation or I/O; its owner validates the Session/workspace and
+baseline binding, bounds retained pins, and rejects unavailable private inputs
+instead of falling back to a global catalog. Generic callers use
+`AgentComposition::pin_session`; plain preset discovery continues using `pin`.
+The resulting pin must still match the Header preset. This permits a protocol
+application to finish private provider preparation before draft publication,
+without teaching Kernel or generic composition about external protocol syntax.
+The source owner may derive a private snapshot with another explicit preset
+catalog, exact factory replacements and a validated seed. Replacements preserve
+all nominal marker and isolation declarations, reject duplicate replacement IDs
+and retain the normal factory bound. The derived snapshot is independent of the
+standing source and is never installed there implicitly.
+
 `rsi-agent-composition` owns the standing, process-local builder for immutable
 Agent generations. It compiles the current `<preset>/agent.profile.toml`,
 resolves every Profile factory against a frozen Agent-only contribution
@@ -108,6 +124,17 @@ generation-local diagnostic. It reports typed saved/expected identities and the
 new-conversation action after rollback. Other Profile activation failures retain
 their generic redaction. A recorded mismatch also prevents sealing if a plugin
 ignores its failed state lookup.
+
+After Tools seal, composition freezes their exact-name output declarations in
+the `rsi.tools.outputs` Domain baseline (codec 1), then seals Domains. That
+registration uses the hidden Scope's ordinary Meta credential and is withdrawn
+with a failed candidate. Historical consumers read this baseline; current Tool
+registries never reinterpret a saved result. Cold reconstruction requires equal
+declarations, including contract version and verified schema digest. Unknown
+codecs and changed declarations reject continuation before publication. A legacy
+baseline without this domain can rebuild only an entirely untyped catalog;
+typed tools require a new conversation. History attachment remains independent
+of executable providers. Session and Store formats are unchanged.
 
 A valid executable source snapshot may explicitly mark only its current generation
 inputs unavailable with a static, redacted reason supplied by the source owner.

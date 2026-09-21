@@ -63,6 +63,7 @@ impl PluginFactory for JobsToolsFactory {
 fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegistration>> {
     Ok(vec![
         ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "job_output",
                 "Read both retained output streams for one background job. Active reads do not report completion; a terminal read or successful wait does.",
@@ -83,6 +84,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
             }),
         },
         ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "job_list",
                 "List background jobs in the current turn scope. Terminal jobs with reported=false still require job_output or job_kill before successful turn completion.",
@@ -95,6 +97,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
             }),
         },
         ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "job_kill",
                 "Terminate one background job, wait for settlement, and report its final retained output.",

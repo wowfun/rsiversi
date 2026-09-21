@@ -40,6 +40,7 @@ impl PluginFactory for QuestionToolsFactory {
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register_batch(vec![ToolRegistration {
+                output: None,
                 definition,
                 timeout: ToolTimeoutPolicy::HumanInteraction,
                 executor,

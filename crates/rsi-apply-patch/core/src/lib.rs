@@ -295,6 +295,7 @@ mod linux {
         process: Arc<dyn Process>,
     ) -> rsi_tools_protocol::Result<ToolRegistration> {
         Ok(ToolRegistration {
+            output: None,
             definition: ToolDefinition::new(
                 "apply_patch",
                 "Apply one bounded structured patch relative to the tool cwd. The helper preflights every operation; a later commit failure returns partial effects and is never replayed automatically.",

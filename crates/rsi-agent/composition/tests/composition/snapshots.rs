@@ -2,6 +2,83 @@ use super::*;
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 
 #[derive(Debug)]
+struct BoundSource(rsi_agent_composition_protocol::AgentCompositionPin);
+impl AgentCompositionSource for BoundSource {
+    fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
+        panic!("prepared private selection must not activate or read the global source")
+    }
+    fn session_pin(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        _: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<
+        Option<rsi_agent_composition_protocol::AgentCompositionPin>,
+    > {
+        if header.session_id().as_str() != "bound" {
+            return Err(AgentCompositionError::InvalidInput(
+                "private inputs unavailable".into(),
+            ));
+        }
+        Ok(Some(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn private_session_pin_precedes_global_source_and_rejects_missing_or_mismatched_inputs() {
+    use rsi_agent_session_protocol::{FrozenAgentSettings, SessionHeader, SessionId};
+    let fixture = Fixture::new(&profile("private")).await;
+    let pin = fixture.service.pin(&fixture.id, None).await.unwrap();
+    let source = Arc::new(BoundSource(pin.clone()));
+    let (runtime, tools, composition, service) = activate_composition_factory(
+        AgentCompositionFactory::with_source(source.clone(), ScopeRoot::new(128).unwrap()),
+    )
+    .await;
+    let header = |session: &str, preset: &str| {
+        SessionHeader::new(
+            SessionId::new(session).unwrap(),
+            1,
+            fixture.source.parent().unwrap().to_str().unwrap(),
+            AgentPresetId::new(preset).unwrap(),
+            FrozenAgentSettings::new(
+                "fixture",
+                "system",
+                rsi_ai_protocol::ModelRef::new("provider", "model").unwrap(),
+                rsi_sandbox::SandboxMode::ReadOnly,
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let retained = service
+        .pin_session(&header("bound", "default"), None)
+        .await
+        .unwrap();
+    assert!(retained.same_generation(&pin));
+    assert!(
+        service
+            .pin_session(&header("other", "default"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .pin_session(&header("bound", "other"), None)
+            .await
+            .is_err()
+    );
+    assert!(composition.dispose().await.is_clean());
+    assert!(matches!(
+        service.pin_session(&header("bound", "default"), None).await,
+        Err(AgentCompositionError::ShuttingDown)
+    ));
+    drop((service, source, retained, pin));
+    assert!(tools.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+    fixture.stop().await;
+}
+
+#[derive(Debug)]
 struct SourceProvider(Arc<dyn AgentCompositionSource>);
 #[async_trait::async_trait]
 impl PluginFactory for SourceProvider {
@@ -139,6 +216,67 @@ fn snapshot(
         ])
         .unwrap(),
     ))
+}
+
+#[tokio::test]
+async fn private_derivation_selects_its_exact_factory_and_preserves_base_generation() {
+    let base_root = tempfile::tempdir().unwrap();
+    let private_root = tempfile::tempdir().unwrap();
+    let base_presets = presets(&base_root, &profile("base"));
+    let private_presets = presets(&private_root, &profile("private"));
+    let base_probe = Arc::new(Probe::default());
+    let private_probe = Arc::new(Probe::default());
+    let base = snapshot(&base_presets, "base", &base_probe);
+    let replacement = ResolvedFactory::linked(
+        "test.contribution",
+        "private",
+        UpdateMode::Replayable,
+        Arc::new(ProbeFactory {
+            probe: private_probe.clone(),
+        }),
+    );
+    let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(vec![]).unwrap();
+    assert!(
+        base.derive_private(
+            private_presets.clone(),
+            [replacement.clone(), replacement.clone()],
+            seed.clone()
+        )
+        .is_err()
+    );
+    let private = base
+        .derive_private(private_presets, [replacement], seed)
+        .unwrap();
+    assert_eq!(base_probe.activations.load(Ordering::Acquire), 0);
+    assert_eq!(private_probe.activations.load(Ordering::Acquire), 0);
+    let base_owner = activate_composition_factory(AgentCompositionFactory::with_source(
+        base,
+        ScopeRoot::new(128).unwrap(),
+    ))
+    .await;
+    let private_owner = activate_composition_factory(AgentCompositionFactory::with_source(
+        Arc::new(private),
+        ScopeRoot::new(128).unwrap(),
+    ))
+    .await;
+    let id = AgentPresetId::new("default").unwrap();
+    let base_pin = base_owner.3.pin(&id, None).await.unwrap();
+    let private_pin = private_owner.3.pin(&id, None).await.unwrap();
+    assert!(!base_pin.same_generation(&private_pin));
+    assert_eq!(base_probe.active("base"), 1);
+    assert_eq!(base_probe.active("private"), 0);
+    assert_eq!(private_probe.active("private"), 1);
+    assert_eq!(private_probe.active("base"), 0);
+    drop(private_pin);
+    assert!(private_owner.2.dispose().await.is_clean());
+    assert_eq!(base_probe.active("base"), 1);
+    drop(base_pin);
+    assert!(base_owner.2.dispose().await.is_clean());
+    for (runtime, tools, _, service) in [base_owner, private_owner] {
+        drop(service);
+        assert!(tools.dispose().await.is_clean());
+        assert!(runtime.shutdown().await.is_clean());
+    }
 }
 
 #[tokio::test]

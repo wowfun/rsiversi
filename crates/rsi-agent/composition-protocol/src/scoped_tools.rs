@@ -14,6 +14,15 @@ pub(super) struct ScopedTools {
 }
 #[async_trait]
 impl ToolRuntime for ScopedTools {
+    fn output_declarations(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {
+        self.inner
+            .output_declarations()
+            .into_iter()
+            .filter(|(name, _)| self.allowed.contains(name))
+            .collect()
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.inner
             .definitions()

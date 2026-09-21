@@ -24,6 +24,12 @@ use tokio_util::sync::CancellationToken;
 /// Closed byte protocol for explicitly injected Portable tool contributions.
 pub mod portable;
 
+mod output;
+pub use output::{
+    MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES, MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES,
+    ToolOutputDeclaration, TypedToolOutput,
+};
+
 /// Maximum tool name or call identity bytes.
 pub const MAXIMUM_TOOL_IDENTIFIER_BYTES: usize = 256;
 /// Maximum encoded schema, arguments, or canonical result bytes.
@@ -698,6 +704,8 @@ pub enum ToolTimeoutPolicy {
 pub struct ToolRegistration {
     /// Model-visible definition.
     pub definition: ToolDefinition,
+    /// Optional canonical successful-output contract, outside model-visible schema.
+    pub output: Option<ToolOutputDeclaration>,
     /// Owner-declared timeout policy; model arguments cannot select it.
     pub timeout: ToolTimeoutPolicy,
     /// Trusted body.
@@ -709,6 +717,7 @@ impl fmt::Debug for ToolRegistration {
         formatter
             .debug_struct("ToolRegistration")
             .field("definition", &self.definition)
+            .field("output", &self.output)
             .field("timeout", &self.timeout)
             .field("executor", &"<tool executor>")
             .finish()
@@ -962,6 +971,10 @@ pub trait ToolCatalogProvider: fmt::Debug + Send + Sync + 'static {
 pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
     /// Returns ordered model-visible definitions of the active tools.
     fn definitions(&self) -> Vec<ToolDefinition>;
+    /// Exact-name declarations from this immutable catalog; absent names are opaque.
+    fn output_declarations(&self) -> std::collections::BTreeMap<String, ToolOutputDeclaration> {
+        std::collections::BTreeMap::new()
+    }
     /// Resolves and pins one call without starting external Tool code.
     fn prepare(&self, invocation_id: &str, call: ToolCall) -> Result<Box<dyn PreparedToolCall>>;
     /// Queries one exact invocation retained by this runtime generation.

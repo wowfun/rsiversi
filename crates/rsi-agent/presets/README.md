@@ -23,6 +23,9 @@ allowlist are shared by roster preflight and generation compilation. The
 allowlist is not the Host factory catalog and contains no executable factory. A
 catalog clone can replace its compiler with `with_compiler`; it preserves root
 precedence, trust, the default-store authority and the shared authoring lock.
+`with_config` creates an independent catalog using the same frozen compiler and
+explicit replacement root authority. It inherits neither the selection store
+nor authoring lock, and does not alter the original catalog.
 The caller must pair the replacement with the executable contribution snapshot
 used for the same Agent build. Existing catalog values keep their own compiler.
 A roster row is healthy only when the complete Profile source,

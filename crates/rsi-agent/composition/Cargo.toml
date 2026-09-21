@@ -26,6 +26,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-tools = { path = "../../rsi-tools/core" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
