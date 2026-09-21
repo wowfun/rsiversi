@@ -130,6 +130,37 @@ impl Drafts {
         self.tasks.wait().await;
     }
 
+    pub(super) fn release(&self, session: &SessionId) -> rsi_session_protocol::DraftRelease {
+        use rsi_session_protocol::DraftRelease;
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let Some(entry) = entries.get(session) else {
+                return DraftRelease::NotDraft;
+            };
+            let state = &mut *entry
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.active != 0 {
+                return DraftRelease::Busy;
+            }
+            let result = entry.result.borrow();
+            let Some(Ok(handle)) = result.as_ref() else {
+                return DraftRelease::Busy;
+            };
+            if handle.published.load(std::sync::atomic::Ordering::Acquire) {
+                return DraftRelease::NotDraft;
+            }
+            state.retired = true;
+            handle.expire_draft();
+        }
+        drop(entries.remove(session));
+        DraftRelease::Released
+    }
+
     fn prune(&self) {
         let removed = {
             let mut entries = self

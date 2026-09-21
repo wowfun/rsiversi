@@ -57,6 +57,8 @@ pub struct ToolState {
     phase_seq: u64,
     #[serde(skip)]
     named_seq: u64,
+    #[serde(skip)]
+    external_candidate: Option<String>,
 }
 impl ToolState {
     /// Starts partial metadata from any exact Tool lifecycle Fact.
@@ -74,6 +76,7 @@ impl ToolState {
             phase: ToolPhase::Prepared,
             phase_seq: 0,
             named_seq: 0,
+            external_candidate: None,
         };
         state.observe(fact);
         Some(state)
@@ -110,6 +113,14 @@ impl ToolState {
             SessionFactBody::ToolStarted { .. } => ToolPhase::Running,
             SessionFactBody::ToolResult { result, .. } => {
                 if seq >= self.phase_seq {
+                    self.external_candidate = (!result.is_error)
+                        .then(|| {
+                            let value = result.value.get("conversation")?.as_str()?;
+                            rsi_acp_protocol::observation::ConversationId::new(value)
+                                .ok()
+                                .map(|id| id.as_str().to_owned())
+                        })
+                        .flatten();
                     self.result = Some(SourceRef {
                         seq,
                         field: FactField::ToolValue,
@@ -139,6 +150,14 @@ impl ToolState {
             self.named_seq = seq;
         }
     }
+    /// Navigation hint from a successful result paired with its exact delegation intent.
+    /// Opening the hint still requires authorization by the external conversation owner.
+    pub fn external_conversation(&self) -> Option<&str> {
+        (self.name.as_deref() == Some(rsi_acp_protocol::EXTERNAL_AGENT_TOOL_NAME)
+            && self.intent_present)
+            .then_some(self.external_candidate.as_deref())
+            .flatten()
+    }
     /// Shared semantic title; renderers still apply their own text safety rules.
     pub fn title(&self) -> String {
         let status = match self.phase {
@@ -157,6 +176,7 @@ impl ToolState {
     /// Heap capacities retained in addition to this value's inline size.
     pub fn owned_bytes(&self) -> usize {
         self.key.capacity()
+            + self.external_candidate.as_ref().map_or(0, String::capacity)
             + self.name.as_ref().map_or(0, String::capacity)
             + self.argument_summary.as_ref().map_or(0, String::capacity)
             + self

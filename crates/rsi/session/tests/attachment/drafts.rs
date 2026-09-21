@@ -1,6 +1,36 @@
 use super::*;
 use rsi_session_protocol::SessionIngress as _;
 
+#[tokio::test]
+async fn explicit_release_rejects_construction_and_expires_escaped_draft_handles() {
+    use rsi_session_protocol::{DraftRelease, SessionDraftControl as _};
+    let directory = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(true);
+    let service = service(directory.path(), preparation.clone());
+    let input = request(directory.path(), "explicit-release");
+    let creating = tokio::spawn({
+        let service = service.clone();
+        let input = input.clone();
+        async move { service.create(input).await }
+    });
+    preparation.entered.acquire().await.unwrap().forget();
+    assert_eq!(service.release_draft(&input.session_id), DraftRelease::Busy);
+    preparation.release.as_ref().unwrap().add_permits(1);
+    let handle = creating.await.unwrap().unwrap();
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        service.release_draft(&input.session_id),
+        DraftRelease::Released
+    );
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
+    assert!(handle.header().await.is_err());
+    assert_eq!(
+        service.release_draft(&input.session_id),
+        DraftRelease::NotDraft
+    );
+    service.stop().await.unwrap();
+}
+
 fn device(byte: u8) -> rsi_api_protocol::CallOrigin {
     rsi_api_protocol::CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
         id: rsi_api_protocol::DeviceId::from_bytes([byte; 16]),

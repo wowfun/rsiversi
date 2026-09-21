@@ -93,7 +93,10 @@ impl PluginFactory for SessionFactory {
             .provide_local::<SessionIngressContract>(service.clone())?;
         let reads = plan
             .context()
-            .provide_local::<SessionReadContract>(service)?;
+            .provide_local::<SessionReadContract>(service.clone())?;
+        let drafts = plan
+            .context()
+            .provide_local::<rsi_session_protocol::SessionDraftControlContract>(service)?;
         plan.defer(
             "withdraw Session",
             Box::new(move || {
@@ -101,6 +104,7 @@ impl PluginFactory for SessionFactory {
                     drop(supply);
                     drop(ingress);
                     drop(reads);
+                    drop(drafts);
                     Ok(())
                 })
             }),

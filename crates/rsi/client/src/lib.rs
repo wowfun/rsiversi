@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod command_submission;
+mod external;
+pub use external::{ExternalBlock, ExternalCommand, ExternalController, ExternalView};
 mod controller;
 pub use command_submission::{CommandSubmission, CommandSubmissionView};
 mod lifetime;

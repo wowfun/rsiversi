@@ -4533,6 +4533,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-acp-agent"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-acp",
+ "rsi-acp-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-application",
+ "rsi-approval-protocol",
+ "rsi-meta",
+ "rsi-serve",
+ "rsi-session-protocol",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-acp-api"
 version = "0.0.1"
 dependencies = [
@@ -5554,6 +5580,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-acp-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -5681,6 +5708,7 @@ dependencies = [
 name = "rsi-conversation"
 version = "0.0.1"
 dependencies = [
+ "rsi-acp-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",

@@ -1,5 +1,25 @@
 # rsi-session-protocol
 
+`SessionService::activity` reads only the current generation's first 64 resident
+identities and its 64 most recently opened/created identities, deduplicated. It
+never discovers historical sessions, prepares a generation or retains a Session
+handle. Results carry exact pending approval/question identities, a durable Fact
+watermark and current-owner running evidence. A durable open Turn without that
+evidence is `Unknown`; a closed durable cut is `Idle`, not proof that all external
+effects settled. Missing unpublished drafts are omitted. Truncation is explicit.
+Collection admits two callers, has a 30-second deadline and reserves the existing
+bounded interaction payload budget before reading brokers. At most 32 interaction
+identities per Session survive into the returned metadata.
+The union therefore contains at most 128 identities. The current adapter performs
+one sequential, single-row open-Turn Store read per selected identity under that
+shared deadline; this is a bounded activity view, not historical enumeration.
+
+`SessionDraftControl` is a Local-only lifetime capability. It explicitly expires
+one completed, inactive, unpublished draft and releases its generation pin.
+Missing or published drafts return NotDraft; construction or active operations
+return Busy. It neither deletes durable history nor cancels execution, and is
+not exported as a remote Session operation.
+
 Reference capture freezes a durable source Session's bounded conversation text
 for this target's actual Header before send. SessionInput::Reference carries the
 returned Agent-owned FrozenReference unchanged. Submit verifies the complete CAS

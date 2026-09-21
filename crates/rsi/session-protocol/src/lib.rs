@@ -21,7 +21,9 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod activity;
 mod evidence;
+pub use activity::{ActivityRequest, ActivityStatus, SessionActivity, SessionActivityPage};
 mod reads;
 /// Session-bound live terminal requests.
 pub mod terminal;
@@ -505,9 +507,36 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<bool>;
 }
 
+/// Exact outcome of explicit unpublished-draft retirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DraftRelease {
+    /// The unpublished generation was released.
+    Released,
+    /// The identity is absent or already durable.
+    NotDraft,
+    /// Draft creation or a scoped operation is still active.
+    Busy,
+}
+/// Local lifetime control without durable mutation or execution authority.
+pub trait SessionDraftControl: fmt::Debug + Send + Sync + 'static {
+    /// Expires one unpublished inactive draft and leaves durable Sessions unchanged.
+    fn release_draft(&self, session: &SessionId) -> DraftRelease;
+}
+/// Local lifetime authority for explicitly closing unpublished drafts.
+#[derive(Debug)]
+pub struct SessionDraftControlContract;
+impl rsi_meta_contract::LocalContract for SessionDraftControlContract {
+    const KEY: &'static str = "rsi.session.drafts";
+    type Service = dyn SessionDraftControl;
+}
+
 /// Transport-independent Session domain service.
 #[async_trait]
 pub trait SessionService: fmt::Debug + Send + Sync + 'static {
+    /// Reads bounded current-generation activity without discovering cold history.
+    async fn activity(&self) -> Result<SessionActivityPage> {
+        Err(SessionError::NotFound("Session activity owner".into()))
+    }
     /// Creates one unpublished draft handle after rejecting a durable identity collision.
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
     /// Resolves a live draft or attaches to one exact durable session from Store alone.

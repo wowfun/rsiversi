@@ -1,5 +1,16 @@
 # rsi-client
 
+`ExternalController` retains a detachable external conversation view over the
+Host capability. It owns one polling read, one non-queued control operation and a
+128-record / 1 MiB text window. History reads advance within the exact replay
+epoch; replacement discards the old projection. Detach cancels observation and
+drains local control waiters, without closing the Host-owned peer. Explicit Close
+is a separate action. Submit is sent once; an unknown response is displayed and
+never reconciled by resending. Missing connection observations disable control
+and display Unknown without rewriting journal evidence or claiming completion.
+Permission answers bind the displayed generation, request and exact option ID.
+All four standard option kinds remain visible; no answer creates a local grant.
+
 `SessionController::completion_catalog` assembles Session commands and human
 skills with one collision policy and diagnostic. Applications supply their own
 reserved command names and retain ownership of display limits and retry controls.
@@ -146,3 +157,12 @@ controller through ordinary Shell-owned terminal surfaces. The [Worker probe](..
 runs the same controller scope, submission-drain and acknowledged-cursor scenarios
 in Chromium and Firefox. Product Web rendering and real domain transport integration
 remain separate validation surfaces.
+
+External refresh publishes a revision only when the visible observation, history
+page or diagnostic changes. Terminal views request a UTF-8-safe bounded tail
+before cloning transcript text; the full bounded view remains available to GUI.
+
+External observation polls every 500 ms during activity and backs off unchanged
+idle observations to at most eight seconds. Local controls wake the observer.
+Detaching cancels controller waiters and drains local tasks promptly; mutations
+already admitted by the Host remain Host-owned and are never resent on detach.

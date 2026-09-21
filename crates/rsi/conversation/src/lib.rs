@@ -2,6 +2,10 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+mod conversation;
+pub use conversation::{
+    ConversationCapabilities, ConversationIdentity, ConversationSource, ExternalSource,
+};
 mod identity;
 mod index;
 mod media;

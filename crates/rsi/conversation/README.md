@@ -1,5 +1,19 @@
 # rsi-conversation
 
+Tool presentation retains at most one bounded external conversation identity from
+a successful result. It exposes that navigation hint only when the exact matched
+intent names `external_agent`; an isolated result or another Tool cannot supply
+the affordance. Backfilling the intent can reveal the same hint without changing
+result provenance. This is a navigation hint, not execution or permission
+authority: the Host revalidates the conversation when a human opens it.
+
+`ConversationIdentity` distinguishes durable native Sessions from locally observed
+external conversations. Their identifiers, source kinds and capabilities never
+convert implicitly. External sources bind the local conversation, replay epoch,
+sequence and record kind; they are not Agent Facts. Native controllers retain
+native Goal and preset authority, while external controllers expose only the
+remote capabilities actually negotiated and local observation reads.
+
 `RequestPresentation` folds one effect's partial lifecycle for bounded history
 windows. It preserves the prepared model/effort, reported usage, elapsed time and
 failure independently of event arrival order. It never contributes usage totals.

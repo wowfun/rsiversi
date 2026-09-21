@@ -142,3 +142,9 @@ may omit optional capabilities, as with other embedded/test service assemblies;
 without `with_terminals`, terminal requests return unavailable. This constructor
 is not an alternative plugin dependency declaration. Terminal authority is
 Session-wide for authorized single-user clients, not a per-pane shell ACL.
+
+Activity caches at most 128 durable watermark/open-Turn pairs under the Kernel
+commit revision captured before the read. An unchanged revision avoids Store
+reads without allocating Session observers or generation pins. Providers without
+a revision fall back to fresh reads. Broker requests and resident running state
+are always sampled separately.

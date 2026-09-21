@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

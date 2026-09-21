@@ -99,3 +99,41 @@ fn semantic_identity_kinds_and_validated_output_references_remain_distinct() {
     }
     assert!(OutputRef::parse(&"1".repeat(32)).is_some());
 }
+
+#[test]
+fn delegation_navigation_requires_exact_intent_and_successful_bounded_result() {
+    let intent = |owner, name: &str| {
+        let mut body = fact(4, "intent", owner).body().clone();
+        if let SessionFactBody::ToolIntent { name: stored, .. } = &mut body {
+            *stored = name.into();
+        }
+        SessionFact::new(4, 1, body).unwrap()
+    };
+    let result = |conversation: &str, is_error| {
+        let mut body = fact(6, "result", "owner").body().clone();
+        if let SessionFactBody::ToolResult { result, .. } = &mut body {
+            *result =
+                ToolResult::new(json!({"conversation": conversation}), vec![], is_error).unwrap();
+        }
+        SessionFact::new(6, 1, body).unwrap()
+    };
+    let mut state = ToolState::from_fact(&result("external_exact", false)).unwrap();
+    assert_eq!(state.external_conversation(), None);
+    assert!(!state.observe(&intent("foreign", "external_agent")));
+    assert_eq!(state.external_conversation(), None);
+    assert!(state.observe(&intent("owner", "external_agent")));
+    assert_eq!(state.external_conversation(), Some("external_exact"));
+    assert_eq!(state.phase, ToolPhase::Settled(ToolOutcome::Completed));
+    for (id, failed, name) in [
+        ("external_exact", true, "external_agent"),
+        ("external_exact", false, "bash"),
+        ("../../private", false, "external_agent"),
+        ("", false, "external_agent"),
+        (&"x".repeat(1024 * 1024), false, "external_agent"),
+    ] {
+        let mut state = ToolState::from_fact(&intent("owner", name)).unwrap();
+        state.observe(&result(id, failed));
+        assert_eq!(state.external_conversation(), None);
+        assert!(state.owned_bytes() < 2048);
+    }
+}

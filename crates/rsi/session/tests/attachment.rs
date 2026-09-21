@@ -47,6 +47,8 @@ use tokio_util::sync::CancellationToken;
 #[path = "attachment/drafts.rs"]
 mod drafts;
 
+#[path = "attachment/activity.rs"]
+mod activity;
 #[path = "attachment/commands.rs"]
 mod commands;
 

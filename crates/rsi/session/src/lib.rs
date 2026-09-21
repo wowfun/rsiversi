@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
+mod activity;
 mod commands;
 mod drafts;
 mod goal;
@@ -50,6 +51,7 @@ use rsi_session_protocol::{
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    activity: Arc<activity::Managed>,
     terminals: Option<Arc<terminal::Terminals>>,
     resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
     references: Option<Arc<rsi_agent_references::References>>,
@@ -131,6 +133,7 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            activity: Arc::new(activity::Managed::default()),
             terminals: None,
             resources: None,
             references: None,
@@ -196,6 +199,12 @@ impl LocalSessionService {
         state: HandleState,
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
+        self.activity.opened(
+            state
+                .header()
+                .expect("new handle has a Header")
+                .session_id(),
+        );
         Arc::new(LocalSessionHandle {
             terminals: self.terminals.clone(),
             references: self.references.clone(),
@@ -318,8 +327,17 @@ impl LocalSessionService {
     }
 }
 
+impl rsi_session_protocol::SessionDraftControl for LocalSessionService {
+    fn release_draft(&self, session: &SessionId) -> rsi_session_protocol::DraftRelease {
+        self.drafts.release(session)
+    }
+}
+
 #[async_trait]
 impl SessionService for LocalSessionService {
+    async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
+        self.collect_activity().await
+    }
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
         self.drafts.accepting()?;
         self.drafts

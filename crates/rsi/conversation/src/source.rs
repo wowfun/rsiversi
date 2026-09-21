@@ -138,7 +138,7 @@ fn order(field: FactField) -> (u8, u16, u8) {
         FactField::ImageOutput => (12, 0, 0),
     }
 }
-mod decimal {
+pub(crate) mod decimal {
     use serde::{Deserialize, Deserializer, Serializer};
     #[allow(clippy::trivially_copy_pass_by_ref)] // Serde field hooks receive a borrowed field.
     pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
