@@ -99,3 +99,6 @@ four.
 Host Profile patching replaces the complete executor configuration and is the
 standard product's user-facing override. The standard product registers those
 factories and composes the fragment into its one shared local Host.
+
+`SessionAgentConfig::with_execution_observation` explicitly enables the Executor
+observer dependency; the standalone Session fragment defaults to no observation.

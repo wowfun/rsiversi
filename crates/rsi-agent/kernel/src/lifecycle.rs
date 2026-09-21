@@ -121,6 +121,7 @@ impl AgentKernel {
                 clock,
                 state: Mutex::new(KernelState {
                     accepting: true,
+                    controlled_work: controlled_work::Registry::default(),
                     sessions: BTreeMap::new(),
                     loading_sessions: BTreeMap::new(),
                     fresh_reservations: BTreeSet::new(),
@@ -918,7 +919,7 @@ impl AgentKernel {
         let composition = self
             .inner
             .composition
-            .pin(header.agent_preset_id(), Some(&seed))
+            .pin_session(header, Some(&seed))
             .await
             .map_err(turn_composition_error)?;
         Ok(composition)

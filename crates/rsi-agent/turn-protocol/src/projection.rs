@@ -26,9 +26,37 @@ pub enum ResidentComposition {
 /// Coalesced requery hints with no durable payload or execution capability.
 pub type SessionProjectionChanges = std::pin::Pin<Box<dyn futures_util::Stream<Item = ()> + Send>>;
 
+/// A metadata-only observation of one currently retained Kernel Session.
+#[derive(Clone, Debug)]
+pub struct ResidentActivity {
+    /// Exact resident identity.
+    pub session: SessionId,
+    /// Current nonterminal Turn ownership, independent of durable history.
+    pub running: bool,
+}
+/// Bounded instantaneous roster; it confers no execution or retention authority.
+#[derive(Clone, Debug)]
+pub struct ResidentActivityPage {
+    /// At most 64 rows in lexical Session order.
+    pub entries: Vec<ResidentActivity>,
+    /// More resident identities exist beyond this page.
+    pub has_more: bool,
+}
+
 /// Read-only generation selection and complete derived snapshot capture.
 #[async_trait]
 pub trait SessionProjections: fmt::Debug + Send + Sync + 'static {
+    /// Cheap durable-commit revision, without observers or pins; None disables caching.
+    fn activity_revision(&self) -> Option<u64> {
+        None
+    }
+
+    /// Reads the first 64 resident identities without Store I/O or generation pins.
+    fn resident_activity(&self) -> crate::Result<ResidentActivityPage> {
+        Err(crate::TurnError::Invalid(
+            "resident activity is unavailable".into(),
+        ))
+    }
     /// Peeks at residency without Store reads, activation, preparation or pinning.
     fn resident_composition(&self, session_id: &SessionId) -> crate::Result<ResidentComposition>;
     /// Subscribes before capture; includes future publication and ends on retirement.

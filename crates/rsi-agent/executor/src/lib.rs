@@ -6,7 +6,9 @@
 
 mod checkpoint;
 mod compaction;
+mod controlled_work;
 mod jobs;
+mod observation;
 
 use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 
@@ -135,6 +137,9 @@ impl ToolLaneParkingService for ExecutorLaneParking {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
+    /// Require and await the explicitly composed execution observer.
+    #[serde(default)]
+    pub observe_execution: bool,
     /// Exact registration identity, unique in one Kernel generation.
     pub executor_id: String,
     /// Maximum turns active across distinct Sessions.
@@ -231,6 +236,7 @@ impl ExecutorConfig {
 
 #[derive(Debug)]
 struct Driver {
+    observer: Option<Arc<dyn rsi_agent_turn_protocol::ExecutionObserver>>,
     evidence: Mutex<evidence::EvidenceCache>,
     turns: Arc<dyn TurnExecution>,
     finalization: Arc<dyn TurnFinalization>,
@@ -241,14 +247,17 @@ struct Driver {
     sandbox: Arc<dyn Sandbox>,
     jobs: Arc<dyn Jobs>,
     active_tools: Mutex<BTreeMap<(SessionId, TurnId), BTreeMap<ToolResultIdentity, TrackedTool>>>,
+    controlled_work: Mutex<BTreeMap<(SessionId, TurnId), Arc<controlled_work::Tracker>>>,
     retirement_tasks: Mutex<Vec<JoinHandle<()>>>,
+    observations: observation::Observations,
     checkpoints: Arc<CheckpointScheduler>,
     config: ExecutorConfig,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct TrackedTool {
     composition: AgentCompositionPin,
+    settlement: Option<controlled_work::Guard>,
 }
 
 struct PreparedToolEffect {
@@ -573,17 +582,21 @@ impl PluginFactory for ExecutorFactory {
             .validate()
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
         let retained = executor_config_retained_bytes(&config)?;
-        Ok(
-            PreparedActivation::with_state(desired.clone(), config, retained)
-                .requiring_local::<TurnExecutionContract>()
-                .requiring_local::<TurnFinalizationContract>()
-                .requiring_local::<LanguageCallContract>()
-                .requiring_local::<ImageCallContract>()
-                .requiring_local::<MediaContract>()
-                .requiring_local::<ApprovalContract>()
-                .requiring_local::<SandboxContract>()
-                .requiring_local::<JobsContract>(),
-        )
+        let observe = config.observe_execution;
+        let prepared = PreparedActivation::with_state(desired.clone(), config, retained)
+            .requiring_local::<TurnExecutionContract>()
+            .requiring_local::<TurnFinalizationContract>()
+            .requiring_local::<LanguageCallContract>()
+            .requiring_local::<ImageCallContract>()
+            .requiring_local::<MediaContract>()
+            .requiring_local::<ApprovalContract>()
+            .requiring_local::<SandboxContract>()
+            .requiring_local::<JobsContract>();
+        Ok(if observe {
+            prepared.requiring_local::<rsi_agent_turn_protocol::ExecutionObserverContract>()
+        } else {
+            prepared
+        })
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -602,6 +615,11 @@ impl PluginFactory for ExecutorFactory {
         let checkpoint_turns = Arc::clone(&turns);
         let checkpoints = Arc::new(CheckpointScheduler::new());
         let driver = Arc::new(Driver {
+            observer: if config.observe_execution {
+                Some(plan.local::<rsi_agent_turn_protocol::ExecutionObserverContract>()?)
+            } else {
+                None
+            },
             evidence: Mutex::new(evidence::EvidenceCache::default()),
             turns,
             finalization,
@@ -612,7 +630,9 @@ impl PluginFactory for ExecutorFactory {
             sandbox,
             jobs,
             active_tools: Mutex::new(BTreeMap::new()),
+            controlled_work: Mutex::new(BTreeMap::new()),
             retirement_tasks: Mutex::new(Vec::new()),
+            observations: observation::Observations::default(),
             checkpoints: Arc::clone(&checkpoints),
             config,
         });

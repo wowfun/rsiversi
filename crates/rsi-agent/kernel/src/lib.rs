@@ -351,6 +351,7 @@ struct SubmissionAdmissionLease {
 
 struct KernelState {
     accepting: bool,
+    controlled_work: controlled_work::Registry,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     loading_sessions: BTreeMap<SessionId, Arc<SessionLoad>>,
     fresh_reservations: BTreeSet<SessionId>,
@@ -806,6 +807,7 @@ mod admission;
 mod commands;
 mod continuation;
 mod contributions;
+mod controlled_work;
 mod domains;
 mod elapsed;
 mod ending;

@@ -1,9 +1,136 @@
 use super::*;
 
 impl Driver {
-    pub(super) async fn run_claim(&self, claim: TurnClaim, stop: &CancellationToken) {
-        let Some((job_scope, _job_status)) = self.prepare_jobs(&claim).await else {
+    pub(super) async fn run_claim(
+        &self,
+        claim: TurnClaim,
+        stop: &CancellationToken,
+        observation_slot: Option<OwnedSemaphorePermit>,
+    ) {
+        let (tracker, observation) = controlled_work::Tracker::new();
+        let guard = tracker.guard();
+        if self
+            .turns
+            .publish_controlled_work(&claim, observation.clone())
+            .is_err()
+        {
+            // A predecessor may still be settling. No execution was admitted and
+            // a registry conflict is not a durable failure of the Turn.
+            tokio::select! { biased;
+                () = stop.cancelled() => {},
+                () = tokio::time::sleep(Duration::from_millis(25)) => {},
+            }
             let _ignored = self.turns.release(&claim);
+            return;
+        }
+        let key = (claim.session_id().clone(), claim.turn_id().clone());
+        self.controlled_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), tracker);
+        let deadline = tokio::time::Instant::now() + observation::OBSERVATION_WAIT;
+        let preparation_stop = stop.child_token();
+        let preparation_guard = preparation_stop.clone().drop_guard();
+        let recovered =
+            self.observer.is_some() && self.observation_recovered(&claim, stop, deadline).await;
+        let start = rsi_agent_turn_protocol::ExecutionObservationStart {
+            header: claim.header().clone(),
+            turn: claim.turn_id().clone(),
+            claim: claim.claim_id(),
+            accepted_seq: claim.accepted_seq(),
+            live_seq: claim.live_seq(),
+            recovered,
+        };
+        let admission = if let Some(observer) = &self.observer {
+            tokio::select! { biased;
+                () = stop.cancelled() => Err("observation admission cancelled".to_owned()),
+                result = tokio::time::timeout_at(deadline, observer.observe(start, preparation_stop.clone())) =>
+                    result.unwrap_or_else(|_| Err("observation admission deadline elapsed".into())).map(Some),
+            }
+        } else {
+            Ok(None)
+        };
+        let interval = match admission {
+            Ok(interval) => interval,
+            Err(error) => {
+                preparation_stop.cancel();
+                let _ = publish_terminal(
+                    &*self.turns,
+                    &self.config,
+                    &claim,
+                    failure_outcome("observation.admission", bounded(&error)),
+                )
+                .await;
+                self.controlled_work
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+                drop(guard);
+                let _ignored = self.turns.release(&claim);
+                return;
+            }
+        };
+        let began = match &interval {
+            Some(interval) => observation::begin(interval, stop, deadline).await,
+            None => true,
+        };
+        drop(preparation_guard);
+        self.run_observed_claim(claim.clone(), stop).await;
+        // Only observation ownership is dropped; Tools retains uncertain effects.
+        let unconfirmed = self
+            .active_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        drop(unconfirmed);
+        self.controlled_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        guard.confirm();
+        let _ignored = self.turns.release(&claim);
+        if let Some(interval) = interval {
+            self.observations.finish(
+                interval,
+                began,
+                observation,
+                stop.clone(),
+                observation_slot.expect("observed claims reserve an interval slot"),
+            );
+        }
+    }
+
+    async fn observation_recovered(
+        &self,
+        claim: &TurnClaim,
+        stop: &CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        let reading = tokio::time::timeout_at(
+            deadline,
+            self.turns.read_facts(claim, claim.accepted_seq(), 3),
+        );
+        let page = tokio::select! { biased;
+            () = stop.cancelled() => None,
+            result = reading => result.ok().and_then(std::result::Result::ok),
+        };
+        match page {
+            Some(page) => {
+                page.facts.len() > 2
+                    || page.facts.iter().any(|fact| {
+                        !matches!(
+                            fact.body(),
+                            SessionFactBody::StepStarted { .. }
+                                | SessionFactBody::InputMessageEntered { .. }
+                        )
+                    })
+            }
+            None => true,
+        }
+    }
+
+    async fn run_observed_claim(&self, claim: TurnClaim, stop: &CancellationToken) {
+        let Some((job_scope, _job_status)) = self.prepare_jobs(&claim).await else {
             return;
         };
         let job_scope = Some(job_scope);
@@ -12,7 +139,6 @@ impl Driver {
             Err(error) => {
                 self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
                     .await;
-                let _ignored = self.turns.release(&claim);
                 return;
             }
         };
@@ -23,7 +149,6 @@ impl Driver {
             Err(error) => {
                 self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
                     .await;
-                let _ignored = self.turns.release(&claim);
                 return;
             }
         };
@@ -49,7 +174,6 @@ impl Driver {
                 deadline_task.abort();
                 self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
                     .await;
-                let _ignored = self.turns.release(&claim);
                 return;
             }
         };
@@ -81,12 +205,10 @@ impl Driver {
                 self.request_checkpoint(&claim, &composition);
                 self.retire_tracked_tools(&claim, stop);
             }
-            let _ignored = self.turns.release(&claim);
             return;
         }
         self.settle_drive(&claim, &composition, job_scope.as_ref(), drive, stop)
             .await;
-        let _ignored = self.turns.release(&claim);
     }
 
     pub(super) async fn claim_next(
@@ -1381,25 +1503,53 @@ impl Driver {
         composition: AgentCompositionPin,
         identity: ToolResultIdentity,
     ) {
+        let key = (claim.session_id().clone(), claim.turn_id().clone());
+        let tracker = self
+            .controlled_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        let mut settlement = tracker.as_ref().map(controlled_work::Tracker::guard);
         self.active_tools
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry((claim.session_id().clone(), claim.turn_id().clone()))
+            .entry(key)
             .or_default()
-            .insert(identity, TrackedTool { composition });
+            .entry(identity)
+            .or_insert_with(|| TrackedTool {
+                composition,
+                settlement: settlement.take(),
+            });
+        // An existing identity already owns its guard. Discarding this unused,
+        // confirmed reservation must not mark that work as lost.
+        if let Some(unused) = settlement {
+            unused.confirm();
+        }
     }
 
     pub(super) fn clear_tracked_tool(&self, claim: &TurnClaim, identity: &ToolResultIdentity) {
         let key = (claim.session_id().clone(), claim.turn_id().clone());
-        let mut active = self
-            .active_tools
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(tools) = active.get_mut(&key) {
-            tools.remove(identity);
-            if tools.is_empty() {
+        let tracked = {
+            let mut active = self
+                .active_tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let tracked = active
+                .get_mut(&key)
+                .and_then(|tools| tools.remove(identity));
+            if active
+                .get(&key)
+                .is_some_and(std::collections::BTreeMap::is_empty)
+            {
                 active.remove(&key);
             }
+            tracked
+        };
+        if let Some(tracked) = tracked
+            && let Some(guard) = tracked.settlement
+        {
+            guard.confirm();
         }
     }
 
@@ -1414,6 +1564,7 @@ impl Driver {
         drop(active);
         for (identity, tracked) in tracked {
             let composition = tracked.composition;
+            let settlement_guard = tracked.settlement;
             let tools = composition.tools();
             let stop = stop.clone();
             let wait = self.config.retained_tool_wait();
@@ -1434,6 +1585,9 @@ impl Driver {
                     ))
                 ) {
                     let _ignored = tools.commit(&identity);
+                    if let Some(guard) = settlement_guard {
+                        guard.confirm();
+                    }
                 }
             });
             self.retirement_tasks
@@ -1463,6 +1617,7 @@ impl Driver {
         for task in tasks {
             let _ignored = task.await;
         }
+        self.observations.close().await;
     }
 
     #[allow(clippy::too_many_arguments)] // Start binds one prepared effect to its durable identity and exact turn-scoped authorities.
@@ -1704,12 +1859,21 @@ impl Driver {
             turn_id: claim.turn_id().clone(),
             job_scope: job_scope.cloned(),
         };
-        match tokio::time::timeout(
+        let finalized = tokio::time::timeout(
             self.config.finalization_wait(),
             self.finalization.finalize(&context),
         )
-        .await
-        {
+        .await;
+        let tracker = self
+            .controlled_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(claim.session_id().clone(), claim.turn_id().clone()))
+            .cloned();
+        if let Some(tracker) = tracker {
+            tracker.finalized(matches!(&finalized, Ok(Ok(_))));
+        }
+        match finalized {
             Ok(Ok(report)) => match report.completion_blocker() {
                 Some(blocker) => {
                     apply_finalization_failure(outcome, blocker.code(), blocker.message(), false)

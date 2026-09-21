@@ -1,5 +1,43 @@
 # rsi-agent-turn-protocol
 
+`ExecutionObserver` is an optional, explicitly composed effect-interval observer.
+It asynchronously admits an interval bound to the exact claim, then Executor awaits
+its `begin` before entering any effect owner, including Job preparation and
+finalization. `end` receives both the baseline completion result and the separate
+controlled-work status after the claim driver and retained Tools settle. Initial
+history inspection, admission and begin share one 30-second deadline. Admission
+failure prevents effects; incomplete history or baseline evidence remains partial.
+Settlement wait and end share a separate 30-second deadline after drive completion.
+Final observation runs outside the execution lane. The Executor reserves one of
+256 observation slots before taking a lane and retains it through end completion;
+capacity backpressures new claims without accumulating waiting observation tasks.
+A timeout cancels its
+stage token; Executor retirement also cancels stage waits without upgrading
+Running work to Settled. Providers retain dispatched resources until actual completion.
+Observer futures must yield cooperatively and never perform blocking I/O while
+polled; deadlines cannot preempt blocking safe-Rust plugin code.
+Observation never changes durable Turn outcome or gives an observer claim mutation
+authority. An uncompleted baseline or unconfirmed cleanup is explicitly partial.
+The contract owns ordering only; Git, summaries, storage and UI belong to callers.
+
+`SessionProjections::resident_activity` is an instantaneous, read-only lexical
+page of at most 64 resident identities and their nonterminal-work flags. It does
+not read Store, resolve generations, pin sessions or acquire execution authority.
+`has_more` explicitly reports an incomplete roster. A durable open Turn without
+a current resident is not evidence of running work.
+
+`TurnService::controlled_work` reads process-local Executor settlement evidence
+for an exact Session/Turn. `Running` includes the claim drive and retained Tool
+cleanup; `Settled` requires successful finalization and settlement of every
+tracked Tool. `Unsettled` records loss of that proof (deadline, cancellation of
+cleanup, or provider loss). None means no retained observation, including cold
+history; neither None nor a durable terminal implies settlement. Observations
+carry no execution authority. Kernel authenticates publication against the
+current claim and retains at most 1024 observations, evicting only non-running
+entries. Existing observers retain their exact generation across eviction or
+replacement. Consumers impose their own wait deadline and must not interpret
+an unknown or unsettled result as safe completion of controlled work.
+
 `SessionProjections::resident_composition` only peeks at the current resident
 generation. It does not read a cold Store, await a load or invoke composition
 resolution. `NotResident` and `Loading` are explicit observations. This operation
@@ -256,3 +294,8 @@ Facts, domain values or execution authority. They share the Kernel observer
 count bound, terminate on shutdown, and release their registry entry on final
 drop. Consumers requery a complete snapshot and compare both durable cursors;
 duplicate hints never establish progress by themselves.
+
+SessionProjections may expose an optional process-local durable activity revision
+without Store I/O, observer slots or generation retention. It changes after each
+Kernel commit; consumers capture it before reading durable metadata. An unavailable
+or exhausted revision disables caching, and it conveys no authorization.

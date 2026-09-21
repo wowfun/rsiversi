@@ -75,6 +75,64 @@ impl TurnJobStatusSource for Source {
 }
 
 #[tokio::test]
+async fn controlled_work_publication_is_claim_bound_and_old_observers_keep_their_generation() {
+    use rsi_agent_turn_protocol::{ControlledWork, ControlledWorkStatus};
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let workers = kernel.start_workers();
+    let submitted = submit(&kernel, "work-observation", "work").await;
+    let registration = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let (source, reporter) = ControlledWork::new();
+    kernel
+        .publish_controlled_work(&claim, source.clone())
+        .unwrap();
+    assert!(
+        kernel
+            .publish_controlled_work(&claim, source.clone())
+            .is_err()
+    );
+    let old = kernel
+        .controlled_work(&submitted.session_id, &submitted.turn_id)
+        .unwrap()
+        .unwrap();
+    kernel.release(&claim).unwrap();
+    assert!(matches!(
+        kernel.publish_controlled_work(&claim, source),
+        Err(TurnError::StaleClaim)
+    ));
+    let replacement = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let (next, next_reporter) = ControlledWork::new();
+    assert!(
+        kernel
+            .publish_controlled_work(&replacement, next.clone())
+            .is_err()
+    );
+    drop(reporter);
+    assert_eq!(old.status(), ControlledWorkStatus::Unsettled);
+    kernel.publish_controlled_work(&replacement, next).unwrap();
+    next_reporter.finish(true);
+    assert_eq!(
+        kernel
+            .controlled_work(&submitted.session_id, &submitted.turn_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        ControlledWorkStatus::Settled
+    );
+    assert_eq!(old.status(), ControlledWorkStatus::Unsettled);
+    drop(registration);
+    kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One scenario follows a cursor through byte truncation, retirement and replacement.
 async fn jobs_pages_are_byte_bounded_and_claim_scoped_without_reporting() {
     let kernel = kernel(Arc::new(MemoryStore::new())).await;

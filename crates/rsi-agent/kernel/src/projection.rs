@@ -37,6 +37,27 @@ fn select_generation(inner: &KernelInner, session_id: &SessionId) -> TurnResult<
 
 #[async_trait]
 impl SessionProjections for AgentKernel {
+    fn activity_revision(&self) -> Option<u64> {
+        self.inner.session_changes.revision()
+    }
+    fn resident_activity(&self) -> TurnResult<rsi_agent_turn_protocol::ResidentActivityPage> {
+        let state = lock_state(&self.inner);
+        if !state.accepting {
+            return Err(TurnError::ShuttingDown);
+        }
+        Ok(rsi_agent_turn_protocol::ResidentActivityPage {
+            entries: state
+                .sessions
+                .iter()
+                .take(64)
+                .map(|(id, session)| rsi_agent_turn_protocol::ResidentActivity {
+                    session: id.clone(),
+                    running: session.turns.values().any(|turn| turn.terminal.is_none()),
+                })
+                .collect(),
+            has_more: state.sessions.len() > 64,
+        })
+    }
     fn resident_composition(
         &self,
         session_id: &SessionId,

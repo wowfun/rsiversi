@@ -32,6 +32,15 @@ pub(super) async fn run_executor_pool(
                 break;
             }
         };
+        let observation_slot = if driver.observer.is_some() {
+            let Some(slot) = driver.observations.reserve(&stop).await else {
+                let _ignored = driver.turns.release(&claim);
+                break;
+            };
+            Some(slot)
+        } else {
+            None
+        };
         let permit = tokio::select! {
             () = stop.cancelled() => {
                 let _ignored = driver.turns.release(&claim);
@@ -52,9 +61,10 @@ pub(super) async fn run_executor_pool(
         let task_stop = stop.clone();
         let task_failure_stop = stop.clone();
         lanes.spawn(EXECUTOR_LANE_PARKING.scope(parking, async move {
-            let result = AssertUnwindSafe(task_driver.run_claim(claim, &task_stop))
-                .catch_unwind()
-                .await;
+            let result =
+                AssertUnwindSafe(task_driver.run_claim(claim, &task_stop, observation_slot))
+                    .catch_unwind()
+                    .await;
             lane_service.close();
             if result.is_ok() {
                 Ok(())
@@ -76,13 +86,18 @@ pub(super) async fn run_executor_pool(
         }
     }
     driver.abort_retirement_tasks().await;
+    if driver.observations.failed() {
+        failure.get_or_insert_with(|| "Agent execution observer task panicked".into());
+    }
     // All lanes have joined, so no effect can add another tracking pin. A lane
     // panic may bypass normal terminal retirement while this Driver stays alive.
-    driver
-        .active_tools
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
+    let abandoned = std::mem::take(
+        &mut *driver
+            .active_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    drop(abandoned);
     failure.map_or(Ok(()), Err)
 }
 

@@ -81,6 +81,7 @@ async fn settled_lane_reclaims_admission_from_a_retained_tool_extension() {
 #[test]
 fn prepared_executor_charge_includes_inline_and_dynamic_config_state() {
     let config = ExecutorConfig {
+        observe_execution: false,
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -728,6 +729,7 @@ async fn terminal_publication_delegates_durable_ending_to_kernel() {
         capture_tokens: None,
     };
     let config = ExecutorConfig {
+        observe_execution: false,
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -759,6 +761,7 @@ async fn terminal_publication_treats_kernel_shutdown_as_driver_stop() {
         capture_tokens: None,
     };
     let config = ExecutorConfig {
+        observe_execution: false,
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -798,6 +801,7 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
         capture_tokens: None,
     };
     let config = ExecutorConfig {
+        observe_execution: false,
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),

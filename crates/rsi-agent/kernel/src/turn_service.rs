@@ -3,6 +3,14 @@ use rsi_agent_session_protocol::MessageDelivery;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    fn controlled_work(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> TurnResult<Option<rsi_agent_turn_protocol::ControlledWork>> {
+        let state = lock_state(&self.inner);
+        Ok(state.controlled_work.get(session, turn))
+    }
     fn settlement_health(&self) -> SettlementHealth {
         self.inner
             .settlement_health
@@ -1442,7 +1450,7 @@ impl AgentKernel {
         let composition = self
             .inner
             .composition
-            .pin(child_header.agent_preset_id(), None)
+            .pin_session(&child_header, None)
             .await
             .map_err(turn_composition_error)?;
         let tool_names: std::collections::BTreeSet<_> = composition

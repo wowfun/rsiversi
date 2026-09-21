@@ -42,6 +42,8 @@ async fn elapsed_budget_bounds_a_provider_prepare_that_never_returns() {
 #[allow(clippy::too_many_lines)] // Keep admission, terminal eviction, retained settlement, and final generation release in one public scenario.
 async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     let stack = BaseStack::activate().await;
+    let (observer, observer_owner) = observation::install(&stack).await;
+    observer.release.cancel();
     let tools = Arc::clone(&stack.tool_registrar);
     let entered = Arc::new(Notify::new());
     let release = CancellationToken::new();
@@ -66,7 +68,11 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     let language_fiber = stack
         .activate_language("test.language.elapsed-tool", fixture)
         .await;
-    let executor_fiber = stack.activate_executor("executor-elapsed-tool").await;
+    let executor_fiber = stack
+        .activate_executor_with_config(
+            json!({"executor_id":"executor-elapsed-tool","observe_execution":true}),
+        )
+        .await;
     let budget = TurnBudget::new(50, 64, 256, 65_536, 67_108_864).unwrap();
     let fresh = stack.fresh(header_with_budget(budget)).await;
     let tool_runtime = stack.tool_runtime();
@@ -133,7 +139,34 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
         })
         .expect("durable ToolStarted identity");
 
+    let work = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap()
+        .controlled_work(&submitted.session_id, &submitted.turn_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        work.status(),
+        rsi_agent_turn_protocol::ControlledWorkStatus::Running,
+        "durable elapsed terminal precedes retained Tool settlement"
+    );
+
+    assert!(
+        observer.result.lock().unwrap().is_none(),
+        "end cannot precede retained Tool settlement"
+    );
     release.cancel();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            work.wait(CancellationToken::new())
+        )
+        .await
+        .unwrap(),
+        rsi_agent_turn_protocol::ControlledWorkStatus::Settled
+    );
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             if tool_runtime.query(&identity).unwrap() == RetainedToolResult::Absent {
@@ -152,9 +185,19 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     .await
     .expect("the retained Tool's final pin must release after settlement");
 
+    tokio::time::timeout(std::time::Duration::from_secs(2), observer.ended.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        observer.result.lock().unwrap().unwrap().controlled_work,
+        rsi_agent_turn_protocol::ControlledWorkStatus::Settled
+    );
+    assert!(executor_fiber.dispose().await.is_clean());
+    assert!(observer_owner.dispose().await.is_clean());
     drop(tool_lease);
     drop(tools);
-    stack.dispose(language_fiber, executor_fiber).await;
+    assert!(language_fiber.dispose().await.is_clean());
+    stack.dispose_services().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -494,12 +537,29 @@ async fn hanging_finalizer_becomes_a_durable_bounded_failure() {
         }))
         .await;
 
-    let (_, outcome) = stack.submit_and_wait("finish with a stuck finalizer").await;
+    let (submitted, outcome) = stack.submit_and_wait("finish with a stuck finalizer").await;
     entered.notified().await;
     assert!(matches!(
         outcome,
         TurnOutcome::Failed { code, .. } if code == "turn.finalization_timeout"
     ));
+    let observation = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap()
+        .controlled_work(&submitted.session_id, &submitted.turn_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            observation.wait(CancellationToken::new())
+        )
+        .await
+        .unwrap(),
+        rsi_agent_turn_protocol::ControlledWorkStatus::Unsettled
+    );
 
     drop(finalizer_lease);
     assert!(finalizer_owner.dispose().await.is_clean());

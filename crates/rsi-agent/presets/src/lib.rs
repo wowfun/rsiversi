@@ -60,6 +60,7 @@ pub struct SessionAgentConfig {
     store_root: PathBuf,
     executor_id: String,
     maximum_active_turns: usize,
+    observe_execution: bool,
 }
 
 impl SessionAgentConfig {
@@ -78,6 +79,7 @@ impl SessionAgentConfig {
             store_root,
             executor_id: SESSION_EXECUTOR_INSTANCE.to_owned(),
             maximum_active_turns: 1,
+            observe_execution: false,
         })
     }
 
@@ -103,6 +105,13 @@ impl SessionAgentConfig {
     #[must_use]
     pub const fn with_maximum_active_turns(mut self, maximum: usize) -> Self {
         self.maximum_active_turns = maximum;
+        self
+    }
+
+    /// Require an explicitly composed execution observer before dispatching effects.
+    #[must_use]
+    pub const fn with_execution_observation(mut self, enabled: bool) -> Self {
+        self.observe_execution = enabled;
         self
     }
 
@@ -135,6 +144,7 @@ pub fn session_fragment(config: &SessionAgentConfig) -> ProfileFragment {
                 json!({
                     "executor_id": config.executor_id,
                     "maximum_active_turns": config.maximum_active_turns,
+                    "observe_execution": config.observe_execution,
                 }),
             ),
         ],

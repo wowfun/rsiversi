@@ -29,6 +29,14 @@ async fn resident_manifest_peek_never_resolves_cold_or_replaces_a_retained_gener
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let calls = fixture.composition.calls.load(Ordering::SeqCst);
     fixture.composition.reject.store(true, Ordering::SeqCst);
+    assert!(
+        fixture
+            .kernel
+            .resident_activity()
+            .unwrap()
+            .entries
+            .is_empty()
+    );
     assert!(matches!(
         fixture
             .kernel
@@ -88,6 +96,11 @@ async fn resident_manifest_peek_never_resolves_cold_or_replaces_a_retained_gener
     assert_eq!(header.session_id(), &fixture.session_id);
     assert_eq!(captured.unwrap(), manifest);
     assert_eq!(source_digest, "c".repeat(64));
+    let activity = fixture.kernel.resident_activity().unwrap();
+    assert_eq!(activity.entries.len(), 1);
+    assert_eq!(activity.entries[0].session, fixture.session_id);
+    assert!(activity.entries[0].running);
+    assert!(!activity.has_more);
     assert_eq!(fixture.composition.calls.load(Ordering::SeqCst), calls);
     fixture.stop().await;
 }

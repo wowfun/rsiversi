@@ -1,7 +1,10 @@
 use super::*;
 
 #[derive(Clone, Default)]
-pub(super) struct SessionWatchHub(Arc<Mutex<BTreeMap<WatchKey, watch::Sender<u64>>>>);
+pub(super) struct SessionWatchHub(
+    Arc<Mutex<BTreeMap<WatchKey, watch::Sender<u64>>>>,
+    Arc<std::sync::atomic::AtomicU64>,
+);
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum WatchKey {
@@ -16,6 +19,11 @@ pub(super) struct SessionWatch {
 }
 
 impl SessionWatchHub {
+    pub(super) fn revision(&self) -> Option<u64> {
+        let revision = self.1.load(Ordering::Acquire);
+        (revision != u64::MAX).then_some(revision)
+    }
+
     fn subscribe(&self, key: WatchKey) -> SessionWatch {
         let receiver = self
             .0
@@ -40,6 +48,12 @@ impl SessionWatchHub {
     }
 
     fn notify(&self, key: &WatchKey) {
+        let _exhausted = self
+            .1
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            });
+
         if let Some(sender) = self
             .0
             .lock()
@@ -175,6 +189,19 @@ pub(super) fn terminal_boundary_record(
 mod tests {
     use super::*;
 
+    #[test]
+    fn activity_revision_needs_no_observers_and_exhaustion_disables_caching() {
+        let hub = SessionWatchHub::default();
+        assert_eq!(hub.revision(), Some(0));
+        hub.committed(&SessionId::new("activity").unwrap());
+        assert_eq!(hub.revision(), Some(1));
+        assert!(hub.0.lock().unwrap().is_empty());
+        hub.1.store(u64::MAX - 1, Ordering::Release);
+        hub.committed(&SessionId::new("activity").unwrap());
+        assert_eq!(hub.revision(), None);
+        hub.committed(&SessionId::new("activity").unwrap());
+        assert_eq!(hub.revision(), None);
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_last_watch_drops_leave_no_inactive_registry_entry() {
         let hub = SessionWatchHub::default();

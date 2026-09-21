@@ -1619,3 +1619,6 @@ mod tool_settlement;
 
 #[path = "end_to_end/structured.rs"]
 mod structured;
+
+#[path = "end_to_end/observation.rs"]
+mod observation;

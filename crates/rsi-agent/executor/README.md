@@ -1,5 +1,31 @@
 # rsi-agent-executor
 
+`observe_execution` defaults to false. When enabled, the exact injected
+`ExecutionObserver` is a required dependency. Executor awaits interval begin before
+Job preparation or other effects. After releasing its drive guard it transfers
+interval end to a bounded owned task, so observation no longer retains an execution
+lane. Admission failure
+fails the claim before effects; baseline/end failure does not rewrite the Turn
+outcome. The [observation contract](../turn-protocol/README.md) owns stage deadlines.
+Executor retirement cancels observation waits within its existing shutdown
+budget. It samples unfinished controlled work as Running, never Settled, and
+offers the end hook a cancellation-aware final poll. Observation slots cover
+preparation, drive and end; they are reserved before execution-lane admission.
+Shutdown joins all observation tasks after claim lanes, alongside retained-Tool cleanup.
+
+Tool tracking snapshots the claim's tracker before taking the active-Tool lock.
+Guard creation, confirmation and destruction run outside that map lock; registry
+and tracker locks are never nested on this path.
+
+The Executor publishes a claim-bound controlled-work observation before effects.
+Its main drive and each tracked Tool hold separate settlement guards. Returning
+from the drive closes only its guard; background retained-result cleanup keeps
+the observation Running. All guards must confirm settlement, and the existing
+finalizer snapshot must succeed, before Settled is visible. Dropped cleanup,
+finalizer failure and timeout yield Unsettled. This is process-local evidence,
+independent of terminal durability and optional checkpoint maintenance; it does
+not certify arbitrary work outside the registered effect owners.
+
 Request evidence is extracted from the single semantic LanguageRequest supplied
 to Prepare and the actual returned snapshot. Deduplication retains at most 64
 metadata entries across its sessions, never section bodies. Eviction leaves
@@ -209,3 +235,9 @@ After that attempt finishes, pending Step input enters normally and the next
 request captures the newest selection. Only `NotStarted`/`NotDispatched` errors
 allowed by the frozen retry policy can retry; a dispatched HTTP rejection is not
 made retryable by changing Session settings.
+
+A claim releases its scheduling lease only after withdrawing its local controlled-work
+tracker and dropping any unconfirmed Tool observation guards. These drops mark the
+old interval unsettled; they neither commit nor replay a retained Tool result. A
+transient controlled-work publication rejection releases the unstarted claim with
+bounded retry pacing and cannot publish a terminal context failure.

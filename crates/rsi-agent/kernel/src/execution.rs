@@ -2,6 +2,15 @@ use super::*;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    fn publish_controlled_work(
+        &self,
+        claim: &TurnClaim,
+        source: rsi_agent_turn_protocol::ControlledWork,
+    ) -> TurnResult<()> {
+        let mut state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        state.controlled_work.publish(claim, source)
+    }
     fn publish_job_status(
         &self,
         claim: &TurnClaim,

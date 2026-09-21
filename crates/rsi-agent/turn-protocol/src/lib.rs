@@ -21,6 +21,13 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 mod command;
+mod controlled_work;
+mod execution_observer;
+pub use controlled_work::{ControlledWork, ControlledWorkReporter, ControlledWorkStatus};
+pub use execution_observer::{
+    ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
+    ExecutionObserverContract,
+};
 mod job_preview;
 mod jobs;
 pub use job_preview::{
@@ -38,7 +45,8 @@ pub use continuation::{
 mod projection;
 mod resource;
 pub use projection::{
-    ResidentComposition, SessionProjectionChanges, SessionProjections, SessionProjectionsContract,
+    ResidentActivity, ResidentActivityPage, ResidentComposition, SessionProjectionChanges,
+    SessionProjections, SessionProjectionsContract,
 };
 pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;
@@ -555,6 +563,15 @@ pub type TurnObservation = Pin<Box<dyn Stream<Item = Result<TurnUpdate>> + Send 
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Reads retained process-local settlement evidence without loading history.
+    fn controlled_work(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> Result<Option<ControlledWork>> {
+        let _ = (session, turn);
+        Ok(None)
+    }
     /// Reads bounded settlement health without triggering Store I/O.
     fn settlement_health(&self) -> SettlementHealth {
         SettlementHealth::default()
@@ -1014,6 +1031,11 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Publishes one exact claim's read-only controlled-work observation.
+    fn publish_controlled_work(&self, claim: &TurnClaim, source: ControlledWork) -> Result<()> {
+        let _ = (claim, source);
+        Ok(())
+    }
     /// Publishes an optional read-only Jobs source for this exact claim.
     /// The Executor retains the strong owner; an unsupported provider exposes no view.
     fn publish_job_status(
