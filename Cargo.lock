@@ -5912,6 +5912,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-history"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-acp-protocol",
+ "rsi-agent-references",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-conversation",
+ "rsi-files-native-fs",
+ "rsi-history-api",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "rsi-workspace-protocol",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-history-api"
+version = "0.0.1"
+dependencies = [
+ "rsi-agent-session-protocol",
+ "rsi-api-protocol",
+ "rsi-conversation",
+ "rsi-workspace-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rsi-host"
 version = "0.0.1"
 dependencies = [

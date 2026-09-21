@@ -1,0 +1,41 @@
+[package]
+name = "rsi-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-agent-references = { path = "../../rsi-agent/references" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-conversation = { path = "../conversation" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-history-api = { path = "../history-api" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+rusqlite = { workspace = true, features = ["hooks"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+[dev-dependencies]
+rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread","test-util"] }
+[lints]
+workspace = true
