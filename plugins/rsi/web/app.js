@@ -189,8 +189,9 @@ async function makeWorker() {
       await current.authenticated;
       if (connection !== current || current.closing) return;
       try {
-        const frame = JSON.parse(data.view);
-        const presented = await presentFrame(frame, JSON.parse(data.assets), current);
+        const frame = typeof data.view === 'string' ? JSON.parse(data.view) : data.view;
+        const assets = typeof data.assets === 'string' ? JSON.parse(data.assets) : data.assets;
+        const presented = await presentFrame(frame, assets, current);
         if (!current.closing && connection === current) current.worker.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !presented?.accepted, renderer: presented?.renderer });
       } catch (error) { if (connection === current && !current.closing) failWorker(`View rendering failed: ${error.message}`, current); }
     } else if (data.kind === "reply") {

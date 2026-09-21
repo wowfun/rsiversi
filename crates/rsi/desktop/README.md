@@ -25,7 +25,24 @@ is granted. Startup composition, protocol admission and Runtime/event-loop
 lifetime each have one internal owner. A single view request and one pending frame are
 admitted. The shared 32-MiB frame bound remains authoritative. ACK names its exact
 frame; a 30-second missing ACK requests Application teardown. Ordinary requests
-have eight non-queued slots; ACK and disconnect have reserved admission.
+have eight non-queued slots; terminal reads have 32 and writes have eight.
+Connect and disconnect share one lifecycle slot. ACK and document-close signals
+use synchronous control paths. Transport classification controls budgets only;
+GUI owns terminal validation. The bounded classification parse runs before taking
+the Owner lock; GUI separately parses and validates the body during execution.
+The Owner lock still fences task registration against close, without covering
+JSON classification. HTTP 409 errors carry `code`, `message`,
+`notAdmitted` and `retryable`. Only a `busy` rejection before dispatch is
+retryable. `closed` and `invalid` are permanent rejections; `failed` means the
+operation has been polled and cannot authorize replay. A stop observed before
+the first operation poll returns `closed`; after that poll it returns `failed`,
+even if the operation has not yet produced a visible effect. Unknown or lost replies
+never establish non-admission.
+Frozen assets use a separate synchronous lookup/copy path with one copy at a
+time on the protocol callback thread; on Linux this is the WebKit main thread.
+This performs no disk I/O, but its bounded memcpy can delay that event loop.
+RPC saturation cannot reject an asset import. Closing fences new copies
+and joins an existing copy; response handoff holds no asset or owner lock.
 Request admission ends when the operation completes, before its response is handed
 to WebKit. A response consumer can immediately issue its next request without
 competing with the completed operation's permit.
@@ -36,6 +53,9 @@ The owner limits bound admitted logical work and pending frames; they are not
 RSS limits or a claim of zero-copy platform delivery.
 Renderer candidate and accepted graph leases remain distinct until an exact
 document ACK reports successful mount and awaited old-renderer disposal.
+Serialized renderer offers are retained by revision across frames and resync.
+Native frames enter the document as decoded objects without a stringify/parse
+round trip.
 
 Install Tokio before constructing Tauri, then run Tauri on the main thread.
 Exit requests prevent platform exit while the retained ApplicationLifetime future

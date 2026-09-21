@@ -29,6 +29,7 @@ struct Owner {
     failed: bool,
     assets: Option<Arc<crate::assets::Assets>>,
     asset_revision: Option<String>,
+    encoded_offer: Option<(String, String)>,
 }
 thread_local! { static OWNER: RefCell<Owner> = RefCell::new(Owner::default()); }
 
@@ -203,6 +204,7 @@ pub async fn connect(receipt: String, allow_loopback_http: bool) -> Result<Strin
         owner.connection = connection;
         owner.assets = assets;
         owner.asset_revision = None;
+        owner.encoded_offer = None;
         owner.config = Some(config);
         owner.revision = None;
     });
@@ -551,9 +553,19 @@ pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
         &JsValue::from_str(&app.frame_id().expect("encoded frame")),
         &JsValue::from_str(text),
     );
-    result.push(&JsValue::from_str(
-        &serde_json::to_string(&offer).map_err(failure)?,
-    ));
+    OWNER.with(|owner| -> Result<(), JsValue> {
+        let mut owner = owner.borrow_mut();
+        if owner.encoded_offer.as_ref().map(|(revision, _)| revision) != Some(&offer.revision) {
+            owner.encoded_offer = Some((
+                offer.revision.clone(),
+                serde_json::to_string(&offer).map_err(failure)?,
+            ));
+        }
+        result.push(&JsValue::from_str(
+            &owner.encoded_offer.as_ref().expect("encoded offer").1,
+        ));
+        Ok(())
+    })?;
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         owner.revision = Some(revision);
@@ -580,6 +592,7 @@ pub async fn disconnect(sign_out: bool) -> Result<JsValue, JsValue> {
         owner.app.take();
         owner.assets.take();
         owner.asset_revision.take();
+        owner.encoded_offer.take();
         (owner.running.take(), owner.config.take())
     });
     if let Some(running) = running {

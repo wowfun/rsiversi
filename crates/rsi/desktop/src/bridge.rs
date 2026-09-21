@@ -1,3 +1,4 @@
+use super::protocol::{Admission, NativeError};
 use rsi_api_http::AssetType;
 use rsi_api_http::HttpAssets;
 use rsi_application::ApplicationLifetime;
@@ -8,7 +9,6 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 type Result<T> = std::result::Result<T, String>;
@@ -21,7 +21,7 @@ struct Frames {
     pending: Option<BundleLease>,
     accepted: Option<BundleLease>,
     rejected: Option<String>,
-    offer: Option<serde_json::Value>,
+    offer: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -33,9 +33,8 @@ pub(crate) struct Bridge {
     pub failed: Arc<AtomicBool>,
     pub stop: CancellationToken,
     pub tasks: TaskTracker,
-    pub slots: Arc<Semaphore>,
-    pub frame_slot: Arc<Semaphore>,
-    pub control_slot: Arc<Semaphore>,
+    pub admission: Admission,
+    asset_delivery: Mutex<()>,
     close_attempt: Mutex<Option<CancellationToken>>,
     frames: Mutex<Frames>,
 }
@@ -55,9 +54,8 @@ impl Bridge {
             failed,
             stop: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            slots: Arc::new(Semaphore::new(8)),
-            frame_slot: Arc::new(Semaphore::new(1)),
-            control_slot: Arc::new(Semaphore::new(1)),
+            admission: Admission::default(),
+            asset_delivery: Mutex::new(()),
             close_attempt: Mutex::new(None),
             frames: Mutex::new(Frames::default()),
         }
@@ -65,8 +63,9 @@ impl Bridge {
     pub async fn close(&self) {
         self.cancel_document_close();
         self.stop.cancel();
-        self.slots.close();
-        self.frame_slot.close();
+        self.admission.close();
+        // Stop fences later copies; acquiring this lock joins any in-flight copy.
+        drop(self.asset_delivery.lock().expect("asset delivery poisoned"));
         self.tasks.close();
         self.tasks.wait().await;
         *self.frames.lock().expect("desktop frames poisoned") = Frames::default();
@@ -119,20 +118,18 @@ impl Bridge {
                 {
                     let candidate = self.assets.acquire(&asset_revision).map_err(error)?;
                     frames.offer = Some(
-                        serde_json::json!({"revision": candidate.revision(), "catalog": candidate.catalog()}),
+                        serde_json::to_vec(&serde_json::json!({"revision": candidate.revision(), "catalog": candidate.catalog()})).map_err(error)?,
                     );
                     frames.pending = Some(candidate);
                 }
                 let frame = self.app.next_frame(base.as_deref()).map_err(error)?;
                 let id = self.app.frame_id().ok_or("Frame identity is absent")?;
-                let offer =
-                    serde_json::to_vec(frames.offer.as_ref().ok_or("Renderer offer is absent")?)
-                        .map_err(error)?;
+                let offer = frames.offer.as_ref().ok_or("Renderer offer is absent")?;
                 let mut bytes = Vec::with_capacity(frame.len() + offer.len() + 32);
                 bytes.extend_from_slice(b"{\"view\":");
                 bytes.extend_from_slice(frame.as_bytes());
                 bytes.extend_from_slice(b",\"assets\":");
-                bytes.extend_from_slice(&offer);
+                bytes.extend_from_slice(offer);
                 bytes.push(b'}');
                 let ack = CancellationToken::new();
                 frames.awaiting = Some((id, ack.clone()));
@@ -195,12 +192,16 @@ impl Bridge {
         frames.awaiting.take().expect("checked ACK").1.cancel();
         Ok(())
     }
-    pub fn asset(&self, path: &str) -> Result<(Vec<u8>, &'static str)> {
+    pub fn asset(&self, path: &str) -> std::result::Result<(Vec<u8>, &'static str), NativeError> {
+        let _delivery = self.asset_delivery.lock().expect("asset delivery poisoned");
+        if self.stop.is_cancelled() {
+            return Err(NativeError::Closed);
+        }
         let asset = self
             .assets
             .get(path)
-            .map_err(error)?
-            .ok_or("Asset is unavailable")?;
+            .map_err(|cause| NativeError::Failed(error(cause)))?
+            .ok_or_else(|| NativeError::Invalid("Asset is unavailable".into()))?;
         let mime = match asset.kind {
             AssetType::Html => "text/html; charset=utf-8",
             AssetType::JavaScript => "text/javascript; charset=utf-8",

@@ -10,7 +10,19 @@ export class NativeDocument {
   private abort = new AbortController();
   private async request(path: string, body?: BodyInit): Promise<Response> {
     const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', body, signal: this.abort.signal });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) {
+      const source = await response.text();
+      let failure;
+      try { failure = JSON.parse(source); } catch { /* Unknown outcomes do not authorize replay. */ }
+      const known = failure && typeof failure.message === 'string' &&
+        ((failure.code === 'busy' && failure.notAdmitted === true && failure.retryable === true) ||
+         (['closed', 'invalid'].includes(failure.code) && failure.notAdmitted === true && failure.retryable === false) ||
+         (failure.code === 'failed' && failure.notAdmitted === false && failure.retryable === false));
+      throw Object.assign(new Error(known ? failure.message : 'Native request failed'), {
+        notAdmitted: known && failure.notAdmitted === true,
+        retryable: known && failure.retryable === true,
+      });
+    }
     return response;
   }
   postMessage(data: any): void {
@@ -42,7 +54,11 @@ export class NativeDocument {
             if (!this.closed) this.onmessage?.({ data: { kind: 'failed', error: String(error) } });
           });
         }
-      } catch (error) { if (!this.closed) this.onmessage?.({ data: { kind: 'reply', id: data.id, error: String(error) } }); }
+      } catch (error) {
+        if (!this.closed) this.onmessage?.({ data: { kind: 'reply', id: data.id, error: String(error),
+          notAdmitted: error instanceof Error && (error as any).notAdmitted === true,
+          retryable: error instanceof Error && (error as any).retryable === true } });
+      }
     })();
   }
   private async views(): Promise<void> {
@@ -50,7 +66,7 @@ export class NativeDocument {
       const frame = await (await this.request(`/_frame?${this.base ?? ''}`)).json();
       const settled = await new Promise<{ resync: boolean; renderer?: unknown }>(resolve => {
         this.waiting = { id: frame.view.frame_id, resolve };
-        this.onmessage?.({ data: { kind: 'view', view: JSON.stringify(frame.view), assets: JSON.stringify(frame.assets) } });
+        this.onmessage?.({ data: { kind: 'view', view: frame.view, assets: frame.assets } });
       });
       this.waiting = undefined;
       if (this.closed) return;
