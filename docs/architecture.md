@@ -64,6 +64,16 @@ URL policy, bounded retrieval and attributed source results. Their configuration
 and model adapters remain above generic Agent and Meta contracts; neither moves
 network policy into Kernel or Context.
 
+[`rsi-acp`](../crates/rsi-acp/README.md) owns bounded stable ACP wire validation,
+correlation and drain over explicitly supplied byte transports. Native Agent
+durability remains with Kernel; subprocess confinement and reaping remain with
+Sandbox and Process. External-agent observations do not become native Agent Facts.
+
+The optional [`rsi-lsp`](../crates/rsi-lsp/README.md) source addon owns bounded
+read-only language-server queries over Process, Sandbox and Files. Its Tool and
+the product's [language UI](../crates/rsi/lsp-ui/README.md) consume the same semantic
+results; the foundation addon does not depend on product clients or UI.
+
 The standard [`rsi`](../crates/rsi/README.md) product owns Base composition,
 applications, and the single local Service Host for one standard
 `HostPaths` identity. Its library owns product factories, product-owned Profile

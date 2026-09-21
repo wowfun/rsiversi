@@ -22,13 +22,31 @@ path = "../../../fixtures/rsi/addon-workbench/main.rs"
 name = "session-api-eval"
 path = "eval/session.rs"
 
+[[example]]
+name = "profile-leaf-probe"
+path = "../../../fixtures/rsi/profile-management/probe.rs"
+
 [dependencies]
+rsi-service-ui = { path = "../service-ui" }
+rsi-lsp = { path = "../../rsi-lsp/core" }
+rsi-lsp-ui = { path = "../lsp-ui" }
+rsi-workspace-review-ui = { path = "../workspace-review-ui" }
+rsi-acp = { path = "../../rsi-acp/core" }
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
+rsi-acp-host = { path = "../../rsi-acp/host" }
+rsi-acp-api = { path = "../../rsi-acp/api" }
+rsi-acp-tools = { path = "../../rsi-acp/tools" }
+rsi-acp-agent = { path = "../acp" }
 rsi-pty-protocol = { path = "../../rsi-pty/protocol" }
 rsi-pty = { path = "../../rsi-pty/core" }
 rsi-mcp = { path = "../../rsi-mcp/core" }
 rsi-retrieval = { path = "../../rsi-retrieval/core" }
 rsi-agent-references = { path = "../../rsi-agent/references" }
 rsi-workbench-ui = { path = "../workbench-ui" }
+rsi-workspace-review = { path = "../workspace-review" }
+rsi-workspace-review-api = { path = "../workspace-review-api" }
+rsi-history = { path = "../history" }
+rsi-history-api = { path = "../history-api" }
 rsi-navigation = { path = "../navigation" }
 rsi-navigation-api = { path = "../navigation-api" }
 rsi-configuration-access = { path = "../configuration-access" }

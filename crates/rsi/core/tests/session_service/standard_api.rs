@@ -268,6 +268,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .start_file(&fixture.profile)
         .await
         .unwrap();
+    crate::product::ready(&host).await;
     managed_ready(
         host.subscribe_profile(),
         host.lookup_local::<ApiDispatchContract>().unwrap(),
@@ -299,11 +300,14 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     assert_eq!(
         domains,
         [
+            "attention",
             "connection",
             "configuration",
             "devices",
             "exa-credential",
+            "external-conversation",
             "files",
+            "history",
             "inspector",
             "mcp-configuration",
             "media",
@@ -312,12 +316,14 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             #[cfg(unix)]
             "native-addons",
             "output",
+            "profile-leaves",
             "provider-credentials",
             "providers",
             "session",
             "settings",
             "ui",
-            "workspace"
+            "workspace",
+            "workspace_review"
         ]
         .map(str::to_owned)
         .into()
@@ -369,6 +375,19 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .unwrap(),
     );
     assert_eq!(api.description(), description.as_ref());
+    let external = rsi_acp_api::Client::new(api.clone()).unwrap();
+    assert!(
+        rsi_acp_protocol::service::ExternalConversations::endpoints(&external)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        rsi_acp_protocol::service::ExternalConversations::residents(&external)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let workspace = rsi_workspace_api::WorkspaceClient::new(api.clone()).unwrap();
     let registered_workspace = workspace.get_or_create(&fixture.workspace).await.unwrap();
     assert_eq!(
@@ -442,6 +461,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .start_file(&fixture.profile)
         .await
         .unwrap();
+    crate::product::ready(&restarted).await;
     managed_ready(
         restarted.subscribe_profile(),
         restarted.lookup_local::<ApiDispatchContract>().unwrap(),

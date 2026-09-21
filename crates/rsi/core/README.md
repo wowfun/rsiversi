@@ -38,6 +38,12 @@ come from rsi-terminal. Initial Profile preparation validates application argume
 before this connection plugin activates. The launcher invokes ApplicationRun and
 disposes the one enclosing Runtime.
 
+The Linux `acp` Application Profile selects `rsi.application.acp-service` and
+`rsi.application.acp`. Its Service uses the ordinary native Host owner lease;
+the Application owns only stdio and signals. Custom Application Profiles may
+choose another Host Profile through the ACP Service factory's `host_profile`.
+The entry accepts no application flags and writes only ACP NDJSON to stdout.
+
 This package implements the standard RSIversi product described by the product
 [contract](../README.md). The library owns the explicit linked factory catalog,
 standard composition and product-owned Profile catalogs. The Session plugin
@@ -160,6 +166,27 @@ generation. Copy names both identities explicitly as `copy --from SOURCE --id
 ID [--name NAME]`. JSON roster and show rows always expose `id`, a `metadata`
 object containing `name` and `description`, independent `source` and `trust`,
 flat `status` and nullable `reason`, and `default`.
+
+The shipped asset bundle also contains `acp-internal`, a private composition
+which includes the standard preset and disables its human-question contribution.
+Both sources are hashed and byte-verified together. Ordinary preset catalogs
+grant authority to the exact `standard` directory only; ACP explicitly derives
+an isolated catalog for `acp-internal`, with no user roots or default override.
+ACP private input preparation is supplied by the Service's ordinary composition
+source owner. It binds each root Session ID and canonical cwd to a private MCP
+service and generation before draft creation. Environment values resolve through
+ephemeral credential references; only the frozen MCP manifest enters Agent
+durability. Cold restore requires the caller's configuration and secrets again,
+compares the discovered manifest, and rejects missing or changed declarations.
+The source resolves descendants through their validated root lineage, retaining
+the same private provider. Private input failure cannot fall back to Host MCP.
+Preparation reserves the root ID before starting effects. The 256-root budget
+includes preparing and retiring roots, with at most eight concurrent builds.
+Admission and task registration share the shutdown lock; abandoned preparation
+retains ownership until its MCP processes and composition are retired.
+Closing a preparing root cancels that exact build and awaits its cleanup. The
+ACP Session owner registers roots before preparation so connection shutdown can
+retire unpublished inputs as well as attached Sessions.
 
 The preset catalog and its Settings namespace registration belong to an ordinary
 catalog plugin. AgentPresetManager observes that capability and owns its Profile
@@ -561,3 +588,48 @@ current readiness or current executable authority.
 
 Personal skill discovery skips missing, empty or relative HOME values. Standard
 path resolution still requires an absolute HOME when an XDG fallback needs it.
+
+The standard Host includes `rsi.acp.host` with an empty endpoint list and a dedicated
+`state/acp` observation journal. Local Host Profiles may replace that leaf with
+explicit endpoint configuration; the [ACP Host contract](../../rsi-acp/host/README.md)
+owns its launch and lifecycle limits. Authenticated application clients receive
+only the external-conversation API. The standard Agent preset contributes
+`external_agent` for configured-endpoint delegation through that same owner.
+External conversations remain separate from native Session durability.
+
+Host Profile single-leaf management is an ordinary product owner over the
+[reviewed source transaction](../README.md) and the
+[closed configuration wire](../configuration-api/README.md). It captures the
+standard composition inputs, refreshes the immutable staged native catalog for
+new previews, and uses the existing Profile observation for apply status.
+Grant publication and source publication remain separate owned operations.
+The `host_profile` Agent tool uses the same owner with its live Session identity.
+It can list redacted choices, prepare, commit and query its own tickets; it cannot
+issue grants or inherit Local/Device authority. The shipped preset enables it
+only where the protected native source editor is available.
+
+History text search is a separate product owner from Session metadata navigation.
+The standard Host stores its rebuildable cache at `HostPaths.cache()/history/v1`,
+outside the leased Agent Store root, and publishes the bounded
+[history API](../history-api/README.md) to authenticated clients.
+
+Host startup waits for enabled history/cache API instances as well as the managed
+provider owner before returning the service for client capability negotiation.
+A reconstructible cache may need asynchronous rebuilding; publishing a client
+operation snapshot before that work settles would permanently omit history from
+that connection. The existing 30-second startup deadline covers this readiness.
+
+Workspace interval review is composed through the ordinary
+[review owner](../workspace-review/README.md). Standard native Session execution
+awaits its baseline before effects and final comparison after controlled-work
+settlement. Git captures use Files, Process and Sandbox; the product summary
+Domain is separate from Agent history. Startup awaits its API before client
+negotiation. Review has no staging, restore or rollback operation.
+
+The optional linked [language addon](../../rsi-lsp/core/README.md) exposes
+`rsi.lsp` and `rsi.lsp.ui` as explicit Host Profile leaves, plus `rsi.lsp.tools`
+as an explicit Agent Profile leaf. None is enabled by default. The configured
+provider lazily starts one read-only server per admitted workspace; its service
+UI is consumed through the existing authenticated Service extensions entry.
+Independent launchers may register the same public factories under their own
+addon namespace and verify generation replacement with the public addon testkit.

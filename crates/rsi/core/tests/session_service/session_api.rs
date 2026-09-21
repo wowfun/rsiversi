@@ -100,6 +100,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
         .start_file(&fixture.profile)
         .await
         .unwrap();
+    crate::product::ready(&host).await;
     let workspace = host
         .lookup_local::<rsi_workspace_protocol::WorkspaceRegistryContract>()
         .unwrap()

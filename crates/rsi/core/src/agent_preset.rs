@@ -298,6 +298,10 @@ fn agent_compiler(
         BTreeMap::from([
             ("standard_unix_files".to_owned(), Value::Bool(cfg!(unix))),
             (
+                "standard_host_profile_edits".to_owned(),
+                Value::Bool(cfg!(unix)),
+            ),
+            (
                 "standard_linux_coding_tools".to_owned(),
                 Value::Bool(linux_tools_enabled),
             ),

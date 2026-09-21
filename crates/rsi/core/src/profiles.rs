@@ -33,6 +33,7 @@ const CLI_PROFILE: &str = "cli";
 const HEADLESS_PROFILE: &str = "headless";
 const TUI_PROFILE: &str = "tui";
 const SERVE_PROFILE: &str = "serve";
+const ACP_PROFILE: &str = "acp";
 const DEVICES_PROFILE: &str = "devices";
 const INSPECTOR_PROFILE: &str = "inspector";
 const ADDONS_PROFILE: &str = "addons";
@@ -380,6 +381,7 @@ impl ProfileCatalog {
             HEADLESS_PROFILE,
             TUI_PROFILE,
             SERVE_PROFILE,
+            ACP_PROFILE,
             DEVICES_PROFILE,
             INSPECTOR_PROFILE,
             ADDONS_PROFILE,
@@ -497,6 +499,7 @@ fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
         HEADLESS_PROFILE => ("rsi.application.headless", "rsi.application.connection"),
         TUI_PROFILE => ("rsi.application.tui", "rsi.application.connection"),
         SERVE_PROFILE => ("rsi.application.serve", "rsi.application.service"),
+        ACP_PROFILE => ("rsi.application.acp", "rsi.application.acp-service"),
         DEVICES_PROFILE => ("rsi.application.devices", "rsi.application.operator"),
         ADDONS_PROFILE => ("rsi.application.addons", "rsi.application.operator"),
         INSPECTOR_PROFILE => ("rsi.application.inspector", "rsi.application.operator"),
@@ -540,6 +543,14 @@ plugin = "rsi.session.tree.ui"
 kind = "plugin"
 id = "files-ui"
 plugin = "rsi.session.files.ui"
+[[steps]]
+kind = "plugin"
+id = "service-ui"
+plugin = "rsi.service.ui.client"
+[[steps]]
+kind = "plugin"
+id = "workspace-review-ui"
+plugin = "rsi.workspace.review.ui"
 "#
     } else {
         ""

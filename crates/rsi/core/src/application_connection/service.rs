@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Product composition, without owning HTTP or process-signal policy.
 #[derive(Debug)]
-pub(super) struct ServiceFactory(pub Arc<ConnectionFactory>);
+pub(super) struct ServiceFactory(pub Arc<ConnectionFactory>, pub bool);
 
 #[async_trait]
 impl PluginFactory for ServiceFactory {
@@ -79,6 +79,25 @@ impl PluginFactory for ServiceFactory {
                 .provide_local::<rsi_api_protocol::ConnectionDescriptionContract>(description)?,
             context.provide_local::<ServingServiceContract>(service)?,
         ];
+        if self.1 {
+            let backend =
+                crate::acp_owner::backend(&running).map_err(|error| self.0.diagnosed(error))?;
+            let supply =
+                context.provide_local::<rsi_acp_agent::AgentBackendContract>(backend.clone())?;
+            plan.defer(
+                "close native ACP backend",
+                Box::new(move || {
+                    Box::pin(async move {
+                        let result = backend
+                            .shutdown()
+                            .await
+                            .map_err(|_| "native ACP cleanup failed".to_owned());
+                        drop(supply);
+                        result
+                    })
+                }),
+            )?;
+        }
         plan.defer(
             "withdraw application service",
             Box::new(move || {

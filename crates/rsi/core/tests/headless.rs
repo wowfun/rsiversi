@@ -1225,8 +1225,11 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
             "ask_user",
             "bash",
             "directory_list",
+            "external_agent",
             "file_read",
             "followup_task",
+            "history_search",
+            "host_profile",
             "interrupt_agent",
             "job_kill",
             "job_list",
@@ -2201,7 +2204,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     let sent = Arc::new(Notify::new());
     let notify = sent.clone();
     let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, Router::new().route("/v1/chat/completions", post(move || {
+        axum::serve(listener, Router::new().route("/v1/chat/completions", post(move |axum::Json(_request): axum::Json<serde_json::Value>| {
             let notify = notify.clone();
             async move {
                 let chunk = format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":{"role":"assistant","content":"x".repeat(200_000)},"finish_reason":null}]}));
@@ -2250,7 +2253,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
         .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     tokio::time::timeout(CHILD_PROVIDER_START_TIMEOUT, sent.notified())
@@ -2263,7 +2266,23 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
         let mut chunk = [0; 4096];
         loop {
             let count = stdout.read(&mut chunk).await.unwrap();
-            assert!(count > 0, "stdout closed before streamed model bytes");
+            if count == 0 {
+                let mut diagnostic = Vec::new();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    child
+                        .stderr
+                        .take()
+                        .unwrap()
+                        .take(8192)
+                        .read_to_end(&mut diagnostic),
+                )
+                .await;
+                panic!(
+                    "stdout closed before streamed model bytes: {}",
+                    String::from_utf8_lossy(&diagnostic)
+                );
+            }
             prefix.extend_from_slice(&chunk[..count]);
             if prefix.windows(32).any(|bytes| bytes == [b'x'; 32]) {
                 break;

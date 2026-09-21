@@ -122,6 +122,21 @@ const STANDARD_AGENT_METADATA: &[u8] = include_bytes!(concat!(
     "/../../../plugins/rsi-agent-presets/standard/preset.toml"
 ));
 
+const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
+    ("standard", STANDARD_AGENT_PROFILE, STANDARD_AGENT_METADATA),
+    (
+        "acp-internal",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../plugins/rsi-agent-presets/acp-internal/agent.profile.toml"
+        )),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../plugins/rsi-agent-presets/acp-internal/preset.toml"
+        )),
+    ),
+];
+
 /// Frozen inputs used to construct the standard linked catalog and fragments.
 #[derive(Clone, Debug)]
 pub struct StandardComposition {
@@ -240,7 +255,18 @@ fn standard_agent_addon(
         "rsi.agent.references.tools",
         Arc::new(rsi_agent_references::ReferenceToolsFactory),
     )?;
+    register("rsi.lsp.tools", Arc::new(rsi_lsp::LanguageToolsFactory))?;
     register("rsi.mcp.tools", Arc::new(rsi_mcp::McpToolsFactory))?;
+    register("rsi.acp.tools", Arc::new(rsi_acp_tools::Factory))?;
+    register(
+        "rsi.history.tools",
+        Arc::new(rsi_history::HistoryToolsFactory),
+    )?;
+    #[cfg(unix)]
+    register(
+        "rsi.profile-leaves.tools",
+        Arc::new(crate::profile_management::ToolsFactory),
+    )?;
     register(
         "rsi.retrieval.tools",
         Arc::new(rsi_retrieval::RetrievalToolsFactory),
@@ -265,6 +291,11 @@ fn standard_agent_addon(
         register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
         register(APPLY_PATCH_FACTORY, Arc::new(coding.apply_patch.clone()))?;
     }
+    describe_agent_addon(&mut builder)?;
+    builder.build()
+}
+
+fn describe_agent_addon(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
     builder.describe_factory(
         "rsi.tools.portable",
         "Import an explicitly injected Portable Tool service into this Agent catalog",
@@ -281,7 +312,7 @@ fn standard_agent_addon(
     builder.register_local_contract_at::<rsi_agent_composition_protocol::DomainRegistrarContract>(
         AddonScope::Agent,
     )?;
-    builder.build()
+    Ok(())
 }
 
 fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<PathBuf> {
@@ -297,10 +328,12 @@ fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<Path
 
 fn standard_agent_preset_digest() -> String {
     let mut digest = Sha256::new();
-    digest.update(b"rsi-standard-agent-preset-v1\0");
-    for bytes in [STANDARD_AGENT_PROFILE, STANDARD_AGENT_METADATA] {
-        digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
-        digest.update(bytes);
+    digest.update(b"rsi-standard-agent-preset-v2\0");
+    for (name, profile, metadata) in SHIPPED_PRESETS {
+        for bytes in [name.as_bytes(), *profile, *metadata] {
+            digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+            digest.update(bytes);
+        }
     }
     hex::encode(digest.finalize())
 }
@@ -328,12 +361,14 @@ fn materialize_standard_agent_preset_portable(
     let staging = create_asset_staging(&cache)?;
     let mut cleanup = AssetStaging::new(staging.clone());
     set_owner_directory_permissions(&staging)?;
-    let preset = staging.join("standard");
-    fs::create_dir(&preset)
-        .map_err(|error| asset_error("create preset directory", &preset, &error))?;
-    set_owner_directory_permissions(&preset)?;
-    write_asset_file(&preset.join("agent.profile.toml"), STANDARD_AGENT_PROFILE)?;
-    write_asset_file(&preset.join("preset.toml"), STANDARD_AGENT_METADATA)?;
+    for (name, profile, metadata) in SHIPPED_PRESETS {
+        let preset = staging.join(name);
+        fs::create_dir(&preset)
+            .map_err(|error| asset_error("create preset directory", &preset, &error))?;
+        set_owner_directory_permissions(&preset)?;
+        write_asset_file(&preset.join("agent.profile.toml"), profile)?;
+        write_asset_file(&preset.join("preset.toml"), metadata)?;
+    }
 
     match fs::rename(&staging, &target) {
         Ok(()) => cleanup.disarm(),
@@ -482,49 +517,50 @@ fn verify_standard_agent_preset_directory_unix(
 ) -> rsi_host::Result<()> {
     use rustix::fs::{FileType, Mode, OFlags};
 
-    let preset_path = diagnostic_root.join("standard");
-    let preset = rustix::fs::openat(
-        root,
-        "standard",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|error| no_follow_asset_directory(&preset_path, error))?;
-    for (name, expected) in [
-        ("agent.profile.toml", STANDARD_AGENT_PROFILE),
-        ("preset.toml", STANDARD_AGENT_METADATA),
-    ] {
-        let path = preset_path.join(name);
-        let mut file = rustix::fs::openat(
-            &preset,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+    for (preset_name, profile, metadata) in SHIPPED_PRESETS {
+        let preset_path = diagnostic_root.join(preset_name);
+        let preset = rustix::fs::openat(
+            root,
+            *preset_name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map(File::from)
-        .map_err(|error| asset_errno("open preset asset without following links", &path, error))?;
-        let stat = rustix::fs::fstat(&file)
-            .map_err(|error| asset_errno("inspect preset asset", &path, error))?;
-        if !FileType::from_raw_mode(stat.st_mode).is_file() {
-            return Err(rsi_host::HostError::Bootstrap(format!(
-                "standard Agent preset asset `{}` is not a regular file",
-                path.display()
-            )));
-        }
-        let maximum = u64::try_from(expected.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        let mut actual = Vec::with_capacity(expected.len());
-        std::io::Read::by_ref(&mut file)
-            .take(maximum)
-            .read_to_end(&mut actual)
-            .map_err(|error| asset_error("read preset asset", &path, &error))?;
-        if actual != expected {
-            return Err(rsi_host::HostError::Bootstrap(format!(
-                "standard Agent preset asset `{}` failed byte verification",
-                path.display()
-            )));
+        .map_err(|error| no_follow_asset_directory(&preset_path, error))?;
+        for (name, expected) in [("agent.profile.toml", *profile), ("preset.toml", *metadata)] {
+            let path = preset_path.join(name);
+            let mut file = rustix::fs::openat(
+                &preset,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|error| {
+                asset_errno("open preset asset without following links", &path, error)
+            })?;
+            let stat = rustix::fs::fstat(&file)
+                .map_err(|error| asset_errno("inspect preset asset", &path, error))?;
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(rsi_host::HostError::Bootstrap(format!(
+                    "standard Agent preset asset `{}` is not a regular file",
+                    path.display()
+                )));
+            }
+            let maximum = u64::try_from(expected.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            let mut actual = Vec::with_capacity(expected.len());
+            std::io::Read::by_ref(&mut file)
+                .take(maximum)
+                .read_to_end(&mut actual)
+                .map_err(|error| asset_error("read preset asset", &path, &error))?;
+            if actual != expected {
+                return Err(rsi_host::HostError::Bootstrap(format!(
+                    "standard Agent preset asset `{}` failed byte verification",
+                    path.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -612,38 +648,40 @@ impl UnixAssetStaging {
     fn populate(&self) -> rsi_host::Result<()> {
         use rustix::fs::{Mode, OFlags};
 
-        let preset_path = self.path().join("standard");
-        rustix::fs::mkdirat(
-            &self.directory,
-            "standard",
-            Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        )
-        .map_err(|error| asset_errno("create preset directory", &preset_path, error))?;
-        let preset = rustix::fs::openat(
-            &self.directory,
-            "standard",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(File::from)
-        .map_err(|error| no_follow_asset_directory(&preset_path, error))?;
-        rustix::fs::fchmod(&preset, Mode::RUSR | Mode::WUSR | Mode::XUSR)
-            .map_err(|error| asset_errno("set preset directory mode", &preset_path, error))?;
-        write_asset_file_unix(
-            &preset,
-            "agent.profile.toml",
-            STANDARD_AGENT_PROFILE,
-            &preset_path.join("agent.profile.toml"),
-        )?;
-        write_asset_file_unix(
-            &preset,
-            "preset.toml",
-            STANDARD_AGENT_METADATA,
-            &preset_path.join("preset.toml"),
-        )?;
-        preset
-            .sync_all()
-            .map_err(|error| asset_error("sync preset directory", &preset_path, &error))?;
+        for (preset_name, profile, metadata) in SHIPPED_PRESETS {
+            let preset_path = self.path().join(preset_name);
+            rustix::fs::mkdirat(
+                &self.directory,
+                *preset_name,
+                Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            )
+            .map_err(|error| asset_errno("create preset directory", &preset_path, error))?;
+            let preset = rustix::fs::openat(
+                &self.directory,
+                *preset_name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|error| no_follow_asset_directory(&preset_path, error))?;
+            rustix::fs::fchmod(&preset, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+                .map_err(|error| asset_errno("set preset directory mode", &preset_path, error))?;
+            write_asset_file_unix(
+                &preset,
+                "agent.profile.toml",
+                profile,
+                &preset_path.join("agent.profile.toml"),
+            )?;
+            write_asset_file_unix(
+                &preset,
+                "preset.toml",
+                metadata,
+                &preset_path.join("preset.toml"),
+            )?;
+            preset
+                .sync_all()
+                .map_err(|error| asset_error("sync preset directory", &preset_path, &error))?;
+        }
         self.directory
             .sync_all()
             .map_err(|error| asset_error("sync preset staging", &self.path(), &error))
@@ -791,32 +829,34 @@ fn create_asset_staging(root: &Path) -> rsi_host::Result<PathBuf> {
 #[cfg(not(unix))]
 fn verify_standard_agent_preset(root: &Path) -> rsi_host::Result<()> {
     ensure_directory_without_symlink(root)?;
-    let preset = root.join("standard");
-    ensure_directory_without_symlink(&preset)?;
-    for (path, expected) in [
-        (preset.join("agent.profile.toml"), STANDARD_AGENT_PROFILE),
-        (preset.join("preset.toml"), STANDARD_AGENT_METADATA),
-    ] {
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| asset_error("inspect preset asset", &path, &error))?;
-        if !metadata.file_type().is_file() || portable_metadata_is_link(&metadata) {
-            return Err(rsi_host::HostError::Bootstrap(format!(
-                "standard Agent preset asset `{}` is not a regular file",
-                path.display()
-            )));
-        }
-        let mut actual = Vec::with_capacity(expected.len());
-        File::open(&path)
-            .and_then(|file| {
-                std::io::Read::by_ref(&mut file.take(expected.len() as u64 + 1))
-                    .read_to_end(&mut actual)
-            })
-            .map_err(|error| asset_error("read preset asset", &path, &error))?;
-        if actual != expected {
-            return Err(rsi_host::HostError::Bootstrap(format!(
-                "standard Agent preset asset `{}` failed byte verification",
-                path.display()
-            )));
+    for (preset_name, profile, metadata) in SHIPPED_PRESETS {
+        let preset = root.join(preset_name);
+        ensure_directory_without_symlink(&preset)?;
+        for (path, expected) in [
+            (preset.join("agent.profile.toml"), *profile),
+            (preset.join("preset.toml"), *metadata),
+        ] {
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| asset_error("inspect preset asset", &path, &error))?;
+            if !metadata.file_type().is_file() || portable_metadata_is_link(&metadata) {
+                return Err(rsi_host::HostError::Bootstrap(format!(
+                    "standard Agent preset asset `{}` is not a regular file",
+                    path.display()
+                )));
+            }
+            let mut actual = Vec::with_capacity(expected.len());
+            File::open(&path)
+                .and_then(|file| {
+                    std::io::Read::by_ref(&mut file.take(expected.len() as u64 + 1))
+                        .read_to_end(&mut actual)
+                })
+                .map_err(|error| asset_error("read preset asset", &path, &error))?;
+            if actual != expected {
+                return Err(rsi_host::HostError::Bootstrap(format!(
+                    "standard Agent preset asset `{}` failed byte verification",
+                    path.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -1333,6 +1373,7 @@ impl StandardComposition {
                 crate::native_addons::SharedNativeAddonFactory {
                     staging: staging.clone(),
                     presets,
+                    paths: self.paths.clone(),
                 },
             )?;
         } else {
@@ -1385,6 +1426,13 @@ impl StandardComposition {
         #[cfg(unix)]
         let reserved = Arc::new(std::sync::OnceLock::new());
         let inspector = Arc::new(crate::inspector::InspectorFactory::default());
+        #[cfg(unix)]
+        crate::profile_management::register(
+            &mut builder,
+            self.clone(),
+            crate::ProfileCatalog::new(paths.clone()),
+            local_api.map(str::to_owned),
+        )?;
         builder.register_linked(
             "rsi.inspector.api",
             env!("CARGO_PKG_VERSION"),
@@ -1397,12 +1445,13 @@ impl StandardComposition {
             &mut builder,
             "rsi.agent.catalog",
             UpdateMode::RestartRequired,
-            crate::integration_source::SourceFactory(Arc::new(
-                rsi_agent_composition::AgentCompositionSnapshot::new(
+            crate::integration_source::SourceFactory(
+                Arc::new(rsi_agent_composition::AgentCompositionSnapshot::new(
                     presets,
                     agent_addons.agent_catalog()?,
-                ),
-            )),
+                )),
+                self.paths.clone(),
+            ),
         )?;
         #[cfg(unix)]
         self.register_native_source(&mut builder, presets, &agent_addons, reserved.clone())?;
@@ -1439,7 +1488,8 @@ impl StandardComposition {
         ))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
-            .with_maximum_active_turns(STANDARD_MAXIMUM_ACTIVE_TURNS);
+            .with_maximum_active_turns(STANDARD_MAXIMUM_ACTIVE_TURNS)
+            .with_execution_observation(true);
         builder.register_fragment(session_fragment(&agent))?;
         builder.register_fragment(ProfileFragment::new(
             "rsi.standard.session",
@@ -1678,6 +1728,36 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        "rsi.lsp",
+        UpdateMode::Replayable,
+        rsi_lsp::LanguageFactory,
+    )?;
+    register(
+        builder,
+        "rsi.lsp.ui",
+        UpdateMode::Replayable,
+        rsi_lsp_ui::LanguageUiFactory,
+    )?;
+    register(
+        builder,
+        "rsi.workspace-review",
+        UpdateMode::RestartRequired,
+        rsi_workspace_review::WorkspaceReviewFactory,
+    )?;
+    register(
+        builder,
+        "rsi.history",
+        UpdateMode::RestartRequired,
+        rsi_history::HistoryFactory,
+    )?;
+    register(
+        builder,
+        "rsi.acp.host",
+        UpdateMode::RestartRequired,
+        rsi_acp_host::Factory,
+    )?;
+    register(
+        builder,
         "rsi.retrieval",
         UpdateMode::RestartRequired,
         rsi_retrieval::RetrievalFactory,
@@ -1842,6 +1922,7 @@ fn register(
 }
 
 fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+    builder.register_local_contract::<crate::acp_inputs::InputsContract>()?;
     builder.register_local_contract::<rsi_files_protocol::FilesContract>()?;
     builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;
     builder.register_local_contract::<StorageHubContract>()?;
@@ -1853,6 +1934,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_session_protocol::SessionContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionIngressContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionReadContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionDraftControlContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionApprovalControlContract>()?;
     builder.register_local_contract::<rsi_service_host::ApprovalBrokerContract>()?;
     builder.register_local_contract::<CredentialsResolveContract>()?;
@@ -1871,6 +1953,8 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_pty_protocol::PtyProviderContract>()?;
     builder.register_local_contract::<rsi_mcp::McpContract>()?;
     builder.register_local_contract::<rsi_mcp::McpOwnerContract>()?;
+    builder
+        .register_local_contract::<rsi_acp_protocol::service::ExternalConversationsContract>()?;
     builder.register_local_contract::<rsi_retrieval::RetrievalContract>()?;
     #[cfg(not(unix))]
     builder.register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>()?;
@@ -1892,6 +1976,10 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
     builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
+    builder.register_local_contract::<rsi_history::HistoryContract>()?;
+    builder.register_local_contract::<rsi_lsp::LanguageContract>()?;
+    builder.register_local_contract::<rsi_workspace_review::WorkspaceReviewContract>()?;
+    builder.register_local_contract::<rsi_agent_turn_protocol::ExecutionObserverContract>()?;
     builder.register_local_contract::<TurnServiceContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::TurnJobsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionContinuationsContract>()?;
@@ -1980,6 +2068,21 @@ fn base_fragment(
         ),
         ProfileEntry::new("rsi-pty", "rsi.pty", Value::Null),
         ProfileEntry::new("rsi-mcp", "rsi.mcp", Value::Null),
+        ProfileEntry::new(
+            "rsi-acp",
+            "rsi.acp.host",
+            json!({"directory":paths.state().join("acp"),"endpoints":[]}),
+        ),
+        ProfileEntry::new(
+            "rsi-workspace-review",
+            "rsi.workspace-review",
+            json!({"directory":paths.cache().join("workspace-review/v1"),"program":if cfg!(windows){r"C:\Program Files\Git\bin\git.exe"}else{"/usr/bin/git"}}),
+        ),
+        ProfileEntry::new(
+            "rsi-history",
+            "rsi.history",
+            json!({"directory":paths.cache().join("history/v1")}),
+        ),
         ProfileEntry::new("rsi-retrieval", "rsi.retrieval", Value::Null),
         ProfileEntry::new("rsi-retrieval-api", "rsi.retrieval.api", Value::Null),
         ProfileEntry::new("rsi-mcp-api", "rsi.mcp.api", Value::Null),
@@ -2289,6 +2392,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn private_acp_preset_reuses_standard_sources_without_entering_the_public_roster() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let composition = StandardComposition::new(paths.clone(), BTreeMap::new(), None);
+        let addons = composition.agent_addons().unwrap();
+        let public = composition.preset_catalog(true, &addons).unwrap();
+        let id = AgentPresetId::new("acp-internal").unwrap();
+        assert!(public.compile(&id).is_err());
+        let root = standard_agent_preset_root(&paths).unwrap();
+        let private = public
+            .with_config(
+                AgentPresetCatalogConfig::new(id.clone())
+                    .with_system_preset(id.clone(), root.join(id.as_str())),
+            )
+            .unwrap();
+        let compiled = private.compile(&id).unwrap();
+        assert!(
+            !compiled
+                .leaves()
+                .iter()
+                .any(|leaf| leaf.plugin().as_str() == QUESTION_TOOLS_FACTORY)
+        );
+        assert!(
+            compiled
+                .leaves()
+                .iter()
+                .any(|leaf| leaf.plugin().as_str() == "rsi.mcp.tools")
+        );
+        assert_eq!(private.default_id().await.unwrap(), id);
+        assert!(
+            !private
+                .launch_identity()
+                .roots
+                .iter()
+                .any(|root| root.writable)
+        );
+        assert!(public.compile(&id).is_err());
+        std::fs::write(root.join("acp-internal/agent.profile.toml"), "format = 1\n").unwrap();
+        assert!(standard_agent_preset_root(&paths).is_err());
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -2317,6 +2467,10 @@ mod tests {
                             Value::Bool(linux_tools_enabled),
                         ),
                         ("standard_unix_files".to_owned(), Value::Bool(unix_files)),
+                        (
+                            "standard_host_profile_edits".to_owned(),
+                            Value::Bool(unix_files),
+                        ),
                     ]),
                 )
                 .unwrap(),
@@ -2351,6 +2505,9 @@ mod tests {
                 FILES_TOOLS_FACTORY,
                 "rsi.mcp.tools",
                 "rsi.retrieval.tools",
+                "rsi.acp.tools",
+                "rsi.history.tools",
+                "rsi.profile-leaves.tools",
             ]
         );
         assert_eq!(
@@ -2377,6 +2534,8 @@ mod tests {
                 QUESTION_TOOLS_FACTORY,
                 "rsi.mcp.tools",
                 "rsi.retrieval.tools",
+                "rsi.acp.tools",
+                "rsi.history.tools",
             ]
         );
 

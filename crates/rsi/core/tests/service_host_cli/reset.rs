@@ -39,7 +39,11 @@ fn reset_state_cli_preserves_configuration_and_initializes_empty_sessions() {
     assert!(!rejected.status.success());
     let diagnostic = String::from_utf8(rejected.stderr).unwrap();
     assert!(
-        diagnostic.contains("expected 22, actual 21"),
+        diagnostic.contains(&format!(
+            "expected {}, actual {}",
+            rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION,
+            rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION - 1
+        )),
         "{diagnostic}"
     );
     assert!(diagnostic.contains("--reset-state"), "{diagnostic}");

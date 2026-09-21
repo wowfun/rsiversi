@@ -1,0 +1,10 @@
+format = 1
+
+[[steps]]
+kind = "include"
+path = "../standard/agent.profile.toml"
+
+[[steps]]
+kind = "patch"
+target = "questions"
+enabled = false

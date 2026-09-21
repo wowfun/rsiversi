@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#[path = "service_host_cli/acp.rs"]
+mod acp;
 #[path = "service_host_cli/addons.rs"]
 mod addons;
 #[path = "service_host_cli/commands.rs"]

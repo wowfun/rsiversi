@@ -106,6 +106,8 @@ impl PluginFactory for ConnectionFactory {
             .publish_domains(&mut plan, crate::addon::DomainLookup::Local(&connection));
         let session = connection.session_service();
         let api = connection.api_client();
+        let external =
+            Arc::new(rsi_acp_api::Client::new(api.clone()).map_err(|error| self.diagnosed(error))?);
         let workspace = connection.workspace_registry();
         let models = connection.language_models();
         let output = connection.output_cache();
@@ -131,6 +133,9 @@ impl PluginFactory for ConnectionFactory {
         let context = plan.context();
         let supplies = vec![
             context.provide_local::<rsi_api_protocol::ApiClientContract>(api)?,
+            context.provide_local::<rsi_acp_protocol::service::ExternalConversationsContract>(
+                external,
+            )?,
             context.provide_local::<rsi_session_protocol::SessionContract>(session)?,
             context.provide_local::<rsi_session_files::SessionFilesContract>(files)?,
             context.provide_local::<rsi_settings_protocol::SettingsAccessContract>(settings)?,
@@ -165,6 +170,8 @@ pub struct ApplicationDiagnostics {
     devices: Arc<rsi_terminal::DevicesFactory>,
     inspector: Arc<rsi_terminal::InspectorFactory>,
     native_addons: Arc<rsi_terminal::NativeAddonsFactory>,
+    #[cfg(target_os = "linux")]
+    acp: Arc<rsi_acp_agent::ApplicationFactory>,
 }
 impl ApplicationDiagnostics {
     /// Takes an actionable owner diagnostic after generic Profile bootstrap fails.
@@ -228,6 +235,8 @@ pub(crate) fn application_addons(
         inspector: Arc::new(rsi_terminal::InspectorFactory::new(arguments.clone())),
         native_addons: Arc::new(rsi_terminal::NativeAddonsFactory::new(arguments.clone())),
         web_serve: Arc::new(rsi_serve::ServeFactory::with_web_assets(arguments.clone())),
+        #[cfg(target_os = "linux")]
+        acp: Arc::new(rsi_acp_agent::ApplicationFactory::new(arguments.clone())),
         serve: Arc::new(rsi_serve::ServeFactory::new(arguments)),
     };
     let mut builder = crate::StandardAddonBuilder::new("rsi.standard.application");
@@ -263,25 +272,7 @@ pub(crate) fn application_addons(
         )
         .map_err(boot)?;
     #[cfg(target_os = "linux")]
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.application.service",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(service::ServiceFactory(diagnostics.connection.clone())),
-        )
-        .map_err(boot)?;
-    #[cfg(target_os = "linux")]
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.application.operator",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(operator::OperatorFactory(diagnostics.connection.clone())),
-        )
-        .map_err(boot)?;
+    register_service_applications(&mut builder, &diagnostics)?;
     for (id, factory) in application_factories(&diagnostics) {
         builder
             .register_factory(
@@ -302,6 +293,58 @@ pub(crate) fn application_addons(
         .merged(builder.build().map_err(boot)?)
         .map_err(boot)?;
     Ok((addons, diagnostics))
+}
+
+#[cfg(target_os = "linux")]
+fn register_service_applications(
+    builder: &mut crate::StandardAddonBuilder,
+    diagnostics: &ApplicationDiagnostics,
+) -> crate::Result<()> {
+    builder
+        .register_factory(
+            crate::AddonScope::Application,
+            "rsi.application.service",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(service::ServiceFactory(
+                diagnostics.connection.clone(),
+                false,
+            )),
+        )
+        .map_err(boot)?;
+    for (id, factory) in [
+        (
+            "rsi.application.acp-service",
+            Arc::new(service::ServiceFactory(
+                diagnostics.connection.clone(),
+                true,
+            )) as Arc<dyn PluginFactory>,
+        ),
+        (
+            "rsi.application.acp",
+            diagnostics.acp.clone() as Arc<dyn PluginFactory>,
+        ),
+    ] {
+        builder
+            .register_factory(
+                crate::AddonScope::Application,
+                id,
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                factory,
+            )
+            .map_err(boot)?;
+    }
+    builder
+        .register_factory(
+            crate::AddonScope::Application,
+            "rsi.application.operator",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(operator::OperatorFactory(diagnostics.connection.clone())),
+        )
+        .map_err(boot)?;
+    Ok(())
 }
 
 fn boot(error: impl std::fmt::Display) -> RsiError {
@@ -341,6 +384,9 @@ fn register_presentations(builder: &mut crate::StandardAddonBuilder) -> crate::R
 
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
     let scope = crate::AddonScope::Application;
+    builder
+        .register_local_contract_at::<rsi_acp_agent::AgentBackendContract>(scope)
+        .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_workbench_ui::SetupFeatureContract>(scope)
         .map_err(boot)?;
@@ -384,6 +430,11 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .register_local_contract_at::<rsi_session_files::SessionFilesContract>(scope)
         .map_err(boot)?;
     builder
+        .register_local_contract_at::<rsi_acp_protocol::service::ExternalConversationsContract>(
+            scope,
+        )
+        .map_err(boot)?;
+    builder
         .register_local_contract_at::<rsi_session_protocol::SessionContract>(scope)
         .map_err(boot)?;
     builder
@@ -421,7 +472,7 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
 
 fn application_factories(
     diagnostics: &ApplicationDiagnostics,
-) -> [(&'static str, Arc<dyn PluginFactory>); 17] {
+) -> [(&'static str, Arc<dyn PluginFactory>); 19] {
     [
         (
             "rsi.workbench.setup",
@@ -430,6 +481,11 @@ fn application_factories(
         (
             "rsi.workbench.plugins",
             Arc::new(rsi_workbench_ui::PluginsFeatureFactory),
+        ),
+        ("rsi.service.ui.client", Arc::new(rsi_service_ui::Factory)),
+        (
+            "rsi.workspace.review.ui",
+            Arc::new(rsi_workspace_review_ui::Factory),
         ),
         ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
         ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),

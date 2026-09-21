@@ -1,3 +1,5 @@
+#[path = "support/product.rs"]
+mod product;
 use rsi::{DEFAULT_AGENT_PRESET_ID, StandardComposition};
 use rsi_agent_composition_protocol::{AgentCompositionContract, AgentGenerationSeed};
 use rsi_agent_session_protocol::AgentPresetId;
@@ -58,6 +60,7 @@ async fn real_catalog_defaults_off_freezes_flags_restores_offline_and_current_di
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
     let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
     let disabled = resolver.pin(&preset, None).await.unwrap();
@@ -138,6 +141,7 @@ async fn real_catalog_defaults_off_freezes_flags_restores_offline_and_current_di
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&reopened).await;
     let resolver = reopened.lookup_local::<AgentCompositionContract>().unwrap();
     let restored = resolver.pin(&preset, Some(&seed)).await.unwrap();
     assert_eq!(restored.tools().definitions(), definitions);

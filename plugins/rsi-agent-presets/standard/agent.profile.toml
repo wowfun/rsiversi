@@ -98,3 +98,19 @@ plugin = "rsi.mcp.tools"
 kind = "plugin"
 id = "retrieval-tools"
 plugin = "rsi.retrieval.tools"
+
+[[steps]]
+kind = "plugin"
+id = "external-agents"
+plugin = "rsi.acp.tools"
+
+[[steps]]
+kind = "plugin"
+id = "history-search"
+plugin = "rsi.history.tools"
+
+[[steps]]
+kind = "plugin"
+id = "host-profile-management"
+plugin = "rsi.profile-leaves.tools"
+enabled_rhai = "defines.standard_host_profile_edits"

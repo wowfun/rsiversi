@@ -43,6 +43,8 @@ mod api_composition;
 mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::probe_service_host;
+mod acp_inputs;
+mod acp_owner;
 mod composition;
 mod integration_source;
 mod local_api_client;
@@ -58,6 +60,8 @@ pub use native_addons::{
     NativeAddonUpdateError,
 };
 mod output_read;
+#[cfg(unix)]
+mod profile_management;
 mod profile_owner;
 mod profiles;
 #[cfg(unix)]
@@ -232,30 +236,40 @@ impl RunningRsi {
             loop {
                 {
                     let status = changes.borrow_and_update();
-                    let managed = status
-                        .observed()
-                        .iter()
-                        .find(|instance| instance.id().as_str() == "rsi.managed-providers");
-                    match managed.map(rsi_host::ProfileInstanceStatus::state) {
-                        None if !status
+                    let mut pending = false;
+                    for id in [
+                        "rsi.managed-providers",
+                        "rsi-history",
+                        "rsi.history.api",
+                        "rsi-workspace-review",
+                        "rsi.workspace-review.api",
+                    ] {
+                        let desired = status
                             .target()
                             .iter()
-                            .any(|target| target.id().as_str() == "rsi.managed-providers")
-                            && status.health() == rsi_host::ProfileHealth::Converged =>
-                        {
-                            break Ok(());
+                            .any(|target| target.id().as_str() == id);
+                        let instance = status
+                            .observed()
+                            .iter()
+                            .find(|instance| instance.id().as_str() == id);
+                        match instance.map(rsi_host::ProfileInstanceStatus::state) {
+                            None if !desired
+                                && status.health() == rsi_host::ProfileHealth::Converged => {}
+                            Some(rsi_host::ProfileInstanceState::Active) => {}
+                            Some(
+                                rsi_host::ProfileInstanceState::Failed
+                                | rsi_host::ProfileInstanceState::Disposed
+                                | rsi_host::ProfileInstanceState::Unloading,
+                            ) => return Err("required product owner failed during startup"),
+                            None
+                            | Some(
+                                rsi_host::ProfileInstanceState::Pending(_)
+                                | rsi_host::ProfileInstanceState::Loading,
+                            ) => pending = true,
                         }
-                        Some(rsi_host::ProfileInstanceState::Active) => break Ok(()),
-                        Some(
-                            rsi_host::ProfileInstanceState::Failed
-                            | rsi_host::ProfileInstanceState::Disposed
-                            | rsi_host::ProfileInstanceState::Unloading,
-                        ) => break Err("managed provider owner failed during startup"),
-                        None
-                        | Some(
-                            rsi_host::ProfileInstanceState::Pending(_)
-                            | rsi_host::ProfileInstanceState::Loading,
-                        ) => {}
+                    }
+                    if !pending {
+                        break Ok(());
                     }
                 }
                 if changes.changed().await.is_err() {
@@ -269,7 +283,7 @@ impl RunningRsi {
             return Err(RsiError::Boot(
                 match ready {
                     Ok(Err(error)) => error,
-                    _ => "managed provider startup timed out",
+                    _ => "required product startup timed out",
                 }
                 .into(),
             ));

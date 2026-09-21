@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "support/product.rs"]
+mod product;
 
 use axum::{
     Json, Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
@@ -33,10 +35,18 @@ mod milestone;
 #[path = "session_service/terminals.rs"]
 mod terminals;
 
+#[path = "session_service/acp.rs"]
+mod acp;
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;
+#[path = "session_service/attention.rs"]
+mod attention;
+#[path = "session_service/external.rs"]
+mod external;
 #[path = "session_service/goal.rs"]
 mod goal;
+#[path = "session_service/history.rs"]
+mod history;
 #[path = "session_service/job_preview.rs"]
 mod job_preview;
 #[path = "session_service/managed_providers.rs"]
@@ -49,6 +59,8 @@ mod navigation;
 mod plan_policy;
 #[path = "session_service/pricing.rs"]
 mod pricing;
+#[path = "session_service/profile_leaves.rs"]
+mod profile_leaves;
 #[path = "session_service/repeat_reminder.rs"]
 mod repeat_reminder;
 #[path = "session_service/request_evidence.rs"]
@@ -915,3 +927,6 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
     assert!(restarted.shutdown().await.is_clean());
     provider.abort();
 }
+
+#[path = "session_service/workspace_review.rs"]
+mod workspace_review;

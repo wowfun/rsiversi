@@ -51,6 +51,7 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
                 | "rsi.configuration.access"
                 | "rsi.managed-providers"
                 | "rsi.navigation"
+                | "rsi.attention"
         ) {
             json!({"backend": "base"})
         } else {
@@ -76,9 +77,25 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
     Ok(())
 }
 
-fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 19] {
+fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 23] {
     [
+        (
+            "rsi.workspace-review.api",
+            std::sync::Arc::new(rsi_workspace_review::WorkspaceReviewApiFactory),
+        ),
+        (
+            "rsi.history.api",
+            std::sync::Arc::new(rsi_history::HistoryApiFactory),
+        ),
+        (
+            "rsi.attention",
+            std::sync::Arc::new(rsi_navigation::AttentionFactory),
+        ),
         ("rsi.api", std::sync::Arc::new(rsi_api::ApiFactory)),
+        (
+            "rsi.acp.api",
+            std::sync::Arc::new(rsi_acp_api::EndpointFactory),
+        ),
         ("rsi.service.ui", std::sync::Arc::new(rsi_ui::UiFactory)),
         (
             "rsi.service.session.ui",

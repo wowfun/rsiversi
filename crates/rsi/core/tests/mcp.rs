@@ -1,3 +1,5 @@
+#[path = "support/product.rs"]
+mod product;
 #[allow(dead_code)]
 #[path = "../../../rsi-mcp/core/tests/support/mod.rs"]
 mod support;
@@ -103,6 +105,7 @@ async fn real_standard_composition_freezes_manifest_reports_drift_as_tool_result
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
     let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
     let disabled = resolver.pin(&preset, None).await.unwrap();
@@ -184,6 +187,7 @@ async fn real_standard_composition_freezes_manifest_reports_drift_as_tool_result
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&reopened).await;
     let resolver = reopened.lookup_local::<AgentCompositionContract>().unwrap();
     let restored = resolver.pin(&preset, Some(&saved)).await.unwrap();
     assert_eq!(restored.tools().definitions(), frozen_definitions);
@@ -295,6 +299,7 @@ async fn mcp_selection_obeys_the_actual_shared_tool_ceiling_without_partial_publ
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
     let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
     let before = resolver.pin(&preset, None).await.unwrap();
@@ -620,6 +625,7 @@ async fn saved_codec_one_cannot_restore_even_with_an_empty_mcp_manifest() {
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
     let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
     let current = resolver.pin(&preset, None).await.unwrap();

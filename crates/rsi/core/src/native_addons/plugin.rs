@@ -68,6 +68,7 @@ impl LocalContract for NativeStagingContract {
 pub(crate) struct SharedNativeAddonFactory {
     pub(crate) staging: NativeStaging,
     pub(crate) presets: AgentPresetCatalog,
+    pub(crate) paths: HostPaths,
 }
 #[async_trait]
 impl PluginFactory for SharedNativeAddonFactory {
@@ -77,26 +78,24 @@ impl PluginFactory for SharedNativeAddonFactory {
                 "native staging configuration must be null".into(),
             ));
         }
-        Ok(PreparedActivation::new(ConfigValue::Null)
-            .requiring_local::<rsi_service_host::ServiceOwnerContract>()
-            .requiring_local::<rsi_mcp::McpOwnerContract>()
-            .requiring_local::<rsi_retrieval::RetrievalContract>())
+        Ok(crate::integration_source::requirements(
+            PreparedActivation::new(ConfigValue::Null)
+                .requiring_local::<rsi_service_host::ServiceOwnerContract>(),
+        ))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         self.staging
             .manager
             .retain_service_owner(plan.local::<rsi_service_host::ServiceOwnerContract>()?)?;
         plan.context()
-            .provide_local::<AgentCompositionSourceContract>(Arc::new(
-                crate::integration_source::SeededSource::new(
-                    Arc::new(ServiceAgentSource {
-                        manager: self.staging.manager.clone(),
-                        presets: self.presets.clone(),
-                    }),
-                    plan.local::<rsi_mcp::McpOwnerContract>()?,
-                    plan.local::<rsi_retrieval::RetrievalContract>()?,
-                ),
-            ))?;
+            .provide_local::<AgentCompositionSourceContract>(crate::integration_source::capture(
+                &plan,
+                Arc::new(ServiceAgentSource {
+                    manager: self.staging.manager.clone(),
+                    presets: self.presets.clone(),
+                }),
+                self.paths.clone(),
+            )?)?;
         plan.context()
             .provide_local::<NativeAddonControlContract>(self.staging.control.clone())?;
         Ok(())
@@ -182,9 +181,7 @@ impl PluginFactory for NativeAddonFactory {
             prepared = prepared.requiring_local::<rsi_service_host::ServiceOwnerContract>();
         }
         Ok(if self.capture_service_inputs {
-            prepared
-                .requiring_local::<rsi_mcp::McpOwnerContract>()
-                .requiring_local::<rsi_retrieval::RetrievalContract>()
+            crate::integration_source::requirements(prepared)
         } else {
             prepared
         })
@@ -229,11 +226,7 @@ impl PluginFactory for NativeAddonFactory {
         })??;
         let source: Arc<dyn rsi_agent_composition::AgentCompositionSource> =
             if self.capture_service_inputs {
-                Arc::new(crate::integration_source::SeededSource::new(
-                    manager.clone(),
-                    plan.local::<rsi_mcp::McpOwnerContract>()?,
-                    plan.local::<rsi_retrieval::RetrievalContract>()?,
-                ))
+                crate::integration_source::capture(&plan, manager.clone(), self.paths.clone())?
             } else {
                 manager.clone()
             };
