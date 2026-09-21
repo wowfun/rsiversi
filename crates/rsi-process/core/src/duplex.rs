@@ -80,6 +80,8 @@ pub trait DuplexControl: fmt::Debug + Send + Sync + 'static {
     fn terminate(&self);
     /// Waits for direct-child reaping and bounded pipe/group settlement.
     async fn wait(&self) -> Result<ProcessOutcome>;
+    /// Waits for reaping, group disappearance and pipe-task joins, without claiming lossless EOF.
+    async fn wait_settlement(&self) -> Result<()>;
 }
 /// Cloneable handle to one exact ongoing protocol process.
 #[derive(Clone, Debug)]
@@ -115,6 +117,10 @@ impl ManagedDuplexProcess {
     /// Starts cancellation and group escalation.
     pub fn terminate(&self) {
         self.0.0.terminate();
+    }
+    /// Waits for resource cleanup without claiming that protocol output reached clean EOF.
+    pub async fn wait_settlement(&self) -> Result<()> {
+        self.0.0.wait_settlement().await
     }
     /// Waits for reaping and settlement.
     pub async fn wait(&self) -> Result<ProcessOutcome> {

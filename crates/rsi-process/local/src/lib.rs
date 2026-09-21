@@ -1190,4 +1190,34 @@ mod tests {
         drop((replacement, managed));
         assert!(service.shutdown().await.is_ok());
     }
+    #[tokio::test(start_paused = true)]
+    async fn duplex_resource_settlement_preserves_group_failure() {
+        use rsi_process::DuplexProcessSpec;
+        let groups = Arc::new(StubbornProcessGroups {
+            alive: AtomicBool::new(true),
+            ..StubbornProcessGroups::default()
+        });
+        let service = Service::with_groups(ProcessLocalConfig::default(), groups.clone());
+        let managed = rsi_process::DuplexProcess::spawn(
+            &service,
+            DuplexProcessSpec {
+                process: immediate_process().process,
+                environment: vec![],
+                stdout_buffer_bytes: 64,
+                stderr_max_bytes: 64,
+                termination_grace_ms: 1,
+            },
+        )
+        .unwrap();
+        groups.wait_until_terminated().await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(75), managed.wait_settlement())
+                .await
+                .unwrap(),
+            Err(ProcessError::SettlementTimeout)
+        );
+        assert_eq!(managed.wait().await, Err(ProcessError::SettlementTimeout));
+        groups.alive.store(false, Ordering::Release);
+        service.shutdown().await.unwrap();
+    }
 }

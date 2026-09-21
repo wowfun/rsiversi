@@ -97,3 +97,8 @@ Pipe drain settlement retains each join result independently. A grace deadline
 aborts and joins only unfinished drains; concurrent clean completion remains
 success, while cancellation, panic and I/O failure remain observable. A joined
 stdout is never polled again while waiting for stderr.
+
+The duplex supervisor publishes its separate resource-settlement receipt only
+after reaping/group observation and all pipe-task joins. An intentional stdout
+cancellation can leave `wait` as an output error while `wait_settlement` confirms
+resource cleanup. Group-settlement and native-wait errors remain errors in both.

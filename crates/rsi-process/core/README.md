@@ -98,3 +98,10 @@ PTY request validation checks framing and the supported enforcement stamp, not
 the authenticity of an arbitrary Rust-constructed plan. The trusted consumer
 must obtain the exact plan from Sandbox; neither a stamp nor an opaque plan owner
 constitutes proof of confinement.
+
+Duplex `wait_settlement` separately confirms direct-child reaping, managed-group
+disappearance and pipe-task joins. It does not claim lossless stdout EOF. Protocol
+owners use it after intentional termination; they must still propagate settlement
+failure. `wait` retains its stronger output-completeness result and may report a
+drain error even when resource settlement succeeded. Neither operation fabricates
+success for a surviving group or an OS wait failure.

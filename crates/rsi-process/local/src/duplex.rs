@@ -226,6 +226,7 @@ mod native {
     #[derive(Debug)]
     struct Control {
         child: Arc<ChildState>,
+        settlement: tokio::sync::watch::Receiver<Option<Result<()>>>,
         input: Arc<Input>,
         output: Arc<Output>,
         stderr: Arc<Tail>,
@@ -249,6 +250,17 @@ mod native {
         }
         async fn wait(&self) -> Result<ProcessOutcome> {
             self.child.wait_outcome().await
+        }
+        async fn wait_settlement(&self) -> Result<()> {
+            let mut settled = self.settlement.clone();
+            loop {
+                if let Some(result) = settled.borrow_and_update().clone() {
+                    return result;
+                }
+                settled.changed().await.map_err(|_| {
+                    ProcessError::Io("duplex supervisor ended before settlement".into())
+                })?;
+            }
         }
     }
     impl Service {
@@ -307,6 +319,7 @@ mod native {
             let stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
             let waiting = state.clone();
             let final_output = output.clone();
+            let (settled, settlement) = tokio::sync::watch::channel(None);
             runtime.spawn(async move {
                 let outcome = reap_group(&mut child, &waiting).await;
                 input_stop.cancel();
@@ -316,7 +329,9 @@ mod native {
                     .map(ProcessError::Io);
                 // Keep capture ownership through both joins, independently of stdout EOF.
                 drop(final_output);
+                let reaped = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
                 waiting.finish(outcome.and_then(|outcome| drain_error.map_or(Ok(outcome), Err)));
+                settled.send_replace(Some(reaped));
             });
             if !published {
                 state.terminate();
@@ -324,6 +339,7 @@ mod native {
             }
             Ok(ManagedDuplexProcess::new(Arc::new(Control {
                 child: state,
+                settlement,
                 input,
                 output,
                 stderr,

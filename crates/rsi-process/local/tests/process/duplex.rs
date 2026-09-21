@@ -163,9 +163,14 @@ async fn termination_unblocks_unread_output_and_reaps_the_child() {
     assert_eq!(first.bytes, b"0");
     let pid = managed.pid();
     managed.terminate();
-    let _outcome = tokio::time::timeout(Duration::from_secs(3), managed.wait())
+    let outcome = tokio::time::timeout(Duration::from_secs(3), managed.wait())
         .await
         .unwrap();
+    assert!(
+        matches!(outcome, Err(ProcessError::Io(_))),
+        "intentional stdout cancellation remains incomplete: {outcome:?}"
+    );
+    managed.wait_settlement().await.unwrap();
     assert_eq!(
         rustix::process::test_kill_process(
             rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap()
@@ -257,6 +262,7 @@ async fn stderr_drain_timeout_is_reported_by_wait_independently_of_stdout_eof() 
         matches!(outcome, Ok(Err(ProcessError::Io(_)))),
         "{outcome:?}"
     );
+    managed.wait_settlement().await.unwrap();
     assert!(managed.stdout().read(128).await.unwrap().eof);
     assert!(fiber.dispose().await.is_clean());
 }
