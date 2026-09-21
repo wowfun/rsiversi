@@ -1,0 +1,28 @@
+[package]
+name = "rsi-language-addon-example"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+[workspace]
+[dependencies]
+rsi = { path = "../../../crates/rsi/core" }
+rsi-host = { path = "../../../crates/rsi-host/core" }
+rsi-meta = { path = "../../../crates/rsi-meta/core" }
+rsi-lsp = { path = "../../../crates/rsi-lsp/core" }
+rsi-lsp-ui = { path = "../../../crates/rsi/lsp-ui" }
+rsi-process = { path = "../../../crates/rsi-process/core" }
+rsi-process-local = { path = "../../../crates/rsi-process/local" }
+rsi-sandbox = { path = "../../../crates/rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../../crates/rsi-sandbox/local" }
+rsi-files = { path = "../../../crates/rsi-files/core" }
+rsi-files-protocol = { path = "../../../crates/rsi-files/protocol" }
+rsi-ui = { path = "../../../crates/rsi/ui" }
+rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
+[dev-dependencies]
+rsi-addon-testkit = { path = "../../../crates/rsi/addon-testkit" }
+[lints.rust]
+unsafe_code = "forbid"

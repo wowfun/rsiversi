@@ -1,0 +1,19 @@
+[package]
+name = "rsi-addon-linked-template"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+rsi = { git = "https://github.com/wowfun/rsiversi.git", rev = "0d0037305dac4dc1077be7bba2aee13bf4e7061b" }
+rsi-host = { git = "https://github.com/wowfun/rsiversi.git", rev = "0d0037305dac4dc1077be7bba2aee13bf4e7061b" }
+rsi-meta = { git = "https://github.com/wowfun/rsiversi.git", rev = "0d0037305dac4dc1077be7bba2aee13bf4e7061b" }
+async-trait = "0.1"
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"

@@ -16,6 +16,15 @@ workspace builds with `cargo build --locked --offline` without changing its lock
 The format-2 addon manifest targets the launcher's native OS/architecture and watches its
 explicit source files. Native Windows/macOS scaffolding is currently unavailable.
 
+`cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY --kind linked`
+creates an independent source addon library and its own composition executable.
+Its RSI dependencies use one repository URL and one full Git revision, with an
+independent lockfile. It uses public Local contracts and existing addon role
+catalogs. Source changes take effect when the executable is rebuilt. The project
+does not include private modules or fixture source files from this checkout.
+The native template remains the default. Delivering dynamic libraries still
+requires the existing Native ABI and Portable boundaries.
+
 `cargo xtask dist desktop /absolute/output [--debug]` creates a new Linux paired
 distribution from an immutable capture of all current tracked and non-ignored
 untracked files, including dirty contents. It never stages or commits them. The

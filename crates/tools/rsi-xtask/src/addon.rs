@@ -6,10 +6,30 @@ use std::{
 const MANIFEST: &str = include_str!("../../../../fixtures/rsi/addon-template/Cargo.toml");
 const LOCK: &str = include_str!("../../../../fixtures/rsi/addon-template/Cargo.lock");
 const SOURCE: &str = include_str!("../../../../fixtures/rsi/addon-template/src/lib.rs");
+const LINKED_MANIFEST: &str =
+    include_str!("../../../../fixtures/rsi/addon-linked-template/Cargo.toml");
+const LINKED_LOCK: &str = include_str!("../../../../fixtures/rsi/addon-linked-template/Cargo.lock");
+const LINKED_SOURCE: &str =
+    include_str!("../../../../fixtures/rsi/addon-linked-template/src/lib.rs");
+const LINKED_MAIN: &str =
+    include_str!("../../../../fixtures/rsi/addon-linked-template/src/main.rs");
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
+    if let [command, name, flag, directory, kind, linked] = arguments
+        && command == "new"
+        && flag == "--directory"
+        && kind == "--kind"
+        && linked == "linked"
+    {
+        let repository = std::env::current_dir().map_err(|e| e.to_string())?;
+        super::repository_root::require(&repository, "addon new")?;
+        return generate_linked(name, Path::new(directory));
+    }
     let [command, name, flag, directory] = arguments else {
-        return Err("usage: cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY".into());
+        return Err(
+            "usage: cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY [--kind linked]"
+                .into(),
+        );
     };
     if command != "new" || flag != "--directory" {
         return Err("usage: cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY".into());
@@ -17,6 +37,48 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let repository = std::env::current_dir().map_err(|e| e.to_string())?;
     super::repository_root::require(&repository, "addon new")?;
     generate(&repository, name, Path::new(directory))
+}
+
+fn generate_linked(name: &str, directory: &Path) -> Result<(), String> {
+    validate_destination(name, directory)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".rsi-addon-")
+        .tempdir_in(directory.parent().ok_or("destination parent required")?)
+        .map_err(|error| error.to_string())?;
+    let root = temporary.path();
+    let package = format!("rsi-addon-{name}");
+    let mut manifest: toml::Value =
+        toml::from_str(LINKED_MANIFEST).map_err(|error| error.to_string())?;
+    *template_field(&mut manifest, &["package", "name"])? = toml::Value::String(package.clone());
+    write(
+        root,
+        "Cargo.toml",
+        &toml::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+    )?;
+    write(
+        root,
+        "Cargo.lock",
+        &rename_lock_from(LINKED_LOCK, "rsi-addon-linked-template", &package)?,
+    )?;
+    fs::create_dir(root.join("src")).map_err(|error| error.to_string())?;
+    write(
+        root,
+        "src/lib.rs",
+        &LINKED_SOURCE.replace("addon.linked", &format!("addon.{name}")),
+    )?;
+    write(
+        root,
+        "src/main.rs",
+        &LINKED_MAIN.replace("rsi_addon_linked_template", &package.replace('-', "_")),
+    )?;
+    write(
+        root,
+        "README.md",
+        &format!(
+            "# {package}\n\nAn independent source addon library and composition executable.\n\nRun `cargo test --locked` and `cargo run --locked`. Cargo fetches the one pinned\nRSI Git revision; later builds can use `--offline` with a populated cache.\nSource changes take effect on rebuild. The library demonstrates public addon\nroles and Local contracts; the executable owns its composition and shutdown.\nNo installation, user state or provider credentials are required.\n"
+        ),
+    )?;
+    publish(root, directory)
 }
 
 fn generate(repository: &Path, name: &str, directory: &Path) -> Result<(), String> {
@@ -93,14 +155,18 @@ fn generate(repository: &Path, name: &str, directory: &Path) -> Result<(), Strin
 }
 
 fn rename_lock(source: &str, package: &str) -> Result<String, String> {
+    rename_lock_from(source, "rsi-addon-template", package)
+}
+
+fn rename_lock_from(source: &str, original: &str, package: &str) -> Result<String, String> {
     let mut lock: toml::Value = toml::from_str(source).map_err(|e| e.to_string())?;
     let entries = lock
         .get_mut("package")
         .and_then(toml::Value::as_array_mut)
         .ok_or("template lock has no packages")?;
-    let mut matches = entries.iter_mut().filter(|entry| {
-        entry["name"].as_str() == Some("rsi-addon-template") && entry.get("source").is_none()
-    });
+    let mut matches = entries
+        .iter_mut()
+        .filter(|entry| entry["name"].as_str() == Some(original) && entry.get("source").is_none());
     let root = matches.next().ok_or("template lock root is absent")?;
     if matches.next().is_some() {
         return Err("template lock has duplicate roots".into());
@@ -172,6 +238,50 @@ fn publish(_: &Path, _: &Path) -> Result<(), String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_scaffold_uses_one_immutable_git_sdk_and_its_own_launcher() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("linked 空间");
+        generate_linked("linked-probe", &destination).unwrap();
+        let manifest: toml::Value =
+            toml::from_str(&fs::read_to_string(destination.join("Cargo.toml")).unwrap()).unwrap();
+        let dependencies = manifest["dependencies"].as_table().unwrap();
+        for (name, dependency) in dependencies
+            .iter()
+            .filter(|(name, _)| name.starts_with("rsi"))
+        {
+            assert_eq!(
+                dependency["git"].as_str(),
+                Some("https://github.com/wowfun/rsiversi.git"),
+                "{name}"
+            );
+            let revision = dependency["rev"].as_str().unwrap();
+            assert_eq!(revision.len(), 40);
+            assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(dependency.get("path").is_none());
+        }
+        assert!(
+            fs::read_to_string(destination.join("src/main.rs"))
+                .unwrap()
+                .contains("rsi_addon_linked_probe")
+        );
+        assert!(
+            !fs::read_to_string(destination.join("src/lib.rs"))
+                .unwrap()
+                .contains("#[path")
+        );
+        let lock: toml::Value =
+            toml::from_str(&fs::read_to_string(destination.join("Cargo.lock")).unwrap()).unwrap();
+        assert!(
+            lock["package"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"].as_str() == Some("rsi-addon-linked-probe"))
+        );
+        assert!(generate_linked("linked-probe", &destination).is_err());
+    }
 
     #[test]
     fn lock_rewrite_requires_one_root_and_preserves_other_values() {
