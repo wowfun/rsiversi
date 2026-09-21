@@ -16,6 +16,7 @@ rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }
 rsi-session-api = { path = "../session-api" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-ui-api = { path = "../ui-api" }
 rsi-ui = { path = "../ui" }

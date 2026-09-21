@@ -6797,6 +6797,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-agent-composition-protocol",
  "rsi-agent-goal",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",

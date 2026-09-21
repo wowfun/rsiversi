@@ -40,3 +40,9 @@ configuration policy; the browser fixture checks that rejection and retained
 editor input. Trusted Local Settings mutation remains covered by the public
 composition and TUI/headless acceptance targets. Its fixture
 configuration hook only writes isolated test inputs before the service starts.
+
+The echo Tool also declares a typed output contract. Browser acceptance opens its
+recorded result using the durable baseline and verifies the generic fields and
+literal Unicode/HTML text at desktop and narrow widths. The ignored
+`independent_addon_tui_renders_saved_typed_result_and_literal_unicode` target
+exercises the same card in the actual PTY and retains terminal captures.

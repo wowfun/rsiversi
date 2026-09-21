@@ -69,6 +69,23 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.match(await extensions.locator("summary").innerText(), /Durable/);
     assert.equal(requests.length, 1);
     await page.screenshot({ path: join(destination, "durable.png") });
+    await page.getByRole("button", { name: "Trajectory", exact: true }).click();
+    await pane.getByRole("textbox", { name: "Main message" }).fill("Please record a typed addon result");
+    await pane.getByRole("button", { name: "Send ↗" }).click();
+    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+    await pane.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
+    await page.getByRole("button", { name: "Recorded result", exact: true }).click();
+    const resultCard = page.locator("#detail .ui-contribution");
+    await resultCard.locator(".ui-field").filter({ hasText: "Result contract: fixture.workbench.echo · version 1" }).waitFor();
+    assert.match(await resultCard.innerText(), /Generation label/);
+    assert.match(await resultCard.innerText(), /中文 · typed result <script>literal<\/script>/);
+    await page.screenshot({ path: join(destination, "typed-result.png") });
+    await page.setViewportSize({ width: 430, height: 900 });
+    await page.screenshot({ path: join(destination, "typed-result-narrow.png") });
+    const overflow = await resultCard.evaluate(element => element.scrollWidth > element.clientWidth + 1);
+    assert.equal(overflow, false, "typed result card overflows its narrow view");
+    await page.setViewportSize({ width: 1440, height: 980 });
+    await page.getByRole("button", { name: "Close details", exact: true }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByText("Additional settings", { exact: true }).click();
     await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
@@ -85,6 +102,10 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.deepEqual(errors, []);
     results.push({ browser: name, version: browser.version(), requests, passed: true });
   } catch (error) {
+    for (const page of browser.contexts().flatMap(context => context.pages())) {
+      await page.screenshot({ path: join(destination, "failure.png"), fullPage: true }).catch(() => {});
+      await writeFile(join(destination, "failure.html"), await page.content()).catch(() => {});
+    }
     await writeFile(join(destination, "failure.json"), JSON.stringify({ error: String(error), errors, requests }, null, 2));
     throw error;
   } finally { await browser.close(); await service.close(); }

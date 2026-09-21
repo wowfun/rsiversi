@@ -9,6 +9,7 @@ mod patch;
 mod references;
 mod retrieval;
 mod tasks;
+mod tool_contract;
 pub use binding::SessionUiBinderFactory;
 
 use async_trait::async_trait;
@@ -176,6 +177,11 @@ impl PluginFactory for SessionUiFactory {
                             handler: Arc::new(ReadSource),
                         },
                         ActionContribution {
+                            name: "tool-contract".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(tool_contract::Read),
+                        },
+                        ActionContribution {
                             name: "output".into(),
                             target: TargetKind::Surface,
                             handler: Arc::new(output::ReadOutput),
@@ -305,6 +311,9 @@ impl BlockRenderer for ToolCard {
             }
         }
         output::buttons(target, tool, &mut elements);
+        if let (Some(intent), Some(result)) = (tool.arguments, tool.result) {
+            elements.push(tool_contract::button(intent, result));
+        }
         Ok(Some(UiView {
             title: FieldWindow::text(&tool.title(), 0, 256)
                 .expect("valid title bound")

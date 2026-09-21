@@ -95,3 +95,10 @@ It checks the exact intent/result sequences and full Tool identity, the request
 and result operation, and the bounded retrieval DTO. Previews and text paging
 read only those durable Facts. Neither model content nor a card can initiate
 network retrieval; URLs remain plain attributed text for explicit user use.
+
+Completed Tool details offer a recorded result-contract view. The action checks
+the exact intent/result identity, reads the first durable control baseline and
+interprets the canonical value using its saved output declaration. It performs
+no current-catalog lookup or plugin activation. Missing declarations display
+opaque JSON; unavailable codecs, mismatches and tool-owned errors retain raw
+result access. Text previews remain bounded and render as literal data.
