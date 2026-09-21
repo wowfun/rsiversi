@@ -1,0 +1,31 @@
+[package]
+name = "rsi-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+[dev-dependencies]
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-files = { path = "../../rsi-files/core" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+[lints]
+workspace = true

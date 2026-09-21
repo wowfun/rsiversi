@@ -6032,6 +6032,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-lsp"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-agent-turn-protocol",
+ "rsi-files",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "rsi-lsp-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-client",
+ "rsi-lsp",
+ "rsi-meta",
+ "rsi-session-protocol",
+ "rsi-ui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-managed-providers"
 version = "0.0.1"
 dependencies = [
@@ -6552,6 +6594,23 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-service-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-api-protocol",
+ "rsi-client",
+ "rsi-meta",
+ "rsi-ui",
+ "rsi-ui-api",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]
