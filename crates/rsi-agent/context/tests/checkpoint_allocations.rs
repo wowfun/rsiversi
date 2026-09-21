@@ -124,14 +124,14 @@ fn full_builder_preserves_v7_payload_and_v6_envelope_without_a_third_full_copy()
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // Exact v7 fold/v6 envelope with Session 16 and builder 2.6.0.
-    // Rebinding only the Header's format and removed workspace-trust field,
-    // then both envelope checksums, exactly recovers the Session 15 oracle
-    // 33f1e2f8964b04e21337cae1cd789f70a3ee98cbcbbea642bcea2c895e1539b9.
+    // Exact v7 fold/v6 envelope with Session 17 and builder 2.6.0.
+    // Rebinding only the Header format to 16 and the two envelope digests
+    // recovers the reviewed Session 16 oracle:
+    // 092a2720249c31276d7bc3d7a4b56a86cbbb4b4defc4603b225afd7df3c14495.
     // All payload bytes and Fact-prefix digests remain unchanged.
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "092a2720249c31276d7bc3d7a4b56a86cbbb4b4defc4603b225afd7df3c14495"
+        "6ef26e3c9dcb6ea658dfd43dcf4d7e34f1e11a57b0c4ea66e73844824401a79b"
     );
     assert!(
         additional < 3 * bytes.len(),

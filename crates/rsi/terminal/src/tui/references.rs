@@ -44,10 +44,10 @@ impl State {
     pub(super) fn show_reference(&mut self, page: ReferenceTextPage) {
         let reference = &page.reference;
         let metadata = &reference.metadata;
-        self.open_detail(format!("Reference {}\nCaptured through Fact {} · retained Facts {}..{} · {} bytes\nOmissions: {}\n\n{}",
-            metadata.source.session_id, metadata.through_seq, metadata.retained_after_seq+1,
-            metadata.retained_through_seq, metadata.text_bytes,
-            if metadata.omissions.is_empty() {"none".into()} else {format!("{:?}",metadata.omissions)},
+        self.open_detail(format!("Reference {}\nCaptured through record {} · retained records {}..{} · {} bytes\nOmissions: {}\n\n{}",
+            metadata.source, metadata.through_seq(), metadata.retained_interval().0,
+            metadata.retained_interval().1, metadata.text_bytes,
+            if metadata.omissions().is_empty() {"none".into()} else {format!("{:?}",metadata.omissions())},
             super::super::terminal_text(&page.text)));
         self.detail_previous = (page.offset > 0)
             .then(|| Action::PreviewReference(reference.clone(), page.offset.saturating_sub(8192)));
@@ -103,10 +103,10 @@ impl Client {
                     .map(|reference| {
                         (
                             format!(
-                                "{} · captured through Fact {}{}",
-                                reference.metadata.source.session_id,
-                                reference.metadata.through_seq,
-                                if reference.metadata.omissions.is_empty() {
+                                "{} · captured through record {}{}",
+                                reference.metadata.source,
+                                reference.metadata.through_seq(),
+                                if reference.metadata.omissions().is_empty() {
                                     ""
                                 } else {
                                     " · shortened"

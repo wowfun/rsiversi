@@ -22,15 +22,19 @@ use thiserror::Error;
 mod domain;
 mod evidence;
 mod suffix;
+mod window;
 pub use domain::{
     StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
     domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
+pub use window::{
+    MAXIMUM_STORE_WINDOW_FACTS, StoreFactOmission, StoreFactWindow, validate_window_limits,
+};
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 22;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 23;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1742,12 +1746,30 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Reads at most `limit` contiguous Facts after one cursor.
+    ///
+    /// This ordinary page uses the Store-wide aggregate ceiling. Consumers requiring
+    /// a smaller first-body budget use `read_fact_window` instead.
     async fn read_facts(
         &self,
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
     ) -> Result<StoreFactPage>;
+    /// Reads a bounded forward interval, omitting originals larger than the entire
+    /// caller budget before body allocation. Omitted coordinates still advance.
+    async fn read_fact_window(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<StoreFactWindow> {
+        let _ = (session_id, after_seq);
+        validate_window_limits(limit, maximum_bytes)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support forward Fact windows".into(),
+        ))
+    }
     /// Reads at most `limit` contiguous Agent-control records after one cursor.
     async fn read_controls(
         &self,

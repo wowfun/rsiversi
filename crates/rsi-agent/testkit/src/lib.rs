@@ -43,6 +43,7 @@ pub struct MemoryStore {
     fail_appends: AtomicUsize,
     fork_boundary_resolutions: AtomicUsize,
     fail_agent_children: Mutex<Option<SessionId>>,
+    open_turn_reads: AtomicUsize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -101,6 +102,11 @@ impl MemoryStore {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .fact_read_cursors,
         )
+    }
+
+    /// Counts bounded open-Turn metadata reads, including missing-session queries.
+    pub fn open_turn_read_count(&self) -> usize {
+        self.open_turn_reads.load(Ordering::Acquire)
     }
 
     /// Returns how many immutable fork-boundary resolutions this fixture served.

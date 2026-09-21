@@ -115,7 +115,7 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
         )
         .await
         .unwrap();
-    assert_eq!(frozen.metadata.through_seq, 2);
+    assert_eq!(frozen.metadata.through_seq(), 2);
     assert!(frozen.preview.contains("最初的材料"));
     owner
         .verify(target.clone(), frozen.clone(), CancellationToken::new())
@@ -158,7 +158,12 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
             .is_err()
     );
     let mut modified = frozen.clone();
-    modified.metadata.source.session_id = SessionId::new("forged").unwrap();
+    let rsi_agent_session_protocol::ReferenceSource::Native { binding } =
+        &mut modified.metadata.source
+    else {
+        panic!("native")
+    };
+    binding.session_id = SessionId::new("forged").unwrap();
     assert!(
         owner
             .verify(target.clone(), modified, CancellationToken::new())
@@ -263,6 +268,216 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
             .await,
         Err(ReferenceError::Cancelled)
     ));
+    owner.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One causal source lifecycle checks old selection, tampering and immutable growth"
+)]
+async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and_source_fencing() {
+    use sha2::{Digest as _, Sha256};
+    let runtime = rsi_meta::Runtime::default();
+    let store = Arc::new(MemoryStore::default());
+    let source = header("old-source");
+    let target = header("selected-target");
+    let text = "old 🦀精确 selected evidence";
+    append(
+        &*store,
+        &source,
+        0,
+        vec![accepted("old", text), terminal("old")],
+    )
+    .await;
+    // The original is over 1024 Facts behind the durable horizon.
+    for index in 0..520 {
+        let turn = format!("later-{index}");
+        append(
+            &*store,
+            &source,
+            2 + index * 2,
+            vec![accepted(&turn, "later"), terminal(&turn)],
+        )
+        .await;
+    }
+    let window = store
+        .read_fact_window(source.session_id(), 0, 1, MAXIMUM_REFERENCE_SCAN_BYTES)
+        .await
+        .unwrap();
+    let selection = ReferenceSelection {
+        record: ReferenceRecord {
+            sequence: 1,
+            kind: ReferenceContentKind::Human,
+            content_index: 0,
+        },
+        through_seq: window.durable_seq,
+        start: 4,
+        end: 14,
+        text_sha256: hex::encode(Sha256::digest(text.as_bytes())),
+        scanned_bytes: window.encoded_bytes,
+    };
+    let binding = ReferenceBinding {
+        session_id: source.session_id().clone(),
+        header_sha256: source.fingerprint().unwrap(),
+    };
+    let owner = References::new(store.clone(), runtime.execution().clone());
+    let frozen = owner
+        .capture_selected(
+            binding.clone(),
+            target.clone(),
+            selection.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frozen.preview, "🦀精确");
+    assert_eq!(frozen.metadata.retained_interval(), (1, 1));
+    for changed in [
+        ReferenceSelection {
+            start: 5,
+            ..selection.clone()
+        },
+        ReferenceSelection {
+            text_sha256: "b".repeat(64),
+            ..selection.clone()
+        },
+        ReferenceSelection {
+            scanned_bytes: selection.scanned_bytes + 1,
+            ..selection.clone()
+        },
+        ReferenceSelection {
+            through_seq: selection.through_seq + 1,
+            ..selection.clone()
+        },
+        ReferenceSelection {
+            record: ReferenceRecord {
+                kind: ReferenceContentKind::ToolEvidence,
+                ..selection.record.clone()
+            },
+            ..selection.clone()
+        },
+    ] {
+        assert!(
+            owner
+                .capture_selected(
+                    binding.clone(),
+                    target.clone(),
+                    changed,
+                    CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+    }
+    let foreign = SessionHeader::new(
+        SessionId::new("foreign").unwrap(),
+        1,
+        "/foreign",
+        target.agent_preset_id().clone(),
+        target.settings().clone(),
+    )
+    .unwrap();
+    assert!(
+        owner
+            .capture_selected(
+                binding.clone(),
+                foreign,
+                selection.clone(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    append(
+        &*store,
+        &source,
+        window.durable_seq,
+        vec![accepted("growth", "new"), terminal("growth")],
+    )
+    .await;
+    let again = owner
+        .capture_selected(binding, target.clone(), selection, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(again, frozen);
+    let page = owner
+        .preview(target, frozen, 0, 65536, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(page.text, "🦀精确");
+    owner.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() {
+    use rsi_agent_references::ObservedReferenceText;
+    use sha2::{Digest as _, Sha256};
+    let runtime = rsi_meta::Runtime::default();
+    let owner = References::new(
+        Arc::new(MemoryStore::default()),
+        runtime.execution().clone(),
+    );
+    let selection = ReferenceSelection {
+        record: ReferenceRecord {
+            sequence: 8,
+            kind: ReferenceContentKind::Assistant,
+            content_index: 0,
+        },
+        through_seq: 10,
+        start: 0,
+        end: 8,
+        text_sha256: hex::encode(Sha256::digest(b"observed")),
+        scanned_bytes: 128,
+    };
+    let source = ReferenceSource::Observed {
+        owner: "acp".into(),
+        id: "external-id".into(),
+        epoch: 3,
+    };
+    let frozen = owner
+        .capture_observed(
+            ObservedReferenceText {
+                source: source.clone(),
+                canonical_cwd: "/workspace".into(),
+                text: "observed".into(),
+                selection: selection.clone(),
+            },
+            header("target"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frozen.metadata.source, source);
+    assert!(
+        owner
+            .capture_observed(
+                ObservedReferenceText {
+                    source,
+                    canonical_cwd: "/different".into(),
+                    text: "observed".into(),
+                    selection
+                },
+                header("target"),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    let mut old_envelope = serde_json::json!({"version":1,"metadata":frozen.metadata,"preview":"observed","text":"observed"});
+    assert!(
+        serde_json::from_value::<ReferenceSnapshotEnvelope>(old_envelope.clone())
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    old_envelope["version"] = 2.into();
+    serde_json::from_value::<ReferenceSnapshotEnvelope>(old_envelope)
+        .unwrap()
+        .validate()
+        .unwrap();
     owner.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }

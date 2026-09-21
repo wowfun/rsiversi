@@ -4,6 +4,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod export;
+mod selected;
+pub use selected::{ObservedReferenceText, ReferenceText, reference_texts};
 mod plugin;
 mod tools;
 pub use plugin::{ReferencesContract, ReferencesFactory};
@@ -12,9 +14,9 @@ use rsi_agent_session_protocol::{
     MAXIMUM_AGENT_IDENTIFIER_BYTES, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
     MAXIMUM_REFERENCE_PAGE_BYTES, MAXIMUM_REFERENCE_PREVIEW_BYTES, MAXIMUM_REFERENCE_SCAN_BYTES,
     MAXIMUM_REFERENCE_SCAN_FACTS, MAXIMUM_REFERENCE_TEXT_BYTES, ModelEventPurpose,
-    ReferenceBinding, ReferenceMetadata, ReferenceOmission, ReferenceReadRequest,
-    ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceTextPage, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, TurnId,
+    ReferenceBinding, ReferenceCapture, ReferenceMetadata, ReferenceOmission, ReferenceReadRequest,
+    ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource, ReferenceSuffix,
+    ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_store_protocol::{CasObjectRef, SessionStore, StoreError};
 use sha2::{Digest as _, Sha256};

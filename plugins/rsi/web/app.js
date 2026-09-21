@@ -5,6 +5,13 @@ import { NativeDocument } from "./src/native.ts";
 import { MountTable } from "/mounts.js";
 import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
 import { openFilePicker } from "./file-picker.js";
+function referenceOrigin(meta) {
+  return meta.source.kind === "native" ? `Session ${meta.source.binding.session_id}` : `${meta.source.owner}/${meta.source.id} · observed epoch ${meta.source.epoch}`;
+}
+function referenceInterval(meta) {
+  const capture = meta.capture;
+  return capture.kind === "suffix" ? {...capture.interval, first:String(BigInt(capture.interval.retained_after_seq)+1n), last:capture.interval.retained_through_seq} : {through_seq:capture.selection.through_seq,first:capture.selection.record.sequence,last:capture.selection.record.sequence,omissions:[]};
+}
 export function initialize() {
 const $ = id => document.getElementById(id);
 let pending = new Map();
@@ -528,8 +535,8 @@ class Pane {
     this.referenceKey = key; this.referenceList.replaceChildren();
     for (const reference of editor?.references ?? []) {
       const row = element("div", "reference-row");
-      const source = reference.metadata.source.session_id;
-      row.append(element("span", "reference-origin", `Session ${source} · through Fact ${reference.metadata.through_seq}${reference.metadata.omissions.length ? " · shortened" : ""}`),
+      const source = referenceOrigin(reference.metadata), interval = referenceInterval(reference.metadata);
+      row.append(element("span", "reference-origin", `${source} · through record ${interval.through_seq}${interval.omissions.length ? " · shortened" : ""}`),
         button("Preview reference", () => this.showReferencePicker(reference), "quiet"),
         button("Remove reference", () => { this.edit(this.editor.text, this.editor.images, this.editor.references.filter(item => item.snapshot.sha256 !== reference.snapshot.sha256)); this.input.focus(); }, "quiet"));
       this.referenceList.append(row);
@@ -558,10 +565,10 @@ class Pane {
     const alive = () => dialog.open && this.generation === generation && this.editor === editor && this.referenceDialog === dialog;
     const show = (reference, page) => {
       content.replaceChildren();
-      const meta = reference.metadata;
-      content.append(element("p", "reference-origin", `Source Session ${meta.source.session_id} · through Fact ${meta.through_seq}`),
-        element("p", "hint", `Retained Facts ${BigInt(meta.retained_after_seq) + 1n}–${meta.retained_through_seq} · ${meta.text_bytes} text bytes`));
-      if (meta.omissions.length) content.append(element("p", "hint", `Earlier material omitted: ${meta.omissions.map(reason => ({ fact_limit:"capture reached 1,024 Facts", scan_bytes:"capture reached 16 MiB of source Facts", content_bytes:"text reached 1 MiB" })[reason]).join("; ")}.`));
+      const meta = reference.metadata, interval = referenceInterval(meta);
+      content.append(element("p", "reference-origin", `${referenceOrigin(meta)} · through record ${interval.through_seq}`),
+        element("p", "hint", `Retained records ${interval.first}–${interval.last} · ${meta.text_bytes} text bytes`));
+      if (interval.omissions.length) content.append(element("p", "hint", `Earlier material omitted: ${interval.omissions.map(reason => ({ fact_limit:"capture reached 1,024 Facts", scan_bytes:"capture reached 16 MiB of source Facts", content_bytes:"text reached 1 MiB" })[reason]).join("; ")}.`));
       content.append(element("pre", "", page?.text ?? reference.preview));
       const offset = page?.offset ?? 0, next = page?.next_offset ?? new TextEncoder().encode(reference.preview).length;
       if (offset > 0) content.append(button("Previous reference page", () => preview(reference, Math.max(0, offset - 8192)), "quiet"));

@@ -19,6 +19,60 @@ use super::{
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn read_fact_window(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreFactWindow> {
+        use rsi_agent_store_protocol::{
+            StoreFactOmission, StoreFactWindow, validate_window_limits,
+        };
+        validate_window_limits(limit, maximum_bytes)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
+        if after_seq > durable_seq {
+            return Err(StoreError::Invalid(
+                "Fact window cursor exceeds durable horizon".into(),
+            ));
+        }
+        let mut window = StoreFactWindow {
+            after_seq,
+            through_seq: after_seq,
+            durable_seq,
+            facts: vec![],
+            omitted: vec![],
+            encoded_bytes: 0,
+        };
+        let start = usize::try_from(after_seq)
+            .map_err(|_| StoreError::Invalid("Fact cursor exceeds memory".into()))?;
+        for fact in session.facts.iter().skip(start).take(limit) {
+            let length = fact.encoded_len();
+            if length > maximum_bytes {
+                window.omitted.push(StoreFactOmission {
+                    seq: fact.seq(),
+                    encoded_bytes: length,
+                });
+            } else {
+                if length > maximum_bytes - window.encoded_bytes {
+                    break;
+                }
+                window.encoded_bytes += length;
+                window.facts.push(fact.as_ref().clone());
+            }
+            window.through_seq = fact.seq();
+        }
+        window.validate(limit, maximum_bytes)?;
+        Ok(window)
+    }
     async fn read_fact_suffix(
         &self,
         session_id: &SessionId,
@@ -699,6 +753,7 @@ impl SessionStore for MemoryStore {
         after_accepted_seq: u64,
         limit: usize,
     ) -> Result<StoreOpenTurnPage> {
+        self.open_turn_reads.fetch_add(1, Ordering::Relaxed);
         validate_read_limit(limit)?;
         let state = self
             .inner

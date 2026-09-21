@@ -875,6 +875,7 @@ mod suffix;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod text;
+mod window;
 use text::{bounded_text, optional_text};
 mod validation;
 

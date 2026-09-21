@@ -61,8 +61,9 @@ pub use reference::{
     FrozenReference, MAXIMUM_MESSAGE_REFERENCES, MAXIMUM_REFERENCE_PAGE_BYTES,
     MAXIMUM_REFERENCE_PREVIEW_BYTES, MAXIMUM_REFERENCE_SCAN_BYTES, MAXIMUM_REFERENCE_SCAN_FACTS,
     MAXIMUM_REFERENCE_SNAPSHOT_BYTES, MAXIMUM_REFERENCE_TEXT_BYTES, ReferenceBinding,
-    ReferenceMetadata, ReferenceOmission, ReferenceSnapshotEnvelope, ReferenceSnapshotRef,
-    validate_reference_page_bounds,
+    ReferenceCapture, ReferenceContentKind, ReferenceMetadata, ReferenceOmission, ReferenceRecord,
+    ReferenceSelection, ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource,
+    ReferenceSuffix, validate_reference_page_bounds,
 };
 pub use reference::{ReferenceReadRequest, ReferenceTextPage};
 pub use resource::{
@@ -72,7 +73,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 16;
+pub const SESSION_FORMAT_VERSION: u32 = 17;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.

@@ -118,6 +118,54 @@ pub async fn assert_mechanical_store_contract(
     let second = store.read_facts(&session_id, 1, 1).await.unwrap();
     assert_eq!(second.facts, vec![event.clone()]);
     assert!(second.caught_up());
+    let omitted = store
+        .read_fact_window(&session_id, 0, 256, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        (omitted.after_seq, omitted.through_seq, omitted.durable_seq),
+        (0, 2, 2)
+    );
+    assert!(omitted.facts.is_empty());
+    assert_eq!(omitted.encoded_bytes, 0);
+    assert_eq!(
+        omitted
+            .omitted
+            .iter()
+            .map(|row| row.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let budget = accepted.encoded_len().max(event.encoded_len());
+    let first = store
+        .read_fact_window(&session_id, 0, 256, budget)
+        .await
+        .unwrap();
+    assert_eq!(first.facts, vec![accepted.clone()]);
+    assert_eq!(first.through_seq, 1);
+    assert!(
+        first.omitted.is_empty(),
+        "remaining budget does not create an omission"
+    );
+    let next = store
+        .read_fact_window(&session_id, first.through_seq, 256, budget)
+        .await
+        .unwrap();
+    assert_eq!(next.facts, vec![event.clone()]);
+    assert_eq!(next.through_seq, next.durable_seq);
+    assert!(
+        store
+            .read_fact_window(&session_id, 3, 1, budget)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .read_fact_window(&session_id, 0, 257, budget)
+            .await
+            .is_err()
+    );
+    assert!(store.read_fact_window(&session_id, 0, 1, 0).await.is_err());
     let newest = store.read_facts_before(&session_id, 0, 1).await.unwrap();
     assert_eq!(newest.before_seq, 3);
     assert_eq!(newest.facts, vec![event.clone()]);

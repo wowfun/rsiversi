@@ -1,6 +1,7 @@
 use super::*;
 use rsi_agent_session_protocol::{
-    FrozenReference, ReferenceBinding, ReferenceMetadata, ReferenceSnapshotRef,
+    FrozenReference, ReferenceBinding, ReferenceCapture, ReferenceMetadata, ReferenceSnapshotRef,
+    ReferenceSource, ReferenceSuffix,
 };
 fn frozen(header: &SessionHeader) -> FrozenReference {
     FrozenReference {
@@ -9,22 +10,28 @@ fn frozen(header: &SessionHeader) -> FrozenReference {
             byte_len: 900,
         },
         metadata: ReferenceMetadata {
-            source: ReferenceBinding {
-                session_id: SessionId::new("source").unwrap(),
-                header_sha256: "b".repeat(64),
+            source: ReferenceSource::Native {
+                binding: ReferenceBinding {
+                    session_id: SessionId::new("source").unwrap(),
+                    header_sha256: "b".repeat(64),
+                },
             },
             target: ReferenceBinding {
                 session_id: header.session_id().clone(),
                 header_sha256: header.fingerprint().unwrap(),
             },
-            through_seq: 2,
-            fact_prefix_sha256: "c".repeat(64),
-            scanned_after_seq: 0,
-            retained_after_seq: 0,
-            retained_through_seq: 1,
-            scanned_bytes: 400,
             text_bytes: 12,
-            omissions: vec![],
+            capture: ReferenceCapture::Suffix {
+                interval: ReferenceSuffix {
+                    through_seq: 2,
+                    fact_prefix_sha256: "c".repeat(64),
+                    scanned_after_seq: 0,
+                    retained_after_seq: 0,
+                    retained_through_seq: 1,
+                    scanned_bytes: 400,
+                    omissions: vec![],
+                },
+            },
         },
         preview: "你好世界".into(),
     }

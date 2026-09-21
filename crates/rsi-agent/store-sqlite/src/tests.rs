@@ -16,8 +16,7 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
         )
         .unwrap();
     let mut header: serde_json::Value = serde_json::from_str(&header).unwrap();
-    header["format_version"] = 15.into();
-    header["workspace_trust"] = "trusted".into();
+    header["format_version"] = 16.into();
     connection
         .execute(
             "UPDATE sessions SET header_json=?1 WHERE session_id=?2",
@@ -31,7 +30,7 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
     let before = std::fs::read(&path).unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(
-        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains("unsupported session format version 15"))
+        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains("unsupported session format version 16"))
     );
     drop(store);
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -73,6 +72,60 @@ async fn bounded_reference_suffix_uses_the_1024_fact_limit_and_exact_horizon() {
     assert_eq!(page.facts.last().unwrap().seq(), 1100);
     assert!(!page.byte_limited);
     page.validate(1024, 16 * 1024 * 1024).unwrap();
+    let forward = store
+        .read_fact_window(&session, 0, 256, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(forward.durable_seq, 1100);
+    assert_eq!(forward.through_seq, 256);
+    assert_eq!(forward.facts.len(), 256);
+    assert!(forward.omitted.is_empty());
+}
+
+#[tokio::test]
+async fn forward_window_skips_large_holes_but_stops_before_aggregate_overflow() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = SessionId::new("window-holes").unwrap();
+    let mut facts = (1..=5).map(test_fact).collect::<Vec<_>>();
+    let mut body = facts[1].body().clone();
+    if let SessionFactBody::TurnAccepted { text, .. } = &mut body {
+        *text = "x".repeat(8192);
+    }
+    facts[1] = SessionFact::new(2, 2, body).unwrap();
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(test_header(id.as_str())),
+            facts: facts.iter().cloned().map(Into::into).collect(),
+        })
+        .await
+        .unwrap();
+    let budget = facts[0].encoded_len() + facts[2].encoded_len();
+    store
+        .inner
+        .fact_materializations
+        .store(0, Ordering::Relaxed);
+    let first = store.read_fact_window(&id, 0, 256, budget).await.unwrap();
+    assert_eq!(first.through_seq, 3);
+    assert_eq!(first.facts, vec![facts[0].clone(), facts[2].clone()]);
+    assert_eq!(
+        first.omitted.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(
+        store.inner.fact_materializations.swap(0, Ordering::Relaxed),
+        2
+    );
+    let next = store
+        .read_fact_window(&id, first.through_seq, 256, budget)
+        .await
+        .unwrap();
+    assert_eq!(next.through_seq, 5);
+    assert_eq!(next.facts, facts[3..]);
+    assert!(next.omitted.is_empty());
+    assert_eq!(store.inner.fact_materializations.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -1052,6 +1105,10 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one causal allocation probe compares all public fact-page boundaries"
+)]
 async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
     use rsi_agent_session_protocol::EffectId;
     use rsi_ai_protocol::{ContentDelta, LanguageEvent};
@@ -1106,6 +1163,32 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
         count(),
         0,
         "an oversized first suffix body must never materialize"
+    );
+    let window = store
+        .read_fact_window(&id, 0, 256, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(window.through_seq, 4);
+    assert_eq!(window.facts.len(), 1);
+    assert_eq!(
+        window.omitted.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        vec![2, 3, 4]
+    );
+    assert_eq!(
+        count(),
+        1,
+        "length-only omissions never materialize any of the 32 MiB originals"
+    );
+    let window = store
+        .read_fact_window(&id, 1, 256, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(window.facts.is_empty());
+    assert_eq!(window.through_seq, 4);
+    assert_eq!(
+        count(),
+        0,
+        "the first forward original obeys the caller's budget"
     );
     let page = store.read_facts(&id, 0, 8).await.unwrap();
     assert_eq!(page.facts.len(), 2);

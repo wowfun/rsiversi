@@ -1,5 +1,14 @@
 # rsi-agent-store-sqlite
 
+Forward Fact windows perform a length-only bounded selection in one read
+transaction before projecting admitted bodies in one ordered query over those
+exact coordinates. Oversized coordinates are absent from that query, so their
+payloads need no second length scan; returned coordinates and canonical lengths
+must match the admitted selection. Oversized records remain explicit
+coordinate/length omissions. At most 256 coordinates and the caller's encoded
+byte budget are materialized; session integrity preparation remains a separate
+Store boundary. The Memory testkit implements the same contract before cloning.
+
 One-shot reset requests expose a bounded receipt notification independently of
 the serialized reset operation. A backup location becomes observable immediately
 after the root move, including while subsequent initialization is still pending.
@@ -188,7 +197,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 22 admits frozen human reference content and the current mandatory Agent-preset
+The exact schema version 23 admits version 2 selected-reference envelopes and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

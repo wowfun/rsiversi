@@ -6,6 +6,17 @@ wire values. The Context builder consumes only their inline previews; it never
 calls this service or reads CAS. Product Session admission supplies the actual
 target Header, and the model Tool obtains it from AgentCallerAuthority.
 
+Version 2 envelopes separate native immutable Header bindings from product-owned
+observations. Capture provenance is either the existing bounded suffix or one
+exact selected record/content field, UTF-8 byte range, full original text digest
+and source cutoff. Selected native originals cross the Store's forward-window
+budget before decoding; observed originals are reread and authorized by their
+product source owner before the trusted in-process capture boundary. Reasoning,
+raw provider requests and arbitrary Tool JSON are never reference exports.
+Only direct human text, conversation assistant text, and explicit Tool text
+evidence can be selected. Source growth does not change an already frozen CAS
+envelope. A source identity or original-text mismatch rejects capture.
+
 Capture uses at most 1,024 Facts and 16 MiB of encoded suffix bodies, exporting
 only direct human text and visible conversation assistant text. Newer text wins
 the 1 MiB export limit. Explicit metadata records omissions and exact retained

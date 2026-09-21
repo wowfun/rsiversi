@@ -319,9 +319,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 16);
+    assert_eq!(current["format_version"], 17);
     assert!(current.get("workspace_trust").is_none());
-    for version in [15, 14, 1] {
+    for version in [16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -1092,18 +1092,24 @@ fn reference_envelope_bound_admits_worst_case_json_escaping_and_rejects_excess()
         header_sha256: "a".repeat(64),
     };
     let envelope = ReferenceSnapshotEnvelope {
-        version: 1,
+        version: 2,
         metadata: ReferenceMetadata {
-            source: binding.clone(),
+            source: ReferenceSource::Native {
+                binding: binding.clone(),
+            },
             target: binding,
-            through_seq: 1,
-            fact_prefix_sha256: "b".repeat(64),
-            scanned_after_seq: 0,
-            retained_after_seq: 0,
-            retained_through_seq: 1,
-            scanned_bytes: 1,
             text_bytes: text.len(),
-            omissions: vec![],
+            capture: ReferenceCapture::Suffix {
+                interval: ReferenceSuffix {
+                    through_seq: 1,
+                    fact_prefix_sha256: "b".repeat(64),
+                    scanned_after_seq: 0,
+                    retained_after_seq: 0,
+                    retained_through_seq: 1,
+                    scanned_bytes: 1,
+                    omissions: vec![],
+                },
+            },
         },
         preview: text[..MAXIMUM_REFERENCE_PREVIEW_BYTES].into(),
         text,

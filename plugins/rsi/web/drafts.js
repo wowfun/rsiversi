@@ -26,12 +26,27 @@ export function validateEditor(text, images, references = []) {
     require(typeof reference.preview === "string" && bytes(reference.preview) > 0 && bytes(reference.preview) <= 8192 && !/[\u0000\u007f]/u.test(reference.preview), "Invalid reference preview");
     const metadata = reference.metadata;
     const decimal = value => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
-    require(metadata && Object.keys(metadata).sort().join() === "fact_prefix_sha256,omissions,retained_after_seq,retained_through_seq,scanned_after_seq,scanned_bytes,source,target,text_bytes,through_seq" && [metadata.source,metadata.target].every(binding => binding && Object.keys(binding).sort().join() === "header_sha256,session_id" && identity(binding.session_id) && hex(binding.header_sha256)) && hex(metadata.fact_prefix_sha256), "Invalid reference origin");
-    require([metadata.through_seq,metadata.scanned_after_seq,metadata.retained_after_seq,metadata.retained_through_seq].every(decimal), "Invalid reference interval");
-    const through = BigInt(metadata.through_seq), scanned = BigInt(metadata.scanned_after_seq), first = BigInt(metadata.retained_after_seq), last = BigInt(metadata.retained_through_seq);
-    require(scanned < through && through - scanned <= 1024n && first >= scanned && first < last && last <= through, "Invalid reference interval");
-    require(integer(metadata.text_bytes,MiB) && metadata.text_bytes >= bytes(reference.preview) && integer(metadata.scanned_bytes,16*MiB) && metadata.scanned_bytes > 0, "Invalid reference limits");
-    require(Array.isArray(metadata.omissions) && metadata.omissions.length <= 3 && new Set(metadata.omissions).size === metadata.omissions.length && metadata.omissions.every(reason => ["fact_limit","scan_bytes","content_bytes"].includes(reason)), "Invalid reference omission state");
+    const keys = (value, expected) => value && Object.keys(value).sort().join() === expected;
+    const binding = value => keys(value,"header_sha256,session_id") && identity(value.session_id) && hex(value.header_sha256);
+    require(keys(metadata,"capture,source,target,text_bytes") && binding(metadata.target), "Invalid reference origin");
+    const origin = metadata.source;
+    require(origin?.kind === "native" ? keys(origin,"binding,kind") && binding(origin.binding) : origin?.kind === "observed" && keys(origin,"epoch,id,kind,owner") && identity(origin.owner) && identity(origin.id) && decimal(origin.epoch) && BigInt(origin.epoch) > 0n, "Invalid reference source");
+    require(integer(metadata.text_bytes,MiB) && metadata.text_bytes >= bytes(reference.preview), "Invalid reference limits");
+    const capture = metadata.capture;
+    if (capture?.kind === "suffix") {
+      const interval = capture.interval;
+      require(origin.kind === "native" && keys(capture,"interval,kind") && keys(interval,"fact_prefix_sha256,omissions,retained_after_seq,retained_through_seq,scanned_after_seq,scanned_bytes,through_seq") && hex(interval.fact_prefix_sha256), "Invalid suffix capture");
+      require([interval.through_seq,interval.scanned_after_seq,interval.retained_after_seq,interval.retained_through_seq].every(decimal), "Invalid reference interval");
+      const through = BigInt(interval.through_seq), scanned = BigInt(interval.scanned_after_seq), first = BigInt(interval.retained_after_seq), last = BigInt(interval.retained_through_seq);
+      require(scanned < through && through - scanned <= 1024n && first >= scanned && first < last && last <= through, "Invalid reference interval");
+      require(integer(interval.scanned_bytes,16*MiB) && interval.scanned_bytes > 0, "Invalid reference limits");
+      require(Array.isArray(interval.omissions) && interval.omissions.length <= 3 && new Set(interval.omissions).size === interval.omissions.length && interval.omissions.every(reason => ["fact_limit","scan_bytes","content_bytes"].includes(reason)), "Invalid reference omission state");
+    } else {
+      const selected = capture?.selection, record = selected?.record;
+      require(capture?.kind === "selected" && keys(capture,"kind,selection") && keys(selected,"end,record,scanned_bytes,start,text_sha256,through_seq") && keys(record,"content_index,kind,sequence"), "Invalid selected capture");
+      require(decimal(selected.through_seq) && decimal(record.sequence) && BigInt(record.sequence)>0n && BigInt(record.sequence)<=BigInt(selected.through_seq) && ["human","assistant","tool_evidence"].includes(record.kind) && integer(record.content_index,1023), "Invalid selected record");
+      require(integer(selected.start,MiB) && integer(selected.end,MiB) && selected.start < selected.end && selected.end-selected.start===metadata.text_bytes && hex(selected.text_sha256) && integer(selected.scanned_bytes,16*MiB) && selected.scanned_bytes>0, "Invalid selected range");
+    }
     require(bytes(JSON.stringify(reference)) <= 64 * 1024, "Reference descriptor exceeds its limit");
     previewBytes += bytes(reference.preview);
   }
@@ -142,7 +157,7 @@ async function openDatabase() {
       if (event.oldVersion === 0) {
         const records = request.result.createObjectStore("drafts", { keyPath: "key" });
         records.createIndex("scope", "scope"); request.result.createObjectStore("usage");
-      } else if (event.oldVersion === 1 || event.oldVersion === 2 || event.oldVersion === 3) migrate(request.transaction, fail, event.oldVersion);
+      } else if (event.oldVersion === 1 || event.oldVersion === 2) migrate(request.transaction, fail, event.oldVersion);
       else fail(new Error("Unsupported saved draft schema"));
     };
     request.onerror = () => reject(failure ?? request.error);

@@ -46,65 +46,12 @@ pub enum ReferenceOmission {
     /// Newer exported text filled the content budget.
     ContentBytes,
 }
-/// Captured source interval and its limits, retained unchanged in input history.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReferenceMetadata {
-    /// Source conversation's immutable Header binding.
-    pub source: ReferenceBinding,
-    /// Original receiving Session's immutable Header binding.
-    pub target: ReferenceBinding,
-    /// Atomic source Fact watermark.
-    #[serde(with = "decimal")]
-    pub through_seq: u64,
-    /// Canonical complete Fact-prefix digest at that watermark.
-    pub fact_prefix_sha256: String,
-    /// Exclusive start of the inspected contiguous suffix.
-    #[serde(with = "decimal")]
-    pub scanned_after_seq: u64,
-    /// Exclusive start of the interval containing retained exported text.
-    #[serde(with = "decimal")]
-    pub retained_after_seq: u64,
-    /// Last Fact contributing retained exported text.
-    #[serde(with = "decimal")]
-    pub retained_through_seq: u64,
-    /// Aggregate encoded Facts inspected, before export filtering.
-    pub scanned_bytes: usize,
-    /// Exact exported text length in bytes.
-    pub text_bytes: usize,
-    /// Unique bounded reasons for omitting earlier data.
-    pub omissions: Vec<ReferenceOmission>,
-}
-impl ReferenceMetadata {
-    /// Revalidates the frozen interval and all allocation bounds.
-    pub fn validate(&self) -> Result<()> {
-        self.source.validate()?;
-        self.target.validate()?;
-        validate_sha256("reference Fact prefix", &self.fact_prefix_sha256)?;
-        if self.through_seq == 0
-            || self.scanned_after_seq >= self.through_seq
-            || self.through_seq - self.scanned_after_seq > MAXIMUM_REFERENCE_SCAN_FACTS as u64
-            || self.retained_after_seq < self.scanned_after_seq
-            || self.retained_after_seq >= self.retained_through_seq
-            || self.retained_through_seq > self.through_seq
-            || self.scanned_bytes == 0
-            || self.scanned_bytes > MAXIMUM_REFERENCE_SCAN_BYTES
-            || self.text_bytes == 0
-            || self.text_bytes > MAXIMUM_REFERENCE_TEXT_BYTES
-            || self.omissions.len() > 3
-            || self
-                .omissions
-                .iter()
-                .enumerate()
-                .any(|(index, reason)| self.omissions[..index].contains(reason))
-        {
-            return Err(SessionError::Invalid(
-                "invalid frozen reference interval or limits".into(),
-            ));
-        }
-        Ok(())
-    }
-}
+mod source;
+pub use source::{
+    ReferenceCapture, ReferenceContentKind, ReferenceMetadata, ReferenceRecord, ReferenceSelection,
+    ReferenceSource, ReferenceSuffix,
+};
+
 /// Agent-owned content address; the mechanical Store adapts this to its CAS type.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -160,7 +107,7 @@ impl FrozenReference {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSnapshotEnvelope {
-    /// Exact supported envelope version, one.
+    /// Exact supported envelope version, two.
     pub version: u32,
     /// Source, target, horizon and retained interval.
     pub metadata: ReferenceMetadata,
@@ -179,7 +126,7 @@ impl ReferenceSnapshotEnvelope {
             MAXIMUM_REFERENCE_TEXT_BYTES,
             false,
         )?;
-        if self.version != 1
+        if self.version != 2
             || self.text.len() != self.metadata.text_bytes
             || self.preview
                 != self.text[..self

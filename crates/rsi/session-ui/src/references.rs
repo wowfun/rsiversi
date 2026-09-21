@@ -85,23 +85,23 @@ fn view(page: ReferenceTextPage) -> Result<UiView> {
     let mut elements = vec![
         UiElement::Field {
             label: "Source conversation".into(),
-            value: meta.source.session_id.to_string(),
+            value: meta.source.to_string(),
         },
         UiElement::Field {
             label: "Captured interval".into(),
             value: format!(
-                "Through Fact {} · retained Facts {}–{}",
-                meta.through_seq,
-                meta.retained_after_seq + 1,
-                meta.retained_through_seq
+                "Through record {} · retained records {}–{}",
+                meta.through_seq(),
+                meta.retained_interval().0,
+                meta.retained_interval().1
             ),
         },
         UiElement::Field {
             label: "Omitted material".into(),
-            value: if meta.omissions.is_empty() {
+            value: if meta.omissions().is_empty() {
                 "None within the captured conversation".into()
             } else {
-                format!("{:?}", meta.omissions)
+                format!("{:?}", meta.omissions())
             },
         },
         UiElement::Field {

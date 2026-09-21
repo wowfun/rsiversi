@@ -7,7 +7,7 @@ use rsi_ai_protocol::{ContentDelta, LanguageEvent};
 #[serde(transparent)]
 pub(super) struct ValidatedEnvelope(ReferenceSnapshotEnvelope);
 impl ValidatedEnvelope {
-    fn new(envelope: ReferenceSnapshotEnvelope) -> Result<Self> {
+    pub(super) fn new(envelope: ReferenceSnapshotEnvelope) -> Result<Self> {
         envelope.validate().map_err(invalid)?;
         Ok(Self(envelope))
     }
@@ -104,24 +104,30 @@ pub(super) fn capture(
         omissions.push(ReferenceOmission::ContentBytes);
     }
     let envelope = ReferenceSnapshotEnvelope {
-        version: 1,
+        version: 2,
         metadata: ReferenceMetadata {
-            source: ReferenceBinding {
-                session_id: source.session_id().clone(),
-                header_sha256: source.fingerprint().map_err(invalid)?,
+            source: ReferenceSource::Native {
+                binding: ReferenceBinding {
+                    session_id: source.session_id().clone(),
+                    header_sha256: source.fingerprint().map_err(invalid)?,
+                },
             },
             target: ReferenceBinding {
                 session_id: target.session_id().clone(),
                 header_sha256: target.fingerprint().map_err(invalid)?,
             },
-            through_seq: suffix.through_seq,
-            fact_prefix_sha256: suffix.fact_prefix_sha256.clone(),
-            scanned_after_seq: suffix.after_seq(),
-            retained_after_seq: retained_after,
-            retained_through_seq: retained_through,
-            scanned_bytes: suffix.encoded_bytes,
             text_bytes: text.len(),
-            omissions,
+            capture: ReferenceCapture::Suffix {
+                interval: ReferenceSuffix {
+                    through_seq: suffix.through_seq,
+                    fact_prefix_sha256: suffix.fact_prefix_sha256.clone(),
+                    scanned_after_seq: suffix.after_seq(),
+                    retained_after_seq: retained_after,
+                    retained_through_seq: retained_through,
+                    scanned_bytes: suffix.encoded_bytes,
+                    omissions,
+                },
+            },
         },
         preview: text[..text.floor_char_boundary(text.len().min(MAXIMUM_REFERENCE_PREVIEW_BYTES))]
             .into(),
@@ -441,8 +447,8 @@ mod tests {
             "{}",
             exported.as_envelope().text
         );
-        assert_eq!(exported.as_envelope().metadata.retained_after_seq, 0);
-        assert_eq!(exported.as_envelope().metadata.retained_through_seq, 10);
+        assert_eq!(exported.as_envelope().metadata.retained_interval().0, 1);
+        assert_eq!(exported.as_envelope().metadata.retained_interval().1, 10);
     }
     #[test]
     fn streaming_deltas_coalesce_without_joining_distinct_model_blocks() {
@@ -524,14 +530,17 @@ mod tests {
                 .starts_with(&envelope.as_envelope().preview)
         );
         assert_eq!(
-            envelope.as_envelope().metadata.omissions,
+            envelope.as_envelope().metadata.omissions(),
             vec![
                 ReferenceOmission::FactLimit,
                 ReferenceOmission::ContentBytes
             ]
         );
         let value = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(value["metadata"]["through_seq"], "9007199254740993");
+        assert_eq!(
+            value["metadata"]["capture"]["interval"]["through_seq"],
+            "9007199254740993"
+        );
         let decoded: ReferenceSnapshotEnvelope = serde_json::from_value(value).unwrap();
         decoded.validate().unwrap();
         assert_eq!(decoded, envelope.0);

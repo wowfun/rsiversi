@@ -400,7 +400,15 @@ impl SessionHandle for Handle {
         reference
             .validate()
             .map_err(|_| malformed(Operation::CaptureReference))?;
-        if reference.metadata.source.session_id != source
+        if reference
+            .metadata
+            .source
+            .native()
+            .is_none_or(|binding| binding.session_id != source)
+            || !matches!(
+                reference.metadata.capture,
+                rsi_agent_session_protocol::ReferenceCapture::Suffix { .. }
+            )
             || reference.metadata.target.session_id != handle.session_id
             || reference.metadata.target.header_sha256 != handle.target().header_key
         {

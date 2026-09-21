@@ -1,5 +1,11 @@
 # rsi-agent-session-protocol
 
+Reference envelopes use version 2. Source identity distinguishes native Header
+bindings from observed product records; capture metadata distinguishes a bounded
+suffix from an exact selected record, content kind, range and cutoff. These are
+user-data provenance, never execution authority or evidence of an external agent's
+durable acceptance. Only the source owner can reread and freeze a selection.
+
 Format 16 freezes optional `DelegationPolicy` in child Headers: selected role,
 persona, normalized role digest and at most 64 ordered effective Tool names.
 This records a monotone restriction, not a permission grant or an executable
@@ -109,7 +115,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 16), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 17), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.

@@ -10,6 +10,14 @@ count and encoded-byte limits; providers check lengths before copying bodies,
 including the first body. An oversized last Fact yields an empty omitted suffix.
 This mechanical operation performs no conversation export or reference policy.
 
+Finite forward windows likewise admit encoded lengths before copying any body.
+They inspect at most 256 contiguous coordinates and retain at most the caller's
+byte budget, including the first record. A record larger than the complete budget
+is returned as an explicit length-only omission so a derived index can advance;
+a record that merely exceeds the remaining budget is left for the next window.
+The read-time durable horizon, returned interval, admitted bodies and omissions
+come from one snapshot. This operation supplies no search or reference authority.
+
 Evidence originals are resolved by exact Session and Fact sequence. The shared
 resolver accepts only a ModelIntent's original inline section with matching
 section, digest and byte length; reference chains are rejected. Consumers may
@@ -17,7 +25,7 @@ cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
 
-Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (22). Schema 21
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (23). Schema 22
 and earlier versions are rejected before recovery or writes; there is no implicit
 migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.

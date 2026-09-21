@@ -132,8 +132,12 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
         match kind {
             0 => forged.preview.push('x'),
             1 => {
-                forged.metadata.source.session_id =
-                    foreign.header().await.unwrap().session_id().clone();
+                let rsi_agent_session_protocol::ReferenceSource::Native { binding } =
+                    &mut forged.metadata.source
+                else {
+                    panic!("native")
+                };
+                binding.session_id = foreign.header().await.unwrap().session_id().clone();
             }
             2 => forged.snapshot.byte_len += 1,
             _ => forged.snapshot.sha256 = "a".repeat(64),

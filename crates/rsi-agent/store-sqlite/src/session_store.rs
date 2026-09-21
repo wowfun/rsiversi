@@ -47,6 +47,16 @@ const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT DISTINCT root_session_id FROM r
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn read_fact_window(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreFactWindow> {
+        self.fact_window(session_id, after_seq, limit, maximum_bytes)
+            .await
+    }
     async fn read_fact_suffix(
         &self,
         session_id: &SessionId,

@@ -83,7 +83,7 @@ async fn skill_file_and_frozen_reference_workflows_use_real_tui_actions() {
     terminal.select_menu("New session").await;
     terminal.absent("VISIBLE_SOURCE_PTY").await;
     terminal.send(b"/reference tui-resource-source\r");
-    terminal.until("Captured through Fact").await;
+    terminal.until("Captured through record").await;
     terminal.until("VISIBLE_SOURCE_PTY").await;
     terminal.capture();
     terminal.send(b"\r");
@@ -92,7 +92,7 @@ async fn skill_file_and_frozen_reference_workflows_use_real_tui_actions() {
     terminal.send(b"\x10");
     terminal.select_menu("Draft references").await;
     terminal.select_menu("tui-resource-source").await;
-    terminal.until("Captured through Fact").await;
+    terminal.until("Captured through record").await;
     terminal.send(b"\r");
     terminal.select_menu("Remove from draft").await;
     terminal.until("Reference removed from draft").await;

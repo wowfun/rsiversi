@@ -5,7 +5,7 @@ import { join } from 'node:path';
 export async function verifyDraftMigration(browser, root) {
   const source = await readFile(join(root,'plugins/rsi/web/drafts.js'),'utf8');
   const reports=[];
-  for (const version of [1,2,3]) for (const phase of (version === 3 ? ["prepared","dispatching","unknown"] : ["unknown"])) for (const corrupt of [false,true]) {
+  for (const version of [1,2]) for (const phase of ["prepared","dispatching","unknown"]) for (const corrupt of [false,true]) {
     const context=await browser.newContext();
     await context.route('http://localhost:37918/**',route=>route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
     const page=await context.newPage();
@@ -14,11 +14,6 @@ export async function verifyDraftMigration(browser, root) {
       const report=await page.evaluate(async ({corrupt,version,phase})=>{
         const records=[0,1].map(pane=>({version,key:['a'.repeat(32),'b'.repeat(32),pane,`session-${pane}`],scope:['a'.repeat(32),'b'.repeat(32),pane],header:'c'.repeat(64),incarnation:String(pane+1).repeat(32),editRevision:3,pendingRevision:2,text:`草稿 ${pane}`,images:[{id:"d".repeat(64),mime:"image/png",bytes:72,width:1,height:1}],creation:{session_id:`session-${pane}`,workspace_id:"e".repeat(64),agent_preset_id:null,workspace_trust:pane===0 ? "trusted" : "untrusted"},everDispatched:true,pending:{kind:pane===0?'message':'command',id:`original-${pane}`,opaque:'{"revision":18446744073709551615,"fields":{"z":1,"a":2}}',text_bytes:10,images:1,phase,editRevision:1},receipt:'{"seq":18446744073709551615}'}));
         if (version >= 2) for (const record of records) { record.key[1] = `device:${record.key[1]}`; record.key[2] = record.key[2] === 0 ? "main" : "compare"; record.scope = record.key.slice(0,3); }
-        if (version === 3) for (const record of records) {
-          record.references = [{snapshot:{sha256:'b'.repeat(64),byte_len:900},metadata:{source:{session_id:'source',header_sha256:'f'.repeat(64)},target:{session_id:record.key[3],header_sha256:record.header},through_seq:'9007199254740993',fact_prefix_sha256:'e'.repeat(64),scanned_after_seq:'9007199254740992',retained_after_seq:'9007199254740992',retained_through_seq:'9007199254740993',scanned_bytes:400,text_bytes:12,omissions:['fact_limit']},preview:'你好世界'}];
-          record.pending.references = 1;
-          record.pending.opaque = '{"operation":{"version":6},"workspace_trust":"trusted","revision":18446744073709551615,"reference":' + JSON.stringify(record.references[0]) + '}';
-        }
         const editableBytes = record => new TextEncoder().encode(record.text).length + (record.references?.length ? new TextEncoder().encode(JSON.stringify(record.references)).length : 0);
         await new Promise((resolve,reject)=>{
           const request=indexedDB.open('rsi.composer',version);
@@ -48,5 +43,27 @@ export async function verifyDraftMigration(browser, root) {
       reports.push(report);
     } finally {await context.close()}
   }
+  // Unsupported schema rejection is separate from the validated migrations.
+  const context = await browser.newContext();
+  await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
+  try {
+    const page = await context.newPage(); await page.goto('http://localhost:37918/');
+    const report = await page.evaluate(async () => {
+      const sentinel = {opaque: 'old schema bytes remain owned by their original format'};
+      await new Promise((resolve,reject) => {
+        const request=indexedDB.open('rsi.composer',3);
+        request.onupgradeneeded=()=>request.result.createObjectStore('sentinel').put(sentinel,'original');
+        request.onsuccess=()=>{request.result.close();resolve()};request.onerror=()=>reject(request.error);
+      });
+      const {DraftStore}=await import('/drafts.js');let rejected=false;
+      try {await DraftStore.open('a'.repeat(32),{kind:'local'})} catch {rejected=true}
+      const request=indexedDB.open('rsi.composer');
+      const db=await new Promise((resolve,reject)=>{request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});
+      const read=db.transaction('sentinel').objectStore('sentinel').get('original');
+      const saved=await new Promise((resolve,reject)=>{read.onsuccess=()=>resolve(read.result);read.onerror=()=>reject(read.error)});
+      const version=db.version;db.close();return {rejected,version,unchanged:JSON.stringify(saved)===JSON.stringify(sentinel)};
+    });
+    assert.deepEqual(report,{rejected:true,version:3,unchanged:true});reports.push(report);
+  } finally {await context.close()}
   return reports;
 }

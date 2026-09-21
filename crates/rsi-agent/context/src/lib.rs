@@ -1219,9 +1219,9 @@ fn input_message(
                 media_descriptor(media).map(MessageContent::Image)
             }
             AgentMessageContent::Reference { reference } => Ok(MessageContent::Text { text: format!(
-                "Referenced conversation data from Session {} through Fact {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
-                reference.metadata.source.session_id, reference.metadata.through_seq,
-                if reference.metadata.omissions.is_empty() { "" } else { " Earlier material was omitted by capture limits." },
+                "Referenced conversation data from {} through record {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
+                reference.metadata.source, reference.metadata.through_seq(),
+                if reference.metadata.omissions().is_empty() { "" } else { " Earlier material was omitted by capture limits." },
                 reference.preview, serde_json::to_string(&reference.metadata.target.session_id).expect("Session identity"), seq, index,
             ) }),
         })
