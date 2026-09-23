@@ -976,9 +976,14 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     restored.restore(&writes[0].bytes).unwrap();
     assert_eq!(restored.position().through_seq, 3);
     assert!(
-        serde_json::to_string(&restored.build(Vec::new()).unwrap().messages())
-            .unwrap()
-            .contains("queued task")
+        serde_json::to_string(
+            &restored
+                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .unwrap()
+                .messages()
+        )
+        .unwrap()
+        .contains("queued task")
     );
 }
 
@@ -1024,17 +1029,22 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
     )
     .unwrap();
     restored.restore(&checkpoint.bytes).unwrap();
-    let messages = serde_json::to_string(&restored.build(Vec::new()).unwrap().messages()).unwrap();
+    let messages = serde_json::to_string(
+        &restored
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap()
+            .messages(),
+    )
+    .unwrap();
     assert!(messages.contains("inherited task"));
     assert!(messages.contains("child task"));
     assert_eq!(checkpoint.through_seq, 2);
 }
 
-#[test]
-fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
+fn completed_model_with_tool_call() -> (TurnClaim, Vec<Arc<SessionFact>>) {
     let (claim, accepted) = claim();
     let effect_id = EffectId::new("effect-model-complete").unwrap();
-    let facts = vec![
+    let mut facts = vec![
         accepted,
         SessionFact::new(
             2,
@@ -1080,19 +1090,83 @@ fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
             SessionFactBody::ModelEvent {
                 purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
-                effect_id,
+                effect_id: effect_id.clone(),
                 event: LanguageEvent::Finished {
-                    reason: FinishReason::Stop,
+                    reason: FinishReason::ToolCalls,
                     replay: None,
                 },
             },
         )
         .unwrap(),
     ];
+    let terminal = facts.pop().unwrap();
+    for event in [
+        LanguageEvent::ContentStarted {
+            index: 0,
+            content: rsi_ai_protocol::ContentStart::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                kind: rsi_ai_protocol::ToolCallKind::Function,
+            },
+        },
+        LanguageEvent::ContentDelta {
+            index: 0,
+            delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+        },
+        LanguageEvent::ContentFinished { index: 0 },
+    ] {
+        let seq = facts.len() as u64 + 1;
+        facts.push(
+            SessionFact::new(
+                seq,
+                seq,
+                SessionFactBody::ModelEvent {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: effect_id.clone(),
+                    event,
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                },
+            )
+            .unwrap(),
+        );
+    }
+    facts.push(SessionFact::new(7, 7, terminal.body().clone()).unwrap());
+    (claim, facts.into_iter().map(Arc::new).collect())
+}
+
+#[test]
+fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
+    let (claim, facts) = completed_model_with_tool_call();
     let mut state = ScannedTurn::default();
-    let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
     scan_turn(&claim, &mut state, &facts).unwrap();
     assert!(state.completed_model_without_successor);
+    assert!(state.effects.is_empty());
+
+    let source = EffectId::new("effect-model-complete").unwrap();
+    let supersession = |source| {
+        Arc::new(
+            SessionFact::new(
+                8,
+                8,
+                SessionFactBody::ToolCallsSuperseded {
+                    turn_id: claim.turn_id().clone(),
+                    source_model_effect_id: source,
+                },
+            )
+            .unwrap(),
+        )
+    };
+    assert!(
+        scan_turn(
+            &claim,
+            &mut state,
+            &[supersession(EffectId::new("wrong-source").unwrap())]
+        )
+        .is_err()
+    );
+    assert!(state.completed_model_without_successor);
+    scan_turn(&claim, &mut state, &[supersession(source)]).unwrap();
+    assert!(!state.completed_model_without_successor);
     assert!(state.effects.is_empty());
 }
 
@@ -1201,4 +1275,79 @@ pub(super) fn pending_context(
         capture_tokens: Some(tokens),
         ..Default::default()
     })
+}
+
+#[test]
+fn supersession_requires_outstanding_completed_conversation_calls() {
+    for mode in ["stop", "empty", "consumed", "duplicate"] {
+        let (claim, mut facts) = completed_model_with_tool_call();
+        if mode == "empty" {
+            facts.retain(|fact| {
+                !matches!(
+                    fact.body(),
+                    SessionFactBody::ModelEvent {
+                        event: LanguageEvent::ContentStarted { .. }
+                            | LanguageEvent::ContentDelta { .. }
+                            | LanguageEvent::ContentFinished { .. },
+                        ..
+                    }
+                )
+            });
+        }
+        if mode == "stop" {
+            let last = facts.pop().unwrap();
+            let mut body = last.body().clone();
+            if let SessionFactBody::ModelEvent { event, .. } = &mut body {
+                *event = LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                };
+            }
+            facts.push(Arc::new(
+                SessionFact::new(last.seq(), last.timestamp_ms(), body).unwrap(),
+            ));
+        }
+        let mut state = ScannedTurn::default();
+        scan_turn(&claim, &mut state, &facts).unwrap();
+        let source = EffectId::new("effect-model-complete").unwrap();
+        if mode == "consumed" {
+            let intent = SessionFact::new(
+                8,
+                8,
+                SessionFactBody::ToolIntent {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: EffectId::new("tool").unwrap(),
+                    source_model_effect_id: source.clone(),
+                    identity: ToolResultIdentity::new(
+                        "owner",
+                        "invocation",
+                        "call",
+                        "a".repeat(64),
+                    )
+                    .unwrap(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                    approval: None,
+                    parallel_safe: false,
+                },
+            )
+            .unwrap();
+            scan_turn(&claim, &mut state, &[Arc::new(intent)]).unwrap();
+        }
+        let marker = Arc::new(
+            SessionFact::new(
+                9,
+                9,
+                SessionFactBody::ToolCallsSuperseded {
+                    turn_id: claim.turn_id().clone(),
+                    source_model_effect_id: source,
+                },
+            )
+            .unwrap(),
+        );
+        if mode == "duplicate" {
+            scan_turn(&claim, &mut state, std::slice::from_ref(&marker)).unwrap();
+        }
+        assert!(scan_turn(&claim, &mut state, &[marker]).is_err(), "{mode}");
+    }
 }

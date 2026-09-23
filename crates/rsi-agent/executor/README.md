@@ -1,5 +1,12 @@
 # rsi-agent-executor
 
+Every Conversation and compaction request preserves the selected reasoning
+effort. Executor rejects a builder that changes it before evidence capture or
+provider preparation. A matching durable Tool supersession closes the completed
+source in claim scanning, permitting the next request from the entered input;
+it never authorizes replay of that source's Tools. Kernel startup recovery still
+interrupts unfinished Turns after process loss.
+
 `observe_execution` defaults to false. When enabled, the exact injected
 `ExecutionObserver` is a required dependency. Executor awaits interval begin before
 Job preparation or other effects. After releasing its drive guard it transfers
@@ -241,3 +248,7 @@ tracker and dropping any unconfirmed Tool observation guards. These drops mark t
 old interval unsettled; they neither commit nor replay a retained Tool result. A
 transient controlled-work publication rejection releases the unstarted claim with
 bounded retry pacing and cannot publish a terminal context failure.
+
+Resume scanning accepts Tool supersession only for the latest Conversation model
+source with a ToolCalls finish and unconsumed, completed calls. A Stop, empty
+response, already consumed batch or repeated marker cannot reopen model work.

@@ -701,14 +701,14 @@ async fn restart_ready_scan_discards_auto_before_any_new_turn_is_claimed() {
     }).await.unwrap();
     cancellation.cancel();
     assert!(matches!(claim.await, Ok(None) | Err(TurnError::Cancelled)));
-    assert!(
+    assert_eq!(
         store
-            .read_turn_boundary(
-                &session,
-                &TurnId::new(format!("turn-message-{}", receipt.accepted_control_seq)).unwrap()
-            )
+            .read_watermarks(&session)
             .await
-            .is_err()
+            .unwrap()
+            .durable_fact_seq,
+        receipt.observed_fact_seq,
+        "discarded continuation must not admit a new Turn"
     );
     drop(observation);
     drop(executor);

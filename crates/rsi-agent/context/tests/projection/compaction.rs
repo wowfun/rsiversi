@@ -96,6 +96,7 @@ fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation(
     );
     let planned = state
         .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
             &ModelRef::new("deployment", "model").unwrap(),
             &profile(),
             Some(CompactionTrigger::ProviderContextLimit),
@@ -153,20 +154,31 @@ fn pressure_without_selectable_history_is_optional_but_forced_pressure_is_a_limi
         accepted("current", "next short task"),
     ]);
     append(&mut state, &mut history, bodies);
-    assert!(state.build(vec![]).is_ok());
+    assert!(
+        state
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .is_ok()
+    );
     for state in [
         &state,
         &state.restored(&state.checkpoint().unwrap()).unwrap(),
     ] {
         assert!(
             state
-                .plan_compaction(&model, &profile(), None, false)
+                .plan_compaction(
+                    &rsi_ai_protocol::LanguageRequestOptions::default(),
+                    &model,
+                    &profile(),
+                    None,
+                    false
+                )
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
             state
                 .plan_compaction(
+                    &rsi_ai_protocol::LanguageRequestOptions::default(),
                     &model,
                     &profile(),
                     Some(CompactionTrigger::ProviderContextLimit),
@@ -207,6 +219,7 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
         let mut count = 0;
         while let Some(planned) = state
             .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
                 &ModelRef::new("deployment", "model").unwrap(),
                 &profile(),
                 None,
@@ -238,7 +251,11 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
             assert!(count < 8, "bounded requests must make finite progress");
         }
         assert!(count >= 2);
-        assert!(state.build(vec![]).is_ok());
+        assert!(
+            state
+                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .is_ok()
+        );
         let mut replay = cursor();
         for page in history.chunks(128) {
             replay.ingest(ContextPage::Canonical(page)).unwrap();
@@ -248,6 +265,7 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One fork chain proves the usage horizon before and after installing summaries.
 fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() {
     let (_, mut parent, _) = history(Some(80_000));
     parent.pop(); // Only balanced completed parent Turns are inherited.
@@ -271,7 +289,13 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
     );
     let model = ModelRef::new("deployment", "model").unwrap();
     let planned = child
-        .plan_compaction(&model, &profile(), None, false)
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &model,
+            &profile(),
+            None,
+            false,
+        )
         .unwrap()
         .unwrap();
     assert!(
@@ -308,7 +332,13 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
     }
     assert!(
         child
-            .plan_compaction(&model, &profile(), None, false)
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -316,7 +346,13 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
         child
             .restored(&child.checkpoint().unwrap())
             .unwrap()
-            .plan_compaction(&model, &profile(), None, false)
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -326,7 +362,13 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
     replay.ingest(ContextPage::Canonical(&own)).unwrap();
     assert!(
         replay
-            .plan_compaction(&model, &profile(), None, false)
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -344,7 +386,7 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
         ),
     );
     assert!(
-        matches!(child.plan_compaction(&model, &profile(), None, false).unwrap().unwrap().plan.trigger,
+        matches!(child.plan_compaction(&rsi_ai_protocol::LanguageRequestOptions::default(), &model, &profile(), None, false).unwrap().unwrap().plan.trigger,
         CompactionTrigger::Usage { session, .. } if session == *child_header.session_id())
     );
 }
@@ -453,7 +495,7 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
         let mut live = cursor();
         append(&mut live, &mut Vec::new(), bodies.clone());
         assert!(
-            matches!(live.plan_compaction(&ModelRef::new("deployment", "model").unwrap(), &profile(), Some(CompactionTrigger::ProviderContextLimit), false), Err(rsi_agent_context::ContextError::Invalid(message)) if message.contains("Tool batch"))
+            matches!(live.plan_compaction(&rsi_ai_protocol::LanguageRequestOptions::default(), &ModelRef::new("deployment", "model").unwrap(), &profile(), Some(CompactionTrigger::ProviderContextLimit), false), Err(rsi_agent_context::ContextError::Invalid(message)) if message.contains("Tool batch"))
         );
         bodies.push(SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("interrupted").unwrap(),
@@ -492,6 +534,7 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
         assert!(wire(&state).contains("missing-0"));
         let planned = state
             .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
                 &ModelRef::new("deployment", "model").unwrap(),
                 &profile(),
                 None,
@@ -576,6 +619,7 @@ fn missed_source_pressure_opportunity_does_not_poison_later_replay() {
     for index in 0..2 {
         let planned = state
             .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
                 &ModelRef::new("deployment", "model").unwrap(),
                 &profile(),
                 None,
@@ -665,6 +709,7 @@ fn encoded_plan_bound_keeps_long_identifier_history_recoverable() {
         let mut installed = 0;
         while let Some(planned) = state
             .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
                 &ModelRef::new("deployment", "model").unwrap(),
                 &profile(),
                 None,
@@ -815,6 +860,7 @@ fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64
 fn plan(state: &ModelContextState) -> ContextCompactionPlan {
     let planned = state
         .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
             &ModelRef::new("deployment", "model").unwrap(),
             &profile(),
             Some(CompactionTrigger::ProviderContextLimit),
@@ -828,7 +874,12 @@ fn plan(state: &ModelContextState) -> ContextCompactionPlan {
     planned.plan
 }
 fn wire(state: &ModelContextState) -> String {
-    serde_json::to_string(&state.build(vec![]).unwrap()).unwrap()
+    serde_json::to_string(
+        &state
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -838,7 +889,13 @@ fn pressure_uses_only_matching_successful_usage_and_never_guesses_first_call() {
         let (state, _, _) = history(usage);
         assert_eq!(
             state
-                .plan_compaction(&model, &profile(), None, false)
+                .plan_compaction(
+                    &rsi_ai_protocol::LanguageRequestOptions::default(),
+                    &model,
+                    &profile(),
+                    None,
+                    false
+                )
                 .unwrap()
                 .is_some(),
             pressured
@@ -846,6 +903,7 @@ fn pressure_uses_only_matching_successful_usage_and_never_guesses_first_call() {
         assert!(
             state
                 .plan_compaction(
+                    &rsi_ai_protocol::LanguageRequestOptions::default(),
                     &ModelRef::new("different", "model").unwrap(),
                     &profile(),
                     None,
@@ -885,6 +943,7 @@ fn only_finished_installs_and_summary_usage_does_not_retrigger_pressure() {
     assert!(
         state
             .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
                 &ModelRef::new("deployment", "model").unwrap(),
                 &profile(),
                 None,
@@ -1076,7 +1135,13 @@ fn long_lived_turns(replace_instructions: bool) {
             }
         }
         if let Some(planned) = state
-            .plan_compaction(&model, &profile(), None, false)
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false,
+            )
             .unwrap()
         {
             let effect = format!("summary-{index}");
@@ -1095,7 +1160,9 @@ fn long_lived_turns(replace_instructions: bool) {
             assert!(state.summary_installed(&EffectId::new(effect).unwrap()));
             summaries += 1;
         }
-        state.build(vec![]).unwrap();
+        state
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap();
         if replace_instructions {
             assert!(wire(&state).contains(&format!("Active instruction version {index}.")));
         }
@@ -1224,6 +1291,7 @@ fn summary_retry_halves_bytes_and_can_skip_an_oversized_whole_unit() {
     let model = ModelRef::new("deployment", "model").unwrap();
     let first = state
         .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
             &model,
             &profile(),
             Some(CompactionTrigger::ProviderContextLimit),
@@ -1233,6 +1301,7 @@ fn summary_retry_halves_bytes_and_can_skip_an_oversized_whole_unit() {
         .unwrap();
     let retry = state
         .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
             &model,
             &profile(),
             Some(CompactionTrigger::ProviderContextLimit),
@@ -1334,7 +1403,7 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
 }
 
 #[test]
-fn both_request_paths_reject_orphans_while_legacy_projection_keeps_partial_evidence() {
+fn both_fold_modes_reject_orphan_results_during_ingestion() {
     let mut semantic = cursor();
     let mut legacy = ContextFold::new(header("instructions")).unwrap();
     let facts = vec![
@@ -1358,12 +1427,557 @@ fn both_request_paths_reject_orphans_while_legacy_projection_keeps_partial_evide
         )
         .unwrap(),
     ];
-    legacy.apply(&facts).unwrap();
+    assert!(matches!(
+        legacy.apply(&facts),
+        Err(ContextError::Invalid(_))
+    ));
     let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
-    semantic.ingest(ContextPage::Canonical(&facts)).unwrap();
-    assert!(
-        matches!(semantic.build(vec![]), Err(ContextError::Invalid(message)) if message.contains("orphan"))
+    assert!(matches!(
+        semantic.ingest(ContextPage::Canonical(&facts)),
+        Err(ContextError::Invalid(_))
+    ));
+}
+
+#[test]
+fn outcome_ingestion_rejects_duplicate_results_and_reused_call_ids() {
+    let bodies = partial_tool_batch(Some(0));
+    let mut state = cursor();
+    let mut history = Vec::new();
+    append(&mut state, &mut history, bodies.clone());
+    let duplicate = facts_after(
+        history.last().unwrap().seq(),
+        vec![bodies.last().unwrap().clone()],
     );
-    assert!(legacy.project(ContextLimits::default()).is_ok());
-    assert!(legacy.request(ContextLimits::default(), vec![]).is_err());
+    assert!(matches!(
+        state.ingest(ContextPage::Canonical(
+            &duplicate.iter().cloned().map(Arc::new).collect::<Vec<_>>()
+        )),
+        Err(ContextError::Invalid(_))
+    ));
+
+    let mut state = cursor();
+    let mut history = Vec::new();
+    append(&mut state, &mut history, bodies);
+    let repeated = partial_tool_batch(None)
+        .into_iter()
+        .skip(1)
+        .map(|mut body| {
+            match &mut body {
+                SessionFactBody::ModelIntent { effect_id, .. }
+                | SessionFactBody::ModelStarted { effect_id, .. }
+                | SessionFactBody::ModelEvent { effect_id, .. } => {
+                    *effect_id = EffectId::new("second-source").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            body
+        })
+        .collect();
+    let repeated = facts_after(history.last().unwrap().seq(), repeated)
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        state.ingest(ContextPage::Canonical(&repeated)),
+        Err(ContextError::Invalid(_))
+    ));
+}
+
+#[test]
+fn live_unfinished_batch_checkpoint_restores_before_supersession() {
+    let mut state = cursor();
+    let mut history = Vec::new();
+    append(&mut state, &mut history, partial_tool_batch(None));
+    let checkpoint = state.checkpoint().unwrap();
+    let mut restored = state.restored(&checkpoint).unwrap();
+    let marker = facts_after(
+        history.last().unwrap().seq(),
+        vec![SessionFactBody::ToolCallsSuperseded {
+            turn_id: TurnId::new("interrupted").unwrap(),
+            source_model_effect_id: EffectId::new("tool-model").unwrap(),
+        }],
+    )
+    .into_iter()
+    .map(Arc::new)
+    .collect::<Vec<_>>();
+    state.ingest(ContextPage::Canonical(&marker)).unwrap();
+    restored.ingest(ContextPage::Canonical(&marker)).unwrap();
+    assert_eq!(wire(&restored), wire(&state));
+    assert!(wire(&restored).contains("newer input superseded"));
+}
+
+#[test]
+fn semantic_materialization_ceiling_rejects_retention_before_planning() {
+    let mut state = cursor();
+    let mut history = Vec::new();
+    append(&mut state, &mut history, vec![accepted("limit", "small")]);
+    for index in 0..rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES {
+        let page = facts_after(
+            index as u64 + 1,
+            vec![SessionFactBody::InputMessageEntered {
+                turn_id: TurnId::new("limit").unwrap(),
+                step_id: StepId::new(format!("step-{index}")).unwrap(),
+                source: InputMessageSource::Human {
+                    message_id: MessageId::new(format!("message-{index}")).unwrap(),
+                },
+                content: vec![AgentMessageContent::Text {
+                    text: "small".into(),
+                }],
+            }],
+        )
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+        let result = state.ingest(ContextPage::Canonical(&page));
+        if index + 1 == rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES {
+            assert!(matches!(result, Err(ContextError::TooLarge)));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+fn superseded_live_calls_have_prompt_only_outcomes_and_stable_replay() {
+    let mut state = cursor();
+    let mut history = Vec::new();
+    let mut bodies = partial_tool_batch(Some(1));
+    bodies.push(SessionFactBody::ToolCallsSuperseded {
+        turn_id: TurnId::new("interrupted").unwrap(),
+        source_model_effect_id: EffectId::new("tool-model").unwrap(),
+    });
+    bodies.push(SessionFactBody::InputMessageEntered {
+        turn_id: TurnId::new("interrupted").unwrap(),
+        step_id: rsi_agent_session_protocol::StepId::new("steer").unwrap(),
+        source: rsi_agent_session_protocol::InputMessageSource::Human {
+            message_id: rsi_agent_session_protocol::MessageId::new("steer").unwrap(),
+        },
+        content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+            text: "new direction".into(),
+        }],
+    });
+    append(&mut state, &mut history, bodies);
+    let request = state
+        .build(rsi_ai_protocol::LanguageRequestOptions::default())
+        .unwrap();
+    let messages = request.messages();
+    let calls = messages
+        .iter()
+        .position(|message| {
+            message
+                .content()
+                .iter()
+                .any(|content| matches!(content, MessageContent::ToolCall(_)))
+        })
+        .unwrap();
+    assert!(
+        matches!(messages[calls + 1].content(), [MessageContent::ToolResult { call_id, is_error: true, .. }] if call_id == "missing-0")
+    );
+    assert!(
+        matches!(messages[calls + 2].content(), [MessageContent::ToolResult { call_id, is_error: false, .. }] if call_id == "missing-1")
+    );
+    assert!(
+        serde_json::to_string(&messages[calls + 1])
+            .unwrap()
+            .contains("newer input superseded")
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+            .count(),
+        1
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&history)).unwrap();
+    assert_eq!(wire(&replay), wire(&state));
+    assert_eq!(
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
+        wire(&state)
+    );
+    assert!(matches!(
+        state.plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::ProviderContextLimit),
+            false
+        ),
+        Err(ContextError::TooLarge)
+    ));
+}
+
+#[test]
+fn terminal_started_call_reports_unknown_outcome_without_fabricating_a_result_fact() {
+    let mut bodies = partial_tool_batch(None);
+    let turn_id = TurnId::new("interrupted").unwrap();
+    let effect_id = EffectId::new("started-tool").unwrap();
+    let identity =
+        ToolResultIdentity::new("owner", "invocation", "missing-0", "b".repeat(64)).unwrap();
+    bodies.extend([
+        SessionFactBody::ToolIntent {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            identity: identity.clone(),
+            source_model_effect_id: EffectId::new("tool-model").unwrap(),
+            name: "lookup".into(),
+            arguments: json!({}),
+            approval: None,
+            parallel_safe: false,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: turn_id.clone(),
+            effect_id,
+            identity,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id,
+            outcome: TurnOutcome::Interrupted {
+                effect: None,
+                reason: "stopped".into(),
+            },
+            result: None,
+        },
+    ]);
+    let mut state = cursor();
+    let mut history = Vec::new();
+    append(&mut state, &mut history, bodies);
+    let projected = wire(&state);
+    assert!(projected.contains("outcome is unknown"));
+    assert!(projected.contains("before it was started"));
+    assert_eq!(
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
+        projected
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+    );
+}
+
+#[test]
+fn emission_pressure_respects_ai_message_limit_above_configured_default() {
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let model = ModelRef::new("deployment", "model").unwrap();
+    for count in [255, 256, 257] {
+        let mut state = ModelContextState::open(
+            Arc::new(DefaultContextBuilder::default()),
+            header(""),
+            ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut history = Vec::new();
+        for index in 0..count {
+            let id = format!("turn-{index}");
+            let mut bodies = vec![accepted(&id, "small input")];
+            if index + 1 < count {
+                bodies.push(SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new(&id).unwrap(),
+                    outcome: TurnOutcome::Completed,
+                    result: None,
+                });
+            }
+            append(&mut state, &mut history, bodies);
+        }
+        let planned = state
+            .plan_compaction(&options, &model, &profile(), None, false)
+            .unwrap();
+        assert_eq!(planned.is_some(), count > rsi_ai_protocol::MAX_MESSAGES);
+        if count <= rsi_ai_protocol::MAX_MESSAGES {
+            assert_eq!(
+                state.build(options.clone()).unwrap().messages().len(),
+                count
+            );
+        } else {
+            assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+            let planned = planned.unwrap();
+            append(
+                &mut state,
+                &mut history,
+                model_bodies(
+                    "turn-256",
+                    "summary-emission",
+                    ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+                    "Earlier inputs summarized.",
+                    None,
+                    FinishReason::Stop,
+                ),
+            );
+            assert!(state.summary_installed(&EffectId::new("summary-emission").unwrap()));
+            assert!(
+                state.build(options.clone()).unwrap().messages().len()
+                    <= rsi_ai_protocol::MAX_MESSAGES
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_partial_summaries_remain_replayable_until_the_request_fits() {
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let model = ModelRef::new("deployment", "model").unwrap();
+    for (count, shrink) in [(500, true), (1500, false)] {
+        let mut state = ModelContextState::open(
+            Arc::new(DefaultContextBuilder::default()),
+            header(""),
+            ContextLimits::new(4096, 32 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut history = Vec::new();
+        for index in 0..count {
+            let id = format!("bounded-{index:04}");
+            let mut bodies = vec![accepted(&id, "small input")];
+            if index + 1 < count {
+                bodies.push(SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new(&id).unwrap(),
+                    outcome: TurnOutcome::Completed,
+                    result: None,
+                });
+            }
+            append(&mut state, &mut history, bodies);
+        }
+        for batch in 0..2 {
+            let planned = state
+                .plan_compaction(&options, &model, &profile(), None, shrink && batch == 0)
+                .unwrap()
+                .unwrap();
+            let effect = format!("bounded-summary-{batch}");
+            append(
+                &mut state,
+                &mut history,
+                model_bodies(
+                    &format!("bounded-{:04}", count - 1),
+                    &effect,
+                    ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+                    "Earlier inputs summarized.",
+                    None,
+                    FinishReason::Stop,
+                ),
+            );
+            assert!(state.summary_installed(&EffectId::new(&effect).unwrap()));
+            state = state.restored(&state.checkpoint().unwrap()).unwrap();
+            if batch == 0 {
+                assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+            } else {
+                assert!(
+                    state.build(options.clone()).unwrap().messages().len()
+                        <= rsi_ai_protocol::MAX_MESSAGES
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_independent() {
+    use rsi_ai_protocol::{
+        LanguageRequestOptions, LanguageSettings, ReasoningEffortId, ResponseFormat,
+    };
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("system"),
+        ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut history = Vec::new();
+    for index in 0..20 {
+        let id = format!("catalog-{index}");
+        let mut bodies = vec![accepted(&id, &"x".repeat(750_000))];
+        if index < 19 {
+            bodies.push(SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new(&id).unwrap(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            });
+        }
+        append(&mut state, &mut history, bodies);
+    }
+    let model = ModelRef::new("deployment", "model").unwrap();
+    assert!(
+        state
+            .plan_compaction(
+                &LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false
+            )
+            .unwrap()
+            .is_none()
+    );
+    let tools = (0..40)
+        .map(|index| {
+            rsi_tools_protocol::ToolDefinition::new(
+                format!("read_{index}"),
+                "Read",
+                json!({"type":"object", "description":"x".repeat(48_000)}),
+            )
+            .unwrap()
+        })
+        .collect();
+    let options = LanguageRequestOptions::new(
+        tools,
+        ToolChoice::Auto,
+        vec![],
+        ResponseFormat::Text,
+        LanguageSettings::default()
+            .with_optional_reasoning_effort(Some(ReasoningEffortId::new("high").unwrap())),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+    let planned = state
+        .plan_compaction(&options, &model, &profile(), None, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        planned
+            .request
+            .settings()
+            .reasoning_effort()
+            .unwrap()
+            .as_str(),
+        "high"
+    );
+    append(
+        &mut state,
+        &mut history,
+        model_bodies(
+            "catalog-19",
+            "catalog-summary",
+            ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            "Earlier work summarized.",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(state.summary_installed(&EffectId::new("catalog-summary").unwrap()));
+    let built = state.build(options.clone()).unwrap();
+    assert!(built.canonical_bytes().unwrap().len() <= rsi_ai_protocol::MAX_REQUEST_BYTES);
+    let mut replay = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("system"),
+        ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    replay.ingest(ContextPage::Canonical(&history)).unwrap();
+    assert_eq!(
+        replay
+            .build(LanguageRequestOptions::default())
+            .unwrap()
+            .messages(),
+        built.messages()
+    );
+}
+
+#[test]
+fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effects() {
+    for case in ["late-denial", "superseded-result", "wrong-effect"] {
+        let mut state = cursor();
+        let mut history = Vec::new();
+        let mut bodies = partial_tool_batch(None);
+        let turn = TurnId::new("interrupted").unwrap();
+        let effect = EffectId::new("tool-result").unwrap();
+        let identity =
+            ToolResultIdentity::new("owner", "invocation", "missing-0", "b".repeat(64)).unwrap();
+        if case == "superseded-result" {
+            bodies.push(SessionFactBody::ToolCallsSuperseded {
+                turn_id: turn.clone(),
+                source_model_effect_id: EffectId::new("tool-model").unwrap(),
+            });
+        } else {
+            bodies.push(SessionFactBody::ToolIntent {
+                turn_id: turn.clone(),
+                effect_id: effect.clone(),
+                source_model_effect_id: EffectId::new("tool-model").unwrap(),
+                identity: identity.clone(),
+                name: "lookup".into(),
+                arguments: json!({}),
+                approval: None,
+                parallel_safe: false,
+            });
+            if case == "wrong-effect" {
+                bodies.push(SessionFactBody::ToolStarted {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    identity: identity.clone(),
+                });
+            }
+        }
+        append(&mut state, &mut history, bodies);
+        let body = if case == "late-denial" {
+            SessionFactBody::ToolRejected {
+                turn_id: turn,
+                effect_id: effect,
+                identity,
+                name: "lookup".into(),
+                arguments: json!({}),
+                rejection: rsi_agent_session_protocol::ToolRejection::PolicyDenied {
+                    contribution_id: rsi_agent_session_protocol::ContributionId::new("deny")
+                        .unwrap(),
+                    reason: "denied".into(),
+                },
+            }
+        } else {
+            SessionFactBody::ToolResult {
+                turn_id: turn,
+                effect_id: EffectId::new("wrong-effect").unwrap(),
+                identity,
+                result: ToolResult::new(json!({}), vec![], false).unwrap(),
+                conclusion: None,
+            }
+        };
+        let invalid = facts_after(history.last().unwrap().seq(), vec![body])
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                state.ingest(ContextPage::Canonical(&invalid)),
+                Err(ContextError::Invalid(_))
+            ),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() {
+    let mut fold = ContextFold::new(header("instructions")).unwrap();
+    let mut bodies = partial_tool_batch(None);
+    bodies.push(SessionFactBody::TurnTerminal {
+        turn_id: TurnId::new("interrupted").unwrap(),
+        outcome: TurnOutcome::Completed,
+        result: None,
+    });
+    bodies.push(accepted("current", "continue"));
+    fold.apply(&facts(bodies)).unwrap();
+    // The raw five-message projection fits, but two missing tool results require
+    // eviction of the completed old Turn to preserve an adjacent provider view.
+    let raw_bytes = serde_json::to_vec(&fold.project(ContextLimits::default()).unwrap().messages)
+        .unwrap()
+        .len();
+    for limits in [
+        ContextLimits::new(5, 16 * 1024).unwrap(),
+        ContextLimits::new(32, raw_bytes).unwrap(),
+    ] {
+        assert_eq!(fold.project(limits).unwrap().omitted_turns, 0);
+        let request = fold
+            .request(limits, rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap();
+        assert!(
+            serde_json::to_string(&request)
+                .unwrap()
+                .contains("omitted 1 complete")
+        );
+        assert!(request.messages().len() <= limits.max_messages);
+        assert!(serde_json::to_vec(request.messages()).unwrap().len() <= limits.max_bytes);
+        assert!(!request.messages().iter().any(|message| {
+            message
+                .content()
+                .iter()
+                .any(|part| matches!(part, MessageContent::ToolCall(_)))
+        }));
+    }
 }

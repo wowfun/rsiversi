@@ -5,9 +5,8 @@ use crate::{
     ModelContextBuilder, ModelContextBuilderContract, ModelContextCursor, Result,
 };
 use async_trait::async_trait;
-use rsi_ai_protocol::LanguageRequest;
+use rsi_ai_protocol::{LanguageRequest, LanguageRequestOptions};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_tools_protocol::ToolDefinition;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -22,7 +21,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.6.0",
+                "2.7.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -63,17 +62,19 @@ impl ModelContextCursor for DefaultCursor {
             ContextPage::FinishSeed => self.fold.finish_seed(),
         }
     }
-    fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest> {
-        self.fold.request(self.limits, tools)
+    fn build(&self, options: LanguageRequestOptions) -> Result<LanguageRequest> {
+        self.fold.request(self.limits, options)
     }
     fn plan_compaction(
         &self,
+        options: &LanguageRequestOptions,
         model: &rsi_ai_protocol::ModelRef,
         profile: &rsi_ai_protocol::LanguageProfile,
         force: Option<rsi_agent_session_protocol::CompactionTrigger>,
         shrink: bool,
     ) -> Result<Option<crate::PlannedCompaction>> {
-        self.fold.plan_compaction(model, profile, force, shrink)
+        self.fold
+            .plan_compaction(options, model, profile, force, shrink)
     }
     fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         self.fold.summary_installed(effect)

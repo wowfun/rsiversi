@@ -8,6 +8,7 @@ use rsi_agent_context::{
 struct SelectedBuilder {
     identity: ContextBuilderIdentity,
     events: Arc<Mutex<Vec<&'static str>>>,
+    drop_effort: bool,
 }
 
 impl SelectedBuilder {
@@ -15,6 +16,7 @@ impl SelectedBuilder {
         Arc::new(Self {
             identity: ContextBuilderIdentity::new(id, "1.0.0", "a".repeat(64)).unwrap(),
             events: Arc::new(Mutex::new(Vec::new())),
+            drop_effort: false,
         })
     }
 }
@@ -44,6 +46,7 @@ impl ModelContextBuilder for SelectedBuilder {
             inner: DefaultContextBuilder::default().open(init)?,
             marker: self.identity.id().to_owned(),
             events: self.events.clone(),
+            drop_effort: self.drop_effort,
         }))
     }
 }
@@ -53,6 +56,7 @@ struct SelectedCursor {
     inner: Box<dyn ModelContextCursor>,
     marker: String,
     events: Arc<Mutex<Vec<&'static str>>>,
+    drop_effort: bool,
 }
 impl ModelContextCursor for SelectedCursor {
     fn ingest(&mut self, page: ContextPage<'_>) -> rsi_agent_context::Result<()> {
@@ -60,16 +64,19 @@ impl ModelContextCursor for SelectedCursor {
     }
     fn build(
         &self,
-        tools: Vec<rsi_tools_protocol::ToolDefinition>,
+        options: rsi_ai_protocol::LanguageRequestOptions,
     ) -> rsi_agent_context::Result<LanguageRequest> {
         self.events.lock().unwrap().push("build");
-        let original = self.inner.build(tools)?;
+        let original = self.inner.build(options.clone())?;
         let mut messages = original.messages().to_vec();
         messages.push(rsi_ai_protocol::Message::system_text(&self.marker).unwrap());
-        Ok(LanguageRequest::new(messages)
-            .unwrap()
-            .with_tools(original.tools().to_vec(), original.tool_choice().clone())
-            .unwrap())
+        if self.drop_effort {
+            return Ok(LanguageRequest::new(messages)
+                .unwrap()
+                .with_tools(original.tools().to_vec(), original.tool_choice().clone())
+                .unwrap());
+        }
+        Ok(LanguageRequest::new_with_options(messages, options).unwrap())
     }
     fn checkpoint(&self) -> rsi_agent_context::Result<Arc<[u8]>> {
         self.events.lock().unwrap().push("checkpoint");
@@ -81,6 +88,46 @@ impl ModelContextCursor for SelectedCursor {
     fn position(&self) -> ContextPosition {
         self.inner.position()
     }
+}
+
+#[tokio::test]
+async fn builder_cannot_silently_drop_selected_effort_before_provider_prepare() {
+    let stack = BaseStack::activate().await;
+    let mut selected = SelectedBuilder::new("fixture.context.drops-effort");
+    Arc::get_mut(&mut selected).unwrap().drop_effort = true;
+    *stack.composition.context_builder.lock().unwrap() = selected;
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language_fiber = stack
+        .activate_language("test.language.drops-effort", language.clone())
+        .await;
+    let executor = stack.activate_executor("executor-drops-effort").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = turns
+        .submit(SubmitTurn {
+            reasoning_effort: Some(rsi_ai_protocol::ReasoningEffortId::new("high").unwrap()),
+            turn_id: client_turn_id(),
+            session: stack.fresh(header()).await,
+            text: "work".into(),
+            model: Some(header().settings().default_model().clone()),
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let outcome = wait_for_outcome(&turns, &submitted).await;
+    assert!(matches!(outcome, TurnOutcome::Failed { code, .. } if code == "context.settings"));
+    assert!(language.requests.lock().unwrap().is_empty());
+    assert_eq!(language.starts.load(Ordering::SeqCst), 0);
+    stack.dispose(language_fiber, executor).await;
 }
 
 #[tokio::test]

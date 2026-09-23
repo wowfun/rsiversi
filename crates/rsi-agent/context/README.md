@@ -25,10 +25,52 @@ No estimate substitutes for missing Usage. Hard canonical
 byte/message limits and explicit provider ContextLimit handle first calls.
 Compaction preserves active instructions, the current original task input, latest
 human steering and whole recent interaction units. The optional recent tail
-uses at most 64 KiB and half the configured message allowance (at most 512
-messages); the last unit is always retained intact. A terminal Turn's incomplete
-Tool batch is protected without fabricating missing results; unrelated complete
-units remain eligible. Orphan results and unfinished live batches are invalid.
+uses at most 64 KiB and half the lesser of the configured and AI message
+allowances; the last unit is always retained intact. A terminal Turn's incomplete
+Tool batch and a durably superseded live batch remain protected; unrelated
+complete units remain eligible. Original unit coordinates never include derived
+results. Other unfinished live batches and orphan results are invalid.
+The protected incomplete units still count toward the 4,096-message / 32 MiB
+materialization ceiling. Repeated interrupted or superseded batches can exhaust
+that irreducible history; compaction then returns `TooLarge` rather than deleting
+unknown-outcome evidence. Summarizing such units requires a separate change to
+the raw-coordinate selection and replay contract.
+Call identifiers are unique within a retained Turn. Outcome admission rejects duplicate,
+unknown, already superseded or mismatched calls before changing their state.
+The AI protocol separately requires call identifiers to be unique across the
+complete emitted request. A provider reusing an identifier across retained Turns
+is rejected at request construction; the fold does not rename durable call IDs.
+Checkpoint restore also rejects orphan results, missing settled results, and
+result order inconsistent with the call batch. Settlement rejects a result that
+would follow a later call's result or leave its batch nonadjacent. A successful
+parallel sibling may still settle when an earlier sibling has no outcome; after
+termination its missing predecessor receives the ordinary unknown-outcome view.
+Message capacity rejection cannot register a batch or settle a call without its
+message. An ingestion error invalidates the cursor for further use; discard it
+and rebuild from authoritative Facts. A failed Fact body cannot yield a cache
+claiming to represent the preceding prefix.
+
+Provider requests retain actual results and add deterministic error explanations
+for missing results: superseded before execution, terminal before ToolStarted,
+or started with no durable outcome. These are views, never ToolResult Facts or
+permission to replay a Tool. Ordinary requests, pressure, view digests and
+summary shrink checks share that view. Non-semantic requests also budget the
+normalized view before deciding which completed turns to omit, so synthesized
+results cannot invalidate a raw-only retention decision. Their byte accounting
+reuses retained per-Turn totals and serializes only synthesized outcomes.
+Raw Facts remain unchanged.
+
+Retention and emission are distinct. Each attempt freezes validated Language
+request options before planning. The effective message budget intersects the
+configured limits with the AI message ceiling and the exact bytes remaining in
+the complete request. System, summary and interruption explanations count.
+Dynamic options trigger pressure but do not change replayable selection rules.
+Before summary I/O, the irreducible protected view plus a minimal summary must
+fit. This is a feasibility lower bound, not a guarantee that one bounded summary
+will make an ordinary request fit. Source-count, quoted-byte and retry bounds can
+require multiple successful plans; each installed plan must strictly shrink the
+canonical view and remains replayable independently of current emission pressure.
+
 A capacity retry
 halves selected canonical message bytes, choosing whole units oldest-first and
 skipping any unit that cannot fit the remaining allowance.
@@ -38,7 +80,7 @@ catalog. Those historical versions become ordinary summary candidates. Additive
 instructions stay protected until an explicit replacement of their source;
 instructions from other sources retain their protection.
 
-Builder 2.6.0 prunes historical Tool-result text at view time. The fold and its
+Builder 2.7.0 prunes historical Tool-result text at view time. The fold and its
 checkpoint retain the original projected messages. Above 8,192 Unicode code
 points, the view keeps the first 4,096 and last 1,024, separated by
 `\n\n[... tool result middle pruned ...]\n\n`. Text budgets span all text blocks
@@ -51,6 +93,14 @@ Summary planning still rejects an unfinished live interaction.
 Ordinary requests, summary input and selection budgets, view digests, replay
 eligibility and post-install shrink checks use the same pure projection. One planning
 call reuses a single projected history for pressure, selection and materialization.
+Forced, message-count and source-count pressure skip the separate byte-trigger
+pass; no-pressure attempts do not hash the view. Live outcome validation traverses
+without materializing messages. Remainder preflight and installation use the same
+post-selection pruning and provider-view assembly.
+Remainder measurement borrows turns with no removed messages; turns changed by
+selection own their retained subset. Installation materializes replacements only
+after its digest and strict-shrink checks pass. Selection byte counting borrows
+provider-neutral messages and copies only provider-state changes.
 Unchanged turns borrow their retained messages; only turns containing a pruned
 result are copied. Replay eligibility also shares one projection across its checks.
 Planning and replay hash the borrowed semantic view directly into a counting
@@ -111,11 +161,11 @@ to the raw bounded provider payload. Restore validates this envelope before
 calling the builder and requires the restored cursor's position to agree.
 Rejected or mismatched caches are rebuilt from Facts; a failed restore leaves
 the current cursor intact. The Store's single Session cache slot does not change. The envelope writes metadata and raw payload once without
-deep-cloning projected messages. The default provider uses the version-7 fold
+deep-cloning projected messages. The default provider uses the version-8 fold
 encoding below as its opaque payload; other providers own their payload schema.
 
 Exact Fact prefixes with no active model assembler may be encoded as the
-version-7 Context checkpoint. Retained nonterminal turns are encoded with their
+version-8 Context checkpoint. Retained nonterminal turns are encoded with their
 lifecycle state, so accepted queued turns do not prevent a checkpoint. Context
 alone owns and validates that schema, recomputes all message accounting on
 restore, and binds the retained projection to the immutable header, exact
@@ -161,8 +211,7 @@ bound. The generic builder releases the copied opaque payload before allocating
 the final shared envelope. These allocation rules preserve the serialized format,
 binding checks and optional-cache failure behavior.
 
-Semantic request construction and compaction both reject orphan or misordered
-Tool results. Legacy non-semantic `ContextFold::project` may retain an orphan
-as partial evidence, but `ContextFold::request` rejects it at the AI request
-validator. Neither public request path sends an orphan to a provider. Unit shape discovery performs no JSON byte accounting. Compaction
+Both fold modes reject orphan Tool results during ingestion; request construction
+and compaction also reject misordered results. Legacy non-semantic projection
+does not apply builder 2.7.0's semantic pruning. Unit shape discovery performs no JSON byte accounting. Compaction
 measures the pruned messages only after shape validation.

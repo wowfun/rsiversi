@@ -2071,6 +2071,16 @@ pub enum SessionFactBody {
         /// Tool-owner scheduling proof copied from the sealed definition.
         parallel_safe: bool,
     },
+    /// New input superseded the unadmitted calls of a completed Conversation.
+    /// Identity syntax is checked here. Kernel authenticates the completed source
+    /// and commits this marker with Step closure, new Step and input entry; see the
+    /// message-entry contract in `rsi-agent-kernel/README.md`.
+    ToolCallsSuperseded {
+        /// Exact target turn.
+        turn_id: TurnId,
+        /// Completed Conversation whose remaining calls will not execute.
+        source_model_effect_id: EffectId,
+    },
     /// One prepared Tool call was denied before intent or external execution.
     ToolRejected {
         /// Exact target turn.
@@ -2155,7 +2165,6 @@ impl SessionFactBody {
                     *require_approval,
                 )
             }
-            Self::StepStarted { .. } => Ok(()),
             Self::InputMessageEntered {
                 source, content, ..
             } => validate_entered_message(source, content),
@@ -2220,9 +2229,11 @@ impl SessionFactBody {
                     .validate()
                     .map_err(|error| SessionError::Invalid(error.to_string()))
             }
-            Self::ModelStarted { .. } | Self::ImageStarted { .. } | Self::ToolStarted { .. } => {
-                Ok(())
-            }
+            Self::StepStarted { .. }
+            | Self::ModelStarted { .. }
+            | Self::ImageStarted { .. }
+            | Self::ToolStarted { .. }
+            | Self::ToolCallsSuperseded { .. } => Ok(()),
             Self::ModelEvent { event, .. } => event
                 .validate()
                 .map_err(|error| SessionError::Invalid(error.to_string())),
@@ -2300,6 +2311,7 @@ impl SessionFactBody {
             | Self::ImageOutput { turn_id, .. }
             | Self::ModelEvent { turn_id, .. }
             | Self::ToolIntent { turn_id, .. }
+            | Self::ToolCallsSuperseded { turn_id, .. }
             | Self::ToolRejected { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolResult { turn_id, .. }

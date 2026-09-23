@@ -965,6 +965,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::TurnTerminal { .. } => "terminal",
         SessionFactBody::CancelRequested { .. } => "cancel",
         SessionFactBody::BudgetExhausted { .. } => "budget_exhausted",
+        SessionFactBody::ToolCallsSuperseded { .. } => "tool_calls_superseded",
     }
 }
 
@@ -1022,4 +1023,213 @@ async fn failed_tool_result_is_retired_after_the_terminal_fact_is_durable() {
     drop(tool_lease);
     drop(tools);
     stack.dispose(language_fiber, executor_fiber).await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One gated public scenario checks dispatch, durable order, replay and checkpoint equivalence.
+async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_request() {
+    use rsi_agent_session_protocol::{
+        AgentMessage, AgentMessageContent, AgentMessageSource, MessageDelivery, MessageId,
+        MessageOptions,
+    };
+    use rsi_agent_turn_protocol::SubmitMessage;
+    use rsi_ai_protocol::{MessageContent, MessageRole};
+    let stack = BaseStack::activate().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _tool = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+        })
+        .unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::GatedStream {
+                events: tool_calls_script(&[
+                    ("obsolete-a", "echo", "{}"),
+                    ("obsolete-b", "echo", "{}"),
+                ]),
+                waiting_after_first: entered.clone(),
+                release: release.clone(),
+            },
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("test.language.supersession", provider.clone())
+        .await;
+    let executor = stack.activate_executor("supersession").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let id = SessionId::new("supersession").unwrap();
+    let header = header_for_session(
+        "supersession",
+        TurnBudget::new(1_800_000, 64, 1, 65_536, 67_108_864).unwrap(),
+    );
+    turns
+        .submit_message(SubmitMessage {
+            session: stack.fresh(header.clone()).await,
+            delivery: MessageDelivery::NextTurn,
+            message: AgentMessage {
+                message_id: MessageId::new("initial").unwrap(),
+                source: AgentMessageSource::Human,
+                content: vec![AgentMessageContent::Text {
+                    text: "original".into(),
+                }],
+                options: MessageOptions::default(),
+            },
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let turn = stack
+        .store
+        .inspect_session(&id)
+        .await
+        .unwrap()
+        .active_turn_id
+        .unwrap();
+    turns
+        .submit_message(SubmitMessage {
+            session: SubmitSession::Resume(turns.prepare_resume(&id).await.unwrap()),
+            delivery: MessageDelivery::NextStep,
+            message: AgentMessage {
+                message_id: MessageId::new("steer").unwrap(),
+                source: AgentMessageSource::Human,
+                content: vec![AgentMessageContent::Text {
+                    text: "new direction".into(),
+                }],
+                options: MessageOptions::default(),
+            },
+        })
+        .await
+        .unwrap();
+    release.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(outcome) = turns.outcome(&id, &turn).await.unwrap() {
+                break outcome;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let mut pending = std::collections::BTreeSet::new();
+    for message in requests[1].messages() {
+        if message.role() != MessageRole::Tool {
+            assert!(pending.is_empty());
+        }
+        for content in message.content() {
+            match content {
+                MessageContent::ToolCall(call) => {
+                    assert!(pending.insert(call.id.clone()));
+                }
+                MessageContent::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } => {
+                    assert!(pending.remove(call_id));
+                    assert!(is_error);
+                    assert!(
+                        serde_json::to_string(content)
+                            .unwrap()
+                            .contains("newer input superseded")
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(pending.is_empty());
+    let facts = stack.store.read_facts(&id, 0, 128).await.unwrap().facts;
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ToolCallsSuperseded { .. }))
+            .count(),
+        1
+    );
+    assert!(!facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolRejected { .. }
+            | SessionFactBody::ToolStarted { .. }
+            | SessionFactBody::ToolResult { .. }
+    )));
+    let marker = facts
+        .iter()
+        .position(|fact| matches!(fact.body(), SessionFactBody::ToolCallsSuperseded { .. }))
+        .unwrap();
+    assert!(matches!(
+        facts[marker + 1].body(),
+        SessionFactBody::StepEnded { .. }
+    ));
+    assert!(matches!(
+        facts[marker + 2].body(),
+        SessionFactBody::StepStarted { .. }
+    ));
+    assert!(matches!(
+        facts[marker + 3].body(),
+        SessionFactBody::InputMessageEntered { .. }
+    ));
+    let mut replay = ModelContextState::open(
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        header,
+        ContextLimits::default(),
+    )
+    .unwrap();
+    // Stop before the final answer: compare the exact request sent after steering.
+    let last_model = facts
+        .iter()
+        .rposition(|fact| matches!(fact.body(), SessionFactBody::ModelIntent { .. }))
+        .unwrap();
+    let prefix = facts[..last_model]
+        .iter()
+        .cloned()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+    replay.ingest(ContextPage::Canonical(&prefix)).unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::new(
+        requests[1].tools().to_vec(),
+        requests[1].tool_choice().clone(),
+        requests[1].hosted_tools().to_vec(),
+        requests[1].response_format().clone(),
+        requests[1].settings().clone(),
+        requests[1].extensions().to_vec(),
+    )
+    .unwrap();
+    let rebuilt = replay.build(options.clone()).unwrap();
+    assert_eq!(rebuilt, requests[1]);
+    assert_eq!(
+        replay
+            .restored(&replay.checkpoint().unwrap())
+            .unwrap()
+            .build(options)
+            .unwrap(),
+        requests[1]
+    );
+    stack.dispose(language, executor).await;
 }

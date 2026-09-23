@@ -127,7 +127,7 @@ fn contribution_budget_header() -> SessionHeader {
             ModelRef::new("deployment", "model").unwrap(),
             SandboxMode::WorkspaceWrite,
             false,
-            TurnBudget::new(1_800_000, 64, 1, 3, 67_108_864).unwrap(),
+            TurnBudget::new(1_800_000, 64, 1, 12, 67_108_864).unwrap(),
         )
         .unwrap(),
     )
@@ -243,13 +243,30 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
             .await
             .unwrap()
             .unwrap();
+        tool_origin::publish_model_calls(
+            &kernel,
+            &claim,
+            &[("call", "bash"), ("other-call", "bash")],
+            &snapshot(),
+        )
+        .await;
+        let mut denied = rejection(&submitted.turn_id);
+        if let SessionFactBody::ToolRejected { arguments, .. } = &mut denied {
+            *arguments = serde_json::json!({});
+        }
+        let mut other_denied = denied.clone();
+        if let SessionFactBody::ToolRejected { identity, .. } = &mut other_denied {
+            *identity =
+                ToolResultIdentity::new("owner", "other-tool", "other-call", "a".repeat(64))
+                    .unwrap();
+        }
         let bodies = vec![
             SessionFactBody::StepStarted {
                 turn_id: submitted.turn_id.clone(),
                 step_id: StepId::new("step").unwrap(),
             },
             plugin_input(&submitted.turn_id),
-            rejection(&submitted.turn_id),
+            denied.clone(),
         ];
         let published = kernel
             .publish(&claim, bodies.clone())
@@ -261,9 +278,11 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
             .await
             .unwrap();
         assert!(matches!(
-            kernel
-                .publish(&claim, vec![rejection(&submitted.turn_id)])
-                .await,
+            kernel.publish(&claim, vec![denied]).await,
+            Err(TurnError::Invalid(_))
+        ));
+        assert!(matches!(
+            kernel.publish(&claim, vec![other_denied]).await,
             Err(TurnError::BudgetExceeded {
                 dimension: BudgetDimension::ToolCalls,
                 consumed: 2,
@@ -276,12 +295,12 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
                 .await,
             Err(TurnError::BudgetExceeded {
                 dimension: BudgetDimension::GeneratedRecords,
-                consumed: 4,
-                limit: 3
+                consumed: 13,
+                limit: 12
             })
         ));
         let page = store
-            .read_facts(&submitted.session_id, 1, 16)
+            .read_facts(&submitted.session_id, 10, 16)
             .await
             .unwrap();
         assert_eq!(
@@ -303,7 +322,7 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
             rsi_agent_store_sqlite::SqliteStore::verify(root.path()).unwrap();
             let reopened = rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap();
             let page = reopened
-                .read_facts(&submitted.session_id, 1, 16)
+                .read_facts(&submitted.session_id, 10, 16)
                 .await
                 .unwrap();
             assert_eq!(

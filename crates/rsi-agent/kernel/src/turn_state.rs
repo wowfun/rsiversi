@@ -119,6 +119,7 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ImageOutput { .. } => apply_image_body(turn, body)?,
         SessionFactBody::ToolIntent { .. }
         | SessionFactBody::ToolRejected { .. }
+        | SessionFactBody::ToolCallsSuperseded { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
         SessionFactBody::StepStarted { .. }
@@ -342,9 +343,35 @@ pub(super) fn apply_image_body(turn: &mut TurnControl, body: &SessionFactBody) -
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Intent admission, rejection, supersession, start and settlement share one source-proof state machine.
 pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
-        SessionFactBody::ToolRejected { .. } => ensure_no_active_effect(turn)?,
+        SessionFactBody::ToolRejected {
+            identity,
+            name,
+            arguments,
+            ..
+        } => {
+            ensure_no_active_effect(turn)?;
+            turn.tool_source
+                .as_mut()
+                .ok_or_else(|| TurnError::Invalid("ToolRejected has no Conversation source".into()))
+                .map(Arc::make_mut)?
+                .reject(identity.call_id(), name, arguments)?;
+        }
+        SessionFactBody::ToolCallsSuperseded {
+            source_model_effect_id,
+            ..
+        } => {
+            ensure_no_active_effect(turn)?;
+            turn.tool_source
+                .as_mut()
+                .ok_or_else(|| {
+                    TurnError::Invalid("Tool supersession has no Conversation source".into())
+                })
+                .map(Arc::make_mut)?
+                .supersede(source_model_effect_id)?;
+        }
         SessionFactBody::ToolIntent {
             effect_id,
             source_model_effect_id,
@@ -664,6 +691,7 @@ pub(super) fn record_budget_usage(
         | SessionFactBody::ModelEvent { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. }
+        | SessionFactBody::ToolCallsSuperseded { .. }
         | SessionFactBody::StepStarted { .. }
         | SessionFactBody::InputMessageEntered { .. }
         | SessionFactBody::StepEnded { .. }

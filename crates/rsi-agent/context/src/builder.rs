@@ -2,9 +2,8 @@
 
 use crate::{ContextError, ContextLimits, MAXIMUM_CONTEXT_CHECKPOINT_BYTES, Result};
 use rsi_agent_session_protocol::{SessionFact, SessionHeader};
-use rsi_ai_protocol::LanguageRequest;
+use rsi_ai_protocol::{LanguageRequest, LanguageRequestOptions};
 use rsi_meta::LocalContract;
-use rsi_tools_protocol::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fmt, sync::Arc};
@@ -144,12 +143,14 @@ pub trait ModelContextBuilder: fmt::Debug + Send + Sync + 'static {
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     /// Consumes a framework-supplied bounded page or seed completion marker.
+    /// On error, discard the cursor and rebuild from its authoritative Facts.
     fn ingest(&mut self, page: ContextPage<'_>) -> Result<()>;
-    /// Builds a request using Tool definitions from the cursor's Agent pin.
-    fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest>;
+    /// Builds a request preserving the complete frozen options from the Agent pin.
+    fn build(&self, options: LanguageRequestOptions) -> Result<LanguageRequest>;
     /// Plans internal compaction from exact cursor inputs; unsupported builders decline.
     fn plan_compaction(
         &self,
+        _options: &LanguageRequestOptions,
         _model: &rsi_ai_protocol::ModelRef,
         _profile: &rsi_ai_protocol::LanguageProfile,
         _force: Option<rsi_agent_session_protocol::CompactionTrigger>,
@@ -230,19 +231,21 @@ impl ModelContextState {
     pub fn ingest(&mut self, page: ContextPage<'_>) -> Result<()> {
         self.cursor.ingest(page)
     }
-    /// Builds the next bounded request using the same pin's Tools.
-    pub fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest> {
-        self.cursor.build(tools)
+    /// Builds the next bounded request preserving the pin's complete frozen options.
+    pub fn build(&self, options: LanguageRequestOptions) -> Result<LanguageRequest> {
+        self.cursor.build(options)
     }
     /// Plans a bounded no-Tool summary using the selected pure cursor.
     pub fn plan_compaction(
         &self,
+        options: &LanguageRequestOptions,
         model: &rsi_ai_protocol::ModelRef,
         profile: &rsi_ai_protocol::LanguageProfile,
         force: Option<rsi_agent_session_protocol::CompactionTrigger>,
         shrink: bool,
     ) -> Result<Option<crate::PlannedCompaction>> {
-        self.cursor.plan_compaction(model, profile, force, shrink)
+        self.cursor
+            .plan_compaction(options, model, profile, force, shrink)
     }
     /// Reports the sole installing Finished event's effect identity.
     pub fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {

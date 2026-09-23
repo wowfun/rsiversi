@@ -54,6 +54,36 @@ struct DomainRun {
 }
 
 #[tokio::test]
+async fn domain_mutation_cannot_forge_kernel_owned_supersession() {
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    super::tool_origin::publish_model_source(&run.kernel, &run.claim, "call", "read", &snapshot())
+        .await;
+    let before = store.read_watermarks(run.claim.session_id()).await.unwrap();
+    let result = run
+        .kernel
+        .commit_domains(
+            &run.claim,
+            run.mutation(
+                "forged-supersession",
+                1,
+                true,
+                vec![SessionFactBody::ToolCallsSuperseded {
+                    turn_id: run.claim.turn_id().clone(),
+                    source_model_effect_id: EffectId::new("source-model").unwrap(),
+                }],
+            ),
+        )
+        .await;
+    assert!(matches!(result, Err(TurnError::Invalid(_))), "{result:?}");
+    assert_eq!(
+        store.read_watermarks(run.claim.session_id()).await.unwrap(),
+        before
+    );
+    run.kernel.shutdown(run.workers).await.unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One settlement identity spans injected failures and cancellation.
 async fn tool_result_and_domain_settle_together_across_faults_and_cancellation() {
     for mode in ["before", "after", "unknown", "cancelled"] {

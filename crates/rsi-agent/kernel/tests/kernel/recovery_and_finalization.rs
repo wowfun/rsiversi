@@ -1,5 +1,131 @@
 use super::*;
 
+#[tokio::test]
+async fn recovery_requires_rejection_source_but_not_execution_settings() {
+    for with_source in [false, true] {
+        let store = Arc::new(MemoryStore::new());
+        let session = SessionId::new("rejection-recovery").unwrap();
+        let turn = TurnId::new("turn").unwrap();
+        let facts = rejection_recovery_facts(&turn, with_source);
+        store
+            .append(AppendBatch {
+                session_id: session.clone(),
+                expected_seq: 0,
+                header: Some(header(session.as_str())),
+                facts: facts.into_iter().map(Into::into).collect(),
+            })
+            .await
+            .unwrap();
+        let recovered =
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+                .await;
+        if with_source {
+            let kernel = recovered.unwrap();
+            assert!(matches!(
+                kernel.outcome(&session, &turn).await.unwrap(),
+                Some(TurnOutcome::Interrupted { .. })
+            ));
+        } else {
+            assert!(matches!(
+                recovered,
+                Err(rsi_agent_kernel::KernelError::Invariant(_))
+            ));
+            assert_eq!(
+                store
+                    .read_facts(&session, 0, 256)
+                    .await
+                    .unwrap()
+                    .facts
+                    .len(),
+                2
+            );
+        }
+    }
+}
+
+fn rejection_recovery_facts(turn: &TurnId, with_source: bool) -> Vec<SessionFact> {
+    let effect = EffectId::new("model").unwrap();
+    let mut facts = vec![accepted_fact(1, turn)];
+    if with_source {
+        let mut prepared = snapshot();
+        prepared.language_settings = None;
+        facts.push(
+            SessionFact::new(
+                2,
+                2,
+                SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                    },
+                    price_quote: None,
+                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    snapshot: prepared,
+                },
+            )
+            .unwrap(),
+        );
+        facts.push(model_started_fact(3, turn, &effect));
+        for event in [
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: rsi_ai_protocol::ContentStart::ToolCall {
+                    id: "call".into(),
+                    name: "read".into(),
+                    kind: rsi_ai_protocol::ToolCallKind::Function,
+                },
+            },
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+            },
+            LanguageEvent::ContentFinished { index: 0 },
+            LanguageEvent::Finished {
+                reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                replay: None,
+            },
+        ] {
+            let seq = facts.len() as u64 + 1;
+            facts.push(
+                SessionFact::new(
+                    seq,
+                    seq,
+                    SessionFactBody::ModelEvent {
+                        turn_id: turn.clone(),
+                        effect_id: effect.clone(),
+                        event,
+                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+    }
+    let seq = facts.len() as u64 + 1;
+    facts.push(
+        SessionFact::new(
+            seq,
+            seq,
+            SessionFactBody::ToolRejected {
+                turn_id: turn.clone(),
+                effect_id: EffectId::new("denied").unwrap(),
+                identity: ToolResultIdentity::new("owner", "request", "call", "a".repeat(64))
+                    .unwrap(),
+                name: "read".into(),
+                arguments: serde_json::json!({}),
+                rejection: rsi_agent_session_protocol::ToolRejection::PolicyDenied {
+                    contribution_id: rsi_agent_session_protocol::ContributionId::new("deny")
+                        .unwrap(),
+                    reason: "denied".into(),
+                },
+            },
+        )
+        .unwrap(),
+    );
+    facts
+}
+
 #[derive(Debug)]
 struct NamedFailure(&'static str);
 

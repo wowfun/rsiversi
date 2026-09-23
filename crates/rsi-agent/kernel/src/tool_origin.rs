@@ -236,6 +236,36 @@ impl ToolSource {
         Ok(())
     }
 
+    pub(super) fn pending_source(&self) -> Option<&EffectId> {
+        (self.completed
+            && self
+                .calls
+                .values()
+                .any(|call| matches!(call.arguments, Arguments::Complete(_))))
+        .then_some(&self.effect_id)
+    }
+
+    pub(super) fn supersede(&mut self, source: &EffectId) -> TurnResult<()> {
+        if self.pending_source() != Some(source) {
+            return Err(invalid("supersession has no outstanding completed source"));
+        }
+        for call in self.calls.values_mut() {
+            if matches!(call.arguments, Arguments::Complete(_)) {
+                Arc::make_mut(call).arguments = Arguments::Consumed;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn reject(
+        &mut self,
+        id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> TurnResult<()> {
+        self.consume_call(&self.effect_id.clone(), id, name, arguments)
+    }
+
     pub(super) fn consume(
         &mut self,
         source: &EffectId,
@@ -243,13 +273,24 @@ impl ToolSource {
         name: &str,
         arguments: &serde_json::Value,
     ) -> TurnResult<ModelSelection> {
-        if &self.effect_id != source || !self.completed {
-            return Err(invalid("source is not the completed Conversation"));
-        }
         let selection = self
             .selection
             .clone()
             .ok_or_else(|| invalid("source has no prepared language settings"))?;
+        self.consume_call(source, id, name, arguments)?;
+        Ok(selection)
+    }
+
+    fn consume_call(
+        &mut self,
+        source: &EffectId,
+        id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> TurnResult<()> {
+        if &self.effect_id != source || !self.completed {
+            return Err(invalid("source is not the completed Conversation"));
+        }
         let call = self
             .calls
             .values_mut()
@@ -263,7 +304,7 @@ impl ToolSource {
             ));
         }
         Arc::make_mut(call).arguments = Arguments::Consumed;
-        Ok(selection)
+        Ok(())
     }
 }
 
@@ -399,6 +440,76 @@ pub(super) mod tests {
         ready
             .consume(&effect, "call-second", "tool_second", &args)
             .unwrap();
+    }
+
+    #[test]
+    fn supersession_requires_an_exact_completed_source_and_only_consumes_remaining_calls() {
+        let effect = EffectId::new("source-model").unwrap();
+        let original = source(&[("first", "read"), ("second", "read")]);
+        let mut incomplete = original.clone();
+        incomplete.completed = false;
+        assert!(incomplete.supersede(&effect).is_err());
+        assert!(
+            original
+                .clone()
+                .supersede(&EffectId::new("wrong").unwrap())
+                .is_err()
+        );
+        let mut rejected = original.clone();
+        rejected
+            .reject("first", "read", &serde_json::json!({}))
+            .unwrap();
+        rejected
+            .reject("second", "read", &serde_json::json!({}))
+            .unwrap();
+        assert!(rejected.pending_source().is_none());
+        assert!(rejected.supersede(&effect).is_err());
+        let mut remaining = original;
+        remaining
+            .consume(&effect, "first", "read", &serde_json::json!({}))
+            .unwrap();
+        // Invalid model arguments can be superseded without preparing a Tool.
+        Arc::make_mut(remaining.calls.get_mut(&1).unwrap()).arguments = Arguments::Complete(None);
+        assert!(
+            remaining
+                .reject("second", "read", &serde_json::json!({}))
+                .is_err(),
+            "invalid JSON cannot establish a different typed rejection identity"
+        );
+        assert_eq!(remaining.pending_source(), Some(&effect));
+        remaining.supersede(&effect).unwrap();
+        assert!(remaining.pending_source().is_none());
+        assert!(remaining.supersede(&effect).is_err());
+        assert!(
+            remaining
+                .consume(&effect, "second", "read", &serde_json::json!({}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejecting_a_proven_call_does_not_require_execution_settings() {
+        let mut source = source(&[("call", "read")]);
+        source.selection = None;
+        assert!(
+            source
+                .consume(
+                    &EffectId::new("source-model").unwrap(),
+                    "call",
+                    "read",
+                    &serde_json::json!({})
+                )
+                .is_err()
+        );
+        source
+            .reject("call", "read", &serde_json::json!({}))
+            .unwrap();
+        assert!(source.pending_source().is_none());
+        assert!(
+            source
+                .reject("call", "read", &serde_json::json!({}))
+                .is_err()
+        );
     }
 
     #[test]

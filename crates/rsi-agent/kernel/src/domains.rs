@@ -56,6 +56,7 @@ impl AgentKernel {
         claim: &TurnClaim,
         mut request: DomainMutation,
     ) -> TurnResult<DomainMutationReceipt> {
+        execution::validate_executor_fact_ownership(&request.facts)?;
         if request.proposals.is_empty()
             || request.proposals.len() > MAXIMUM_SESSION_DOMAINS
             || request.facts.len() > MAXIMUM_STORE_BATCH_FACTS

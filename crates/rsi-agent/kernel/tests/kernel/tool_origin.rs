@@ -92,6 +92,15 @@ pub(super) async fn publish_model_source(
     name: &str,
     prepared: &PreparedCallSnapshot,
 ) {
+    publish_model_calls(kernel, claim, &[(call_id, name)], prepared).await;
+}
+
+pub(super) async fn publish_model_calls(
+    kernel: &AgentKernel,
+    claim: &TurnClaim,
+    calls: &[(&str, &str)],
+    prepared: &PreparedCallSnapshot,
+) {
     let model = EffectId::new("source-model").unwrap();
     let turn_id = claim.turn_id().clone();
     flush_bodies(
@@ -118,25 +127,29 @@ pub(super) async fn publish_model_source(
         }],
     )
     .await;
-    let events = [
-        LanguageEvent::ContentStarted {
-            index: 0,
-            content: rsi_ai_protocol::ContentStart::ToolCall {
-                id: call_id.into(),
-                name: name.into(),
-                kind: rsi_ai_protocol::ToolCallKind::Function,
+    let mut events = Vec::new();
+    for (index, (call_id, name)) in calls.iter().enumerate() {
+        let index = u32::try_from(index).unwrap();
+        events.extend([
+            LanguageEvent::ContentStarted {
+                index,
+                content: rsi_ai_protocol::ContentStart::ToolCall {
+                    id: (*call_id).into(),
+                    name: (*name).into(),
+                    kind: rsi_ai_protocol::ToolCallKind::Function,
+                },
             },
-        },
-        LanguageEvent::ContentDelta {
-            index: 0,
-            delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
-        },
-        LanguageEvent::ContentFinished { index: 0 },
-        LanguageEvent::Finished {
-            reason: rsi_ai_protocol::FinishReason::ToolCalls,
-            replay: None,
-        },
-    ];
+            LanguageEvent::ContentDelta {
+                index,
+                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+            },
+            LanguageEvent::ContentFinished { index },
+        ]);
+    }
+    events.push(LanguageEvent::Finished {
+        reason: rsi_ai_protocol::FinishReason::ToolCalls,
+        replay: None,
+    });
     flush_bodies(
         kernel,
         claim,
@@ -360,4 +373,267 @@ async fn frozen_tool_policy_is_enforced_before_kernel_publication() {
         .await
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn executor_cannot_inject_kernel_owned_supersession() {
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let workers = kernel.start_workers();
+    let submitted = submit(&kernel, "supersession-owner", "work").await;
+    let _lease = kernel.register("worker".into()).unwrap();
+    let claim = kernel
+        .claim("worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    publish_model_source(&kernel, &claim, "call", "read", &snapshot()).await;
+    assert!(matches!(
+        kernel
+            .publish(
+                &claim,
+                vec![SessionFactBody::ToolCallsSuperseded {
+                    turn_id: submitted.turn_id.clone(),
+                    source_model_effect_id: EffectId::new("source-model").unwrap(),
+                }]
+            )
+            .await,
+        Err(TurnError::Invalid(_))
+    ));
+    flush_bodies(
+        &kernel,
+        &claim,
+        vec![SessionFactBody::ToolIntent {
+            turn_id: submitted.turn_id,
+            source_model_effect_id: EffectId::new("source-model").unwrap(),
+            effect_id: EffectId::new("tool").unwrap(),
+            identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            approval: None,
+            parallel_safe: false,
+        }],
+    )
+    .await;
+    kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One SQLite scenario proves fresh admission, exact retries, edits, deletion, and cold restoration"
+)]
+async fn named_spawn_resolves_once_and_retries_use_the_durable_seed() {
+    use rsi_agent_session_protocol::{ModelSelection, SpawnRoleReference, SpawnRoleSeed};
+    use rsi_agent_turn_protocol::{SpawnRoleResolver, SpawnRoleSelection};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct Resolver {
+        calls: AtomicUsize,
+        seed: std::sync::Mutex<Option<SpawnRoleSeed>>,
+    }
+    #[async_trait::async_trait]
+    impl SpawnRoleResolver for Resolver {
+        async fn resolve(
+            &self,
+            _: &SessionHeader,
+            _: &SpawnRoleReference,
+            _: CancellationToken,
+        ) -> rsi_agent_turn_protocol::Result<SpawnRoleSeed> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seed
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| TurnError::Invalid("definition removed".into()))
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap());
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header("named-parent")),
+            message: mailbox_message("named-parent-message"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let lease = kernel.register("named-worker".into()).unwrap();
+    let claim = kernel
+        .claim("named-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let caller = control_tool_caller_with_snapshot(&kernel, &claim, snapshot()).await;
+    let reference = SpawnRoleReference {
+        provider: "fixture.agents".into(),
+        name: "reviewer".into(),
+    };
+    let resolver = Arc::new(Resolver {
+        calls: AtomicUsize::new(0),
+        seed: std::sync::Mutex::new(Some(SpawnRoleSeed {
+            reference: reference.clone(),
+            role: rsi_agent_session_protocol::DelegationRole {
+                name: "reviewer".into(),
+                persona: Some("first instructions".into()),
+                allow: Some(std::collections::BTreeSet::default()),
+                deny: std::collections::BTreeSet::default(),
+            },
+            model: Some(ModelSelection {
+                model: rsi_ai_protocol::ModelRef::new("role", "chosen").unwrap(),
+                reasoning_effort: None,
+            }),
+            source: "fixture/reviewer.md".into(),
+            sha256: "a".repeat(64),
+        })),
+    });
+    let request = SpawnAgentRequest {
+        output_contract: None,
+        role: Some(SpawnRoleSelection::Reference {
+            reference,
+            resolver: resolver.clone(),
+        }),
+        model: None,
+        reasoning_effort: None,
+        cancellation: CancellationToken::new(),
+        caller,
+        child_session_id: SessionId::new("named-child").unwrap(),
+        task_name: "named-child".into(),
+        message_id: MessageId::new("named-message").unwrap(),
+        message: "review this".into(),
+        fork_turns: ForkTurnSelection::None,
+    };
+    let (first, concurrent) = tokio::join!(
+        kernel.spawn_agent(request.clone()),
+        kernel.spawn_agent(request.clone())
+    );
+    let first = first.unwrap();
+    assert_eq!(concurrent.unwrap(), first);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    let header = store.header(&first.session_id).await.unwrap();
+    assert_eq!(header.settings().default_model().model(), "chosen");
+    assert_eq!(
+        header.delegation_policy().unwrap().persona(),
+        Some("first instructions")
+    );
+    let restored: SessionHeader =
+        serde_json::from_slice(&serde_json::to_vec(&header).unwrap()).unwrap();
+    assert_eq!(restored, header);
+    {
+        let mut seed = resolver.seed.lock().unwrap();
+        let seed = seed.as_mut().unwrap();
+        seed.role.persona = Some("edited instructions".into());
+        seed.sha256 = "b".repeat(64);
+    }
+    let mut edited = request.clone();
+    edited.child_session_id = SessionId::new("edited-child").unwrap();
+    edited.task_name = "edited-child".into();
+    edited.message_id = MessageId::new("edited-message").unwrap();
+    edited.model = Some(rsi_ai_protocol::ModelRef::new("explicit", "override").unwrap());
+    let edited = kernel.spawn_agent(edited).await.unwrap();
+    let edited_header = store.header(&edited.session_id).await.unwrap();
+    assert_eq!(
+        edited_header.delegation_policy().unwrap().persona(),
+        Some("edited instructions")
+    );
+    assert_eq!(edited_header.settings().default_model().model(), "override");
+    assert_eq!(
+        header.delegation_policy().unwrap().persona(),
+        Some("first instructions")
+    );
+    *resolver.seed.lock().unwrap() = None;
+    assert_eq!(kernel.spawn_agent(request.clone()).await.unwrap(), first);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+    for (index, mut changed) in [
+        request.clone(),
+        request.clone(),
+        request.clone(),
+        request.clone(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match index {
+            0 => changed.message.push_str(" changed"),
+            1 => changed.model = Some(rsi_ai_protocol::ModelRef::new("other", "model").unwrap()),
+            2 => changed.fork_turns = ForkTurnSelection::All,
+            _ => {
+                let Some(SpawnRoleSelection::Reference { reference, .. }) = &mut changed.role
+                else {
+                    panic!("reference")
+                };
+                reference.name = "different".into();
+            }
+        }
+        assert!(kernel.spawn_agent(changed).await.is_err());
+    }
+    let mut fresh = request.clone();
+    fresh.child_session_id = SessionId::new("second-child").unwrap();
+    fresh.task_name = "second-child".into();
+    fresh.message_id = MessageId::new("second-message").unwrap();
+    assert!(kernel.spawn_agent(fresh).await.is_err());
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
+    assert!(
+        store
+            .header(&SessionId::new("second-child").unwrap())
+            .await
+            .is_err()
+    );
+    finish_control_tool(&kernel, &claim).await;
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
+    drop((claim, request, kernel, store));
+    rsi_agent_store_sqlite::SqliteStore::verify(directory.path()).unwrap();
+    let reopened = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap());
+    assert_eq!(reopened.header(&first.session_id).await.unwrap(), header);
+    assert_eq!(
+        reopened.header(&edited.session_id).await.unwrap(),
+        edited_header
+    );
+    let cold = AgentKernel::recover_with_clock(reopened, composition(), Arc::new(FixedClock))
+        .await
+        .unwrap();
+    let workers = cold.start_workers();
+    let _lease = cold.register("cold-worker".into()).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let claim = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            cold.claim("cold-worker", CancellationToken::new()),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "cold child claim timed out: seen={seen:?} health={:?}",
+                cold.ready_health()
+            )
+        })
+        .unwrap()
+        .unwrap();
+        let expected = if claim.session_id() == &first.session_id {
+            &header
+        } else {
+            &edited_header
+        };
+        assert_eq!(claim.header().spawn_role(), expected.spawn_role());
+        assert_eq!(
+            claim.header().settings().default_model(),
+            expected.settings().default_model()
+        );
+        assert_eq!(
+            claim.header().delegation_policy(),
+            expected.delegation_policy()
+        );
+        seen.insert(claim.session_id().clone());
+        cold.finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+    }
+    assert_eq!(seen, [first.session_id, edited.session_id].into());
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
+    cold.shutdown(workers).await.unwrap();
 }

@@ -15,8 +15,8 @@ the Turn.
 
 Historical Tool-result pruning is a pure view operation over retained original
 messages, not a rewrite of Facts or checkpoint contents. The default builder's
-semantic identity changes to 2.6.0 because summary view digests include that
-projection. The owning Context contract defines the fixed budgets and protected
+semantic identity changes to 2.7.0 because summary view digests include that
+projection and derived interrupted-call outcomes. The owning Context contract defines the fixed budgets and protected
 units. The same projection is used before planning and after candidate summary
 installation; comparing pruned input against unpruned candidates would reject
 valid shrinking summaries. DSH's 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720
@@ -53,7 +53,22 @@ maintenance introduces an external effect outside serial admission. Installing
 through a second Fact creates an avoidable crash window. Automatically replaying
 after a durable summary weakens the existing uncertain-effect recovery rule.
 
+Requiring each bounded selection to make the next ordinary request fit would
+reject useful partial summaries when source-count, quoted-input or retry bounds
+limit one plan. The protected-input preflight is therefore an irreducible lower
+bound; strict shrink and replay validity establish progress independently of
+immediate emission. Extending the executor's per-pressure effect budget is a
+separate decision, not an implicit consequence of changing this pure guard.
+
 ## Consequences
+
+The outcome fold rejects orphan and repeated results at ingestion in both modes,
+so legacy raw projection no longer retains an orphan as partial evidence. Batch
+registration and settlement follow successful message admission. A failed Fact
+body makes the cursor non-checkpointable because assembler consumption is not a
+rollback transaction; callers discard an errored cursor and rebuild from Facts.
+The same coordinate transform remaps messages, outcome batches, instructions and
+the last human input after a summary.
 
 Instruction protection follows the entered source contract. A replacement or
 tombstone supersedes the same source's prior baseline, and a complete skill
@@ -91,7 +106,7 @@ the exact installed prior summary. Inductive replay validates each prior before
 its successor, including fork visibility. Copying every transitive raw Turn
 binding imposed a lifetime cap unrelated to the retained context. Fully
 summarized completed Turns are released; the optional recent tail respects both
-byte and message pressure. The private fold payload is version 7; the generic
+byte and message pressure. The private fold payload is version 8; the generic
 builder envelope remains version 6.
 
 An interrupted Tool batch is evidence that cannot be summarized as a completed
@@ -117,3 +132,25 @@ consumes the preceding Usage observation even when inherited through a fork;
 missing new Usage cannot repeatedly charge summary attempts against stale
 parent pressure. The current limits and unsplittable-unit behavior remain owned
 by the Context contract above.
+
+The fold preserves raw incomplete Tool groups. Provider views fill missing results
+only after a durable supersession marker or terminal Turn; Started without a
+result means unknown effects, not non-execution. These derived errors share the
+normal request, pressure, digest and shrink paths and never become ToolResult
+Facts. Compaction selections retain raw coordinates and protect incomplete
+units. Cache payloads retain the bounded call provenance needed for the same
+view after restore; incompatible caches fall back to authoritative Facts.
+
+Retention and emission are separate bounds. The selected Tool catalog and model
+settings are frozen before planning. AI's closed LanguageRequestOptions computes
+available message bytes with the request's own wire serializer; the final request
+is then validated once. Dynamic controls affect pressure, while summary selection
+uses a replayable fixed envelope with the maximum valid effort identifier length.
+Replaying summaries therefore does not depend on today's Tool catalog. Large
+retention settings cannot relax the AI message or full-request limit.
+
+Missing provider results cannot be reconstructed reliably. Fabricating success,
+replaying an uncertain started Tool, or removing raw incomplete groups would
+misrepresent evidence. Raising protocol limits would only move capacity failures
+downstream. Size-only projections use counting writers and turn metadata uses the
+existing ordinal index; no additional cache or projection bypass is required.

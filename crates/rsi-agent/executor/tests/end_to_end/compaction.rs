@@ -253,7 +253,12 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
     let facts: Vec<_> = facts.into_iter().map(Arc::new).collect();
     replay.ingest(ContextPage::Canonical(&facts)).unwrap();
     assert!(!replay.summary_installed(&effect.unwrap()));
-    let retained = serde_json::to_string(&replay.build(vec![]).unwrap()).unwrap();
+    let retained = serde_json::to_string(
+        &replay
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap(),
+    )
+    .unwrap();
     assert!(retained.contains("small older task"));
     assert!(!retained.contains("VERBOSE_SUMMARY"));
     stack.dispose(language, executor).await;

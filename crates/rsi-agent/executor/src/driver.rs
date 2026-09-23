@@ -805,13 +805,12 @@ impl Driver {
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        let settings = request
-            .settings()
-            .clone()
-            .with_optional_reasoning_effort(selection.reasoning_effort.clone());
-        let request = request
-            .with_settings(settings)
-            .map_err(|error| failed("model.settings", error.to_string()))?;
+        if request.settings().reasoning_effort() != selection.reasoning_effort.as_ref() {
+            return Err(failed(
+                "context.settings",
+                "context builder changed the selected reasoning effort",
+            ));
+        }
         let capture = evidence::Capture::new(&request)?;
         let prepared = match self
             .language

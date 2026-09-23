@@ -61,10 +61,11 @@ pub(super) async fn run_executor_pool(
         let task_stop = stop.clone();
         let task_failure_stop = stop.clone();
         lanes.spawn(EXECUTOR_LANE_PARKING.scope(parking, async move {
-            let result =
+            let result = Box::pin(
                 AssertUnwindSafe(task_driver.run_claim(claim, &task_stop, observation_slot))
-                    .catch_unwind()
-                    .await;
+                    .catch_unwind(),
+            )
+            .await;
             lane_service.close();
             if result.is_ok() {
                 Ok(())

@@ -51,9 +51,9 @@ impl ModelContextCursor for WrongPosition {
     }
     fn build(
         &self,
-        tools: Vec<rsi_tools_protocol::ToolDefinition>,
+        options: rsi_ai_protocol::LanguageRequestOptions,
     ) -> rsi_agent_context::Result<rsi_ai_protocol::LanguageRequest> {
-        self.0.build(tools)
+        self.0.build(options)
     }
     fn checkpoint(&self) -> rsi_agent_context::Result<Arc<[u8]>> {
         self.0.checkpoint()
@@ -141,16 +141,23 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
     let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
     fold.apply(&history).unwrap();
     assert_eq!(
-        state.build(Vec::new()).unwrap(),
-        fold.request(limits, Vec::new()).unwrap()
+        state
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap(),
+        fold.request(limits, rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap()
     );
     let checkpoint = state.checkpoint().unwrap();
     let mut restored = ModelContextState::open(builder.clone(), header("system"), limits).unwrap();
     restored.restore(&checkpoint).unwrap();
     assert_eq!(restored.position(), state.position());
     assert_eq!(
-        restored.build(Vec::new()).unwrap(),
-        state.build(Vec::new()).unwrap()
+        restored
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap(),
+        state
+            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .unwrap()
     );
     assert_eq!(builder.opened.load(Ordering::SeqCst), 3);
 
@@ -222,9 +229,13 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
         "seed advanced child prefix"
     );
     assert!(
-        serde_json::to_string(&child.build(Vec::new()).unwrap())
-            .unwrap()
-            .contains("retained input")
+        serde_json::to_string(
+            &child
+                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .unwrap()
+        )
+        .unwrap()
+        .contains("retained input")
     );
 
     let mut claim =

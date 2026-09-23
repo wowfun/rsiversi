@@ -18,7 +18,9 @@ use std::{
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 fn add(size: usize) {
+    ALLOCATED.fetch_add(size, Ordering::Relaxed);
     let now = LIVE.fetch_add(size, Ordering::Relaxed) + size;
     PEAK.fetch_max(now, Ordering::Relaxed);
 }
@@ -58,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v7_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v8_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -124,18 +126,67 @@ fn full_builder_preserves_v7_payload_and_v6_envelope_without_a_third_full_copy()
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // Exact v7 fold/v6 envelope with Session 17 and builder 2.6.0.
-    // Rebinding only the Header format to 16 and the two envelope digests
-    // recovers the reviewed Session 16 oracle:
-    // 092a2720249c31276d7bc3d7a4b56a86cbbb4b4defc4603b225afd7df3c14495.
-    // All payload bytes and Fact-prefix digests remain unchanged.
+    // The v8 fold explicitly carries Tool outcome provenance; the generic
+    // v6 envelope and Session 17 binding stay unchanged.
+    let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
+    let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
+    let payload = &bytes[prefix + 4 + metadata_len..];
+    let fold_magic = b"rsi-agent-context-checkpoint-v8\0";
+    assert!(payload.starts_with(fold_magic));
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
+    assert_eq!(decoded["version"], 8);
+    assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
+    assert!(
+        decoded["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["batches"].as_object().unwrap().is_empty())
+    );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "6ef26e3c9dcb6ea658dfd43dcf4d7e34f1e11a57b0c4ea66e73844824401a79b"
+        "1bab1152d57d9f24066a5cb853fe9b3f4da7ad1312040a0bc1c5f6d2af2002fe"
     );
     assert!(
         additional < 3 * bytes.len(),
         "full builder retained an avoidable complete checkpoint: {additional}"
     );
     state.restore(&bytes).unwrap();
+    assert_planning_allocations(&state, bytes.len());
+}
+
+fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usize) {
+    let before = LIVE.load(Ordering::Relaxed);
+    let allocated_before = ALLOCATED.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let planned = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("fixture", "model").unwrap(),
+            &rsi_ai_protocol::LanguageProfile::new(
+                128_000,
+                4096,
+                8192,
+                rsi_ai_protocol::ToolDialect::Responses,
+                true,
+                rsi_ai_protocol::ImageToolResultCapability::No,
+                vec![],
+            )
+            .unwrap(),
+            Some(CompactionTrigger::ProviderContextLimit),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let additional = PEAK.load(Ordering::Relaxed) - before;
+    let allocated = ALLOCATED.load(Ordering::Relaxed) - allocated_before;
+    println!(
+        "planning peak_additional_bytes={additional} allocated_bytes={allocated} selections={}",
+        planned.plan.selections.len()
+    );
+    assert!(
+        allocated < 3 * checkpoint_bytes,
+        "planning repeatedly copied retained history: {allocated}"
+    );
 }

@@ -326,6 +326,9 @@ impl TurnExecution for AgentKernel {
         let (expected_fact_seq, activation_id, current_step, original) = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
+            if turn_is_ending(turn) || turn.cancel_requested || turn.budget_exhausted.is_some() {
+                return Ok(0);
+            }
             let session = state
                 .sessions
                 .get(claim.session_id())
@@ -350,7 +353,18 @@ impl TurnExecution for AgentKernel {
             pending[0].accepted_control_seq
         ))
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let mut bodies = vec![
+        let mut bodies = Vec::new();
+        if let Some(source) = original
+            .tool_source
+            .as_ref()
+            .and_then(|source| source.pending_source())
+        {
+            bodies.push(SessionFactBody::ToolCallsSuperseded {
+                turn_id: claim.turn_id().clone(),
+                source_model_effect_id: source.clone(),
+            });
+        }
+        bodies.extend([
             SessionFactBody::StepEnded {
                 turn_id: claim.turn_id().clone(),
                 step_id: current_step,
@@ -360,7 +374,8 @@ impl TurnExecution for AgentKernel {
                 turn_id: claim.turn_id().clone(),
                 step_id: next_step.clone(),
             },
-        ];
+        ]);
+        let input_fact_offset = bodies.len();
         bodies.extend(
             pending
                 .iter()
@@ -411,7 +426,7 @@ impl TurnExecution for AgentKernel {
             .enumerate()
             .map(|(offset, entry)| {
                 let fact_index = offset
-                    .checked_add(2)
+                    .checked_add(input_fact_offset)
                     .ok_or_else(|| TurnError::Invariant("Fact offset exhausted".into()))?;
                 let control_offset = u64::try_from(offset)
                     .map_err(|_| TurnError::Invariant("control offset exceeds u64".into()))?;
@@ -982,12 +997,25 @@ pub(super) fn stage_execution_facts(
     Ok(StagedExecutionFacts { turn, facts, bytes })
 }
 
+pub(super) fn validate_executor_fact_ownership(bodies: &[SessionFactBody]) -> TurnResult<()> {
+    if bodies
+        .iter()
+        .any(|body| matches!(body, SessionFactBody::ToolCallsSuperseded { .. }))
+    {
+        return Err(TurnError::Invalid(
+            "Tool supersession is owned by Kernel message entry".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Staging keeps budget, intent fences, and speculative suffix mutation all-or-nothing.
 pub(super) fn try_publish_once(
     kernel: &AgentKernel,
     claim: &TurnClaim,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {
+    validate_executor_fact_ownership(&bodies)?;
     let (original, header, base_seq) = {
         let state = lock_state(&kernel.inner);
         let original = kernel.validate_claim(&state, claim)?;

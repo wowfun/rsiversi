@@ -343,6 +343,9 @@ struct ScannedTurn {
     image: Option<(ModelRef, ImageRequest)>,
     terminal: bool,
     completed_model_without_successor: bool,
+    completed_model_source: Option<EffectId>,
+    conversation_source: Option<EffectId>,
+    pending_model_calls: BTreeMap<u32, (String, bool)>,
     concluded: bool,
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
@@ -419,9 +422,20 @@ fn scan_turn(
                 state.image = Some((model.clone(), request.clone()));
             }
             SessionFactBody::ModelIntent {
-                turn_id, effect_id, ..
+                turn_id,
+                effect_id,
+                purpose,
+                ..
             } if turn_id == claim.turn_id() => {
+                if matches!(
+                    purpose,
+                    rsi_agent_session_protocol::ModelPurpose::Conversation
+                ) {
+                    state.conversation_source = Some(effect_id.clone());
+                    state.pending_model_calls.clear();
+                }
                 state.completed_model_without_successor = false;
+                state.completed_model_source = None;
                 state.effects.push(ResumeEffect::Model {
                     effect_id: effect_id.clone(),
                     started: false,
@@ -469,8 +483,68 @@ fn scan_turn(
                 };
                 state.effects.remove(index);
                 state.completed_model_without_successor = true;
+                if state.conversation_source.as_ref() == Some(effect_id)
+                    && matches!(
+                        event,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::ToolCalls,
+                            ..
+                        }
+                    )
+                    && state
+                        .pending_model_calls
+                        .values()
+                        .any(|(_, complete)| *complete)
+                {
+                    state.completed_model_source = Some(effect_id.clone());
+                }
             }
-            SessionFactBody::ToolRejected { turn_id, .. } if turn_id == claim.turn_id() => {
+            SessionFactBody::ModelEvent {
+                turn_id,
+                effect_id,
+                event,
+                ..
+            } if turn_id == claim.turn_id()
+                && state.conversation_source.as_ref() == Some(effect_id) =>
+            {
+                match event {
+                    LanguageEvent::ContentStarted {
+                        index,
+                        content: rsi_ai_protocol::ContentStart::ToolCall { id, .. },
+                    } => {
+                        state
+                            .pending_model_calls
+                            .insert(*index, (id.clone(), false));
+                    }
+                    LanguageEvent::ContentFinished { index } => {
+                        if let Some((_, complete)) = state.pending_model_calls.get_mut(index) {
+                            *complete = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SessionFactBody::ToolCallsSuperseded {
+                turn_id,
+                source_model_effect_id,
+            } if turn_id == claim.turn_id() => {
+                if state.completed_model_source.as_ref() != Some(source_model_effect_id)
+                    || !state
+                        .pending_model_calls
+                        .values()
+                        .any(|(_, complete)| *complete)
+                {
+                    return Err("Tool supersession lacks its completed model source");
+                }
+                state.completed_model_without_successor = false;
+                state.pending_model_calls.clear();
+            }
+            SessionFactBody::ToolRejected {
+                turn_id, identity, ..
+            } if turn_id == claim.turn_id() => {
+                state
+                    .pending_model_calls
+                    .retain(|_, (id, _)| id != identity.call_id());
                 state.completed_model_without_successor = true;
             }
             SessionFactBody::ToolIntent {
@@ -480,6 +554,9 @@ fn scan_turn(
                 ..
             } if turn_id == claim.turn_id() => {
                 state.completed_model_without_successor = false;
+                state
+                    .pending_model_calls
+                    .retain(|_, (id, _)| id != identity.call_id());
                 state.effects.push(ResumeEffect::Tool {
                     intent: Arc::clone(fact),
                     effect_id: effect_id.clone(),
@@ -546,6 +623,7 @@ fn scan_turn(
             | SessionFactBody::ToolRejected { .. }
             | SessionFactBody::ToolStarted { .. }
             | SessionFactBody::ToolResult { .. }
+            | SessionFactBody::ToolCallsSuperseded { .. }
             | SessionFactBody::TurnTerminal { .. } => {}
         }
     }

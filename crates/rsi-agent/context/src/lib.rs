@@ -6,6 +6,7 @@
 
 mod builder;
 mod compaction;
+mod outcomes;
 mod pruning;
 pub use compaction::{PlannedCompaction, validate_summary_output};
 mod default_provider;
@@ -21,11 +22,11 @@ use rsi_agent_session_protocol::{
     SessionFactBody, SessionHeader, TurnId, advance_fact_prefix_digest,
 };
 use rsi_ai_protocol::{
-    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequest, Message,
-    MessageContent, ProviderExtension, ToolChoice,
+    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequest,
+    LanguageRequestOptions, Message, MessageContent,
 };
 use rsi_media_protocol::{MediaDescriptor, MediaKind};
-use rsi_tools_protocol::{ToolContent, ToolDefinition, ToolResult};
+use rsi_tools_protocol::{ToolContent, ToolResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::borrow::{Borrow, Cow};
@@ -44,9 +45,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 7;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v7\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v7\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 8;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v8\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v8\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -124,6 +125,7 @@ struct ProjectedTurn {
     messages: Vec<Message>,
     message_bytes: usize,
     terminal: bool,
+    batches: outcomes::Batches,
 }
 
 #[derive(Debug)]
@@ -154,6 +156,7 @@ struct CheckpointTurn {
     id: TurnId,
     messages: Vec<Message>,
     terminal: bool,
+    batches: outcomes::Batches,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +178,7 @@ struct CheckpointTurnRef<'a> {
     id: &'a TurnId,
     messages: &'a [Message],
     terminal: bool,
+    batches: &'a outcomes::Batches,
 }
 
 impl ContextFold {
@@ -290,6 +294,7 @@ impl ContextFold {
                     id: &turn.id,
                     messages: &turn.messages,
                     terminal: turn.terminal,
+                    batches: &turn.batches,
                 })
                 .collect(),
         };
@@ -388,6 +393,7 @@ impl ContextFold {
                     "checkpoint contains duplicate, empty, or misaligned turns".into(),
                 ));
             }
+            outcomes::validate(&turn.batches, &turn.messages)?;
             let mut message_bytes = 0_usize;
             for message in &turn.messages {
                 message
@@ -417,6 +423,7 @@ impl ContextFold {
                 messages: turn.messages,
                 message_bytes,
                 terminal: turn.terminal,
+                batches: turn.batches,
             });
         }
         Ok(())
@@ -577,27 +584,51 @@ impl ContextFold {
 
     /// Projects bounded messages, dropping only complete oldest turns.
     pub fn project(&self, limits: ContextLimits) -> Result<ModelContext> {
+        self.project_view(limits, false)
+    }
+
+    fn project_view(&self, limits: ContextLimits, provider_view: bool) -> Result<ModelContext> {
         ContextLimits::new(limits.max_messages, limits.max_bytes)?;
         if self.semantic.is_some() {
             return self.semantic_project(limits);
         }
+        let normalized = provider_view
+            .then(|| {
+                self.turns
+                    .iter()
+                    .map(|turn| {
+                        outcomes::normalize_with_size(
+                            &turn.messages,
+                            &turn.batches,
+                            turn.terminal,
+                            turn.message_bytes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let (retained_count, retained_bytes) = normalized.as_ref().map_or(
+            (self.retained_messages, self.retained_message_bytes),
+            |turns| {
+                turns
+                    .iter()
+                    .fold((0, 0), |(count, bytes), (messages, size)| {
+                        (count + messages.len(), bytes + size)
+                    })
+            },
+        );
         let mut retained_messages = usize::from(self.system_message.is_some())
-            .checked_add(self.retained_messages)
+            .checked_add(retained_count)
             .ok_or_else(|| ContextError::Invalid("context message count overflowed".into()))?;
         let mut retained_message_bytes = self
             .system_message_bytes
-            .checked_add(self.retained_message_bytes)
+            .checked_add(retained_bytes)
             .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
         let mut omitted = self.omitted_turns;
         let mut skipped_retained = 0_usize;
         loop {
             let notice = (omitted > 0)
-                .then(|| {
-                    Message::developer_text(format!(
-                        "[Context omitted {omitted} complete earlier turn(s).]"
-                    ))
-                    .map_err(|error| ContextError::Invalid(error.to_string()))
-                })
+                .then(|| omission_message(omitted))
                 .transpose()?;
             let notice_bytes = notice
                 .as_ref()
@@ -616,9 +647,13 @@ impl ContextFold {
                 let mut messages = Vec::with_capacity(message_count);
                 messages.extend(self.system_message.iter().cloned());
                 messages.extend(notice);
-                for turn in self.turns.iter().skip(skipped_retained) {
-                    for message in &turn.messages {
-                        messages.push(message.clone());
+                if let Some(turns) = &normalized {
+                    for (turn, _) in turns.iter().skip(skipped_retained) {
+                        messages.extend(turn.iter().map(|message| message.as_ref().clone()));
+                    }
+                } else {
+                    for turn in self.turns.iter().skip(skipped_retained) {
+                        messages.extend(turn.messages.iter().cloned());
                     }
                 }
                 return Ok(ModelContext {
@@ -633,7 +668,11 @@ impl ContextFold {
             if !turn.terminal {
                 return Err(ContextError::TooLarge);
             }
-            let (removed_messages, removed_bytes) = (turn.messages.len(), turn.message_bytes);
+            let (removed_messages, removed_bytes) = normalized
+                .as_ref()
+                .map_or((turn.messages.len(), turn.message_bytes), |turns| {
+                    (turns[skipped_retained].0.len(), turns[skipped_retained].1)
+                });
             retained_messages = retained_messages
                 .checked_sub(removed_messages)
                 .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
@@ -722,13 +761,9 @@ impl ContextFold {
         let mut bytes = self.system_message_bytes;
         if self.omitted_turns > 0 {
             bytes = bytes
-                .checked_add(encoded_message_bytes(
-                    &Message::developer_text(format!(
-                        "[Context omitted {} complete earlier turn(s).]",
-                        self.omitted_turns
-                    ))
-                    .map_err(|error| ContextError::Invalid(error.to_string()))?,
-                )?)
+                .checked_add(encoded_message_bytes(&omission_message(
+                    self.omitted_turns,
+                )?)?)
                 .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
         }
         bytes = bytes
@@ -745,17 +780,27 @@ impl ContextFold {
     pub fn request(
         &self,
         limits: ContextLimits,
-        tools: Vec<ToolDefinition>,
+        options: LanguageRequestOptions,
     ) -> Result<LanguageRequest> {
-        let projected = self.project(limits)?;
-        build_request(
-            without_unscoped_provider_state(projected.messages)?,
-            tools,
-            Vec::new(),
-        )
+        let limits = emission_limits(limits, &options)?;
+        let messages = self.project_view(limits, true)?.messages;
+        let messages = without_unscoped_provider_state(messages)?;
+        // Projection proved the limits; removing provider-private blocks only shrinks it.
+        LanguageRequest::new_with_options(messages, options)
+            .map_err(|error| ContextError::Invalid(error.to_string()))
     }
 
     fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
+        let result = self.apply_body_inner(body, seq);
+        if result.is_err() {
+            // A failed assembler or ingestion may have consumed transient state.
+            // It must never be cached as the preceding exact Fact prefix.
+            self.checkpointable_prefix = false;
+        }
+        result
+    }
+
+    fn apply_body_inner(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
         match body {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => {
                 let message = Message::user_text(text)
@@ -797,24 +842,11 @@ impl ContextFold {
                 event,
                 purpose,
             } => self.apply_model_event(turn_id, effect_id, event, *purpose, seq)?,
-            SessionFactBody::ToolRejected {
-                turn_id,
-                identity,
-                rejection,
-                ..
-            } => {
-                let message = rejected_tool_message(identity.call_id(), rejection)?;
-                self.push_turn_message(turn_id, message)?;
-            }
-            SessionFactBody::ToolResult {
-                turn_id,
-                identity,
-                result,
-                ..
-            } => {
-                let message = tool_message(identity.call_id(), result)?;
-                self.push_turn_message(turn_id, message)?;
-            }
+            SessionFactBody::ToolCallsSuperseded { .. }
+            | SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolStarted { .. }
+            | SessionFactBody::ToolRejected { .. }
+            | SessionFactBody::ToolResult { .. } => self.apply_tool_outcome(body)?,
             SessionFactBody::ImageOutput { turn_id, media, .. } => {
                 let descriptor = media_descriptor(media)?;
                 let message = Message::assistant(vec![MessageContent::Image(descriptor)])
@@ -842,9 +874,7 @@ impl ContextFold {
             | SessionFactBody::BudgetExhausted { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
-            | SessionFactBody::ImageStarted { .. }
-            | SessionFactBody::ToolIntent { .. }
-            | SessionFactBody::ToolStarted { .. } => {}
+            | SessionFactBody::ImageStarted { .. } => {}
         }
         Ok(())
     }
@@ -939,7 +969,14 @@ impl ContextFold {
                     return Ok(());
                 }
                 let message = assistant_message(output.content, output.replay.as_ref())?;
-                self.push_turn_message(turn_id, message)?;
+                let turn = self.turn_mut(turn_id)?;
+                let index = turn.messages.len();
+                let batch = outcomes::prepare_batch(&turn.batches, index, effect_id, &message)?;
+                self.push_turn_message_with(turn_id, message, |turn| {
+                    if let Some(batch) = batch {
+                        turn.batches.insert(index, batch);
+                    }
+                })?;
                 Ok(())
             }
             Err(LanguageAssemblyError::Provider { .. }) => Ok(()),
@@ -989,6 +1026,7 @@ impl ContextFold {
             messages: vec![message],
             message_bytes,
             terminal: false,
+            batches: BTreeMap::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);
         self.retained_messages = retained_messages;
@@ -1011,12 +1049,24 @@ impl ContextFold {
             messages: Vec::new(),
             message_bytes: 0,
             terminal: false,
+            batches: BTreeMap::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);
         Ok(())
     }
 
     fn push_turn_message(&mut self, turn_id: &TurnId, message: Message) -> Result<()> {
+        self.push_turn_message_with(turn_id, message, |_| {})
+    }
+
+    // Validate provenance before entering this helper. Capacity admission may
+    // evict complete older Turns; the live target and its indices stay stable.
+    fn push_turn_message_with(
+        &mut self,
+        turn_id: &TurnId,
+        message: Message,
+        commit: impl FnOnce(&mut ProjectedTurn),
+    ) -> Result<()> {
         let index = self
             .turn_index
             .get(turn_id)
@@ -1042,6 +1092,7 @@ impl ContextFold {
             .checked_add(message_bytes)
             .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
         turn.messages.push(message);
+        commit(turn);
         self.retained_messages = retained_messages;
         self.retained_message_bytes = retained_message_bytes;
         Ok(())
@@ -1067,22 +1118,35 @@ impl ContextFold {
     }
 }
 
-fn build_request(
-    messages: Vec<Message>,
-    tools: Vec<ToolDefinition>,
-    extensions: Vec<ProviderExtension>,
-) -> Result<LanguageRequest> {
-    let request = LanguageRequest::new(messages)
-        .map_err(|error| ContextError::Invalid(error.to_string()))?
-        .with_extensions(extensions)
-        .map_err(|error| ContextError::Invalid(error.to_string()))?;
-    if tools.is_empty() {
-        Ok(request)
-    } else {
-        request
-            .with_tools(tools, ToolChoice::Auto)
-            .map_err(|error| ContextError::Invalid(error.to_string()))
+fn emission_limits(
+    limits: ContextLimits,
+    options: &LanguageRequestOptions,
+) -> Result<ContextLimits> {
+    ContextLimits::new(
+        limits.max_messages.min(rsi_ai_protocol::MAX_MESSAGES),
+        limits.max_bytes.min(options.message_byte_budget()),
+    )
+}
+
+fn encoded_bytes<T: Serialize + ?Sized>(value: &T) -> Result<usize> {
+    #[derive(Default)]
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("encoded size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| ContextError::Invalid(error.to_string()))?;
+    Ok(counter.0)
 }
 
 fn has_unscoped_provider_state(message: &Message) -> bool {
@@ -1262,9 +1326,7 @@ fn media_descriptor(media: &rsi_media_protocol::MediaRef) -> Result<MediaDescrip
 }
 
 fn encoded_message_bytes(message: &Message) -> Result<usize> {
-    serde_json::to_vec(message)
-        .map(|encoded| encoded.len())
-        .map_err(|error| ContextError::Invalid(error.to_string()))
+    encoded_bytes(message)
 }
 
 fn encoded_array_bytes(items: usize, item_bytes: usize) -> Result<usize> {
@@ -1306,6 +1368,13 @@ impl std::io::Write for CheckpointWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+fn omission_message(omitted: usize) -> Result<Message> {
+    Message::developer_text(format!(
+        "[Context omitted {omitted} complete earlier turn(s).]"
+    ))
+    .map_err(|error| ContextError::Invalid(error.to_string()))
 }
 
 #[cfg(test)]

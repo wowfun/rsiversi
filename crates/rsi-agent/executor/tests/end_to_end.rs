@@ -730,6 +730,7 @@ impl LanguageCall for LanguageFixture {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        assert_complete_tool_groups(&request);
         let language_settings = rsi_ai_protocol::PreparedLanguageSettings {
             requested_reasoning_effort: request.settings().reasoning_effort().cloned(),
             effective_reasoning_effort: request.settings().reasoning_effort().cloned(),
@@ -998,6 +999,34 @@ async fn assert_model_started(store: &MemoryStore, expected: &PreparedCallSnapsh
         if page.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ModelIntent { effect_id: intent, snapshot, .. } if intent == effect_id && snapshot == expected)) { return; }
     }
     panic!("provider start lacks its exact durable prepared intent and start prefix");
+}
+
+fn assert_complete_tool_groups(request: &LanguageRequest) {
+    use rsi_ai_protocol::{MessageContent, MessageRole};
+    let mut pending = std::collections::BTreeSet::new();
+    for message in request.messages() {
+        if message.role() != MessageRole::Tool {
+            assert!(
+                pending.is_empty(),
+                "provider received an incomplete Tool group"
+            );
+        }
+        for content in message.content() {
+            match content {
+                MessageContent::ToolCall(call) => {
+                    assert!(pending.insert(&call.id));
+                }
+                MessageContent::ToolResult { call_id, .. } => {
+                    assert!(pending.remove(call_id));
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        pending.is_empty(),
+        "provider received an incomplete final Tool group"
+    );
 }
 
 fn tool_script() -> Vec<LanguageEvent> {

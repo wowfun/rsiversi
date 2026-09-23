@@ -294,7 +294,12 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
     ]))
     .unwrap();
 
-    let request = fold.request(ContextLimits::default(), Vec::new()).unwrap();
+    let request = fold
+        .request(
+            ContextLimits::default(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        )
+        .unwrap();
 
     assert!(request.extensions().is_empty());
     assert_eq!(request.messages().len(), 3);
@@ -412,7 +417,12 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
     fold.apply_seed_page(&seed).unwrap();
     fold.finish_seed().unwrap();
     fold.apply(&child).unwrap();
-    let request = fold.request(ContextLimits::default(), Vec::new()).unwrap();
+    let request = fold
+        .request(
+            ContextLimits::default(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        )
+        .unwrap();
     assert!(request.extensions().is_empty());
     assert_eq!(request.messages().len(), 4);
     assert!(matches!(
