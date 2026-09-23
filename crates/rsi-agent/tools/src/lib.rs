@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod definitions;
 mod questions;
 pub use questions::QuestionToolsFactory;
 
@@ -48,11 +49,16 @@ impl PluginFactory for AgentToolsFactory {
         // Encoded bytes charge string payloads across configuration and prepared roles.
         // The per-role allowance is for bounded container overhead, not persona text.
         let retained = config.roles.len() * 16 * 1024 + bytes * 3;
-        Ok(
-            PreparedActivation::with_state(desired.clone(), config, retained)
-                .requiring_local::<ToolRegistrarContract>()
-                .requiring_local::<TurnServiceContract>(),
-        )
+        let markdown = config.markdown_agents;
+        let mut prepared = PreparedActivation::with_state(desired.clone(), config, retained)
+            .requiring_local::<ToolRegistrarContract>()
+            .requiring_local::<TurnServiceContract>();
+        if markdown {
+            prepared = prepared
+                .requiring_local::<rsi_agent_workspace_context::WorkspaceContextContract>()
+                .requiring_local::<rsi_agent_composition_protocol::ContributionRegistrarContract>();
+        }
+        Ok(prepared)
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -60,8 +66,18 @@ impl PluginFactory for AgentToolsFactory {
         let roles = Arc::new(config.roles);
         let registrar = plan.local::<ToolRegistrarContract>()?;
         let turns = plan.local::<TurnServiceContract>()?;
-        let registrations = registrations(&turns, &roles, config.read_structured_results)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let definitions = if config.markdown_agents {
+            Some(definitions::Definitions::install(&plan, roles.clone())?)
+        } else {
+            None
+        };
+        let registrations = registrations(
+            &turns,
+            &roles,
+            definitions.as_ref(),
+            config.read_structured_results,
+        )
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
         let lease = registrar
             .register_batch(registrations)
             .map_err(|error| MetaError::Activation(error.to_string()))?;
@@ -89,10 +105,13 @@ struct Config {
     roles: BTreeMap<String, RoleConfig>,
     #[serde(default)]
     read_structured_results: bool,
+    #[serde(default)]
+    markdown_agents: bool,
 }
 struct PreparedConfig {
     roles: BTreeMap<String, DelegationRole>,
     read_structured_results: bool,
+    markdown_agents: bool,
 }
 fn parse_config(desired: &Value) -> rsi_meta::Result<PreparedConfig> {
     let config: Config = if desired.is_null() {
@@ -124,6 +143,7 @@ fn parse_config(desired: &Value) -> rsi_meta::Result<PreparedConfig> {
     Ok(PreparedConfig {
         roles,
         read_structured_results: config.read_structured_results,
+        markdown_agents: config.markdown_agents,
     })
 }
 
@@ -140,14 +160,34 @@ enum NativeTool {
 
 #[derive(Debug)]
 struct NativeExecutor {
+    definitions: Option<Arc<definitions::Definitions>>,
     roles: Arc<BTreeMap<String, DelegationRole>>,
     kind: NativeTool,
     turns: Arc<dyn TurnService>,
 }
 
+fn role_schema(roles: &BTreeMap<String, DelegationRole>, markdown: bool) -> Option<Value> {
+    if markdown {
+        Some(
+            json!({"type":"string","minLength":1,"maxLength":64,"description":"Select an exact name from the available subagents listing or a known Markdown definition. Does not grant permissions."}),
+        )
+    } else if roles.is_empty() {
+        None
+    } else {
+        Some(
+            json!({"type":"string","enum":roles.keys().collect::<Vec<_>>(),"description":"Select a configured inline role. Does not grant permissions."}),
+        )
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "The finite Tool catalog binds each schema to its executor and scheduling policy"
+)]
 fn registrations(
     turns: &Arc<dyn TurnService>,
     roles: &Arc<BTreeMap<String, DelegationRole>>,
+    definitions: Option<&Arc<definitions::Definitions>>,
     read_structured_results: bool,
 ) -> rsi_tools_protocol::Result<Vec<ToolRegistration>> {
     let specs = [
@@ -227,8 +267,10 @@ fn registrations(
         .into_iter()
         .filter(|(kind, ..)| read_structured_results || !matches!(kind, NativeTool::ReadResult))
         .map(|(kind, name, description, mut parameters, timeout_ms)| {
-            if matches!(kind, NativeTool::Spawn) && !roles.is_empty() {
-                parameters["properties"]["role"] = json!({"type":"string","enum":roles.keys().collect::<Vec<_>>(),"description":"Configured child persona and Tool restriction; does not grant permissions."});
+            if matches!(kind, NativeTool::Spawn)
+                && let Some(schema) = role_schema(roles, definitions.is_some())
+            {
+                parameters["properties"]["role"] = schema;
             }
             let scheduling = if matches!(kind, NativeTool::Wait) {
                 ToolScheduling::ExclusiveFinal
@@ -241,6 +283,7 @@ fn registrations(
                     .with_scheduling(scheduling),
                 timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms },
                 executor: Arc::new(NativeExecutor {
+                    definitions: definitions.cloned(),
                     roles: roles.clone(),
                     kind,
                     turns: Arc::clone(turns),
@@ -283,9 +326,25 @@ impl NativeExecutor {
             .role
             .as_ref()
             .map(|name| {
-                self.roles.get(name).cloned().ok_or_else(|| {
-                    rsi_tools_protocol::ToolError::InvalidInput("unknown configured role".into())
-                })
+                if let Some(resolver) = &self.definitions {
+                    Ok(rsi_agent_turn_protocol::SpawnRoleSelection::Reference {
+                        reference: rsi_agent_session_protocol::SpawnRoleReference {
+                            provider: "rsi.agents".into(),
+                            name: name.clone(),
+                        },
+                        resolver: resolver.clone(),
+                    })
+                } else {
+                    self.roles
+                        .get(name)
+                        .cloned()
+                        .map(Into::into)
+                        .ok_or_else(|| {
+                            rsi_tools_protocol::ToolError::InvalidInput(
+                                "unknown configured role".into(),
+                            )
+                        })
+                }
             })
             .transpose()?;
         let fork_turns = arguments
@@ -649,6 +708,25 @@ fn tool_error(code: &str, message: impl Into<String>) -> rsi_tools_protocol::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_schema_tracks_the_configured_definition_source() {
+        let empty = BTreeMap::new();
+        assert!(role_schema(&empty, false).is_none());
+        let inline = parse_config(&json!({"roles":{"review":{}}})).unwrap().roles;
+        assert_eq!(
+            role_schema(&inline, false).unwrap()["enum"],
+            json!(["review"])
+        );
+        let dynamic = role_schema(&empty, true).unwrap();
+        assert!(dynamic.get("enum").is_none());
+        assert!(
+            !dynamic["description"]
+                .as_str()
+                .unwrap()
+                .contains("Inline roles: .")
+        );
+    }
 
     #[test]
     fn structured_consumer_requires_explicit_trusted_configuration() {

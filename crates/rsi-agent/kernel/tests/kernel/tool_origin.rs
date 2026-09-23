@@ -224,16 +224,24 @@ async fn child_model_comes_from_producing_request_and_tool_authority_expires() {
     prepared.language_settings = Some(PreparedLanguageSettings::new(profile, None).unwrap());
     let caller = control_tool_caller_with_snapshot(&kernel, &claim, prepared).await;
     let mut inherited = request(caller.clone(), "inherited", None, None);
-    inherited.role = Some(rsi_agent_session_protocol::DelegationRole {
-        name: "auditor".into(),
-        persona: Some("frozen role text".into()),
-        allow: Some(std::collections::BTreeSet::default()),
-        deny: std::collections::BTreeSet::default(),
-    });
+    inherited.role = Some(
+        rsi_agent_session_protocol::DelegationRole {
+            name: "auditor".into(),
+            persona: Some("frozen role text".into()),
+            allow: Some(std::collections::BTreeSet::default()),
+            deny: std::collections::BTreeSet::default(),
+        }
+        .into(),
+    );
     let first = kernel.spawn_agent(inherited.clone()).await.unwrap();
     assert_eq!(kernel.spawn_agent(inherited.clone()).await.unwrap(), first);
     let mut changed_role = inherited.clone();
-    changed_role.role.as_mut().unwrap().persona = Some("changed".into());
+    let rsi_agent_turn_protocol::SpawnRoleSelection::Inline(role) =
+        changed_role.role.as_mut().unwrap()
+    else {
+        panic!("inline role")
+    };
+    role.persona = Some("changed".into());
     assert!(kernel.spawn_agent(changed_role).await.is_err());
     let header = store.header(&first.session_id).await.unwrap();
     assert_eq!(

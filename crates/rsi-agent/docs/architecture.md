@@ -5,6 +5,13 @@ adapter owns their plugin identity. The SQLite Store, Kernel, and executor each
 export their own factory; the product composition root assigns stable plugin
 and instance identities and places them in a Profile.
 
+The [Agent Tools contribution](../tools/README.md) consumes the read-only
+`WorkspaceContext` Local contract for Markdown definitions. Workspace discovery
+owns bounded filesystem observation and parsing; Tools owns catalog projection
+and role resolution. Kernel receives the validated frozen role seed through the
+Turn protocol and does not discover files. The workspace package's Kernel
+dependency is test-only; production discovery depends on the narrow protocols.
+
 The reference owner captures bounded conversation data and verifies immutable
 CAS envelopes. Its model adapter uses the live Tool caller's Header; the product
 supplies the actual target Header for human capture and admission. The Context

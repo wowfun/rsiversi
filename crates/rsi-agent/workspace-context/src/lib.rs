@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+mod agents;
+pub use agents::WorkspaceAgentDefinition;
 mod budget;
 mod observation;
 use observation::Observation;
@@ -102,6 +104,15 @@ pub enum WorkspaceContextError {
 /// Process-local workspace context source.
 #[async_trait]
 pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
+    /// Reads current Markdown agents or one exact winning name. Up to 32 reserved
+    /// names are checked in the same walk and returned as unavailable collisions.
+    async fn agents(
+        &self,
+        header: &SessionHeader,
+        id: Option<&str>,
+        reserved_names: &BTreeSet<String>,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError>;
     /// Reads an explicitly selected skill or its catalog under independent invocation flags.
     async fn skills(
         &self,
@@ -136,19 +147,23 @@ pub struct WorkspaceContextConfig {
     /// Ordered configured user skill roots, strongest first.
     #[serde(default)]
     pub user_skill_roots: Vec<PathBuf>,
+    /// Ordered personal agent definition roots, strongest first.
+    #[serde(default)]
+    pub user_agent_roots: Vec<PathBuf>,
 }
 
 impl WorkspaceContextConfig {
     fn validate(&self) -> Result<(), WorkspaceContextError> {
-        if self.user_skill_roots.len() > 32 {
+        if self.user_skill_roots.len() > 32 || self.user_agent_roots.len() > 32 {
             return Err(WorkspaceContextError::Invalid(
-                "user skill roots exceed 32".into(),
+                "user skill or agent roots exceed 32".into(),
             ));
         }
         for path in self
             .user_instruction_file
             .iter()
             .chain(self.user_skill_roots.iter())
+            .chain(self.user_agent_roots.iter())
         {
             if !path.is_absolute() {
                 return Err(WorkspaceContextError::Invalid(format!(
@@ -265,6 +280,39 @@ const fn default_true() -> bool {
 
 #[async_trait]
 impl WorkspaceContext for LocalWorkspaceContext {
+    async fn agents(
+        &self,
+        header: &SessionHeader,
+        id: Option<&str>,
+        reserved_names: &BTreeSet<String>,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError> {
+        if id.is_some_and(|id| !valid_skill_name(id)) {
+            return Err(WorkspaceContextError::Invalid("invalid agent name".into()));
+        }
+        if reserved_names.len() > 32 || reserved_names.iter().any(|name| !valid_skill_name(name)) {
+            return Err(WorkspaceContextError::Invalid(
+                "invalid reserved agent names".into(),
+            ));
+        }
+        let stop = self.owner.cancellation.child_token();
+        let _guard = stop.clone().drop_guard();
+        let lease = cancellation
+            .run_until_cancelled(self.owner.acquire())
+            .await
+            .ok_or(WorkspaceContextError::Closed)??;
+        let config = self.config.clone();
+        let cwd = PathBuf::from(header.canonical_cwd());
+        let budget = SnapshotBudget::new(&config, &cwd, stop)?;
+        let id = id.map(str::to_owned);
+        let reserved_names = reserved_names.clone();
+        cancellation
+            .run_until_cancelled(lease.run(move || {
+                agents::read_agents(&config, &cwd, id.as_deref(), &reserved_names, budget)
+            }))
+            .await
+            .ok_or(WorkspaceContextError::Closed)?
+    }
     async fn skills(
         &self,
         header: &SessionHeader,
@@ -927,6 +975,7 @@ mod tests {
         let invalid_source = temporary.path().join("x".repeat(300));
         let snapshot = snapshot_blocking(
             &WorkspaceContextConfig {
+                user_agent_roots: Vec::new(),
                 user_instruction_file: Some(invalid_source),
                 user_skill_roots: Vec::new(),
             },
@@ -999,6 +1048,7 @@ mod tests {
     #[test]
     fn retained_bytes_include_configured_path_storage() {
         let config = WorkspaceContextConfig {
+            user_agent_roots: Vec::new(),
             user_instruction_file: Some(PathBuf::from("/tmp/instructions")),
             user_skill_roots: vec![PathBuf::from("/tmp/skills"), PathBuf::from("/opt/skills")],
         };
@@ -1052,6 +1102,7 @@ mod capacity_tests {
         assert_eq!(names.len(), 4096);
         let snapshot = snapshot_blocking(
             &WorkspaceContextConfig {
+                user_agent_roots: Vec::new(),
                 user_instruction_file: None,
                 user_skill_roots: vec![root.path().to_owned()],
             },
@@ -1078,6 +1129,7 @@ mod capacity_tests {
             fs::write(root.path().join(format!("{name}.md")), source).unwrap();
         }
         let config = WorkspaceContextConfig {
+            user_agent_roots: Vec::new(),
             user_instruction_file: None,
             user_skill_roots: vec![root.path().to_owned()],
         };

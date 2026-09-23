@@ -4,6 +4,7 @@ use crate::SessionController;
 use rsi_agent_session_protocol::{ContributionId, SessionResourceRequest, SessionResourceValue};
 use rsi_session_protocol::{ResourceSnapshot, Result, SessionError};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 
 /// One completion candidate; selection replaces only the active input token.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub enum CompletionGroup {
     Command,
     /// User-invocable skill.
     Skill,
+    /// Named custom subagent.
+    Agent,
 }
 /// Case-insensitive ordered subsequence match, with exact and prefix matches first.
 pub fn completion_rank(name: &str, query: &str) -> Option<u8> {
@@ -94,15 +97,74 @@ impl SessionController {
                     .map(rsi_agent_session_protocol::SessionCommandDescriptor::name),
             )
             .collect();
-        let notice = match self.skill_completions(&names).await {
+        let sources = match self.resource_sources().await {
+            Ok(sources) => sources,
+            Err(error) => {
+                return Ok((
+                    entries,
+                    format!("Skills unavailable: {error}. Agents unavailable: {error}."),
+                ));
+            }
+        };
+        let mut notice = match self.skill_completions_from(&names, &sources).await {
             Ok(skills) => {
                 entries.extend(skills);
                 String::new()
             }
             Err(error) => format!("Skills unavailable: {error}."),
         };
+        match self.agent_completions_from(&sources).await {
+            Ok(agents) => entries.extend(agents),
+            Err(error) => {
+                let _ = write!(notice, " Agents unavailable: {error}.");
+            }
+        }
         Ok((entries, notice))
     }
+    /// Reads the current named Agent catalog, including unavailable definitions for preview.
+    pub async fn agent_completions(&self) -> Result<Vec<InputCompletion>> {
+        self.agent_completions_from(&self.resource_sources().await?)
+            .await
+    }
+    async fn resource_sources(&self) -> Result<Vec<ContributionId>> {
+        let snapshot = self.read_resource(SessionResourceRequest::Sources).await?;
+        let SessionResourceValue::Sources { sources } = &snapshot.response().value else {
+            return Err(SessionError::Backend("invalid resource discovery".into()));
+        };
+        Ok(sources.clone())
+    }
+    async fn agent_completions_from(
+        &self,
+        sources: &[ContributionId],
+    ) -> Result<Vec<InputCompletion>> {
+        let source = ContributionId::new("rsi.agents")
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
+        if !sources.contains(&source) {
+            return Ok(Vec::new());
+        }
+        let snapshot = self
+            .read_resource(SessionResourceRequest::List {
+                source: source.clone(),
+            })
+            .await?;
+        let SessionResourceValue::List { entries } = &snapshot.response().value else {
+            return Err(SessionError::Backend("invalid Agent catalog".into()));
+        };
+        Ok(entries
+            .iter()
+            .map(|entry| InputCompletion {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                replacement: format!("@{}", entry.name),
+                group: CompletionGroup::Agent,
+                resource: Some(SessionResourceRequest::Read {
+                    source: source.clone(),
+                    id: entry.id.clone(),
+                }),
+            })
+            .collect())
+    }
+
     /// Reads a recorded reference under this controller's finite admission and lifetime.
     pub async fn read_recorded_reference(
         &self,
@@ -137,18 +199,16 @@ impl SessionController {
     }
 
     /// Discovers user-invocable skills from this Session's contribution catalog.
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "The static contribution identity is valid by construction"
-    )]
     pub async fn skill_completions(&self, command_names: &[&str]) -> Result<Vec<InputCompletion>> {
+        self.skill_completions_from(command_names, &self.resource_sources().await?)
+            .await
+    }
+    async fn skill_completions_from(
+        &self,
+        command_names: &[&str],
+        sources: &[ContributionId],
+    ) -> Result<Vec<InputCompletion>> {
         let source = ContributionId::new("rsi.workspace-skills").expect("static resource source");
-        let sources = self.read_resource(SessionResourceRequest::Sources).await?;
-        let SessionResourceValue::Sources { sources } = &sources.response().value else {
-            return Err(SessionError::Backend(
-                "invalid resource source discovery".into(),
-            ));
-        };
         if !sources.contains(&source) {
             return Ok(Vec::new());
         }

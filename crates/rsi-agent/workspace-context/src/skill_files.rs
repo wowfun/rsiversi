@@ -208,19 +208,19 @@ fn optional_directory_result<T>(
 ) -> Option<T> {
     match result {
         Ok(value) => Some(value),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) || directory_link_loop(&error) =>
-        {
-            None
-        }
+        Err(error) if optional_directory_missing(&error) => None,
         Err(error) => {
             observation.io(path, "resolve skill directory", &error);
             None
         }
     }
+}
+
+pub(super) fn optional_directory_missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) || directory_link_loop(error)
 }
 
 fn directory_link_loop(error: &std::io::Error) -> bool {

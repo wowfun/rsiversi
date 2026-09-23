@@ -142,6 +142,7 @@ pub(super) fn config_retained_bytes(
         .user_instruction_file
         .iter()
         .chain(config.user_skill_roots.iter())
+        .chain(config.user_agent_roots.iter())
         .try_fold(
             std::mem::size_of::<WorkspaceContextConfig>(),
             |bytes, path| {

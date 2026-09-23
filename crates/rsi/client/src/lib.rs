@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod command_submission;
+mod export;
+pub use export::{ExportCommand, parse_export_arguments, parse_export_tokens};
 mod external;
 pub use external::{ExternalBlock, ExternalCommand, ExternalController, ExternalView};
 mod controller;

@@ -84,7 +84,8 @@ struct Entry {
     skill: Option<Arc<rsi_client::InputCompletion>>,
 }
 fn catalog_entry(entry: rsi_client::InputCompletion, remaining: &mut usize) -> Option<Entry> {
-    let skill = entry.group == rsi_client::CompletionGroup::Skill;
+    let resource = entry.group != rsi_client::CompletionGroup::Command;
+    let agent = entry.group == rsi_client::CompletionGroup::Agent;
     // The encoded entry includes every resource coordinate; count the separate display copy too.
     let bytes = serde_json::to_vec(&entry)
         .ok()?
@@ -98,13 +99,18 @@ fn catalog_entry(entry: rsi_client::InputCompletion, remaining: &mut usize) -> O
     *remaining -= bytes;
     Some(Entry {
         name: entry.name.clone().into(),
-        description: if skill {
-            format!("Skill · {}", entry.description).into()
+        description: if resource {
+            format!(
+                "{} · {}",
+                if agent { "Agent" } else { "Skill" },
+                entry.description
+            )
+            .into()
         } else {
             entry.description.clone().into()
         },
         application: false,
-        skill: skill.then(|| Arc::new(entry)),
+        skill: resource.then(|| Arc::new(entry)),
     })
 }
 fn completion_items(entries: &[Entry], providers: bool, dollar: bool) -> Vec<(String, String)> {
@@ -142,6 +148,7 @@ pub(super) struct Ui {
     preview: Option<Preview>,
     preview_request: Option<rsi_agent_session_protocol::SessionResourceRequest>,
     previewing: bool,
+    preview_kind: &'static str,
     refresh: bool,
     failed: bool,
     generation: u64,
@@ -241,7 +248,7 @@ impl Ui {
                                 resource.name, resource.source, text
                             ))
                         } else {
-                            Err(error("Invalid skill preview"))
+                            Err(error("Invalid resource preview"))
                         }
                     });
                 (generation, result)
@@ -289,7 +296,7 @@ impl Ui {
                             .collect();
                         if omitted {
                             notice.push_str(
-                                " Some command or skill entries exceed the 64 KiB display limit.",
+                                " Some completion entries exceed the 64 KiB display limit.",
                             );
                         }
                         (entries, notice)
@@ -304,7 +311,7 @@ impl Ui {
             (generation, result) = async { match &mut self.preview { Some(work) => work.await, None => std::future::pending().await } } => {
                 self.preview = None;
                 if generation == self.generation && self.help && self.previewing {
-                    self.detail = Some(result.unwrap_or_else(|error| format!("Skill unavailable: {error}. Close and preview again to retry.")));
+                    self.detail = Some(result.unwrap_or_else(|error| format!("Resource unavailable: {error}. Close and preview again to retry.")));
                     self.revision += 1;
                 }
                 return;
@@ -335,13 +342,20 @@ impl Ui {
         }
         self.rebuild();
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Cursor-local commands, skills, and agents share one mutually exclusive popup decision"
+    )]
     fn rebuild(&mut self) {
         self.token = None;
         let dollar =
             rsi_agent_workspace_context::skill_input::dollar_token_at(&self.observed, self.cursor);
+        let agent =
+            rsi_agent_workspace_context::skill_input::at_token_at(&self.observed, self.cursor);
         if self.help
             || self.dismissed
             || (dollar.is_none()
+                && agent.is_none()
                 && (!self.observed.starts_with('/')
                     || self.observed.starts_with("//")
                     || self.observed.contains(['\n', '\r'])))
@@ -353,9 +367,11 @@ impl Ui {
             .observed
             .find(char::is_whitespace)
             .unwrap_or(self.observed.len());
-        let providers =
-            dollar.is_none() && self.observed.starts_with("/login ") && self.cursor >= 7;
-        let range = if let Some(token) = &dollar {
+        let providers = dollar.is_none()
+            && agent.is_none()
+            && self.observed.starts_with("/login ")
+            && self.cursor >= 7;
+        let range = if let Some(token) = agent.as_ref().or(dollar.as_ref()) {
             token.range.clone()
         } else if providers {
             let start = self.observed[..self.cursor]
@@ -376,7 +392,7 @@ impl Ui {
             self.popup = None;
             return;
         }
-        let filter = self.observed[range.clone()].trim_start_matches(['/', '$']);
+        let filter = self.observed[range.clone()].trim_start_matches(['/', '$', '@']);
         let mut entries = if providers {
             ["deepseek", "openai", "openai-compatible"]
                 .iter()
@@ -390,7 +406,16 @@ impl Ui {
         } else {
             self.all()
                 .into_iter()
-                .filter(|entry| dollar.is_none() || entry.skill.is_some())
+                .filter(|entry| {
+                    let group = entry.skill.as_ref().map(|entry| entry.group);
+                    if agent.is_some() {
+                        group == Some(rsi_client::CompletionGroup::Agent)
+                    } else if dollar.is_some() {
+                        group == Some(rsi_client::CompletionGroup::Skill)
+                    } else {
+                        group != Some(rsi_client::CompletionGroup::Agent)
+                    }
+                })
                 .collect()
         };
         entries.retain(|entry| {
@@ -520,6 +545,15 @@ impl Ui {
             return key.code == KeyCode::Tab && self.token.is_some();
         };
         if key.code == KeyCode::Function(2) {
+            self.preview_kind = if self.entries[popup.selected]
+                .skill
+                .as_ref()
+                .is_some_and(|entry| entry.group == rsi_client::CompletionGroup::Agent)
+            {
+                "Agent"
+            } else {
+                "Skill"
+            };
             if let Some(request) = self.entries[popup.selected]
                 .skill
                 .as_ref()
@@ -528,7 +562,7 @@ impl Ui {
                 self.preview_request = Some(request);
                 self.previewing = true;
                 self.help = true;
-                self.detail = Some("Loading skill…".into());
+                self.detail = Some("Loading resource…".into());
                 self.page = 0;
                 self.offset = 0;
                 self.revision += 1;

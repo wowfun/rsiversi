@@ -12,7 +12,11 @@ Permission answers bind the displayed generation, request and exact option ID.
 All four standard option kinds remain visible; no answer creates a local grant.
 
 `SessionController::completion_catalog` assembles Session commands and human
-skills with one collision policy and diagnostic. Applications supply their own
+resource candidates from one Sources discovery and one List per present skill or
+Agent source. GUI filtering caches that catalog per pane generation; the Web
+document requests a refresh on each new popup and on explicit Refresh. Fresh spawn
+definition resolution remains independent.
+Skills use one collision policy and diagnostic. Applications supply their own
 reserved command names and retain ownership of display limits and retry controls.
 
 The controller shares its existing retained projection snapshot with contribution

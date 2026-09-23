@@ -231,3 +231,17 @@ across the complete schema. Value rejection identifies the first failing instanc
 and schema JSON pointers (each capped at 256 characters), without embedding the
 rejected value. Summarization encodes the bounded value once for validation size,
 digest and UTF-8 preview.
+
+`ToolCallsSuperseded` names a Turn and its completed Conversation model effect.
+It closes the still unadmitted, unrejected calls when new NextStep input enters;
+it is not a Tool result or a prepared Tool identity. Kernel records it atomically
+with Step transition and input consumption. Terminal histories may still retain
+missing outcomes; Context owns their provider-facing explanation.
+
+Named spawn definitions are recorded in the child Header as a validated complete
+role seed, source digest and immutable original-request digest. This seed is
+separate from the effective DelegationPolicy, which intersects ancestor Tool
+restrictions. A child never inherits its parent's spawn receipt or rereads the
+definition during restore. Kernel owns fresh resolution versus exact retry.
+Headers without a named spawn omit this optional field, preserving their canonical
+encoding and existing fingerprint.

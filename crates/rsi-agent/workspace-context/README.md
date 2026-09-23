@@ -1,5 +1,9 @@
 # rsi-agent-workspace-context
 
+Agent prose mentions allow a terminating colon followed by whitespace or end of
+input, as in `@review: please check`. Quoted file paths, `@path_hex:` locators,
+slash paths and colon-connected locators are excluded from Agent mentions.
+
 Explicit skill discovery and body reads use the same precedence and
 identity validation as before-step snapshots. Human discovery and preview
 require user-invocable; the skill_read Tool requires model-invocable and derives
@@ -137,3 +141,57 @@ The service returns complete instruction and catalog digests. The contributor
 recognizes skill invocations only in direct Human content using the syntax
 defined above, and places selected skill bodies after its background inputs. Invocation names are extracted from borrowed Fact content
 before blocking filesystem discovery; durable message payloads are not cloned.
+
+## Agent definition files
+
+Agent definition discovery shares this source's bounded filesystem ownership.
+Project `.agents/agents` roots are visited nearest cwd first through the Git root
+(only cwd when no Git root exists); configured user roots follow. Direct `.md` files only are selected by filename,
+with complete-file precedence. Directory links authorize their resolved directory;
+file links are excluded. YAML requires a nonempty description; the nonempty
+Markdown body supplies persona. Optional model/effort and exact Tool allow/deny
+are validated at this boundary. Selected malformed files never fall back to a
+lower-priority definition. Reads are cancellable, bounded and never cached across
+spawn invocations. Listing or previewing a definition grants no execution authority.
+Descriptions are workspace-controlled model context, refreshed for each provider
+request, and can influence orchestration just like persona bodies or AGENTS.md.
+Selecting a workspace accepts these instruction sources; this is not prompt
+injection isolation and does not grant Tool, Sandbox or approval privileges.
+
+The standard product supplies `HostPaths.config()/agents` and `~/.agents/agents`
+as user roots, in that order. Filenames are role names (for example
+`.agents/agents/reviewer.md`). A minimal definition is:
+
+```markdown
+---
+description: Review changes against the repository contracts
+allow: [file_read, directory_list]
+---
+Inspect the supplied change and report concrete findings with source evidence.
+```
+
+`model: { deployment: configured-route, model: model-id }` supplies a default
+selection; optional `reasoning_effort` requires that model. `allow: []` exposes
+no ordinary Tools, omitted `allow` preserves the parent set, and `deny` removes
+exact names. The Turn owner intersects these restrictions with ancestors.
+Unknown fields fail definition validation; Tool-name syntax is checked here and
+existence is checked against the pinned catalog at spawn admission. Discovery
+validity and human readability do not guarantee a spawn's catalog or capacity.
+Missing, non-directory and looping Agent roots are omitted; unexpected I/O
+errors withhold the catalog and produce escaped, bounded diagnostics.
+Discovery admits at most
+256 directory entries and 64 KiB per file. Exceeding the directory-entry bound
+withholds the entire catalog and exact-name lookup for that observation.
+Invalid or non-UTF-8 basenames are
+skipped, as they cannot identify an Agent; malformed contents of valid names
+remain visible diagnostics. One walk also checks up to 32 caller-reserved inline
+names for collisions, including outside the listing prefix. Such collisions
+return unavailable entries without reading or parsing the conflicting bodies.
+Listings keep the first 32 unique
+names in root precedence and filename order; excess names do not invalidate
+that prefix. Exact-name reads remain available outside the listing. Description is at
+most 1 KiB and persona at most 32 KiB. Selected invalid entries stay visible with
+a diagnostic and cannot spawn. Direct Human `@name` mentions exclude escaped
+text, code, email addresses, bare URL handles and file locators; they request model
+orchestration. A leading `@example.com` is a valid dotted role name, not an email
+address with a local part.

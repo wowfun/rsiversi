@@ -16,7 +16,8 @@ and contribution resolver; source refresh cannot mix their authority. A source c
 other global factories. Unknown or unsupported contribution identities fail
 before a Tool stage is sealed or any session capacity is reserved.
 
-Selected Session workspaces supply project `AGENTS.md` and skills by default,
+Selected Session workspaces supply project `AGENTS.md`, skills and Markdown
+Agent descriptions/personas by default,
 alongside configured user instructions and skills. Discovery does not grant Tool
 approval, Sandbox privileges, remote authentication or Workspace registration.
 Selecting a workspace accepts its instruction and skill sources as model context,

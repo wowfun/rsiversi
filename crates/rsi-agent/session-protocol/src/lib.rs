@@ -19,6 +19,8 @@ use thiserror::Error;
 mod compaction;
 mod structured;
 pub use structured::*;
+mod spawn_role;
+pub use spawn_role::{SpawnRoleRecord, SpawnRoleReference, SpawnRoleSeed};
 mod delegation;
 pub use delegation::{
     DelegationPolicy, DelegationRole, MAXIMUM_DELEGATION_PERSONA_BYTES, MAXIMUM_DELEGATION_TOOLS,
@@ -1497,6 +1499,8 @@ pub struct SessionHeader {
     settings: FrozenAgentSettings,
     fork_origin: Option<ForkOrigin>,
     delegation_policy: Option<DelegationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn_role: Option<SpawnRoleRecord>,
     initial_output: Option<InitialOutputContract>,
 }
 
@@ -1515,6 +1519,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             settings: Option<serde_json::Value>,
             fork_origin: Option<serde_json::Value>,
             delegation_policy: Option<serde_json::Value>,
+            spawn_role: Option<serde_json::Value>,
             initial_output: Option<serde_json::Value>,
             #[serde(flatten)]
             #[expect(
@@ -1549,6 +1554,11 @@ impl<'de> Deserialize<'de> for SessionHeader {
                 .map_err(serde::de::Error::custom)?,
             delegation_policy: wire
                 .delegation_policy
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
+            spawn_role: wire
+                .spawn_role
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(serde::de::Error::custom)?,
@@ -1596,6 +1606,7 @@ impl SessionHeader {
             settings,
             fork_origin: None,
             delegation_policy: None,
+            spawn_role: None,
             initial_output: None,
         };
         header.validate()?;
@@ -1616,6 +1627,21 @@ impl SessionHeader {
         self.settings.validate()?;
         if let Some(policy) = &self.delegation_policy {
             policy.validate()?;
+        }
+        if let Some(record) = &self.spawn_role {
+            record.validate()?;
+            if self.fork_origin.is_none()
+                || !self
+                    .delegation_policy
+                    .as_ref()
+                    .map(|policy| policy.matches_role(Some(&record.seed.role)))
+                    .transpose()?
+                    .unwrap_or(false)
+            {
+                return Err(SessionError::Invalid(
+                    "spawn definition disagrees with child policy".into(),
+                ));
+            }
         }
         if let Some(origin) = &self.fork_origin {
             origin.validate()?;
@@ -1710,6 +1736,17 @@ impl SessionHeader {
         )?
         .with_fork_origin(origin)?
         .with_delegation_policy(self.delegation_policy.clone())
+    }
+
+    /// Exact definition and original request of this child's named spawn.
+    pub const fn spawn_role(&self) -> Option<&SpawnRoleRecord> {
+        self.spawn_role.as_ref()
+    }
+    /// Records a validated definition after installing its effective policy.
+    pub fn with_spawn_role(mut self, role: Option<SpawnRoleRecord>) -> Result<Self> {
+        self.spawn_role = role;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Initial spawn output binding, absent from follow-up and descendant contracts.

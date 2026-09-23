@@ -2103,6 +2103,8 @@ fn base_fragment(
             WORKSPACE_CONTEXT_FACTORY,
             json!({
                 "user_instruction_file": paths.config().join("AGENTS.md"),
+                "user_agent_roots": std::iter::once(paths.config().join("agents"))
+                    .chain(user_home.map(|home| home.join(".agents/agents"))).collect::<Vec<_>>(),
                 "user_skill_roots": std::iter::once(paths.config().join("skills"))
                     .chain(user_home.map(|home| home.join(".agents/skills"))).collect::<Vec<_>>()
             }),
@@ -2309,6 +2311,13 @@ mod tests {
                 .find(|entry| entry.plugin().as_str() == WORKSPACE_CONTEXT_FACTORY)
                 .unwrap();
             assert_eq!(entry.config()["user_skill_roots"], expected);
+            assert_eq!(
+                entry.config()["user_agent_roots"],
+                match home {
+                    None => json!(["/config/agents"]),
+                    Some(_) => json!(["/config/agents", "/home/test/.agents/agents"]),
+                }
+            );
         }
         assert!(
             StandardComposition::new(paths, BTreeMap::new(), None)

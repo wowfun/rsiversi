@@ -1,7 +1,8 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn skill_file_and_frozen_reference_workflows_use_real_tui_actions() {
+#[allow(clippy::too_many_lines)] // One real PTY journey checks distinct completion, preview, file, and reference actions.
+async fn skill_agent_file_and_frozen_reference_workflows_use_real_tui_actions() {
     let (endpoint, state, provider) = gated_provider("skill_read").await;
     *state.arguments.lock().unwrap() = Some(serde_json::json!({"name": "guide"}));
     state.release.notify_one();
@@ -28,6 +29,13 @@ async fn skill_file_and_frozen_reference_workflows_use_real_tui_actions() {
         "FILE_BODY_ONLY_PTY 中文\n",
     )
     .unwrap();
+    let agents = fixture.workspace.join(".agents/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("reviewer.md"),
+        "---\ndescription: PTY isolated reviewer\nallow: []\n---\nAGENT_BODY_ONLY_PTY\n",
+    )
+    .unwrap();
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-resource-source"]);
     terminal.capture_name = "resource-workflows".into();
     terminal.until("Ctrl+J adds a line").await;
@@ -50,7 +58,19 @@ async fn skill_file_and_frozen_reference_workflows_use_real_tui_actions() {
     terminal.until("/guide").await;
     terminal.send(b"\x15");
     terminal.absent("/guide").await;
-    terminal.send(b"@");
+    terminal.send(b"@rev");
+    terminal.until("PTY isolated reviewer").await;
+    terminal.send(b"\x1bOQ");
+    terminal.until("AGENT_BODY_ONLY_PTY").await;
+    terminal.until("RSI · Agent · page 1").await;
+    terminal.capture();
+    terminal.send(b"\x1b");
+    terminal.absent("AGENT_BODY_ONLY_PTY").await;
+    terminal.send(b"\t");
+    terminal.until("@reviewer").await;
+    terminal.send(b"\x15");
+    terminal.absent("@reviewer").await;
+    terminal.send(b"\x1b@");
     terminal.select_menu("file with space.txt").await;
     terminal.until("FILE_BODY_ONLY_PTY").await;
     terminal.capture();

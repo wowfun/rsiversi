@@ -48,6 +48,16 @@ struct Source {
 }
 #[async_trait]
 impl WorkspaceContext for Source {
+    async fn agents(
+        &self,
+        _: &SessionHeader,
+        _: Option<&str>,
+        _: &std::collections::BTreeSet<String>,
+        _: CancellationToken,
+    ) -> Result<Vec<rsi_agent_workspace_context::WorkspaceAgentDefinition>, WorkspaceContextError>
+    {
+        Ok(Vec::new())
+    }
     async fn skills(
         &self,
         _: &SessionHeader,

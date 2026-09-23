@@ -15,6 +15,7 @@ fn write_skill(directory: &Path, description: &str, body: &str) {
 
 fn select(root: &Path) -> Vec<SelectedSkill> {
     let config = WorkspaceContextConfig {
+        user_agent_roots: Vec::new(),
         user_instruction_file: None,
         user_skill_roots: vec![root.to_owned()],
     };

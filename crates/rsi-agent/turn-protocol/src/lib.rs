@@ -346,6 +346,52 @@ pub struct ClaimMessage {
     pub step_id: StepId,
 }
 
+/// Trusted, cancellable source used only for a fresh child admission.
+#[async_trait]
+pub trait SpawnRoleResolver: fmt::Debug + Send + Sync + 'static {
+    /// Resolves one current definition; exact accepted retries never invoke this.
+    async fn resolve(
+        &self,
+        header: &SessionHeader,
+        reference: &rsi_agent_session_protocol::SpawnRoleReference,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_session_protocol::SpawnRoleSeed>;
+}
+/// Inline configuration or a reference to an editable definition.
+#[derive(Clone, Debug)]
+pub enum SpawnRoleSelection {
+    /// Already resolved immutable configuration.
+    Inline(rsi_agent_session_protocol::DelegationRole),
+    /// Trusted process-local source; the resolver is never serialized.
+    Reference {
+        /// Stable requested definition identity.
+        reference: rsi_agent_session_protocol::SpawnRoleReference,
+        /// Source capability owned by the calling contribution.
+        resolver: Arc<dyn SpawnRoleResolver>,
+    },
+}
+impl From<rsi_agent_session_protocol::DelegationRole> for SpawnRoleSelection {
+    fn from(role: rsi_agent_session_protocol::DelegationRole) -> Self {
+        Self::Inline(role)
+    }
+}
+impl SpawnRoleSelection {
+    /// Validates static input without source I/O.
+    pub fn validate(&self) -> rsi_agent_session_protocol::Result<()> {
+        match self {
+            Self::Inline(role) => role.validate(),
+            Self::Reference { reference, .. } => reference.validate(),
+        }
+    }
+    /// Returns an inline role, absent for dynamically resolved references.
+    pub fn inline(&self) -> Option<&rsi_agent_session_protocol::DelegationRole> {
+        match self {
+            Self::Inline(role) => Some(role),
+            Self::Reference { .. } => None,
+        }
+    }
+}
+
 /// One source-authorized durable child creation request.
 /// Exact retries recover the original child and initial message without another write.
 #[derive(Clone, Debug)]
@@ -353,7 +399,7 @@ pub struct SpawnAgentRequest {
     /// Trusted initial-activation contract; not exposed as a model-authored schema.
     pub output_contract: Option<rsi_agent_session_protocol::OutputContract>,
     /// Configured role selected by the trusted Tool adapter, never a model permission object.
-    pub role: Option<rsi_agent_session_protocol::DelegationRole>,
+    pub role: Option<SpawnRoleSelection>,
     /// Explicit child route; absent inherits the producing request's route and effort.
     pub model: Option<rsi_ai_protocol::ModelRef>,
     /// Explicit child effort, allowed only with an explicit child model.

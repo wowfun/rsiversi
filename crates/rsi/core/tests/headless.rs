@@ -1158,13 +1158,27 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
     if read_structured_results {
         let preset = rsi::user_agent_preset_root(&fixture.paths).join("structured-consumer");
         std::fs::create_dir_all(&preset).unwrap();
-        let profile =
-            include_str!("../../../../plugins/rsi-agent-presets/standard/agent.profile.toml")
-                .replace(
-                    "plugin = \"rsi.agent.tools\"",
-                    "plugin = \"rsi.agent.tools\"\nconfig = { read_structured_results = true }",
-                );
-        std::fs::write(preset.join("agent.profile.toml"), profile).unwrap();
+        let mut profile: toml::Value = toml::from_str(include_str!(
+            "../../../../plugins/rsi-agent-presets/standard/agent.profile.toml"
+        ))
+        .unwrap();
+        let tools = profile["steps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|step| {
+                step.get("plugin").and_then(toml::Value::as_str) == Some("rsi.agent.tools")
+            })
+            .unwrap();
+        tools["config"]
+            .as_table_mut()
+            .unwrap()
+            .insert("read_structured_results".into(), toml::Value::Boolean(true));
+        std::fs::write(
+            preset.join("agent.profile.toml"),
+            toml::to_string(&profile).unwrap(),
+        )
+        .unwrap();
         std::fs::write(
             preset.join("preset.toml"),
             include_str!("../../../../plugins/rsi-agent-presets/standard/preset.toml"),

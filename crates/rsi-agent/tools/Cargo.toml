@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-composition-protocol = { path = "../composition-protocol" }
+rsi-agent-workspace-context = { path = "../workspace-context" }
+tokio-util.workspace = true
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 getrandom.workspace = true
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
@@ -18,6 +21,10 @@ rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

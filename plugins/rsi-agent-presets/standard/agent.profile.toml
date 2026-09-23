@@ -71,6 +71,7 @@ plugin = "rsi.jobs.tools"
 kind = "plugin"
 id = "agents"
 plugin = "rsi.agent.tools"
+config = { markdown_agents = true }
 
 [[steps]]
 kind = "plugin"

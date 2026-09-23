@@ -10,6 +10,7 @@ use rsi_agent_workspace_context::{
 };
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,41 @@ fn header(cwd: &Path) -> SessionHeader {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn stray_agent_filenames_do_not_hide_valid_definitions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(".agents/agents");
+    fs::create_dir_all(&root).unwrap();
+    for name in ["My Agent.md", "review.md"] {
+        fs::write(
+            root.join(name),
+            "---\ndescription: review\n---\nReview code",
+        )
+        .unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        fs::write(
+            root.join(std::ffi::OsString::from_vec(b"\xff.md".to_vec())),
+            "bad",
+        )
+        .unwrap();
+    }
+    let source = context(None, vec![]);
+    let entries = source
+        .agents(
+            &header(temp.path()),
+            None,
+            &BTreeSet::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "review");
 }
 
 fn human(text: &str) -> AgentMessage {
@@ -60,6 +96,7 @@ fn context(
     user_skill_roots: Vec<PathBuf>,
 ) -> LocalWorkspaceContext {
     LocalWorkspaceContext::new(WorkspaceContextConfig {
+        user_agent_roots: Vec::new(),
         user_instruction_file,
         user_skill_roots,
     })
@@ -924,4 +961,166 @@ async fn skill_catalog_retains_a_complete_lexical_prefix_within_its_byte_limit()
     assert!(catalog.contains(&name(0)));
     assert!(!catalog.contains(&name(MAXIMUM_WORKSPACE_SKILL_ENTRIES - 1)));
     assert!(catalog.ends_with("</available_skills>"));
+}
+
+#[tokio::test]
+async fn unavailable_agent_roots_do_not_hide_valid_user_definitions() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".agents")).unwrap();
+    fs::create_dir_all(project.join(".git")).unwrap();
+    let user = temp.path().join("personal");
+    fs::create_dir_all(&user).unwrap();
+    fs::write(
+        user.join("review.md"),
+        "---\ndescription: review\n---\nPersona",
+    )
+    .unwrap();
+    let source = LocalWorkspaceContext::new(WorkspaceContextConfig {
+        user_agent_roots: vec![user],
+        ..Default::default()
+    })
+    .unwrap();
+    let root = project.join(".agents/agents");
+    fs::write(&root, "not a directory").unwrap();
+    let header = header(&project);
+    let reserved = BTreeSet::new();
+    let read = || {
+        source.agents(
+            &header,
+            None,
+            &reserved,
+            tokio_util::sync::CancellationToken::new(),
+        )
+    };
+    assert_eq!(read().await.unwrap()[0].name, "review");
+    #[cfg(unix)]
+    {
+        fs::remove_file(&root).unwrap();
+        std::os::unix::fs::symlink("agents", &root).unwrap();
+        assert_eq!(read().await.unwrap()[0].name, "review");
+    }
+}
+
+#[tokio::test]
+async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
+    use tokio_util::sync::CancellationToken;
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let nested = project.join("nested");
+    let personal = temp.path().join("personal");
+    for dir in [
+        project.join(".git"),
+        project.join(".agents/agents"),
+        nested.join(".agents/agents"),
+        personal.clone(),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let write = |path: &Path, body: &str| {
+        fs::write(
+            path,
+            format!("---\r\ndescription: review code\r\nallow: []\r\n---\r\n{body}\r\n"),
+        )
+        .unwrap();
+    };
+    write(&personal.join("review.md"), "personal");
+    write(&project.join(".agents/agents/review.md"), "project");
+    let selected = nested.join(".agents/agents/review.md");
+    write(&selected, "nearest");
+    let source = LocalWorkspaceContext::new(WorkspaceContextConfig {
+        user_agent_roots: vec![personal],
+        ..Default::default()
+    })
+    .unwrap();
+    let header = header(&nested);
+    let reserved = BTreeSet::new();
+    let read = || source.agents(&header, Some("review"), &reserved, CancellationToken::new());
+    let entries = read().await.unwrap();
+    let role = &entries[0].seed.as_ref().unwrap().role;
+    assert_eq!(role.persona.as_deref(), Some("nearest"));
+    write(&selected, "changed");
+    let entries = read().await.unwrap();
+    let role = &entries[0].seed.as_ref().unwrap().role;
+    assert_eq!(role.persona.as_deref(), Some("changed"));
+    fs::write(&selected, "---\ndescription: [invalid\n---\nbody").unwrap();
+    let invalid = read().await.unwrap();
+    assert!(invalid[0].seed.is_none());
+    assert!(
+        invalid[0]
+            .source
+            .ends_with("nested/.agents/agents/review.md")
+    );
+    fs::remove_file(&selected).unwrap();
+    let entries = read().await.unwrap();
+    let role = &entries[0].seed.as_ref().unwrap().role;
+    assert_eq!(role.persona.as_deref(), Some("project"));
+    assert!(
+        source
+            .agents(
+                &header,
+                Some("../escape"),
+                &BTreeSet::new(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            project.join(".agents/agents/review.md"),
+            nested.join(".agents/agents/linked.md"),
+        )
+        .unwrap();
+        assert!(
+            source
+                .agents(
+                    &header,
+                    Some("linked"),
+                    &BTreeSet::new(),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    fs::write(&selected, "x".repeat(64 * 1024 + 1)).unwrap();
+    assert!(read().await.unwrap()[0].description.contains("64 KiB"));
+}
+
+#[tokio::test]
+async fn agent_catalog_overflow_keeps_a_bounded_prefix_and_exact_lookup() {
+    use tokio_util::sync::CancellationToken;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(".agents/agents");
+    fs::create_dir_all(&root).unwrap();
+    for n in 0..33 {
+        fs::write(
+            root.join(format!("role-{n:02}.md")),
+            "---\ndescription: bounded role\n---\nPersona",
+        )
+        .unwrap();
+    }
+    let source = LocalWorkspaceContext::new(WorkspaceContextConfig::default()).unwrap();
+    let header = header(temp.path());
+    let entries = source
+        .agents(&header, None, &BTreeSet::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 32);
+    assert_eq!(entries[0].name, "role-00");
+    assert_eq!(entries[31].name, "role-31");
+    let exact = source
+        .agents(
+            &header,
+            Some("role-32"),
+            &BTreeSet::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exact[0].name, "role-32");
+    assert!(exact[0].seed.is_some());
 }

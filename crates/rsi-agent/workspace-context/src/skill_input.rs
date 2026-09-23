@@ -18,6 +18,41 @@ fn name_byte(byte: u8) -> bool {
 /// Borrows prose tokens without loading skills or granting invocation authority.
 /// Code, escaped sigils, HTML and link destinations are excluded.
 pub fn dollar_tokens(text: &str) -> impl Iterator<Item = SkillToken<'_>> {
+    prose_tokens(text, '$')
+}
+
+/// Agent mentions in prose; quoted and hex file locators are excluded.
+pub fn at_tokens(text: &str) -> impl Iterator<Item = SkillToken<'_>> {
+    prose_tokens(text, '@')
+        .filter(|token| {
+            !text[..token.range.start]
+                .rsplit(char::is_whitespace)
+                .next()
+                .unwrap_or_default()
+                .contains("://")
+        })
+        .filter(|token| match text.as_bytes().get(token.range.end) {
+            Some(b'/') => false,
+            Some(b':') => {
+                token.name != "path_hex"
+                    && text[token.range.end + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace)
+            }
+            _ => true,
+        })
+}
+
+/// Agent token at the current cursor for completion.
+pub fn at_token_at(text: &str, cursor: usize) -> Option<SkillToken<'_>> {
+    if !text.is_char_boundary(cursor) {
+        return None;
+    }
+    at_tokens(text).find(|token| token.range.start < cursor && cursor <= token.range.end)
+}
+
+fn prose_tokens(text: &str, sigil: char) -> impl Iterator<Item = SkillToken<'_>> {
     let mut code = false;
     let mut auto_link = false;
     Parser::new(text)
@@ -38,7 +73,7 @@ pub fn dollar_tokens(text: &str) -> impl Iterator<Item = SkillToken<'_>> {
         })
         .flat_map(move |range| {
             text[range.clone()]
-                .match_indices('$')
+                .match_indices(sigil)
                 .filter_map(move |(offset, _)| {
                     let start = range.start + offset;
                     let bytes = text.as_bytes();
@@ -48,7 +83,8 @@ pub fn dollar_tokens(text: &str) -> impl Iterator<Item = SkillToken<'_>> {
                         .take_while(|b| **b == b'\\')
                         .count();
                     if escapes % 2 == 1
-                        || start > 0 && (name_byte(bytes[start - 1]) || bytes[start - 1] == b'$')
+                        || start > 0
+                            && (name_byte(bytes[start - 1]) || bytes[start - 1] == sigil as u8)
                     {
                         return None;
                     }
@@ -103,5 +139,38 @@ mod tests {
         assert!(dollar_token_at("\\$review", 5).is_none());
         assert!(dollar_token_at("$$review", 5).is_none());
         assert!(dollar_token_at("${review}", 5).is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    #[test]
+    fn colon_terminates_a_prose_mention_without_admitting_file_locators() {
+        let input = "@review: please check\n@second:\n@third:　中文 @path_hex: abcd @path_hex:abcd @a/b @scheme:value @last:";
+        let names: Vec<_> = super::at_tokens(input).map(|token| token.name).collect();
+        assert_eq!(names, ["review", "second", "third", "last"]);
+        assert_eq!(
+            super::at_token_at("@review: please", 7).unwrap().name,
+            "review"
+        );
+        assert!(super::at_token_at("界 @review", 1).is_none());
+    }
+
+    #[test]
+    fn mentions_exclude_code_escape_email_and_file_locators() {
+        let input = "@review @\"file.rs\" @path_hex:abcd mail@host.com `@code` \\@escaped [@helper](https://host/@url)\n```\n@fenced\n```";
+        let names: Vec<_> = super::at_tokens(input)
+            .filter(|token| !token.name.is_empty())
+            .map(|token| token.name)
+            .collect();
+        assert_eq!(names, ["review", "helper"]);
+    }
+
+    #[test]
+    fn bare_url_handles_are_not_agent_mentions_but_dotted_role_names_are() {
+        let text =
+            "see https://host/@alice and (https://host/@bob). Ask @example.com: please review";
+        let names: Vec<_> = super::at_tokens(text).map(|token| token.name).collect();
+        assert_eq!(names, ["example.com"]);
     }
 }

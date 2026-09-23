@@ -830,6 +830,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
         effective_turns: 2,
     })
     .unwrap();
+    assert_named_spawn_header(&child);
     assert_eq!(child.format_version(), SESSION_FORMAT_VERSION);
     assert_eq!(child.fork_origin().unwrap().resolved_terminal_seq, 7);
     for (field, value) in [
@@ -1136,5 +1137,61 @@ fn reference_envelope_bound_admits_worst_case_json_escaping_and_rejects_excess()
         (0, MAXIMUM_REFERENCE_PAGE_BYTES + 1),
     ] {
         assert!(validate_reference_page_bounds(offset, maximum).is_err());
+    }
+}
+
+fn assert_named_spawn_header(child: &SessionHeader) {
+    assert!(
+        serde_json::to_value(child)
+            .unwrap()
+            .get("spawn_role")
+            .is_none()
+    );
+    let role = DelegationRole {
+        name: "reviewer".into(),
+        persona: Some("Review carefully".into()),
+        allow: Some(std::collections::BTreeSet::new()),
+        deny: std::collections::BTreeSet::new(),
+    };
+    let named = child
+        .clone()
+        .with_delegation_policy(Some(
+            DelegationPolicy::freeze(Some(&role), std::collections::BTreeSet::new(), None).unwrap(),
+        ))
+        .unwrap()
+        .with_spawn_role(Some(SpawnRoleRecord {
+            seed: SpawnRoleSeed {
+                reference: SpawnRoleReference {
+                    provider: "rsi.agents".into(),
+                    name: role.name.clone(),
+                },
+                role,
+                model: None,
+                source: ".agents/agents/reviewer.md".into(),
+                sha256: "d".repeat(64),
+            },
+            request_sha256: "e".repeat(64),
+        }))
+        .unwrap();
+    let named = serde_json::to_value(named).unwrap();
+    assert!(serde_json::from_value::<SessionHeader>(named.clone()).is_ok());
+    for (path, value) in [
+        ("/spawn_role/seed/reference/name", json!("different")),
+        ("/spawn_role/seed/source", json!("bad\nsource")),
+        ("/spawn_role/seed/sha256", json!("A".repeat(64))),
+        ("/spawn_role/request_sha256", json!("invalid")),
+        (
+            "/spawn_role/seed/role/persona",
+            json!("Changed without policy"),
+        ),
+        ("/fork_origin", serde_json::Value::Null),
+        ("/delegation_policy", serde_json::Value::Null),
+    ] {
+        let mut invalid = named.clone();
+        *invalid.pointer_mut(path).unwrap() = value;
+        assert!(
+            serde_json::from_value::<SessionHeader>(invalid).is_err(),
+            "{path}"
+        );
     }
 }

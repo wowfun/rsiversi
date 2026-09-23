@@ -5037,8 +5037,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-agent-workspace-context",
  "rsi-ai-protocol",
  "rsi-meta",
  "rsi-tools-protocol",

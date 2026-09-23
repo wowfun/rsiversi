@@ -1346,7 +1346,7 @@ impl AgentKernel {
             role.validate()
                 .map_err(|error| TurnError::Invalid(error.to_string()))?;
         }
-        let selection = spawn_selection(&request)?;
+        let _ = spawn_selection(&request, None)?;
         validate_identifier("subagent task name", &request.task_name)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         rsi_agent_session_protocol::validate_turn_text(&request.message)
@@ -1372,6 +1372,35 @@ impl AgentKernel {
         if let Some(existing) = self.existing_spawn(&request, &message).await? {
             return Ok(existing);
         }
+        let record = if let Some(rsi_agent_turn_protocol::SpawnRoleSelection::Reference {
+            reference,
+            resolver,
+        }) = &request.role
+        {
+            let seed = request
+                .cancellation
+                .run_until_cancelled(resolver.resolve(
+                    request.caller.header(),
+                    reference,
+                    request.cancellation.clone(),
+                ))
+                .await
+                .ok_or(TurnError::StaleClaim)??;
+            seed.validate()
+                .map_err(|error| TurnError::Invalid(error.to_string()))?;
+            if &seed.reference != reference {
+                return Err(TurnError::Invalid(
+                    "resolved role reference mismatch".into(),
+                ));
+            }
+            Some(rsi_agent_session_protocol::SpawnRoleRecord {
+                seed,
+                request_sha256: spawn_request_digest(&request)?,
+            })
+        } else {
+            None
+        };
+        let selection = spawn_selection(&request, record.as_ref())?;
         let parent_header = request.caller.header().clone();
         let parent_session_id = parent_header.session_id().clone();
         let (root_session_id, parent_path) = agent_root_and_path(&parent_header);
@@ -1462,13 +1491,19 @@ impl AgentKernel {
             .iter()
             .any(|name| name == rsi_agent_session_protocol::REPORT_RESULT_TOOL);
         let policy = rsi_agent_session_protocol::DelegationPolicy::freeze(
-            request.role.as_ref(),
+            record.as_ref().map(|record| &record.seed.role).or_else(|| {
+                request
+                    .role
+                    .as_ref()
+                    .and_then(rsi_agent_turn_protocol::SpawnRoleSelection::inline)
+            }),
             tool_names,
             parent_header.delegation_policy(),
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let child_header = child_header
             .with_delegation_policy(Some(policy))
+            .and_then(|header| header.with_spawn_role(record))
             .and_then(|header| {
                 header.with_initial_output(request.output_contract.clone().map(|contract| {
                     rsi_agent_session_protocol::InitialOutputContract {
@@ -1526,6 +1561,10 @@ impl AgentKernel {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One exact receipt check validates original invocation and durable child together"
+    )]
     async fn existing_spawn(
         &self,
         request: &SpawnAgentRequest,
@@ -1551,12 +1590,27 @@ impl AgentKernel {
         let policy = header
             .delegation_policy()
             .ok_or_else(|| TurnError::Invalid("spawn retry lacks delegation policy".into()))?;
-        if !policy
-            .matches_role(request.role.as_ref())
-            .map_err(|error| TurnError::Invalid(error.to_string()))?
-        {
+        let saved = header.spawn_role();
+        let matches = match (&request.role, saved) {
+            (
+                Some(rsi_agent_turn_protocol::SpawnRoleSelection::Reference { reference, .. }),
+                Some(record),
+            ) => {
+                &record.seed.reference == reference
+                    && record.request_sha256 == spawn_request_digest(request)?
+            }
+            (Some(rsi_agent_turn_protocol::SpawnRoleSelection::Reference { .. }), None)
+            | (_, Some(_)) => false,
+            (role, None) => policy
+                .matches_role(
+                    role.as_ref()
+                        .and_then(rsi_agent_turn_protocol::SpawnRoleSelection::inline),
+                )
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+        };
+        if !matches {
             return Err(TurnError::Invalid(
-                "spawn retry disagrees with frozen role".into(),
+                "spawn retry disagrees with frozen role or request".into(),
             ));
         }
         let parent = request.caller.header();
@@ -1565,9 +1619,10 @@ impl AgentKernel {
                 request.child_session_id.clone(),
                 header.created_at_ms(),
                 origin.clone(),
-                spawn_selection(request)?,
+                spawn_selection(request, saved)?,
             )
             .and_then(|header| header.with_delegation_policy(Some(policy.clone())))
+            .and_then(|header| header.with_spawn_role(saved.cloned()))
             .and_then(|header| {
                 header.with_initial_output(request.output_contract.clone().map(|contract| {
                     rsi_agent_session_protocol::InitialOutputContract {
@@ -1735,6 +1790,7 @@ impl AgentKernel {
 
 fn spawn_selection(
     request: &SpawnAgentRequest,
+    saved: Option<&rsi_agent_session_protocol::SpawnRoleRecord>,
 ) -> TurnResult<rsi_agent_session_protocol::ModelSelection> {
     let source = request.caller.source_selection().ok_or_else(|| {
         TurnError::Invalid("spawn requires an authenticated Tool model origin".into())
@@ -1744,7 +1800,10 @@ fn spawn_selection(
             model: model.clone(),
             reasoning_effort: request.reasoning_effort.clone(),
         },
-        None if request.reasoning_effort.is_none() => source.clone(),
+        None if request.reasoning_effort.is_none() => saved
+            .and_then(|record| record.seed.model.as_ref())
+            .unwrap_or(source)
+            .clone(),
         None => {
             return Err(TurnError::Invalid(
                 "child reasoning effort requires an explicit child model".into(),
@@ -1755,4 +1814,30 @@ fn spawn_selection(
         .validate()
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
     Ok(selection)
+}
+
+fn spawn_request_digest(request: &SpawnAgentRequest) -> TurnResult<String> {
+    use sha2::{Digest as _, Sha256};
+    let Some(rsi_agent_turn_protocol::SpawnRoleSelection::Reference { reference, .. }) =
+        &request.role
+    else {
+        return Err(TurnError::Invalid(
+            "named spawn requires a reference".into(),
+        ));
+    };
+    let value = serde_json::json!({
+        "version": 1, "reference": reference, "model": request.model,
+        "effort": request.reasoning_effort, "child": request.child_session_id,
+        "task": request.task_name, "message_id": request.message_id, "message": request.message,
+        "fork": request.fork_turns, "output": request.output_contract,
+        "parent": request.caller.header().fingerprint().map_err(|error| TurnError::Invalid(error.to_string()))?,
+        "turn": request.caller.turn_id(), "effect": request.caller.tool_effect_id(),
+        "selection": request.caller.source_selection(),
+    });
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&value).map_err(|error| TurnError::Invalid(error.to_string()))?
+        )
+    ))
 }

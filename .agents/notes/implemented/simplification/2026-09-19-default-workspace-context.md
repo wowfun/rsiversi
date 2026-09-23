@@ -38,6 +38,18 @@ Agent Store backup before creating empty history. Web draft upgrades remove only
 the obsolete creation field; they preserve editing and pending request evidence
 and do not replay requests.
 
+Markdown Agent descriptions and personas carry the same selected-workspace context
+trust. A bounded catalog is a discovery summary rather than an admission limit:
+extra file names do not invalidate the deterministic listing prefix, and an exact
+name can still be resolved at a fresh spawn. Configured inline roles have their
+own finite bound. A file/inline collision remains unavailable even when the file
+is outside the displayed prefix; a display limit must not choose execution
+identity. The [Agent tools contract](../../../../crates/rsi-agent/tools/README.md)
+owns the combined catalog and spawn behavior. Resolving the definition at child
+admission makes edits effective on the next spawn without changing an existing
+child's frozen settings. This is the Markdown Subagent milestone's execution
+contract, independent of Session export or preview presentation.
+
 ## Alternatives considered
 
 Keeping a flag defaulted to trusted would preserve a redundant wire and durable
@@ -50,6 +62,11 @@ User-first skill precedence would protect familiar personal names against
 repository shadowing, as the earlier decision intended, but would silently suppress
 a project's identically named workflow. That alternative is rejected for the
 selected-workspace behavior; no target whitelist or confirmation gate replaces it.
+
+Failing the whole Agent catalog on one excess name would make existing healthy
+roles unavailable to discovery. Silently choosing an inline role when a colliding
+file falls outside the listing would make preview and execution disagree. Exact
+selection and bounded presentation therefore use different admission limits.
 
 ## Consequences
 
