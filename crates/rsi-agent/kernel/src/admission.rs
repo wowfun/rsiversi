@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write;
 
 impl AgentKernel {
     pub(super) async fn reconcile_waiting_activations(&self) -> Result<()> {
@@ -119,20 +120,40 @@ impl AgentKernel {
             .header()
             .fork_origin()
             .map(|origin| origin.parent_session_id.clone());
-        let admissions = self
-            .inner
-            .submission_admission
-            .acquire_many(
-                std::iter::once(claim.session_id().clone())
-                    .chain(parent_session_id.iter().cloned()),
-            )
-            .await?;
         let live_seq = {
             let state = lock_state(&self.inner);
             state
                 .sessions
                 .get(claim.session_id())
                 .ok_or(TurnError::StaleClaim)?
+                .live_seq()
+                .map_err(turn_kernel_error)?
+        };
+        self.flush(claim, live_seq).await?;
+        let read_reply =
+            parent_session_id.is_some() && matches!(proposed_outcome, TurnOutcome::Completed) && {
+                let state = lock_state(&self.inner);
+                let turn = self.validate_claim(&state, claim)?;
+                super::structured::contract(claim.header(), turn).is_none()
+            };
+        // The drain fences child publication; scan its flushed prefix without
+        // retaining either submission key or a process admission slot.
+        let reply = if read_reply {
+            completion_reply::read(&self.inner, claim.session_id(), claim.turn_id(), live_seq).await
+        } else {
+            None
+        };
+        let admissions = self
+            .inner
+            .submission_admission
+            .acquire_pair(claim.session_id(), parent_session_id.as_ref())
+            .await?;
+        // External cancellation remains admissible during reply I/O even though
+        // the claim cannot publish more Conversation output. Fence that new tail.
+        let live_seq = {
+            let state = lock_state(&self.inner);
+            self.validate_claim(&state, claim)?;
+            state.sessions[claim.session_id()]
                 .live_seq()
                 .map_err(turn_kernel_error)?
         };
@@ -211,7 +232,7 @@ impl AgentKernel {
         if let Some(parent_session_id) = &parent_session_id {
             sessions.push(
                 self.completion_append(
-                    claim.session_id(),
+                    (claim.session_id(), reply),
                     &activation_id,
                     parent_session_id,
                     &outcome,
@@ -294,15 +315,34 @@ impl AgentKernel {
         .await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Reply projection, reservation sizing and parent mailbox coordinates form one completion append"
+    )]
     pub(super) async fn completion_append(
         &self,
-        child_session_id: &SessionId,
+        child: (&SessionId, Option<String>),
         activation_id: &rsi_agent_session_protocol::ActivationId,
         parent_session_id: &SessionId,
         outcome: &TurnOutcome,
         result: Option<rsi_agent_session_protocol::AgentResultRef>,
         timestamp_ms: u64,
     ) -> TurnResult<AtomicSessionAppend> {
+        let (child_session_id, reply) = child;
+        let mut completion_text = completion_message(outcome);
+        if let Some(result) = &result {
+            write!(
+                completion_text,
+                " Read the structured result with read_agent_result: {}",
+                serde_json::to_string(&result.locator()).expect("result locator encoding")
+            )
+            .expect("String write");
+        } else if matches!(outcome, TurnOutcome::Completed)
+            && let Some(reply) = reply
+        {
+            completion_text.push_str("\n\nChild public reply:\n");
+            completion_text.push_str(&reply);
+        }
         self.fence_pending_terminal(parent_session_id).await?;
         let mailbox = self
             .inner
@@ -342,6 +382,21 @@ impl AgentKernel {
             .await
             .map_err(turn_store_error)?;
         let message_id = completion_message_id(child_session_id, activation_id)?;
+        let mut message = AgentMessage {
+            message_id,
+            source: AgentMessageSource::Completion {
+                child_session_id: child_session_id.clone(),
+                activation_id: activation_id.clone(),
+                outcome: activation_outcome(outcome, result.clone()),
+            },
+            content: vec![AgentMessageContent::Text {
+                text: completion_text,
+            }],
+            options: MessageOptions::default(),
+        };
+        if matches!(outcome, TurnOutcome::Completed) && result.is_none() {
+            completion_reply::bound_message(&mut message)?;
+        }
         let control = AgentControlRecord::new(
             mailbox
                 .durable_control_seq
@@ -355,28 +410,7 @@ impl AgentKernel {
                     rsi_agent_session_protocol::MessageDelivery::NextTurn
                 },
                 bound_turn_id: None,
-                message: AgentMessage {
-                    message_id,
-                    source: AgentMessageSource::Completion {
-                        child_session_id: child_session_id.clone(),
-                        activation_id: activation_id.clone(),
-                        outcome: activation_outcome(outcome, result.clone()),
-                    },
-                    content: vec![AgentMessageContent::Text {
-                        text: result.as_ref().map_or_else(
-                            || completion_message(outcome),
-                            |result| {
-                                format!(
-                                    "{} Read the structured result with read_agent_result: {}",
-                                    completion_message(outcome),
-                                    serde_json::to_string(&result.locator())
-                                        .expect("result locator encoding")
-                                )
-                            },
-                        ),
-                    }],
-                    options: MessageOptions::default(),
-                },
+                message,
                 root_session_id: agent_root_and_path(&parent_header).0,
                 target: if parent_has_step {
                     MessageTarget::NextStep
@@ -514,13 +548,18 @@ impl AgentKernel {
                 let parent_session_id = header
                     .fork_origin()
                     .map(|origin| origin.parent_session_id.clone());
+                let reply = if parent_session_id.is_some()
+                    && matches!(outcome, TurnOutcome::Completed)
+                    && terminal_result(terminal).is_none()
+                {
+                    completion_reply::read(&self.inner, &session_id, &turn_id, terminal.seq()).await
+                } else {
+                    None
+                };
                 let _admissions = self
                     .inner
                     .submission_admission
-                    .acquire_many(
-                        std::iter::once(session_id.clone())
-                            .chain(parent_session_id.iter().cloned()),
-                    )
+                    .acquire_pair(&session_id, parent_session_id.as_ref())
                     .await?;
                 let current = self
                     .inner
@@ -563,7 +602,7 @@ impl AgentKernel {
                 if let Some(parent_session_id) = &parent_session_id {
                     sessions.push(
                         self.completion_append(
-                            &session_id,
+                            (&session_id, reply),
                             &active.activation_id,
                             parent_session_id,
                             &outcome,

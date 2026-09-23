@@ -1,5 +1,46 @@
 use super::*;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn retained_admission_can_retry_capacity_after_producer_close() {
+        // This unit seam tests admission with a retained proof. Live proof validation
+        // and the owned resume retry loop are exercised by human_wait integration tests.
+        let admission = SubmissionAdmission::new();
+        let id = SessionId::new("retained").unwrap();
+        let proof = AgentMutationLease {
+            inner: Weak::new(),
+            session_id: id.clone(),
+            turn_id: TurnId::new("turn").unwrap(),
+            gate: Arc::default(),
+        };
+        let occupied = admission
+            .slots
+            .clone()
+            .acquire_many_owned(u32::try_from(MAXIMUM_ACTIVE_SESSIONS).unwrap())
+            .await
+            .unwrap();
+        admission.close();
+        let Err(error) = admission.acquire_retained(&id, &proof).await else {
+            panic!("capacity must remain bounded after close");
+        };
+        assert!(matches!(
+            super::super::human_wait::WaitControlError::from(error),
+            super::super::human_wait::WaitControlError::Retry(TurnError::Capacity)
+        ));
+        assert!(admission.sessions.lock().unwrap().is_empty());
+        drop(occupied);
+        let lease = admission.acquire_retained(&id, &proof).await.unwrap();
+        assert!(matches!(
+            admission.acquire(&id).await,
+            Err(TurnError::ShuttingDown)
+        ));
+        drop(lease);
+        assert!(admission.sessions.lock().unwrap().is_empty());
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ClaimMutationGate {
     state: std::sync::Mutex<ClaimMutationState>,

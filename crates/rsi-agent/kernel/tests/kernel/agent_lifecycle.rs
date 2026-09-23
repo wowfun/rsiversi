@@ -1,6 +1,159 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercise the same public terminal/admission seam under each scan outcome.
+async fn child_reply_scan_does_not_hold_parent_submission_admission() {
+    for case in [
+        "normal",
+        "cancel",
+        "error",
+        "large-prefix",
+        "large-final",
+        "pages",
+    ] {
+        let cancel = case == "cancel";
+        let fail_read = case == "error";
+        let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+        let kernel = AgentKernel::recover_with_clock_and_limits(
+            store.clone(),
+            composition(),
+            Arc::new(FixedClock),
+            KernelLimits {
+                maximum_store_read_bytes: if case == "pages" {
+                    MAXIMUM_SESSION_FACT_BYTES
+                } else {
+                    rsi_agent_kernel::DEFAULT_MAXIMUM_STORE_READ_BYTES
+                },
+                ..KernelLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+        let worker = kernel.start_workers();
+        kernel
+            .submit_message(SubmitMessage {
+                session: fresh(header("reply-parent")),
+                message: mailbox_message("reply-parent-message"),
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
+        let _parent_lease = kernel.register("reply-parent-executor".into()).unwrap();
+        let parent = kernel
+            .claim("reply-parent-executor", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let child_id = SessionId::new("reply-child").unwrap();
+        kernel
+            .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
+                model: None,
+                reasoning_effort: None,
+                cancellation: CancellationToken::new(),
+                caller: control_tool_caller(&kernel, &parent).await,
+                child_session_id: child_id.clone(),
+                task_name: "reply".into(),
+                message_id: MessageId::new("reply-child-message").unwrap(),
+                message: "work".into(),
+                fork_turns: ForkTurnSelection::None,
+            })
+            .await
+            .unwrap();
+        tool_origin::finish_control_tool(&kernel, &parent).await;
+        let _child_lease = kernel.register("reply-child-executor".into()).unwrap();
+        let child = kernel
+            .claim("reply-child-executor", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        if case == "large-prefix" {
+            publish_reply_parts(
+                &kernel,
+                &child,
+                "early-model",
+                &["x".repeat(4 * 1024 * 1024 + 1)],
+            )
+            .await;
+            publish_public_reply(&kernel, &child, "Final answer after large history").await;
+        }
+        if case == "large-final" {
+            publish_public_reply(&kernel, &child, &"x".repeat(4 * 1024 * 1024 + 1)).await;
+        } else if case == "pages" {
+            publish_reply_parts(&kernel, &child, "streamed-model", &vec!["x".into(); 200]).await;
+        }
+        *store.pause_reply_for.lock().unwrap() = Some(child_id.clone());
+        store.fail_reply_read.store(fail_read, Ordering::Release);
+        let child_turn = child.turn_id().clone();
+        let completion = tokio::spawn({
+            let kernel = kernel.clone();
+            async move { kernel.finish_turn(&child, &TurnOutcome::Completed).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.reply_read_entered.notified(),
+        )
+        .await
+        .expect("reply scan reached Store gate");
+        // Resident cancellation takes parent submission admission but does not need
+        // a Store read permit, which the paused scan may legitimately exhaust.
+        let parent_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            kernel.cancel(parent.session_id(), parent.turn_id(), None),
+        )
+        .await;
+        if cancel {
+            kernel.cancel(&child_id, &child_turn, None).await.unwrap();
+        }
+        store.release_reply_read.notify_one();
+        let terminal = completion.await.unwrap().unwrap();
+        assert!(
+            matches!(terminal.body(), SessionFactBody::TurnTerminal { outcome, .. } if *outcome == if cancel { TurnOutcome::Cancelled } else { TurnOutcome::Completed })
+        );
+        parent_result
+            .expect("parent admission is independent of reply scan")
+            .unwrap();
+        if matches!(case, "error" | "large-final" | "pages") {
+            assert!(
+                store
+                    .inner
+                    .active_activation(&child_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let mailbox = store
+                .inner
+                .read_agent_mailbox(parent.session_id(), None)
+                .await
+                .unwrap();
+            assert!(mailbox.pending.iter().any(|entry| {
+                serde_json::to_string(&entry.message.content)
+                    .unwrap()
+                    .contains("Child reply omitted")
+            }));
+        }
+        if case == "large-prefix" {
+            let mailbox = store
+                .inner
+                .read_agent_mailbox(parent.session_id(), None)
+                .await
+                .unwrap();
+            assert!(mailbox.pending.iter().any(|entry| {
+                serde_json::to_string(&entry.message.content)
+                    .unwrap()
+                    .contains("Final answer after large history")
+            }));
+        }
+        if case == "pages" {
+            assert_eq!(store.reply_pages.load(Ordering::Acquire), 128);
+        }
+        kernel.shutdown(worker).await.unwrap();
+    }
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Both delivery horizons must run against the same live-to-idle target transition.
 async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let store = Arc::new(MemoryStore::new());
@@ -252,6 +405,12 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     .unwrap()
     .unwrap();
     assert_eq!(child_claim.session_id(), &child_id);
+    publish_public_reply(
+        &kernel,
+        &child_claim,
+        &"A deterministic public answer. \"\\\t\0\u{7f}界\n".repeat(500),
+    )
+    .await;
 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -289,96 +448,167 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     assert_eq!(ready.messages.len(), 1);
     assert_eq!(ready.messages[0].session_id, root_id);
     assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
+    let mailbox = store.read_agent_mailbox(&root_id, None).await.unwrap();
+    let reply = serde_json::to_string(&mailbox.pending[0].message.content).unwrap();
+    assert!(reply.contains("Child public reply:"));
+    assert!(reply.contains("A deterministic public answer."));
+    assert!(reply.contains("truncated"));
+    assert!(
+        serde_json::to_vec(&mailbox.pending[0].message)
+            .unwrap()
+            .len()
+            <= rsi_agent_session_protocol::MAXIMUM_COMPLETION_MESSAGE_BYTES
+    );
+    assert!(!reply.contains("private reasoning"));
     kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Both Store backends exercise completion delivery across each terminal boundary.
 async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_scan() {
-    let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_workers();
-    let root_id = SessionId::new("session-terminal-promotion-root").unwrap();
-    kernel
-        .submit_message(SubmitMessage {
-            session: fresh(header(root_id.as_str())),
-            message: mailbox_message("message-terminal-promotion-root"),
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
-        })
-        .await
-        .unwrap();
-    let _root_lease = kernel
-        .register("executor-terminal-promotion-root".into())
-        .unwrap();
-    let root_claim = kernel
-        .claim("executor-terminal-promotion-root", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    let child_id = SessionId::new("session-terminal-promotion-child").unwrap();
-    kernel
-        .spawn_agent(SpawnAgentRequest {
-            output_contract: None,
-            role: None,
-            model: None,
-            reasoning_effort: None,
-            cancellation: CancellationToken::new(),
-            caller: control_tool_caller(&kernel, &root_claim).await,
-            child_session_id: child_id.clone(),
-            task_name: "late-child".into(),
-            message_id: MessageId::new("message-terminal-promotion-child").unwrap(),
-            message: "finish after the parent's final scan".into(),
-            fork_turns: ForkTurnSelection::None,
-        })
-        .await
-        .unwrap();
-    let _child_lease = kernel
-        .register("executor-terminal-promotion-child".into())
-        .unwrap();
-    let child_claim = kernel
-        .claim(
-            "executor-terminal-promotion-child",
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    for sqlite in [false, true] {
+        for ending in ["completed", "cancelled", "budget"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let path = temporary.path().join("store");
+            let store: Arc<dyn SessionStore> = if sqlite {
+                Arc::new(rsi_agent_store_sqlite::SqliteStore::open(&path).unwrap())
+            } else {
+                Arc::new(MemoryStore::new())
+            };
+            let kernel =
+                AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+                    .await
+                    .unwrap();
+            let worker = kernel.start_workers();
+            let root_id = SessionId::new("session-terminal-promotion-root").unwrap();
+            kernel
+                .submit_message(SubmitMessage {
+                    session: fresh(header(root_id.as_str())),
+                    message: mailbox_message("message-terminal-promotion-root"),
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                })
+                .await
+                .unwrap();
+            let _root_lease = kernel
+                .register("executor-terminal-promotion-root".into())
+                .unwrap();
+            let root_claim = kernel
+                .claim("executor-terminal-promotion-root", CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let child_id = SessionId::new("session-terminal-promotion-child").unwrap();
+            kernel
+                .spawn_agent(SpawnAgentRequest {
+                    output_contract: None,
+                    role: None,
+                    model: None,
+                    reasoning_effort: None,
+                    cancellation: CancellationToken::new(),
+                    caller: control_tool_caller(&kernel, &root_claim).await,
+                    child_session_id: child_id.clone(),
+                    task_name: "late-child".into(),
+                    message_id: MessageId::new("message-terminal-promotion-child").unwrap(),
+                    message: "finish after the parent's final scan".into(),
+                    fork_turns: ForkTurnSelection::None,
+                })
+                .await
+                .unwrap();
+            let _child_lease = kernel
+                .register("executor-terminal-promotion-child".into())
+                .unwrap();
+            let child_claim = kernel
+                .claim(
+                    "executor-terminal-promotion-child",
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
 
-    assert_eq!(
-        kernel
-            .enter_pending_step_messages(&root_claim)
-            .await
-            .unwrap(),
-        0
-    );
-    kernel
-        .finish_turn(&child_claim, &TurnOutcome::Completed)
-        .await
-        .unwrap();
-    let before_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
-    assert!(before_terminal.pending.iter().any(|entry| {
-        matches!(entry.message.source, AgentMessageSource::Completion { .. })
-            && entry.target == MessageTarget::NextStep
-            && !entry.wake_required
-    }));
+            assert_eq!(
+                kernel
+                    .enter_pending_step_messages(&root_claim)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let outcome = match ending {
+                "cancelled" => {
+                    kernel
+                        .cancel(&root_id, root_claim.turn_id(), None)
+                        .await
+                        .unwrap();
+                    TurnOutcome::Cancelled
+                }
+                "budget" => {
+                    let outcome = TurnOutcome::BudgetExceeded {
+                        dimension: BudgetDimension::Elapsed,
+                        consumed: 1_800_000,
+                        limit: 1_800_000,
+                    };
+                    kernel
+                        .close_current_step(&root_claim, &outcome)
+                        .await
+                        .unwrap();
+                    kernel
+                        .publish(
+                            &root_claim,
+                            vec![SessionFactBody::BudgetExhausted {
+                                turn_id: root_claim.turn_id().clone(),
+                                dimension: BudgetDimension::Elapsed,
+                                consumed: 1_800_000,
+                                limit: 1_800_000,
+                            }],
+                        )
+                        .await
+                        .unwrap();
+                    outcome
+                }
+                _ => TurnOutcome::Completed,
+            };
+            kernel
+                .finish_turn(&child_claim, &TurnOutcome::Completed)
+                .await
+                .unwrap();
+            let before_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
+            assert!(before_terminal.pending.iter().any(|entry| {
+                matches!(entry.message.source, AgentMessageSource::Completion { .. })
+                    && entry.target == MessageTarget::NextStep
+                    && !entry.wake_required
+            }));
 
-    kernel
-        .finish_turn(&root_claim, &TurnOutcome::Completed)
-        .await
-        .unwrap();
+            if ending != "completed" {
+                assert_eq!(
+                    kernel
+                        .enter_pending_step_messages(&root_claim)
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            kernel.finish_turn(&root_claim, &outcome).await.unwrap();
 
-    let after_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
-    assert!(after_terminal.pending.iter().any(|entry| {
-        matches!(entry.message.source, AgentMessageSource::Completion { .. })
-            && entry.target == MessageTarget::NextTurn
-            && entry.wake_required
-    }));
-    let ready = store.list_ready_messages(&root_id, None, 8).await.unwrap();
-    assert_eq!(ready.messages.len(), 1);
-    assert_eq!(ready.messages[0].session_id, root_id);
-    assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
-    wait_for_settlement(store.as_ref(), &root_id).await;
-    assert!(store.active_activation(&root_id).await.unwrap().is_none());
-    kernel.shutdown(worker).await.unwrap();
+            let after_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
+            assert!(after_terminal.pending.iter().any(|entry| {
+                matches!(entry.message.source, AgentMessageSource::Completion { .. })
+                    && entry.target == MessageTarget::NextTurn
+                    && entry.wake_required
+            }));
+            let ready = store.list_ready_messages(&root_id, None, 8).await.unwrap();
+            assert_eq!(ready.messages.len(), 1);
+            assert_eq!(ready.messages[0].session_id, root_id);
+            assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
+            wait_for_settlement(store.as_ref(), &root_id).await;
+            assert!(store.active_activation(&root_id).await.unwrap().is_none());
+            kernel.shutdown(worker).await.unwrap();
+            drop(kernel);
+            drop(store);
+            if sqlite {
+                rsi_agent_store_sqlite::SqliteStore::verify(&path).unwrap();
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -1542,5 +1772,159 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
             assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);
         }
         kernel.shutdown(worker).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn concurrent_parent_child_claim_retries_preserve_one_durable_activation() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let workers = kernel.start_workers();
+    let (parent, child, lease) = active_parent_and_child(&kernel).await;
+    tool_origin::finish_control_tool(&kernel, &parent).await;
+    kernel
+        .finish_turn(&child, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.enter_pending_step_messages(&parent).await.unwrap();
+    kernel
+        .finish_turn(&parent, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
+    // Direct public claims own this race; no background ready-root claimant.
+    let kernel = super::kernel(store.clone()).await;
+    let message = mailbox_message("contended-child");
+    kernel
+        .submit_message(SubmitMessage {
+            session: resume(&kernel, child.session_id().clone()).await,
+            message: message.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let mut requests = Vec::new();
+    for _ in 0..256 {
+        requests.push(ClaimMessage {
+            session: kernel.prepare_resume(child.session_id()).await.unwrap(),
+            message_id: message.message_id.clone(),
+            activation_id: ActivationId::new("contended-activation").unwrap(),
+            path: AgentPath::new(vec![1]).unwrap(),
+            turn_id: TurnId::new("contended-turn").unwrap(),
+            step_id: StepId::new("contended-step").unwrap(),
+        });
+    }
+    let receipts = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        futures_util::future::join_all(
+            requests
+                .into_iter()
+                .map(|request| kernel.claim_message(request)),
+        ),
+    )
+    .await
+    .expect("public claim contention must finish before its 60-second admission deadline");
+    for receipt in receipts {
+        let receipt = receipt.unwrap();
+        assert_eq!(receipt.session_id, *child.session_id());
+        assert_eq!(receipt.turn_id.as_str(), "contended-turn");
+    }
+    let controls = store
+        .read_controls(child.session_id(), 0, 128)
+        .await
+        .unwrap();
+    assert_eq!(controls.records.iter().filter(|record| matches!(record.body(), AgentControlRecordBody::ActivationStarted { activation_id, .. } if activation_id.as_str() == "contended-activation")).count(), 1);
+    assert_eq!(
+        store
+            .completion_reservation_count(parent.session_id())
+            .await
+            .unwrap(),
+        1
+    );
+    let workers = kernel.start_workers();
+    kernel.shutdown(workers).await.unwrap();
+}
+
+async fn publish_public_reply(
+    kernel: &AgentKernel,
+    claim: &rsi_agent_turn_protocol::TurnClaim,
+    text: &str,
+) {
+    publish_reply_parts(kernel, claim, "final-public-model", &[text.to_owned()]).await;
+}
+async fn publish_reply_parts(
+    kernel: &AgentKernel,
+    claim: &rsi_agent_turn_protocol::TurnClaim,
+    effect: &str,
+    parts: &[String],
+) {
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason};
+    let effect_id = EffectId::new(effect).unwrap();
+    let turn_id = claim.turn_id().clone();
+    let intent = vec![SessionFactBody::ModelIntent {
+        turn_id: turn_id.clone(),
+        effect_id: effect_id.clone(),
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+        snapshot: snapshot(),
+        price_quote: None,
+        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+        },
+    }];
+    let facts = kernel.publish(claim, intent).await.unwrap().published();
+    kernel
+        .flush(claim, facts.last().unwrap().seq())
+        .await
+        .unwrap();
+    let mut bodies = vec![SessionFactBody::ModelStarted {
+        turn_id: turn_id.clone(),
+        effect_id: effect_id.clone(),
+    }];
+    bodies.extend(
+        [
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Reasoning,
+            },
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Reasoning("private reasoning".into()),
+            },
+            LanguageEvent::ContentFinished { index: 0 },
+            LanguageEvent::ContentStarted {
+                index: 1,
+                content: ContentStart::Text,
+            },
+        ]
+        .into_iter()
+        .chain(parts.iter().map(|text| LanguageEvent::ContentDelta {
+            index: 1,
+            delta: ContentDelta::Text(text.clone()),
+        }))
+        .chain([
+            LanguageEvent::ContentFinished { index: 1 },
+            LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: None,
+            },
+        ])
+        .map(|event| SessionFactBody::ModelEvent {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            event,
+        }),
+    );
+    for batch in bodies.chunks(64) {
+        let facts = kernel
+            .publish(claim, batch.to_vec())
+            .await
+            .unwrap()
+            .published();
+        kernel
+            .flush(claim, facts.last().unwrap().seq())
+            .await
+            .unwrap();
     }
 }

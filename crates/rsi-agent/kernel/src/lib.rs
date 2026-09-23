@@ -254,9 +254,41 @@ struct KernelInner {
     store_read_admission: Arc<Semaphore>,
 }
 
+type SubmissionSessions = Mutex<BTreeMap<SessionId, Weak<SubmissionKey>>>;
+const MAXIMUM_PENDING_SUBMISSIONS: usize = MAXIMUM_ACTIVE_SESSIONS;
+
+struct SubmissionKey {
+    id: SessionId,
+    mutex: Arc<AsyncMutex<()>>,
+    registry: Weak<SubmissionSessions>,
+}
+
+impl Drop for SubmissionKey {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut sessions = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if sessions
+                .get(&self.id)
+                .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+            {
+                sessions.remove(&self.id);
+            }
+        }
+    }
+}
+
+// Fields drop in declaration order: unlock before withdrawing the key owner.
+struct SubmissionGuard {
+    _guard: OwnedMutexGuard<()>,
+    _key: Arc<SubmissionKey>,
+}
+
 struct SubmissionAdmission {
     slots: Arc<Semaphore>,
-    sessions: Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>,
+    pending: Arc<Semaphore>,
+    sessions: Arc<SubmissionSessions>,
     closed: CancellationToken,
 }
 
@@ -264,52 +296,84 @@ impl SubmissionAdmission {
     fn new() -> Self {
         Self {
             slots: Arc::new(Semaphore::new(MAXIMUM_ACTIVE_SESSIONS)),
-            sessions: Mutex::new(BTreeMap::new()),
+            pending: Arc::new(Semaphore::new(MAXIMUM_PENDING_SUBMISSIONS)),
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
             closed: CancellationToken::new(),
         }
     }
 
-    async fn acquire(&self, session_id: &SessionId) -> TurnResult<SubmissionAdmissionLease> {
-        self.acquire_until(session_id, &self.closed).await
+    async fn acquire(&self, session: &SessionId) -> TurnResult<SubmissionAdmissionLease> {
+        self.acquire_until(session, None, &self.closed).await
     }
 
     // Only an already admitted mutation may enter after producer shutdown.
     async fn acquire_retained(
         &self,
-        session_id: &SessionId,
+        session: &SessionId,
         _proof: &mutation::AgentMutationLease,
     ) -> TurnResult<SubmissionAdmissionLease> {
-        self.acquire_until(session_id, &CancellationToken::new())
+        self.acquire_until(session, None, &CancellationToken::new())
             .await
+    }
+
+    async fn acquire_pair(
+        &self,
+        session: &SessionId,
+        parent: Option<&SessionId>,
+    ) -> TurnResult<SubmissionAdmissionLease> {
+        self.acquire_until(session, parent, &self.closed).await
+    }
+
+    fn register(&self, id: &SessionId) -> Arc<SubmissionKey> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(key) = sessions.get(id).and_then(Weak::upgrade) {
+            return key;
+        }
+        let key = Arc::new(SubmissionKey {
+            id: id.clone(),
+            mutex: Arc::new(AsyncMutex::new(())),
+            registry: Arc::downgrade(&self.sessions),
+        });
+        sessions.insert(id.clone(), Arc::downgrade(&key));
+        key
     }
 
     async fn acquire_until(
         &self,
-        session_id: &SessionId,
+        session: &SessionId,
+        parent: Option<&SessionId>,
         closed: &CancellationToken,
     ) -> TurnResult<SubmissionAdmissionLease> {
+        if closed.is_cancelled() {
+            return Err(TurnError::ShuttingDown);
+        }
+        let _pending = Arc::clone(&self.pending)
+            .try_acquire_owned()
+            .map_err(|_| TurnError::Capacity)?;
         let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
-        let session = {
-            let mut sessions = self
-                .sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sessions.retain(|_, admission| admission.strong_count() > 0);
-            if let Some(admission) = sessions.get(session_id).and_then(Weak::upgrade) {
-                admission
-            } else {
-                let admission = Arc::new(AsyncMutex::new(()));
-                sessions.insert(session_id.clone(), Arc::downgrade(&admission));
-                admission
-            }
+        let (first, second) = match parent {
+            Some(parent) if parent < session => (parent, Some(session)),
+            Some(parent) if parent > session => (session, Some(parent)),
+            _ => (session, None),
         };
-        let guard = tokio::select! {
-            biased;
-            () = closed.cancelled() => return Err(TurnError::ShuttingDown),
-            result = tokio::time::timeout_at(deadline, session.lock_owned()) => {
-                result.map_err(|_| TurnError::Capacity)?
-            }
-        };
+        let mut guards = Vec::with_capacity(1 + usize::from(second.is_some()));
+        for id in std::iter::once(first).chain(second) {
+            let key = self.register(id);
+            let guard = tokio::select! {
+                biased;
+                () = closed.cancelled() => return Err(TurnError::ShuttingDown),
+                result = tokio::time::timeout_at(deadline, Arc::clone(&key.mutex).lock_owned()) => {
+                    result.map_err(|_| TurnError::Capacity)?
+                }
+            };
+            guards.push(SubmissionGuard {
+                _guard: guard,
+                _key: key,
+            });
+        }
         let slot = tokio::select! {
             biased;
             () = closed.cancelled() => return Err(TurnError::ShuttingDown),
@@ -322,21 +386,9 @@ impl SubmissionAdmission {
             }
         };
         Ok(SubmissionAdmissionLease {
+            _guards: guards,
             _slot: slot,
-            _guard: guard,
         })
-    }
-
-    async fn acquire_many(
-        &self,
-        session_ids: impl IntoIterator<Item = SessionId>,
-    ) -> TurnResult<Vec<SubmissionAdmissionLease>> {
-        let mut session_ids = session_ids.into_iter().collect::<BTreeSet<_>>();
-        let mut leases = Vec::with_capacity(session_ids.len());
-        while let Some(session_id) = session_ids.pop_first() {
-            leases.push(self.acquire(&session_id).await?);
-        }
-        Ok(leases)
     }
 
     fn close(&self) {
@@ -345,8 +397,8 @@ impl SubmissionAdmission {
 }
 
 struct SubmissionAdmissionLease {
+    _guards: Vec<SubmissionGuard>,
     _slot: OwnedSemaphorePermit,
-    _guard: OwnedMutexGuard<()>,
 }
 
 struct KernelState {
@@ -822,6 +874,7 @@ mod projection;
 mod resource;
 mod structured;
 use notifications::{SessionWatch, SessionWatchHub};
+mod completion_reply;
 mod observation;
 mod recovery;
 mod store_reads;

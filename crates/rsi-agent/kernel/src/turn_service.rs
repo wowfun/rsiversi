@@ -1012,9 +1012,7 @@ impl AgentKernel {
         let admissions = self
             .inner
             .submission_admission
-            .acquire_many(
-                std::iter::once(session_id.clone()).chain(parent_session_id.iter().cloned()),
-            )
+            .acquire_pair(&session_id, parent_session_id.as_ref())
             .await?;
         let resume_admission = self.reserve_resume_submission(&request.session).await?;
 
@@ -1029,18 +1027,6 @@ impl AgentKernel {
         self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
-        {
-            let state = lock_state(&self.inner);
-            let session = state
-                .sessions
-                .get(&session_id)
-                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
-            if !session.turns.is_empty() || !session.pending.is_empty() {
-                return Err(TurnError::Invalid(
-                    "next-Turn message cannot be claimed while a Turn is active".into(),
-                ));
-            }
-        }
 
         let scan =
             scan_durable_messages(&self.inner, &session_id, Some(&request.message_id)).await?;
@@ -1085,6 +1071,19 @@ impl AgentKernel {
             }
             MessageState::Pending => {}
         }
+        {
+            let state = lock_state(&self.inner);
+            let session = state
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            if !session.turns.is_empty() || !session.pending.is_empty() {
+                return Err(TurnError::Invalid(
+                    "next-Turn message cannot be claimed while a Turn is active".into(),
+                ));
+            }
+        }
+
         if entry.target != MessageTarget::NextTurn {
             return Err(TurnError::Invalid(
                 "next-Step message requires its owning active Turn".into(),

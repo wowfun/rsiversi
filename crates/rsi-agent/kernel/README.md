@@ -89,9 +89,21 @@ ending channel after business work is exhausted. `finish_turn` owns a bounded
 atomic ending batch: at most one current-Step closure, one required budget
 marker and the terminal Fact. Only the adjacent closure in that ending batch
 is exempt from generated-record and elapsed limits. Ordinary Step closure
-remains charged. Domain mutations cannot append ending records. This prevents
+remains charged. Domain mutations cannot append ending records or Kernel-owned
+Tool supersession markers. Only atomic message entry may supersede outstanding
+model calls. This prevents
 an exhausted open Step from blocking finalization without creating a reusable
 free business-work lane.
+
+Submission admission bounds active operations and pending operations separately,
+to 256 each. Excess pending work returns `Capacity` before registering Session
+keys. An operation locks its complete sorted, deduplicated Session/parent pair
+before taking one active slot; same-Session waiters consume no active slots.
+All acquisition waits share one minute. Closing production cancels ordinary
+waiters; proof-bearing retained settlement remains bounded but may finish after
+closure. Owned commits keep their admission until settlement. Keyed entries
+are removed on last-owner release, matching the exact allocation to protect a
+concurrently registered replacement.
 
 Agent mutations prepare and acquire target admission before their final source
 check. That check, under the short Kernel state lock, verifies the exact claim,
@@ -108,6 +120,19 @@ these fingerprints are recomputed during recovery and never persisted.
 Model effect IDs cannot be reused within a Turn. Their bounded set is charged
 by the existing maximum-provider-attempt count and rebuilt during recovery.
 The caller captures the source request's actual model and effective effort.
+Pre-start rejection consumes the same exact call proof without requiring
+execution settings and grants no caller authority. Invalid JSON has no typed argument digest and cannot be
+replaced with an invented value to record a rejection; executor preparation fails
+before approval or Tool start. Such an unstarted call can still be superseded.
+Recovery applies these same
+proof checks. A bare rejection with no producing Conversation is invalid history,
+not an automatically repairable legacy record. This pre-release format has no
+compatibility migration: preserve an incompatible Store for inspection and start
+with a fresh Store; the standard product's explicit backup-and-reset operation is
+documented in [its launcher contract](../../rsi/README.md). Context caches are
+disposable: older fold encodings rebuild from Facts under the selected builder,
+while older summaries remain ineligible as specified by the
+[Context contract](../context/README.md).
 Spawn requires this Tool authority and freezes its selection in the child
 Header; an explicit child model resets inherited effort. Claim-only callers
 remain available to internal domain and supervision operations.
@@ -179,7 +204,10 @@ reads back the activation and resumes a committed park, including when the park
 acknowledgement was lost. A failed park reports its original cause; if cleanup
 also fails, the bounded diagnostic includes both failures.
 I/O, cursor contention, and admission waits retry every five seconds independently
-of cancellation or shutdown. A deterministic ownership, lifecycle, or Store
+of cancellation or shutdown. Retained submission admission still observes the
+bounded queue/slot capacity after producer closure; Capacity is a retryable
+pre-mutation result and does not release the parked wait's retained ownership.
+A deterministic ownership, lifecycle, or Store
 validation failure stops retrying, latches a bounded permanent Session failure,
 and releases the wait's local ownership. The failed Session cannot be reclaimed
 for another model run; durable recovery remains responsible for its unfinished
@@ -392,3 +420,39 @@ snapshot after pending mutations drain. A conclusion that settles before termina
 admission must not become a missing-output failure. Descendant cancellation uses
 that same final outcome. The terminal drain fences new ordinary Fact publication;
 the final installation rechecks that fence after staging outside the global lock.
+
+Exact message-claim retries recover the existing durable acceptance receipt before
+checking whether a new claim may start. A resident active Turn prevents a new
+claim, but cannot hide an already committed exact receipt.
+
+Scheduler-created message Turn identities bind both the recipient Session and
+accepted control sequence. A per-Session sequence alone cannot name a Turn in
+forked model context, which retains parent and child history together. Activation
+and Step coordinates remain scoped by their durable Session records.
+
+Ordinary successful child completion carries the public text of its final
+Conversation model attempt only when that attempt finished with Stop without
+Tool calls. An empty, incomplete, failed or Tool-producing final attempt does not
+reuse an earlier answer. The reply fits within the existing 8 KiB **encoded complete-message** reservation, including
+metadata and JSON escaping. NUL/DEL are shown as literal escapes. Reasoning and
+Tool calls are excluded. The Kernel reads only that exact child Turn, with a
+4 MiB processed-Fact scan bound and at most 128 backward pages, starting at the
+captured child tail and stopping at its latest Conversation intent. Store page
+materialization retains the ordinary Store read-byte budget. Earlier large Tool
+results do not consume the reply scan when the final attempt fits in the tail.
+Read failures and exhausted scan bounds produce an explicit omission notice;
+optional reply extraction cannot prevent durable terminal settlement.
+Omitted or truncated replies are explicit. Public reply
+projection runs after the child's publication drain and flush, before
+acquiring the parent/child submission pair. Waiting-ancestor settlement scans
+the immutable terminal Turn before taking that pair and then rechecks its
+activation and Fact watermark. Slow reply reads cannot hold parent admission.
+Cancellation may still append during the scan, so live completion resamples and
+flushes the child's current tail under admission before staging its canonical outcome.
+Structured output keeps its exact result locator. No extra Tool permission is required for
+a child to return its ordinary final answer.
+
+Safe-boundary mailbox entry returns zero for ending, cancelled or budget-exhausted
+Turns even after their last Step closes. Terminal settlement promotes pending
+completion notifications and bound Human Steer messages; explicit NextStep
+messages remain non-waking for a future Step.

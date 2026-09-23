@@ -238,3 +238,172 @@ fn write_behind_deadline_rebases_after_a_slow_or_early_scan() {
         early_notification + WRITE_BEHIND_INTERVAL
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn pair_admission_makes_progress_without_timeout_at_full_capacity() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let admission = SubmissionAdmission::new();
+    let occupied = admission
+        .slots
+        .clone()
+        .acquire_many_owned(u32::try_from(MAXIMUM_ACTIVE_SESSIONS).unwrap())
+        .await
+        .unwrap();
+    let pairs: Vec<_> = (0..MAXIMUM_ACTIVE_SESSIONS)
+        .map(|i| {
+            (
+                SessionId::new(format!("a-{i}")).unwrap(),
+                SessionId::new(format!("z-{i}")).unwrap(),
+            )
+        })
+        .collect();
+    let mut waiting: Vec<_> = pairs
+        .iter()
+        .map(|(a, b)| {
+            Box::pin(tokio::task::unconstrained(
+                admission.acquire_pair(a, Some(b)),
+            ))
+        })
+        .collect();
+    let mut context = Context::from_waker(Waker::noop());
+    for waiter in &mut waiting {
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+    }
+    drop(occupied);
+    for waiter in &mut waiting {
+        assert!(
+            matches!(waiter.as_mut().poll(&mut context), Poll::Ready(Ok(_))),
+            "a whole operation must progress without its admission timeout"
+        );
+    }
+    drop(waiting);
+    assert_eq!(admission.slots.available_permits(), MAXIMUM_ACTIVE_SESSIONS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_admission_is_bounded_and_dropped_waiters_remove_keys() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let admission = SubmissionAdmission::new();
+    let occupied = admission
+        .slots
+        .clone()
+        .acquire_many_owned(u32::try_from(MAXIMUM_ACTIVE_SESSIONS).unwrap())
+        .await
+        .unwrap();
+    let ids: Vec<_> = (0..MAXIMUM_PENDING_SUBMISSIONS)
+        .map(|i| SessionId::new(format!("pending-{i}")).unwrap())
+        .collect();
+    let mut waiting: Vec<_> = ids
+        .iter()
+        .map(|id| Box::pin(tokio::task::unconstrained(admission.acquire(id))))
+        .collect();
+    let mut context = Context::from_waker(Waker::noop());
+    for waiter in &mut waiting {
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+    }
+    let excess = SessionId::new("excess").unwrap();
+    assert!(matches!(
+        admission.acquire(&excess).await,
+        Err(TurnError::Capacity)
+    ));
+    assert!(!admission.sessions.lock().unwrap().contains_key(&excess));
+    assert_eq!(
+        admission.sessions.lock().unwrap().len(),
+        MAXIMUM_PENDING_SUBMISSIONS
+    );
+    drop(waiting.pop());
+    assert_eq!(admission.pending.available_permits(), 1);
+    assert_eq!(
+        admission.sessions.lock().unwrap().len(),
+        MAXIMUM_PENDING_SUBMISSIONS - 1
+    );
+    drop(waiting);
+    assert!(admission.sessions.lock().unwrap().is_empty());
+    assert_eq!(
+        admission.pending.available_permits(),
+        MAXIMUM_PENDING_SUBMISSIONS
+    );
+    drop(occupied);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pair_admission_shares_one_deadline_and_deduplicates_keys() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let admission = SubmissionAdmission::new();
+    let a = SessionId::new("a").unwrap();
+    let z = SessionId::new("z").unwrap();
+    let held = admission.acquire(&z).await.unwrap();
+    let occupied = admission
+        .slots
+        .clone()
+        .acquire_many_owned(u32::try_from(MAXIMUM_ACTIVE_SESSIONS - 1).unwrap())
+        .await
+        .unwrap();
+    let mut pair = Box::pin(tokio::task::unconstrained(
+        admission.acquire_pair(&z, Some(&a)),
+    ));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(pair.as_mut().poll(&mut context).is_pending());
+    tokio::time::advance(
+        DURABILITY_WAIT_TIMEOUT
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .await;
+    // Keep capacity full while allowing the second keyed lock to advance.
+    drop(held);
+    let last = admission.slots.clone().try_acquire_owned().unwrap();
+    assert!(pair.as_mut().poll(&mut context).is_pending());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        pair.as_mut().poll(&mut context),
+        Poll::Ready(Err(TurnError::Capacity))
+    ));
+    drop(pair);
+    assert!(admission.sessions.lock().unwrap().is_empty());
+    drop((last, occupied));
+    let duplicate = admission.acquire_pair(&a, Some(&a)).await.unwrap();
+    assert_eq!(
+        admission.slots.available_permits(),
+        MAXIMUM_ACTIVE_SESSIONS - 1
+    );
+    assert_eq!(admission.sessions.lock().unwrap().len(), 1);
+    drop(duplicate);
+    assert!(admission.sessions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn retired_submission_key_cannot_remove_its_replacement() {
+    let admission = SubmissionAdmission::new();
+    let id = SessionId::new("reused").unwrap();
+    let old = admission.register(&id);
+    let weak = Arc::downgrade(&old);
+    let mut sessions = admission.sessions.lock().unwrap();
+    let retired = std::thread::spawn(move || drop(old));
+    // Last-owner Drop must now wait for our registry guard.
+    while weak.strong_count() != 0 {
+        std::thread::yield_now();
+    }
+    let replacement = Arc::new(SubmissionKey {
+        id: id.clone(),
+        mutex: Arc::new(AsyncMutex::new(())),
+        registry: Arc::downgrade(&admission.sessions),
+    });
+    sessions.insert(id.clone(), Arc::downgrade(&replacement));
+    drop(sessions);
+    retired.join().unwrap();
+    assert!(
+        admission
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .ptr_eq(&Arc::downgrade(&replacement))
+    );
+    drop(replacement);
+    assert!(admission.sessions.lock().unwrap().is_empty());
+}

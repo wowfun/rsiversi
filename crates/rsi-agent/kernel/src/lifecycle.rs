@@ -722,6 +722,7 @@ impl AgentKernel {
                     .map_err(turn_store_error)?;
                 let path = agent_root_and_path(&header).1;
                 let suffix = message.control_seq;
+                let turn_id = message_turn_id(&message.session_id, suffix);
                 let prepared = tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return Ok(false),
@@ -737,8 +738,7 @@ impl AgentKernel {
                             ))
                             .map_err(|error| TurnError::Invalid(error.to_string()))?,
                             path,
-                            turn_id: TurnId::new(format!("turn-message-{suffix}"))
-                                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                            turn_id,
                             step_id: rsi_agent_session_protocol::StepId::new(format!(
                                 "step-message-{suffix}"
                             ))
@@ -1405,5 +1405,35 @@ impl DurabilityWait {
                 }
             }
         }
+    }
+}
+
+fn message_turn_id(session: &SessionId, control_seq: u64) -> TurnId {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"rsi.message-turn.v1\0");
+    hash.update(session.as_str().as_bytes());
+    hash.update(control_seq.to_le_bytes());
+    TurnId::new(format!("message-{:x}", hash.finalize())).expect("bounded digest identity")
+}
+
+#[cfg(test)]
+mod message_identity_tests {
+    #[test]
+    fn message_turns_remain_distinct_across_parent_and_child_control_sequences() {
+        let parent = rsi_agent_session_protocol::SessionId::new("parent").unwrap();
+        let child = rsi_agent_session_protocol::SessionId::new("child").unwrap();
+        assert_eq!(
+            super::message_turn_id(&parent, 3),
+            super::message_turn_id(&parent, 3)
+        );
+        assert_ne!(
+            super::message_turn_id(&parent, 3),
+            super::message_turn_id(&child, 3)
+        );
+        assert_ne!(
+            super::message_turn_id(&child, 3),
+            super::message_turn_id(&child, 4)
+        );
     }
 }
