@@ -38,6 +38,12 @@ terminal settlement remains available. Exact spawn retries recover the initial
 receipt because cancelling a waiter cannot undo an admitted child creation.
 Flush and settlement use independent workers;
 ready preparation uses bounded per-root reservations outside the scheduler lock.
+SQLite ready-root enumeration must also bound the work behind one scheduler page:
+it seeks each distinct root through the index under one read snapshot, so
+duplicate ready messages do not determine the work needed to fill a root page.
+This is scheduler progress work, independent of Session export or GUI previews;
+the [SQLite contract](../../../../crates/rsi-agent/store-sqlite/README.md) and
+selection-work tests own its mechanics and measured scan bounds.
 New durable input and newly available tree capacity request a root rescan even
 when another root's final-page preparation is blocked; failed enumeration still
 keeps its retry deadline.
