@@ -80,6 +80,11 @@ enum WaitResumeFault {
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
+    pause_reply_for: Mutex<Option<SessionId>>,
+    fail_reply_read: AtomicBool,
+    reply_pages: AtomicUsize,
+    reply_read_entered: Notify,
+    release_reply_read: Notify,
     stale_domain_read: AtomicBool,
     pause_domain_read: AtomicBool,
     domain_read_entered: Notify,
@@ -152,6 +157,11 @@ impl FactReadRaceStore {
     fn new(inner: Arc<MemoryStore>) -> Self {
         Self {
             inner,
+            pause_reply_for: Mutex::new(None),
+            fail_reply_read: AtomicBool::new(false),
+            reply_pages: AtomicUsize::new(0),
+            reply_read_entered: Notify::new(),
+            release_reply_read: Notify::new(),
             stale_domain_read: AtomicBool::new(false),
             pause_domain_read: AtomicBool::new(false),
             domain_read_entered: Notify::new(),
@@ -700,6 +710,23 @@ impl SessionStore for FactReadRaceStore {
         exclusive_before_seq: u64,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreBackwardFactPage> {
+        self.reply_pages.fetch_add(1, Ordering::AcqRel);
+        let pause = {
+            let mut selected = self.pause_reply_for.lock().unwrap();
+            if selected.as_ref() == Some(session_id) {
+                selected.take();
+                true
+            } else {
+                false
+            }
+        };
+        if pause {
+            self.reply_read_entered.notify_one();
+            self.release_reply_read.notified().await;
+            if self.fail_reply_read.swap(false, Ordering::AcqRel) {
+                return Err(StoreError::Io("reply read fixture failure".into()));
+            }
+        }
         self.inner
             .read_facts_before(session_id, exclusive_before_seq, limit)
             .await
