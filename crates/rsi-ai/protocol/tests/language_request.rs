@@ -697,3 +697,90 @@ fn canonical_request_preserves_provider_extension_integers_above_two_to_the_53()
     let restored: LanguageRequest = serde_json::from_slice(&encoded).expect("round trip");
     assert_eq!(restored.canonical_bytes().unwrap(), encoded);
 }
+
+#[test]
+fn frozen_options_share_exact_complete_envelope_budget_and_wire() {
+    use rsi_ai_protocol::LanguageRequestOptions;
+    let tools = vec![
+        ToolDefinition::new(
+            "read",
+            "quotes \" and Unicode 界",
+            serde_json::json!({"type":"object", "properties":{"path":{"type":"string"}}}),
+        )
+        .unwrap(),
+    ];
+    let settings = LanguageSettings::default()
+        .with_max_output_tokens(8192)
+        .unwrap()
+        .with_optional_reasoning_effort(Some(ReasoningEffortId::new("high").unwrap()));
+    let format = ResponseFormat::JsonSchema {
+        name: "result".into(),
+        description: None,
+        schema: serde_json::json!({"type":"object"}),
+        strict: true,
+    };
+    let hosted = vec![HostedTool::WebSearch { max_uses: Some(3) }];
+    let extensions =
+        vec![ProviderExtension::new("fixture", 1, json!({"opaque":"界\n\""})).unwrap()];
+    let options = LanguageRequestOptions::new(
+        tools.clone(),
+        ToolChoice::Auto,
+        hosted.clone(),
+        format.clone(),
+        settings.clone(),
+        extensions.clone(),
+    )
+    .unwrap();
+    let small = vec![Message::user_text("x").unwrap()];
+    let request = LanguageRequest::new_with_options(small.clone(), options.clone()).unwrap();
+    let chained = LanguageRequest::new(small.clone())
+        .unwrap()
+        .with_tools(tools, ToolChoice::Auto)
+        .unwrap()
+        .with_response_format(format)
+        .unwrap()
+        .with_settings(settings)
+        .unwrap()
+        .with_hosted_tools(hosted)
+        .unwrap()
+        .with_extensions(extensions)
+        .unwrap();
+    assert_eq!(request, chained);
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        wire.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "messages",
+            "tools",
+            "tool_choice",
+            "hosted_tools",
+            "response_format",
+            "settings",
+            "extensions"
+        ]
+    );
+    let message_bytes = serde_json::to_vec(&small).unwrap().len();
+    let overhead = serde_json::to_vec(&request).unwrap().len() - message_bytes;
+    assert_eq!(options.message_byte_budget() + overhead, MAX_REQUEST_BYTES);
+    let text_len = options.message_byte_budget() - (message_bytes - 1);
+    for extra in [0, 1] {
+        // UTF-8, quote and backslash escaping must consume encoded bytes exactly.
+        let prefix = "界\"\\\n";
+        let prefix_bytes = serde_json::to_string(prefix).unwrap().len() - 2;
+        let text = format!("{prefix}{}", "x".repeat(text_len - prefix_bytes + extra));
+        let messages = vec![Message::user_text(text).unwrap()];
+        let request = LanguageRequest::new_with_options(messages, options.clone());
+        if extra == 0 {
+            assert_eq!(
+                serde_json::to_vec(&request.unwrap()).unwrap().len(),
+                MAX_REQUEST_BYTES
+            );
+        } else {
+            assert_eq!(request.unwrap_err().code(), "request.too_large");
+        }
+    }
+}

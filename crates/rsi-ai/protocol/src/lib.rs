@@ -46,11 +46,12 @@ pub use runtime::{
 };
 pub use semantic::{
     HostedTool, ImageToolResultCapability, ImageToolResultMode, LanguageModelLimits,
-    LanguageModelProfiles, LanguageProfile, LanguageRequest, LanguageSettings,
-    MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_BLOCKS_PER_MESSAGE, MAX_DESCRIPTION_BYTES,
-    MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_LANGUAGE_MODEL_PROFILES,
-    MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES, Message, MessageContent,
-    MessageRole, ProviderExtensionFormat, ResponseFormat, SemanticError, ToolChoice, ToolDialect,
+    LanguageModelProfiles, LanguageProfile, LanguageRequest, LanguageRequestOptions,
+    LanguageSettings, MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_BLOCKS_PER_MESSAGE,
+    MAX_DESCRIPTION_BYTES, MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES,
+    MAX_LANGUAGE_MODEL_PROFILES, MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES,
+    Message, MessageContent, MessageRole, ProviderExtensionFormat, ResponseFormat, SemanticError,
+    ToolChoice, ToolDialect,
 };
 pub use validation::{
     JsonStructureError, identifier as validate_identifier, validate_json_structure,
@@ -86,4 +87,6 @@ pub const MAX_TOOL_SCHEMA_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_BINARY_CHUNK_BYTES: usize = 256 * 1024;
 
 mod effort;
-pub use effort::{PreparedLanguageSettings, ReasoningEffortId, ReasoningEffortProfile};
+pub use effort::{
+    MAX_REASONING_EFFORT_BYTES, PreparedLanguageSettings, ReasoningEffortId, ReasoningEffortProfile,
+};

@@ -498,9 +498,13 @@ fn invalid_profile(message: impl Into<String>) -> AiError {
 fn validate_chat_tool_result_adjacency(request: &LanguageRequest) -> Result<(), AiError> {
     let mut adjacent_calls = BTreeSet::new();
     for message in request.messages() {
+        if message.role() != MessageRole::Tool && !adjacent_calls.is_empty() {
+            return Err(invalid_profile(
+                "Chat Completions assistant tool-call group has missing results",
+            ));
+        }
         match message.role() {
             MessageRole::Assistant => {
-                adjacent_calls.clear();
                 adjacent_calls.extend(message.content().iter().filter_map(|content| {
                     let MessageContent::ToolCall(call) = content else {
                         return None;
@@ -521,10 +525,13 @@ fn validate_chat_tool_result_adjacency(request: &LanguageRequest) -> Result<(), 
                     ));
                 }
             }
-            MessageRole::System | MessageRole::Developer | MessageRole::User => {
-                adjacent_calls.clear();
-            }
+            MessageRole::System | MessageRole::Developer | MessageRole::User => {}
         }
+    }
+    if !adjacent_calls.is_empty() {
+        return Err(invalid_profile(
+            "Chat Completions assistant tool-call group has missing results",
+        ));
     }
     Ok(())
 }
@@ -1098,6 +1105,103 @@ mod endpoint_tests {
                     format!("{}/chat/completions", endpoint.trim_end_matches('/'))
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_adjacency_tests {
+    use super::*;
+    #[test]
+    fn multiple_calls_require_all_results_but_allow_result_order_to_differ() {
+        let calls = rsi_ai_protocol::Message::assistant(
+            ["first", "second"]
+                .into_iter()
+                .map(|id| {
+                    MessageContent::ToolCall(rsi_ai_protocol::ToolCall {
+                        id: id.into(),
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                        kind: ToolCallKind::Function,
+                    })
+                })
+                .collect(),
+        )
+        .unwrap();
+        let result = |id| {
+            rsi_ai_protocol::Message::tool_result(
+                id,
+                vec![MessageContent::Text {
+                    text: "done".into(),
+                }],
+                false,
+            )
+            .unwrap()
+        };
+        assert!(
+            validate_chat_tool_result_adjacency(
+                &LanguageRequest::new(vec![calls.clone(), result("first")]).unwrap()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_chat_tool_result_adjacency(
+                &LanguageRequest::new(vec![calls.clone(), result("second"), result("first")])
+                    .unwrap()
+            )
+            .is_ok()
+        );
+        // The provider receives a validated request: duplicate results fail at
+        // the owning protocol boundary before adjacency validation can run.
+        assert!(LanguageRequest::new(vec![calls, result("first"), result("first")]).is_err());
+    }
+    #[test]
+    fn incomplete_groups_fail_before_any_other_role_and_at_eof() {
+        let calls = rsi_ai_protocol::Message::assistant(vec![MessageContent::ToolCall(
+            rsi_ai_protocol::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+                kind: ToolCallKind::Function,
+            },
+        )])
+        .unwrap();
+        let result = rsi_ai_protocol::Message::tool_result(
+            "call",
+            vec![MessageContent::Text {
+                text: "not executed".into(),
+            }],
+            true,
+        )
+        .unwrap();
+        let next = [
+            rsi_ai_protocol::Message::user_text("steer").unwrap(),
+            rsi_ai_protocol::Message::assistant(vec![MessageContent::Text {
+                text: "answer".into(),
+            }])
+            .unwrap(),
+            rsi_ai_protocol::Message::system_text("system").unwrap(),
+            rsi_ai_protocol::Message::developer_text("instructions").unwrap(),
+        ];
+        assert!(
+            validate_chat_tool_result_adjacency(
+                &LanguageRequest::new(vec![calls.clone()]).unwrap()
+            )
+            .is_err()
+        );
+        for message in next {
+            assert!(
+                validate_chat_tool_result_adjacency(
+                    &LanguageRequest::new(vec![calls.clone(), message.clone()]).unwrap()
+                )
+                .is_err()
+            );
+            assert!(
+                validate_chat_tool_result_adjacency(
+                    &LanguageRequest::new(vec![calls.clone(), result.clone(), message]).unwrap()
+                )
+                .is_ok()
+            );
         }
     }
 }

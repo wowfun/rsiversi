@@ -4,6 +4,9 @@ use crate::SemanticError;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
+/// Maximum encoded reasoning effort identifier length.
+pub const MAX_REASONING_EFFORT_BYTES: usize = 32;
+
 /// Actual generation-pinned reasoning and capacity facts for one prepared request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +77,7 @@ impl ReasoningEffortId {
     pub fn new(value: impl Into<String>) -> Result<Self, SemanticError> {
         let value = value.into();
         if value.is_empty()
-            || value.len() > 32
+            || value.len() > MAX_REASONING_EFFORT_BYTES
             || !value
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))

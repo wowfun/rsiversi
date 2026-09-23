@@ -128,3 +128,11 @@ Control JSON must preserve its typed serialization shape. This rejects unknown
 fields silently ignored by nested serde unit variants without changing the
 existing Language/Image public Rust shapes. Opaque provider state stays bounded
 by the normal AI JSON structure limits as well as its smaller byte ceiling.
+
+`LanguageRequestOptions` freezes validated non-message controls and caches their
+exact message-byte allowance at construction. Its budget and complete request
+serialization share one wire representation; reading the allowance is infallible
+and does not encode the controls again. `LanguageRequest::new_with_options` checks
+message structure, cross-message relationships and encoded message bytes against
+that allowance without revalidating the frozen controls. Complete requests remain closed; independent
+`with_*` updates and deserialization retain their validation.

@@ -1045,9 +1045,112 @@ impl ResponseFormat {
     }
 }
 
+/// Validated non-message controls frozen before context planning.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageRequestOptions {
+    tools: Vec<ToolDefinition>,
+    tool_choice: ToolChoice,
+    hosted_tools: Vec<HostedTool>,
+    response_format: ResponseFormat,
+    settings: LanguageSettings,
+    extensions: Vec<ProviderExtension>,
+    message_byte_budget: usize,
+}
+
+impl Default for LanguageRequestOptions {
+    fn default() -> Self {
+        Self::new(
+            Vec::new(),
+            ToolChoice::Auto,
+            Vec::new(),
+            ResponseFormat::Text,
+            LanguageSettings::default(),
+            Vec::new(),
+        )
+        .expect("default controls fit the request envelope")
+    }
+}
+
+impl LanguageRequestOptions {
+    /// Validates controls independently of the eventual message projection.
+    pub fn new(
+        tools: Vec<ToolDefinition>,
+        tool_choice: ToolChoice,
+        hosted_tools: Vec<HostedTool>,
+        response_format: ResponseFormat,
+        settings: LanguageSettings,
+        extensions: Vec<ProviderExtension>,
+    ) -> Result<Self, SemanticError> {
+        settings.validate()?;
+        validate_tools(&tools, &tool_choice)?;
+        validate_hosted_tools(&hosted_tools)?;
+        response_format.validate()?;
+        validate_extensions(&extensions)?;
+        let mut options = Self {
+            tools,
+            tool_choice,
+            hosted_tools,
+            response_format,
+            settings,
+            extensions,
+            message_byte_budget: 0,
+        };
+        options.message_byte_budget = options.compute_message_byte_budget()?;
+        Ok(options)
+    }
+
+    /// Frozen generation controls, including the selected reasoning effort.
+    pub const fn settings(&self) -> &LanguageSettings {
+        &self.settings
+    }
+
+    /// Exact space for the encoded messages array in the complete request envelope.
+    pub const fn message_byte_budget(&self) -> usize {
+        self.message_byte_budget
+    }
+
+    fn compute_message_byte_budget(&self) -> Result<usize, SemanticError> {
+        let view = LanguageRequestWire {
+            messages: &[],
+            tools: &self.tools,
+            tool_choice: &self.tool_choice,
+            hosted_tools: &self.hosted_tools,
+            response_format: &self.response_format,
+            settings: &self.settings,
+            extensions: &self.extensions,
+        };
+        let bytes = validation::encoded_len(&view)
+            .map_err(|reason| SemanticError::new("request.encoding", "request", reason))?;
+        MAX_REQUEST_BYTES
+            // The empty messages array contributed exactly the two ASCII bytes [].
+            // Remove it to obtain envelope overhead, then budget the replacement array.
+            .checked_sub(bytes - 2)
+            .filter(|budget| *budget >= 2)
+            .ok_or_else(|| {
+                SemanticError::new(
+                    "request.too_large",
+                    "request",
+                    "controls exceed the request envelope",
+                )
+            })
+    }
+}
+
+// The budget and request use this same wire view; field additions cannot silently
+// omit overhead from one serialization path.
+#[derive(Serialize)]
+struct LanguageRequestWire<'a> {
+    messages: &'a [Message],
+    tools: &'a [ToolDefinition],
+    tool_choice: &'a ToolChoice,
+    hosted_tools: &'a [HostedTool],
+    response_format: &'a ResponseFormat,
+    settings: &'a LanguageSettings,
+    extensions: &'a [ProviderExtension],
+}
+
 /// One validated language request; model/provider selection lives outside it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LanguageRequest {
     messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
@@ -1056,6 +1159,21 @@ pub struct LanguageRequest {
     response_format: ResponseFormat,
     settings: LanguageSettings,
     extensions: Vec<ProviderExtension>,
+}
+
+impl Serialize for LanguageRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        LanguageRequestWire {
+            messages: &self.messages,
+            tools: &self.tools,
+            tool_choice: &self.tool_choice,
+            hosted_tools: &self.hosted_tools,
+            response_format: &self.response_format,
+            settings: &self.settings,
+            extensions: &self.extensions,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for LanguageRequest {
@@ -1095,16 +1213,34 @@ impl<'de> Deserialize<'de> for LanguageRequest {
 impl LanguageRequest {
     /// Creates a request from one or more validated messages with default controls.
     pub fn new(messages: Vec<Message>) -> Result<Self, SemanticError> {
+        Self::new_with_options(messages, LanguageRequestOptions::default())
+    }
+
+    /// Validates messages and their aggregate allowance using already-validated controls.
+    pub fn new_with_options(
+        messages: Vec<Message>,
+        options: LanguageRequestOptions,
+    ) -> Result<Self, SemanticError> {
+        let message_byte_budget = options.message_byte_budget;
         let request = Self {
             messages,
-            tools: Vec::new(),
-            tool_choice: ToolChoice::Auto,
-            hosted_tools: Vec::new(),
-            response_format: ResponseFormat::Text,
-            settings: LanguageSettings::default(),
-            extensions: Vec::new(),
+            tools: options.tools,
+            tool_choice: options.tool_choice,
+            hosted_tools: options.hosted_tools,
+            response_format: options.response_format,
+            settings: options.settings,
+            extensions: options.extensions,
         };
-        request.validate()?;
+        request.validate_messages()?;
+        let message_bytes = validation::encoded_len(&request.messages)
+            .map_err(|reason| SemanticError::new("request.encoding", "request", reason))?;
+        if message_bytes > message_byte_budget {
+            return Err(SemanticError::new(
+                "request.too_large",
+                "request",
+                format!("canonical encoding exceeds {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
         Ok(request)
     }
 
@@ -1197,6 +1333,16 @@ impl LanguageRequest {
 
     /// Revalidates deserialized request structure, relationships, and aggregate bounds.
     pub fn validate(&self) -> Result<(), SemanticError> {
+        self.validate_messages()?;
+        self.settings.validate()?;
+        validate_tools(&self.tools, &self.tool_choice)?;
+        validate_hosted_tools(&self.hosted_tools)?;
+        self.response_format.validate()?;
+        validate_extensions(&self.extensions)?;
+        self.validate_aggregate_size()
+    }
+
+    fn validate_messages(&self) -> Result<(), SemanticError> {
         if self.messages.is_empty() || self.messages.len() > MAX_MESSAGES {
             return Err(SemanticError::new(
                 "request.invalid_messages",
@@ -1247,12 +1393,7 @@ impl LanguageRequest {
                 }
             }
         }
-        self.settings.validate()?;
-        validate_tools(&self.tools, &self.tool_choice)?;
-        validate_hosted_tools(&self.hosted_tools)?;
-        self.response_format.validate()?;
-        validate_extensions(&self.extensions)?;
-        self.validate_aggregate_size()
+        Ok(())
     }
 
     fn validate_aggregate_size(&self) -> Result<(), SemanticError> {
