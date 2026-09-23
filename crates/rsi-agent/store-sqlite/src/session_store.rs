@@ -37,11 +37,10 @@ pub(super) const LIST_WAITING_ACTIVATIONS_FIRST_SQL: &str =
     "SELECT session_id FROM active_activations
      WHERE phase = 'waiting'
      ORDER BY session_id LIMIT ?2";
-pub(super) const LIST_READY_ROOTS_AFTER_SQL: &str =
-    "SELECT DISTINCT root_session_id FROM ready_messages
+pub(super) const LIST_READY_ROOTS_AFTER_SQL: &str = "SELECT root_session_id FROM ready_messages
      WHERE root_session_id > ?1
      ORDER BY root_session_id LIMIT ?2";
-const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT DISTINCT root_session_id FROM ready_messages
+const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_messages
      ORDER BY root_session_id LIMIT ?2";
 
 #[async_trait]
@@ -1749,29 +1748,41 @@ impl SessionStore for SqliteStore {
         validate_session_read_limit(limit)?;
         let after = after.cloned();
         self.with_reader(move |connection| {
-            let sql = if after.is_some() {
-                LIST_READY_ROOTS_AFTER_SQL
-            } else {
-                LIST_READY_ROOTS_FIRST_SQL
-            };
-            let mut statement = connection.prepare(sql).map_err(sql_error)?;
-            let rows = statement
-                .query_map(
-                    params![
-                        after.as_ref().map(SessionId::as_str),
-                        i64::try_from(limit + 1).map_err(|_| {
-                            StoreError::Invalid("ready-root read limit exceeds SQLite".into())
-                        })?,
-                    ],
-                    |row| bounded_text(row, 0, 256),
-                )
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let mut roots = rows
-                .map(|row| {
-                    SessionId::new(row.map_err(sql_error)?)
-                        .map_err(|error| StoreError::Corrupt(error.to_string()))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let mut roots = Vec::with_capacity(limit + 1);
+            {
+                let mut first = transaction
+                    .prepare_cached(LIST_READY_ROOTS_FIRST_SQL)
+                    .map_err(sql_error)?;
+                let mut next = transaction
+                    .prepare_cached(LIST_READY_ROOTS_AFTER_SQL)
+                    .map_err(sql_error)?;
+                let mut cursor = after.clone();
+                for _ in 0..=limit {
+                    let statement = if cursor.is_some() {
+                        &mut next
+                    } else {
+                        &mut first
+                    };
+                    let root = statement
+                        .query_row(
+                            params![cursor.as_ref().map(SessionId::as_str), 1_i64],
+                            |row| bounded_text(row, 0, 256),
+                        )
+                        .optional()
+                        .map_err(sql_error)?;
+                    let Some(root) = root else {
+                        break;
+                    };
+                    let root = SessionId::new(root)
+                        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                    cursor = Some(root.clone());
+                    roots.push(root);
+                }
+            }
+            transaction.commit().map_err(sql_error)?;
             let has_more = roots.len() > limit;
             roots.truncate(limit);
             let page = StoreReadyRootPage {

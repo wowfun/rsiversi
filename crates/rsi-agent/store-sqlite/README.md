@@ -169,6 +169,14 @@ rather than scanning the complete sessions table. Cursor-paged ready-message,
 Agent-child, waiting-activation, and ready-root reads select distinct first-page
 and continuation SQL. A continuation keeps the complete cursor tuple as an
 index range constraint rather than hiding it behind a nullable `OR` predicate.
+Ready-root pages seek one distinct root at a time inside one deferred reader
+transaction, reusing prepared statements for at most the page limit plus lookahead.
+Each continuation seeks the covering `ready_messages_by_root` index with
+`root_session_id > cursor`; `ready_messages` is a materialized table. Its default
+SQLite BINARY collation agrees with Rust's byte ordering of validated identifiers.
+The foreground reader remains held for this bounded page; the contract does not
+promise independent read lanes or a wall-clock latency bound.
+Duplicate messages do not determine selection work, with or without statistics.
 Ready pages join mailbox source metadata by its complete primary key, rejecting
 missing or inconsistent projections without decoding message bodies. Waiting
 pages use a partial Session-id index containing only waiting activations, so

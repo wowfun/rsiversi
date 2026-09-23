@@ -474,3 +474,202 @@ async fn poisoned_fork_cache_falls_back_to_validated_resolution() {
         2
     );
 }
+
+async fn seed_ready_root(store: &SqliteStore, name: &str, count: u64) -> SessionId {
+    let id = seed_session(store, name).await;
+    store
+        .commit_agent(settlement::commit(vec![ready_append(&id, count)]))
+        .await
+        .unwrap();
+    store.validate_session(&id).await.unwrap();
+    id
+}
+
+fn ready_append(id: &SessionId, count: u64) -> AtomicSessionAppend {
+    let controls = (1..=count)
+        .map(|seq| {
+            AgentControlRecord::new(
+                seq,
+                seq,
+                AgentControlRecordBody::MessageAccepted {
+                    message: AgentMessage {
+                        message_id: MessageId::new(format!("message-{seq}")).unwrap(),
+                        source: AgentMessageSource::Human,
+                        content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+                            text: "work".into(),
+                        }],
+                        options: rsi_agent_session_protocol::MessageOptions::default(),
+                    },
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                    bound_turn_id: None,
+                    root_session_id: id.clone(),
+                    target: MessageTarget::NextTurn,
+                    wake_required: true,
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    AtomicSessionAppend {
+        session_id: id.clone(),
+        expected_fact_seq: 1,
+        expected_control_seq: 0,
+        header: None,
+        facts: vec![],
+        controls,
+    }
+}
+
+#[tokio::test]
+async fn ready_root_pages_seek_past_duplicates_with_and_without_statistics() {
+    let _measurement = MEASUREMENT.lock().await;
+    for statistics in [false, true] {
+        let mut work = Vec::new();
+        let mut continuation_work = Vec::new();
+        for duplicates in [1_u64, 64] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SqliteStore::open(root.path()).unwrap();
+            let mut ids = Vec::new();
+            for (name, count) in [
+                ("a-root", duplicates),
+                ("b-root", duplicates),
+                ("c-root", duplicates),
+            ] {
+                ids.push(seed_ready_root(&store, name, count).await);
+            }
+            if statistics {
+                store
+                    .inner
+                    .connections
+                    .writer
+                    .lock()
+                    .unwrap()
+                    .execute_batch("ANALYZE")
+                    .unwrap();
+            }
+            let plan = store
+                .inner
+                .connections
+                .reader
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!("EXPLAIN QUERY PLAN {LIST_READY_ROOTS_AFTER_SQL}"),
+                    params!["a-root", 1_i64],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap();
+            assert!(
+                plan.contains("COVERING INDEX ready_messages_by_root")
+                    && plan.contains("root_session_id>?"),
+                "{plan}"
+            );
+            eprintln!("ready roots statistics={statistics} duplicates={duplicates} plan={plan}");
+            store
+                .inner
+                .connections
+                .reader
+                .lock()
+                .unwrap()
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+            VM.store(0, Ordering::Relaxed);
+            let first = store.list_ready_roots(None, 1).await.unwrap();
+            work.push(VM.load(Ordering::Relaxed));
+            assert_eq!(first.roots, ids[..1]);
+            assert!(first.has_more);
+            VM.store(0, Ordering::Relaxed);
+            let rest = store.list_ready_roots(Some(&ids[0]), 2).await.unwrap();
+            continuation_work.push(VM.load(Ordering::Relaxed));
+            assert_eq!(rest.roots, ids[1..]);
+            assert!(!rest.has_more);
+            let empty = store.list_ready_roots(Some(&ids[2]), 1).await.unwrap();
+            assert!(empty.roots.is_empty());
+            assert!(!empty.has_more);
+            store
+                .inner
+                .connections
+                .reader
+                .lock()
+                .unwrap()
+                .trace_v2(TraceEventCodes::empty(), None);
+        }
+        eprintln!("ready roots statistics={statistics} duplicates=1/64 vm_steps={work:?}");
+        assert!(
+            work[1] <= work[0] + 16,
+            "root seek work grew with duplicate messages: {work:?}"
+        );
+        eprintln!(
+            "ready roots statistics={statistics} continuation vm_steps={continuation_work:?}"
+        );
+        // Compare cardinalities on the same linked SQLite build, not an absolute
+        // opcode golden. Small planner bookkeeping variation is allowed; scanning
+        // the 64 duplicate rows per root is not.
+        assert!(
+            continuation_work[1] <= continuation_work[0] + 16,
+            "continuation work grew with duplicate messages: {continuation_work:?}"
+        );
+    }
+}
+
+static READY_READ_GATE: std::sync::Mutex<
+    Option<(Arc<tokio::sync::Notify>, std::sync::mpsc::Receiver<()>)>,
+> = std::sync::Mutex::new(None);
+fn pause_ready_read(event: TraceEvent<'_>) {
+    if let TraceEvent::Profile(statement, _) = event
+        && statement.sql().contains("ready_messages")
+        && let Some((entered, release)) = READY_READ_GATE.lock().unwrap().take()
+    {
+        entered.notify_one();
+        release
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ready_root_page_keeps_one_snapshot_while_wal_writer_commits() {
+    let _measurement = MEASUREMENT.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let a = seed_ready_root(&store, "a", 4).await;
+    let b = seed_session(&store, "b").await;
+    let c = seed_ready_root(&store, "c", 4).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, waiter) = std::sync::mpsc::channel();
+    *READY_READ_GATE.lock().unwrap() = Some((entered.clone(), waiter));
+    store.inner.connections.reader.lock().unwrap().trace_v2(
+        TraceEventCodes::SQLITE_TRACE_PROFILE,
+        Some(pause_ready_read),
+    );
+    let reading = tokio::spawn({
+        let store = store.clone();
+        async move { store.list_ready_roots(None, 2).await }
+    });
+    entered.notified().await;
+    let committed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.commit_agent(settlement::commit(vec![ready_append(&b, 1)])),
+    )
+    .await;
+    release.send(()).unwrap();
+    committed
+        .expect("writer must commit while the reader holds its snapshot")
+        .unwrap();
+    let page = reading.await.unwrap().unwrap();
+    assert_eq!(page.roots, [a.clone(), c.clone()]);
+    assert!(
+        !page.has_more,
+        "later root must not enter the captured page"
+    );
+    store
+        .inner
+        .connections
+        .reader
+        .lock()
+        .unwrap()
+        .trace_v2(TraceEventCodes::empty(), None);
+    assert_eq!(
+        store.list_ready_roots(None, 3).await.unwrap().roots,
+        [a, b, c]
+    );
+}
