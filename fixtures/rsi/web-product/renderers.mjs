@@ -31,7 +31,7 @@ const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chr
 try {
   service = await startService({ binary, assets, report, configure: async ({ config }) => {
     const profile = join(config, "application-profiles/web/application.profile.toml");
-    const files = ["index.html", "app.js", "worker.js", "admission.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
+    const files = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
     const content = await readFile(profile, "utf8");
     await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, watch = true, files = ${JSON.stringify(files)}`));
   } });
@@ -136,7 +136,7 @@ try {
     service = await startService({ binary, assets, report: join(report, mode), configure: async ({ config }) => {
       const profile = join(config, "application-profiles/web/application.profile.toml");
       const content = await readFile(profile, "utf8");
-      const files = ["index.html", "app.js", "worker.js", "admission.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
+      const files = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
       if (mode === "broken") files.push("standard.js", "ui-renderers.json", "lazy.js");
       await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(files)}`));
     } });

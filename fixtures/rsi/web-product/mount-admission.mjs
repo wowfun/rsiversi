@@ -12,6 +12,9 @@ export async function verifyMountAdmission(browser, root) {
       export async function mount(root, snapshot, host, signal) {
         if (window.rejectedRevision && import.meta.url.includes('/' + window.rejectedRevision + '/')) throw new Error('fixture broken module');
         window.hosts.push(host);
+        try { await host.source('raw',0,1);throw new Error('source admitted during mount'); }
+        catch(error) { if(error.message!=='Presentation binding retired')throw error; }
+        let next=snapshot;
         if (snapshot.model.data.pause) {
           window.mountStarted = true;
           await new Promise(resolve => signal.addEventListener('abort', () => {
@@ -22,7 +25,11 @@ export async function verifyMountAdmission(browser, root) {
         if (snapshot.model.data.fail) throw new Error('fixture mount failed');
         window.live++;
         root.textContent = 'mounted';
-        return { async update(snapshot) {
+        return { activate() {
+          if(!root.isConnected)throw new Error('activation before DOM commit');
+          window.activations++;if(window.activations===1)window.activationReads.push(host.source('raw',0,1));
+        }, async update(snapshot) {
+          next=snapshot;
           if (snapshot.model.data.updateFail) throw new Error('fixture update failed');
           if (snapshot.model.data.updatePause) await new Promise(resolve => { window.finishUpdate = resolve; });
           window.updates++;
@@ -42,7 +49,7 @@ export async function verifyMountAdmission(browser, root) {
       const { MountTable } = await import("/mounts.js");
       const check = (value, label) => { if (!value) throw new Error(label); };
       const rejects = async (body, label) => { let rejected = false; try { await body(); } catch { rejected = true; } check(rejected, label); };
-      window.hosts = []; window.live = 0; window.updates = 0; window.disposals = 0;
+      window.activations=0;window.activationReads=[];window.hosts = []; window.live = 0; window.updates = 0; window.disposals = 0;
       const offer = number => ({ revision: number.toString(16).padStart(64, "0"), catalog: { renderers: [{
         id: "fixture", abi: 1, entry: "fixture.js", files: [{ name: "fixture.js", sha256: "a".repeat(64) }],
         schemas: [{ name: "fixture.model", version: 1 }], capabilities: ["invoke", "source", "focus"], surfaces: ["pane"],
@@ -58,6 +65,8 @@ export async function verifyMountAdmission(browser, root) {
       await rejects(() => table.render(offer(1), Array.from({ length: 17 }, (_, i) => source(`s${i}`))), "17 mounts admitted");
       await rejects(() => table.render(offer(1), [slot, slot]), "duplicate slots admitted");
       check((await table.render(offer(1), [slot])).accept, "initial mount rejected");
+      check(window.activations===1,'initial renderer did not activate exactly once');
+      check((await window.activationReads[0])[0]===255,'activated source unavailable');
       const host = window.hosts.at(-1);
       check((await host.source("raw", 0, 1))[0] === 255, "binary source changed");
       await rejects(() => host.source("foreign", 0, 1), "foreign source admitted");
@@ -68,7 +77,9 @@ export async function verifyMountAdmission(browser, root) {
       await rejects(() => host.focus(document.body), "foreign focus admitted");
       host.setInput("draft", "kept");
       const bad = { ...slot, snapshot: { model: { ...slot.snapshot.model, data: { fail: true } } } };
+      const activations=window.activations;
       check(!(await table.render(offer(2), [bad])).accept, "failed candidate accepted");
+      check(window.activations===activations+1,'failed candidate activated or restored renderer not activated');
       check(window.live === 1 && slot.root.textContent === "mounted", "failed candidate removed old DOM");
       check((await table.render(offer(3), [slot])).accept, "replacement failed");
       check(window.hosts.at(-1).input("draft") === "kept", "draft lost on code replacement");
@@ -209,7 +220,7 @@ export async function verifyMountAdmission(browser, root) {
     });
     assert.equal(result.live, 0); assert.equal(result.pending_mount_joined, true);
     await page.reload();
-    await page.evaluate(() => { window.hosts = []; window.live = 0; window.disposals = 0; });
+    await page.evaluate(() => { window.activations=0;window.activationReads=[];window.hosts = []; window.live = 0; window.disposals = 0; });
     await page.clock.install();
     await page.evaluate(async () => {
       const { MountTable } = await import("/mounts.js");

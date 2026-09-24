@@ -232,8 +232,23 @@ try {
       assert.doesNotMatch(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       await left.locator(".transcript").evaluate(node => { node.scrollTop = 0; });
       await page.screenshot({ path: join(report, `${name}-partial-history.png`) });
-      await left.locator(".message.assistant").filter({ hasText: "segment" }).getByRole("button", { name: "Inspect sources", exact: true }).click();
-      await page.getByRole("dialog").getByText("Block sources", { exact: true }).waitFor();
+      const sourceButton = left.locator(".message.assistant").filter({ hasText: "segment" }).getByRole("button", { name: "Inspect sources", exact: true });
+      await sourceButton.evaluate(node => {
+        window.sourcePointerEvidence = [];
+        window.sourcePointerEvents = new AbortController();
+        for (const type of ["pointerdown", "pointerup", "click"]) document.addEventListener(type, event => {
+          window.sourcePointerEvidence.push({ type, trusted: event.isTrusted, target: event.target.textContent.slice(0, 80), exactButton: event.target === node, connected: node.isConnected });
+        }, { capture: true, signal: window.sourcePointerEvents.signal });
+      });
+      try {
+        await sourceButton.click();
+        await page.getByRole("dialog").getByText("Block sources", { exact: true }).waitFor();
+      } finally {
+        await writeFile(join(report, `${name}-source-pointer.json`), JSON.stringify(await page.evaluate(() => {
+          window.sourcePointerEvents.abort();
+          return window.sourcePointerEvidence;
+        }), null, 2));
+      }
       assert.equal(await page.locator(".source-reference").count(), 64);
       const firstReference = await page.locator(".source-reference").first().innerText();
       await page.getByRole("button", { name: "Next sources", exact: true }).click();
@@ -489,7 +504,7 @@ if (!process.env.RSI_RENDERER_ASSETS) {
 }
 for (const name of ["chromium", "firefox"]) {
   if (process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER !== name) continue;
-  for (const probe of ["renderers", "rust-renderer", "recovery", "tasks"]) {
+  for (const probe of ["renderers", "rust-renderer", "recovery", "tasks", "preview-verify"]) {
     boundedRun("node", [join(root, `fixtures/rsi/web-product/${probe}.mjs`)], {
       cwd: root, stdio: "inherit", timeout: 180_000,
       env: { ...process.env, RSI_WEB_ASSETS: assets, RSI_WEB_BINARY: sourceBinary, RSI_WEB_BROWSER: name, RSI_RENDERER_ASSETS: rendererAssets, RSI_NATIVE_UI_ARTIFACT: nativeUiArtifact, RSI_WEB_REPORT: join(report, `${name}-${probe}`) },

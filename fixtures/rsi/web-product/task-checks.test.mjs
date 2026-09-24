@@ -7,6 +7,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: control capture waits for asynchronously mounted controls`, async () => {
+    const browser = await engine.launch({ headless: true });
+    try {
+      const page = await browser.newPage();page.setDefaultTimeout(2000);
+      await page.setContent("<main></main>");
+      // Begin observation before the asynchronous renderer supplies the control.
+      const pending = assertControls(page, "main", ["Complete result"]).then(value => ({value}), error => ({error}));
+      await page.evaluate(() => document.querySelector("main").insertAdjacentHTML("beforeend", '<button>Complete result</button>'));
+      const result = await pending;
+      assert.ifError(result.error);
+      assert.deepEqual(result.value, [{label:"Complete result",hit:true}]);
+    } finally { await browser.close(); }
+  });
   test(`${name}: control capture measures the current standard renderer after replacement`, async () => {
     const browser = await engine.launch({ headless: true });
     try {

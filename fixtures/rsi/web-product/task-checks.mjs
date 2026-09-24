@@ -22,6 +22,7 @@ export async function assertControls(page, rootSelector, labels) {
   const controls = [];
   for (const label of labels) {
     const button = page.locator(rootSelector).getByRole("button", { name: label, exact: true });
+    await button.waitFor({ state: "visible" });
     assert.equal(await button.count(), 1, `${label}: expected one reachable control`);
     await button.click({ trial: true });
     assert(await button.isVisible(), `${label}: hidden`);

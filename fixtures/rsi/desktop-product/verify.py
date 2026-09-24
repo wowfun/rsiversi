@@ -24,6 +24,9 @@ from history import verify as verify_history
 from language import verify as verify_language
 from workspace_review import verify as verify_review, reply as review_reply
 from attention import verify as verify_attention, provider_reply as attention_reply
+from file_previews import verify as verify_previews
+from native_window import request_close as native_window_close
+from session_export import verify as verify_export
 from typed_results import verify as verify_typed, provider_reply as typed_reply
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -48,6 +51,8 @@ parser.add_argument('--workspace-review', action='store_true')
 parser.add_argument('--language', type=Path)
 parser.add_argument('--attention', action='store_true')
 parser.add_argument('--typed-results', action='store_true')
+parser.add_argument('--file-previews', action='store_true')
+parser.add_argument('--export', action='store_true')
 args = parser.parse_args()
 if bool(args.live_env_file) != bool(args.live_model):
     parser.error('live mode requires both an authorized environment file and a model')
@@ -200,7 +205,7 @@ try:
         until(lambda: script('return arguments[0].value', [item]) == '')
         if css == 'textarea[aria-label="Main message"]' and before['value']:
             until(lambda: script('return window.fixtureInputEvents.slice(arguments[0]).some(e=>e.trusted&&e.length===0)', [before['events']]))
-        call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
+        if value: call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
         until(lambda: script('return arguments[0].value', [item]) == value)
     def button(text):
         def attempt():
@@ -223,7 +228,8 @@ try:
     if args.startup_close:
         until(lambda: script('return window.fixtureStartupStalled===true'))
         started = time.monotonic()
-        script(r'void window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"});void window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"});return true')
+        native_window_close()
+        native_window_close()
         until(lambda: 'desktop: Application cleanup completed with status 1' in (args.report / 'webdriver.log').read_text(), 45)
         elapsed = time.monotonic() - started
         output = (args.report / 'webdriver.log').read_text()
@@ -312,6 +318,9 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.export: verify_export(script, button, fill, until, screenshot, args.report, requests)
+    if args.file_previews:
+        verify_previews(script, button, fill, until, screenshot, lambda item: call('POST', root + '/frame', {'id': item}), workspace, args.report)
     if args.language: verify_language(script, button, fill, until, screenshot, args.report, language_position, workspace)
     if args.workspace_review: verify_review(script, button, fill, until, screenshot, workspace, args.report)
     if args.history: verify_history(script, button, fill, until, screenshot, args.report)
@@ -391,7 +400,7 @@ try:
         script(r'''window.fixturePut=IDBObjectStore.prototype.put;IDBObjectStore.prototype.put=function(){throw new DOMException('Injected draft write failure','QuotaExceededError')};return true''')
         fill('textarea[aria-label="Main message"]', 'draft must survive failed close 中文')
         until(lambda: script(r'return document.querySelector(".draft-error")?.textContent.includes("Injected draft write failure")'))
-        script(r'void window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"});return true')
+        native_window_close()
         until(lambda: script(r'return document.querySelector("#notice")?.textContent.includes("Recover the draft before closing")'))
         deadline = time.monotonic() + 31
         while time.monotonic() < deadline:
@@ -415,7 +424,10 @@ try:
         raise SystemExit(0)
     if args.restart: fill('textarea[aria-label="Main message"]', 'persistent unsent desktop draft 中文')
     if args.window_close:
-        script(r'void window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"});return true')
+        denied = script('return window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"}).then(()=>"unexpectedly allowed",error=>String(error))')
+        assert 'not allowed' in denied.lower(), denied
+        (args.report / 'no-window-ipc.json').write_text(json.dumps({'command_denied': denied, 'native_close': True}, indent=2))
+        native_window_close()
     else: button('Close application')
     until(lambda: 'desktop: main-thread exit after Application cleanup' in (args.report / 'webdriver.log').read_text(), 45)
     if args.restart:

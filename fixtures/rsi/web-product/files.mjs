@@ -41,6 +41,7 @@ export async function verifyFiles(page, pane, service, report, browser) {
   await card.filter({ hasText: "Link or special file · not readable" }).waitFor();
   await card.getByRole("button", { name: "�", exact: true }).click();
   await card.locator("pre").filter({ hasText: "RAW-NAME" }).waitFor();
+  await card.getByText("File path bytes",{exact:true}).click();
   assert.match(await card.innerText(), /62726f7773652fff/);
   await open();
   await writeFile(join(directory, "new.txt"), "new snapshot\n");

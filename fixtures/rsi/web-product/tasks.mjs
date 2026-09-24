@@ -149,10 +149,11 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       await page.locator("#detail").waitFor({ state: "hidden" });
     };
     const surface = async name => { await close(); await page.getByRole("button", { name, exact: true }).click(); };
-    const capture = async (label, isDetail = false, expected = []) => {
+    const capture = async (label, isDetail = false, expected = [], reveal) => {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (reveal) await reveal();
         const expected_controls = await assertControls(page, isDetail ? "#detail .ui-contribution" : paneSelector, expected);
         await assertNoNotices(page);
         const metric = await geometry(page, paneSelector, isDetail);
@@ -190,7 +191,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await writeFile(join(service.workspace, "card.txt"), "unrelated later edit\n");
     assert.match(await inline.innerText(), /-before/);
     assert.doesNotMatch(await inline.innerText(), /unrelated later edit/);
-    await capture("recorded-inline-patch", false, ["Complete result"]);
+    await capture("recorded-inline-patch", false, ["Complete result"],
+      () => pane.locator(".message.tool").scrollIntoViewIfNeeded());
     const visibilityRetry = await page.evaluate(() => window.taskVisibleRequests.slice(0, 2));
     assert.equal(visibilityRetry.length, 2);
     assert.deepEqual(visibilityRetry[0], visibilityRetry[1], "visible-hint retry must retain its sequence and selection");

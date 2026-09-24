@@ -129,3 +129,31 @@ server and project are owned by the [language fixture](../lsp/README.md).
 It also pages a retained reference result after replacing the private source with
 an oversized file, verifies that explicit Repeat query rejects that current file,
 then restores the original and verifies Repeat query recovers.
+
+The `--file-previews` scenario also verifies the native application frame gate and
+captures the actual application/bootstrap response bodies and CSP in
+`preview-responses.json`. The separate opt-in `csp_engine.py --responses PATH
+--report PATH` probe runs under Xvfb with system Python, PyGObject and WebKit2 4.1
+GI. It checks custom-scheme parent origins, including a foreign-origin transport
+control and rejection of foreign parents even when frame-ancestors is removed.
+This separates the engine's custom-scheme frame-ancestors limitation from the
+product navigation gate and the bootstrap's one-use origin-bound handshake.
+The desktop CI job runs both scenarios. The engine probe serves no-store responses
+and unique case URLs so restrictive and permissive responses cannot share a cache hit.
+It also injects iframe/object/embed from admitted HTML, records CSP violations,
+custom-protocol requests and engine navigation decisions, and compares a permissive
+frame/object policy control. The product fixture checks the actual WebView's nested
+element violations separately; engine decision callbacks do not claim to be Tauri callbacks.
+
+Native close scenarios send WM_DELETE_WINDOW on their isolated Xvfb display using
+libX11, rather than granting the document a test-only Tauri capability. The normal
+`--window-close` scenario also proves the Tauri close command is denied, then
+observes Application cleanup after the native event.
+Before native close or keyboard input, the fixture verifies that DISPLAY belongs
+to a same-user Xvfb spawned by an ancestor of this fixture process. Bare invocations
+on an existing desktop display fail before sending events. Save-dialog input also
+checks X input focus after raising the selected visible chooser and before keys.
+
+`--export` drives the Rust-owned native Save dialog using XTest keys on the
+private Xvfb display, verifies JSON bytes and cancellation, and asserts no
+additional model requests. It requires libXtst and does not automate host dialogs.

@@ -63,6 +63,33 @@ export async function verifyDom(browser, root, report, name) {
       return {retained,errorUpdates,reopened};
     });
     assert.deepEqual(completionIdentity,{retained:true,errorUpdates:true,reopened:true});
+    const retainedHistory = await page.evaluate(() => {
+      const pane=panes.get("main"), transcript={omitted:true,blocks:[{key:"retained",role:"assistant",title:"Assistant",text:"Retained reply",sources:8}]};
+      pane.renderTranscript(transcript,false);
+      const observer=new MutationObserver(()=>{});observer.observe(pane.transcript,{childList:true});
+      for(let i=0;i<40;i++)pane.renderTranscript(structuredClone(transcript),false);
+      const moves=observer.takeRecords().length;observer.disconnect();pane.renderTranscript({omitted:false,blocks:[]},false);
+      return moves;
+    });
+    assert.equal(retainedHistory,0,"unchanged omitted history must not detach and reinsert its controls");
+    const transcriptScroll = await page.evaluate(() => {
+      const pane=panes.get("main"), transcript={omitted:true,blocks:[{key:"scroll",role:"assistant",title:"Assistant",text:"Retained line\n".repeat(100),sources:8}]};
+      pane.transcript.style.cssText="height:200px;max-height:200px;flex:none;overflow:auto";
+      pane.renderTranscript(transcript,true);
+      const bottom=()=>pane.transcript.scrollHeight-pane.transcript.clientHeight;
+      if(bottom()<=80)throw new Error("fixture must have a scrollable transcript");
+      pane.transcript.scrollTop=bottom()-40;
+      const before=pane.transcript.scrollTop;
+      for(let i=0;i<10;i++)pane.renderTranscript(structuredClone(transcript),false);
+      const unchanged=pane.transcript.scrollTop;
+      transcript.blocks[0].text+="New streamed content\n";
+      pane.renderTranscript(transcript,false);
+      const followsContent=pane.transcript.scrollTop===bottom();
+      pane.renderTranscript({omitted:false,blocks:[]},false);pane.transcript.style.cssText="";
+      return {before,unchanged,followsContent};
+    });
+    assert.equal(transcriptScroll.unchanged,transcriptScroll.before,"unchanged frames must not move a near-tail click target");
+    assert(transcriptScroll.followsContent,"new streamed text must still follow the tail");
     const resourceIdentity = await page.evaluate(() => {
       const pane = panes.get("main");
       const original = JSON.stringify;

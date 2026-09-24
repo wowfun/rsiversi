@@ -1,7 +1,11 @@
 # Web product verification
 
 Task captures require named controls to be present, enabled and reachable after
-scrolling, and reject product notices as well as JavaScript errors. The task
+scrolling, and reject product notices as well as JavaScript errors. They await
+asynchronous visible-card mounting before measuring the current control; a
+viewport change is not settled merely by two animation frames. Inline-card
+captures first scroll their retained Tool block into view, because offscreen
+blocks do not retain executable card mounts. The task
 probe accepts only Chromium or Firefox and cannot pass with no selected engine.
 Hit tests resolve and measure the current named button in one document execution,
 because a standard-view refresh can replace a button after actionability checks.
@@ -220,3 +224,44 @@ computed font/whitespace, CSP violations and stylesheet disposal are asserted;
 text appearing in the DOM alone does not establish a correct terminal grid.
 The same scenario switches Host, current preset and resident Session diagnostic
 views without an additional model request.
+
+`preview-verify.mjs`, with explicit `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and a fresh
+`RSI_WEB_REPORT`, exercises editable Markdown Agent completion and actual child
+Tool calls, then code, Markdown, SVG and isolated interactive HTML through the
+real Worker and Service. It checks the next spawn after an edit, empty Tool allow,
+invalid-definition diagnostics, local CSS imports/images/scripts, parent/native
+bridge isolation, default blocked network, per-preview HTTPS opt-in, frame reset,
+explicit file refresh and over-budget source fallback. Chromium and Firefox
+retain full-size and narrow screenshots. Its provider and HTTPS resources are
+controlled fixtures, separate from opt-in live-provider evidence.
+
+The default runner also executes `preview-verify.mjs` on each browser: real
+Markdown Agent definitions, next-fresh-spawn refresh, and bounded Files code,
+Markdown, PNG/SVG and opaque HTML previews. `preview-live.mjs` is a separate opt-in
+using `RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
+a new `RSI_WEB_REPORT`; it checks real parent/child replies and tool-created HTML.
+The parent prompt explicitly requests a verbatim child reply, including its source
+identifier. Assertions require the current definition marker in the child's reply,
+the matching durable completion input, and the parent's quoted reply; ordinary
+paraphrasing alone does not satisfy this traceability probe.
+
+Preview probes include catalog overflow, encoded image dimension rejection before
+any image `src` assignment, and actual frame-src/frame-ancestors behavior with a
+foreign loopback origin and an otherwise identical control with frame-ancestors
+removed. Node document tests additionally
+cover raster formats, bootstrap parent-origin admission and inline script closing
+sequences. Native custom-scheme engine evidence belongs to the desktop fixture.
+
+`export-verify.mjs`, with explicit `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new
+`RSI_WEB_REPORT`, verifies native Session exports through the real Worker/API and
+scoped Service Worker in Chromium and Firefox. It checks downloaded JSON/Markdown
+bytes, semantic diagnostics, filename hints and unchanged provider request counts.
+
+The download transport probe additionally transfers over 32 MiB with a gated
+producer, rejects Blob buffering, and checks cancellation and abnormal EOF at
+the application and Service Worker boundaries. It records browser download-manager
+failure separately in `download-stream.json`. Firefox currently can leave an
+errored streaming download pending after the producer is released and the
+application reports failure; the fixture explicitly cancels that browser artifact
+for cleanup. A pending manager result does not establish a completed failed-download
+UI transition. Chromium reports the failed download directly.

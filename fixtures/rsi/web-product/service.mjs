@@ -80,8 +80,13 @@ async function startProvider(onRequest) {
       if (prompt.includes("Markdown example")) {
         response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
       }
+      if (messages.some(message => message.role === "system" && text(message.content).includes("MARKDOWN-REVIEWER-V"))) {
+        response.end(sse({content:"Custom reviewer completed its isolated task."})); return;
+      }
       let name; let argumentsValue;
-      if (!completedTool && prompt.includes("start an external delegation")) {
+      if (!completedTool && prompt.includes("delegate to Markdown reviewer")) {
+        name="spawn_agent"; argumentsValue={role:"reviewer",task_name:`reviewer-${requests.length}`,message:"Review the isolated sample and return a concise finding."};
+      } else if (!completedTool && prompt.includes("start an external delegation")) {
         name = "external_agent"; argumentsValue = { operation: "start", endpoint: "sdk-agent" };
       } else if (!completedTool && prompt.includes("record a typed addon result")) {
         name = "fixture_echo"; argumentsValue = { message: "中文 · typed result <script>literal</script>" };

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
+import {waitUntil} from './service.mjs';
 
 export async function verifyInputDialogRetirement(page, pane, kind = "reference") {
   const [button, dialog] = kind === 'file' ? ['@ File path', 'Insert workspace file path'] : ['Reference session', 'Reference a conversation'];
@@ -41,8 +42,13 @@ export async function verifyFilePicker(page,pane,service,report,browser) {
   assert.equal(await input.evaluate(element=>element.selectionStart),'before @"browse/00-note.txt"'.length);
   assert(await input.evaluate(element=>document.activeElement===element));
   await input.fill('keep ');await input.press('End');await input.press('@');
-  await dialog.waitFor();await dialog.press('Escape');
+  const completion = pane.getByLabel('Commands, skills and agents', {exact:true});
+  await completion.waitFor({state:'visible'});
+  // Wait for the debounced request to complete, including an empty Agent catalog.
+  await waitUntil(async () => !(await completion.innerText()).includes('Loading'), 'Agent completion response');
+  assert.equal(await dialog.isVisible(),false,'Agent mention must not open the file picker');
   assert.equal(await input.inputValue(),'keep @');
+  await input.press('Escape');
   assert.equal(service.provider.requests.length,before);
   await input.fill('');
 }
