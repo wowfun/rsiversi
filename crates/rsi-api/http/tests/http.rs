@@ -226,9 +226,93 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
 impl rsi_api_http::HttpAssets for Assets {
     fn get(&self, path: &str) -> Result<Option<rsi_api_http::HttpAsset>> {
         Ok((path == "/app.wasm").then(|| rsi_api_http::HttpAsset {
+            policy: rsi_api_http::DocumentPolicy::default(),
             kind: rsi_api_http::AssetType::Wasm,
             bytes: self.0.clone(),
         }))
+    }
+}
+
+#[tokio::test]
+async fn sandbox_policies_survive_real_http_asset_delivery() {
+    use rsi_api_http::{AssetType, DocumentPolicy, HttpAsset, HttpAssets};
+    #[derive(Debug)]
+    struct Documents(rsi_api_protocol::RetainedBytes);
+    impl HttpAssets for Documents {
+        fn get(&self, path: &str) -> Result<Option<HttpAsset>> {
+            let policy = match path {
+                "/local.html" => DocumentPolicy::SandboxLocal,
+                "/online.html" => DocumentPolicy::SandboxHttps,
+                _ => return Ok(None),
+            };
+            Ok(Some(HttpAsset {
+                kind: AssetType::Html,
+                policy,
+                bytes: self.0.clone(),
+            }))
+        }
+    }
+    let budget = rsi_api_protocol::ByteBudget::new(1024).unwrap();
+    for tls in [false, true] {
+        let harness = Harness::start_with_assets(
+            tls,
+            Some(Arc::new(Documents(
+                budget.copy(b"<!doctype html><p>preview</p>").unwrap(),
+            ))),
+        )
+        .await;
+        let client = if tls {
+            slow_http2_client()
+        } else {
+            Harness::client()
+        };
+        for (path, online) in [("/local.html", false), ("/online.html", true)] {
+            let response = client
+                .get(format!("{}{path}", harness.origin))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let csp = response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap();
+            let directives: std::collections::BTreeMap<_, _> = csp
+                .split(';')
+                .map(str::trim)
+                .map(|entry| entry.split_once(' ').unwrap())
+                .collect();
+            assert_eq!(directives["sandbox"], "allow-scripts");
+            assert_eq!(directives["frame-ancestors"], harness.origin);
+            assert_eq!(
+                directives["connect-src"],
+                if online { "https:" } else { "'none'" }
+            );
+            for kind in ["script-src", "style-src", "img-src", "font-src"] {
+                assert_eq!(
+                    directives[kind]
+                        .split_whitespace()
+                        .any(|value| value == "https:"),
+                    online
+                );
+            }
+            for kind in [
+                "worker-src",
+                "frame-src",
+                "object-src",
+                "base-uri",
+                "form-action",
+            ] {
+                assert_eq!(directives[kind], "'none'");
+            }
+            assert_eq!(
+                response.text().await.unwrap(),
+                "<!doctype html><p>preview</p>"
+            );
+        }
+        harness.close().await;
     }
 }
 

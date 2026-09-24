@@ -6,7 +6,7 @@
 
 mod access;
 mod assets;
-pub use assets::{AssetType, HttpAsset, HttpAssets, HttpAssetsContract};
+pub use assets::{AssetType, DocumentPolicy, HttpAsset, HttpAssets, HttpAssetsContract};
 mod bounded_io;
 #[cfg(unix)]
 mod local;

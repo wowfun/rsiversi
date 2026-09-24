@@ -36,6 +36,8 @@ fn default_files() -> Vec<String> {
         "index.html",
         "app.js",
         "worker.js",
+        "download-worker.js",
+        "download-frame.js",
         "styles.css",
         "rsi_web.js",
         "rsi_web_bg.wasm",
@@ -43,6 +45,9 @@ fn default_files() -> Vec<String> {
         "drafts.js",
         "admission.js",
         "standard.js",
+        "file-preview.js",
+        "preview-local.html",
+        "preview-online.html",
         "ui-renderers.json",
     ]
     .map(Into::into)
@@ -180,6 +185,19 @@ fn load(
         files.insert(
             format!("/{name}"),
             HttpAsset {
+                policy: match name.as_str() {
+                    "preview-local.html" => rsi_api_http::DocumentPolicy::SandboxLocal,
+                    "preview-online.html" => rsi_api_http::DocumentPolicy::SandboxHttps,
+                    "index.html" => rsi_api_http::DocumentPolicy::Application {
+                        frame_paths: vec![
+                            "/preview-local.html".into(),
+                            "/preview-online.html".into(),
+                            "/downloads/".into(),
+                            "/download-worker.js".into(),
+                        ],
+                    },
+                    _ => rsi_api_http::DocumentPolicy::default(),
+                },
                 kind: kind(name).expect("validated extension"),
                 bytes,
             },

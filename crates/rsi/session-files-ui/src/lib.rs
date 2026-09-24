@@ -4,7 +4,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod browser;
+mod markup;
 mod presented;
+mod preview;
 mod view;
 use async_trait::async_trait;
 use browser::Browser;

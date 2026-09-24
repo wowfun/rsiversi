@@ -28,15 +28,16 @@ pub(crate) struct Opened {
 pub(crate) struct State {
     pub revision: u64,
     pub opened: Option<Opened>,
+    pub preview: Option<Arc<crate::preview::Preview>>,
 }
 /// Opaque browser state owned by one actual Session surface.
 #[derive(Debug)]
 pub struct Browser {
     session: Arc<dyn SessionHandle>,
-    files: Arc<dyn SessionFiles>,
+    pub(crate) files: Arc<dyn SessionFiles>,
     pub(crate) state: Mutex<State>,
-    slot: Arc<Semaphore>,
-    stop: CancellationToken,
+    pub(crate) slot: Arc<Semaphore>,
+    pub(crate) stop: CancellationToken,
 }
 impl Browser {
     pub(crate) fn new(
@@ -49,6 +50,7 @@ impl Browser {
             state: Mutex::new(State {
                 revision: next_revision()?,
                 opened: None,
+                preview: None,
             }),
             slot: Arc::new(Semaphore::new(1)),
             stop: CancellationToken::new(),
@@ -64,6 +66,10 @@ impl Browser {
         self.release().await;
     }
     async fn release(&self) {
+        let preview = self.state.lock().expect("Files state").preview.take();
+        if let Some(preview) = preview {
+            self.release_preview(&preview).await;
+        }
         let opened = self
             .state
             .lock()
@@ -76,7 +82,7 @@ impl Browser {
             let _ = self.files.release(opened.target, opened.file.token).await;
         }
     }
-    async fn target(&self) -> Result<SessionTarget> {
+    pub(crate) async fn target(&self) -> Result<SessionTarget> {
         let header = self
             .session
             .header()
@@ -193,6 +199,27 @@ impl Browser {
         self.page(0, false, revision).await
     }
     pub(crate) async fn invoke(&self, target: ActionTarget, input: ActionInput) -> Result<UiView> {
+        let _permit = self
+            .slot
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| UiError::Capacity)?;
+        self.invoke_locked(target, input).await
+    }
+    pub(crate) async fn invoke_model(
+        &self,
+        target: ActionTarget,
+        input: ActionInput,
+    ) -> Result<rsi_ui::UiModel> {
+        let _permit = self
+            .slot
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| UiError::Capacity)?;
+        let fallback = self.invoke_locked(target.clone(), input).await?;
+        self.preview_model(target, fallback).await
+    }
+    async fn invoke_locked(&self, target: ActionTarget, input: ActionInput) -> Result<UiView> {
         if input.fields.len() > 1
             || input
                 .fields
@@ -205,11 +232,6 @@ impl Browser {
         }
         let request: Request =
             serde_json::from_value(input.value).map_err(|e| UiError::Invalid(e.to_string()))?;
-        let _permit = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| UiError::Capacity)?;
         if self.stop.is_cancelled() || target.is_cancelled() {
             return Err(UiError::Retired);
         }
@@ -250,7 +272,7 @@ fn next_revision() -> Result<u64> {
     })
     .map_err(|_| UiError::Capacity)
 }
-fn action_error(error: SessionFilesError) -> UiError {
+pub(crate) fn action_error(error: SessionFilesError) -> UiError {
     let text = match error {
         SessionFilesError::Files(FilesError::Changed) => {
             "The file or directory changed. Refresh to open a new snapshot.".into()
@@ -314,6 +336,19 @@ mod decimal_offset {
 #[derive(Debug)]
 pub(crate) struct Browse;
 impl UiAction for Browse {
+    fn invoke_model(
+        &self,
+        target: ActionTarget,
+        input: ActionInput,
+    ) -> BoxFuture<'static, Result<rsi_ui::UiModel>> {
+        Box::pin(async move {
+            let browser = target
+                .context()
+                .lookup_local::<FilesBrowserContract>()
+                .ok_or(UiError::Retired)?;
+            browser.invoke_model(target, input).await
+        })
+    }
     fn invoke(
         &self,
         target: ActionTarget,

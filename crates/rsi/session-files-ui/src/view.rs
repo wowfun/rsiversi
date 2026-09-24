@@ -9,6 +9,15 @@ use rsi_ui::{Result, SurfaceRenderer, UiElement, UiError, UiView};
 #[derive(Debug)]
 pub(crate) struct Card;
 impl SurfaceRenderer for Card {
+    fn source(
+        &self,
+        target: rsi_ui::ActionTarget,
+        name: String,
+        offset: u64,
+        maximum: usize,
+    ) -> futures_util::future::BoxFuture<'static, Result<Vec<u8>>> {
+        crate::preview::source(target, name, offset, maximum)
+    }
     fn render(&self, target: &Context) -> Result<UiView> {
         let browser = target
             .lookup_local::<FilesBrowserContract>()

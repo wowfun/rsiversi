@@ -133,3 +133,19 @@ Run the native HTTP tests with isolated loopback listeners and fixture credentia
 They cover front-door rejection, real disconnect, admission, revocation, binary/SSE
 framing and TLS. Application, browser-client and live-provider evidence remain
 with their owning integration fixtures.
+
+Static assets are available only through `HttpServer::with_assets`; the Unix
+`LocalHttpService` has no asset provider or browser origin and serves API exchanges
+only. Its GET behavior is independent of the document policy.
+
+Immutable document assets carry a closed security-policy classification. The
+application document retains its strict script policy and admits product-selected
+root asset paths or explicit single-segment directory prefixes as frames.
+A trailing slash selects a prefix; root, traversal, URL and CSP syntax are rejected. Local and HTTPS-enabled sandbox
+documents have independent response CSP and opaque script-enabled sandboxing.
+Raw data image URLs are excluded; the preview owner supplies admitted embedded
+images as bounded Blob resources. HTTPS opt-in grants remote scripts, styles,
+images, fonts and connections. Supplied or remote scripts can send previewed
+contents to HTTPS servers; this is broader than remote image access.
+The classification grants no API authority and never accepts request-authored
+CSP strings. Product asset providers own which exact paths receive each policy.

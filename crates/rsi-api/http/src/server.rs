@@ -374,7 +374,16 @@ impl State {
                 .try_acquire_owned()
                 .map_err(|_| ApiError::Capacity)?;
             connection.admit(rsi_api_protocol::ApiAdmission::new(Arc::new(permit)));
-            return crate::assets::response(assets.get(request.uri().path())?, request.headers());
+            let origin = match &self.access {
+                crate::access::Access::Remote { policy, .. } => policy.origin.as_str(),
+                #[cfg(unix)]
+                crate::access::Access::Local(_) => return Err(ApiError::Unauthorized),
+            };
+            return crate::assets::response(
+                assets.get(request.uri().path())?,
+                request.headers(),
+                origin,
+            );
         }
         if request.method() != http::Method::POST || request.uri().query().is_some() {
             return Err(ApiError::Invalid(

@@ -3,11 +3,18 @@
 WebAssetsFactory is an ordinary native provider of immutable HttpAssets. It reads
 an explicit absolute bundle directory and a closed list of flat filenames at
 activation. The default bundle contains index.html, app.js, worker.js, styles.css,
-rsi_web.js, rsi_web_bg.wasm, mounts.js, drafts.js, admission.js, standard.js and ui-renderers.json. Only HTML, JavaScript, CSS, WASM, JSON and PNG
+rsi_web.js, rsi_web_bg.wasm, mounts.js, drafts.js, admission.js, download-worker.js,
+download-frame.js, standard.js, file-preview.js, preview-local.html,
+preview-online.html and ui-renderers.json. Only HTML, JavaScript, CSS, WASM, JSON and PNG
 extensions are accepted; names contain ASCII letters, digits, dot, dash or
 underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must
 be index.html and is also served at `/`.
+
+The application frame policy permits the two preview documents and the `/downloads/`
+Service Worker navigation prefix. Firefox also checks the synthetic navigation
+against the exact `/download-worker.js` source, which is explicitly permitted. Download responses are owned by the client worker,
+not by an HTTP business route or the asset provider.
 
 On Unix the directory is opened no-follow, then files are opened relative to
 that retained directory descriptor, no-follow and nonblocking. Only regular files
@@ -30,7 +37,8 @@ changes no listener, Worker or bootstrap bytes.
 `ui-renderers.json` declares the renderer ABI, exact model schemas, requested
 bound-host capabilities and SHA-256 for every entry, stylesheet, WASM file and
 lazy import. The owner validates the complete graph before publication. Bootstrap
-files and every file outside either generation's renderer graph must remain identical
+files and every file outside either generation's renderer graph must retain identical
+bytes and document policy
 in both generations, including files moving into or out of a renderer graph;
 changes require an application restart. Model data never selects executable URLs.
 

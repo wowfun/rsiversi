@@ -18,11 +18,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const MANIFEST: &str = "ui-renderers.json";
 const BOOTSTRAP: &[&str] = &[
     "index.html",
+    "preview-local.html",
+    "preview-online.html",
     "app.js",
     "mounts.js",
     "drafts.js",
     "admission.js",
     "worker.js",
+    "download-worker.js",
+    "download-frame.js",
     "styles.css",
     "rsi_web.js",
     "rsi_web_bg.wasm",
@@ -66,6 +70,7 @@ impl Bundle {
             digest.update(name);
             digest.update((asset.bytes.len() as u64).to_le_bytes());
             digest.update(asset.bytes.as_bytes());
+            digest.update(serde_json::to_vec(&asset.policy).expect("closed policy"));
         }
         let mut renderer_files = BTreeSet::new();
         let catalog = files
@@ -439,7 +444,9 @@ impl AssetCandidate {
         for (base, other) in [(current, candidate), (candidate, current)] {
             for (name, asset) in &base.files {
                 if !base.renderer_files.contains(name)
-                    && Some(&asset.bytes) != other.files.get(name).map(|asset| &asset.bytes)
+                    && other.files.get(name).is_none_or(|other| {
+                        asset.bytes != other.bytes || asset.policy != other.policy
+                    })
                 {
                     return Err(AssetError::RestartRequired);
                 }
@@ -554,6 +561,69 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn policy_only_bootstrap_change_requires_restart() {
+        let owner = WebAssetControl::new(Execution::native(tokio::runtime::Handle::current()));
+        let make = |policy| {
+            let renderer = b"export function mount() {}";
+            let catalog = serde_json::to_vec(&serde_json::json!({
+                "format": 1,
+                "renderers": [{
+                    "id": "fixture.renderer", "abi": 1, "entry": "renderer.js",
+                    "files": [{"name": "renderer.js", "sha256": hex::encode(Sha256::digest(renderer))}],
+                    "schemas": [{"name": "fixture.model", "version": 1}],
+                    "capabilities": [], "surfaces": ["pane"]
+                }]
+            })).unwrap();
+            Bundle::new(BTreeMap::from([
+                (
+                    "/preview-local.html".into(),
+                    HttpAsset {
+                        kind: rsi_api_http::AssetType::Html,
+                        policy,
+                        bytes: owner.budget.copy(b"same document bytes").unwrap(),
+                    },
+                ),
+                (
+                    "/renderer.js".into(),
+                    HttpAsset {
+                        kind: rsi_api_http::AssetType::JavaScript,
+                        policy: rsi_api_http::DocumentPolicy::default(),
+                        bytes: owner.budget.copy(renderer).unwrap(),
+                    },
+                ),
+                (
+                    "/ui-renderers.json".into(),
+                    HttpAsset {
+                        kind: rsi_api_http::AssetType::Json,
+                        policy: rsi_api_http::DocumentPolicy::default(),
+                        bytes: owner.budget.copy(&catalog).unwrap(),
+                    },
+                ),
+            ]))
+            .unwrap()
+        };
+        let current = make(rsi_api_http::DocumentPolicy::SandboxLocal);
+        let candidate = make(rsi_api_http::DocumentPolicy::SandboxHttps);
+        assert_ne!(current.revision, candidate.revision);
+        let revision = current.revision.clone();
+        {
+            let mut state = owner.state.lock().unwrap();
+            state.current = Some(current);
+            state.candidate = Some((1, candidate));
+        }
+        let ticket = AssetCandidate {
+            owner: Arc::downgrade(&owner),
+            id: 1,
+        };
+        assert!(matches!(
+            ticket.publish(&revision),
+            Err(AssetError::RestartRequired)
+        ));
+        assert_eq!(owner.revision().unwrap(), revision);
+        owner.close().await;
+    }
+
+    #[tokio::test]
     async fn staging_references_do_not_grant_renderer_access() {
         let owner = WebAssetControl::new(Execution::native(tokio::runtime::Handle::current()));
         let revision = "a".repeat(64);
@@ -562,6 +632,7 @@ mod tests {
             files: BTreeMap::from([(
                 "/renderer.js".into(),
                 HttpAsset {
+                    policy: rsi_api_http::DocumentPolicy::default(),
                     kind: rsi_api_http::AssetType::JavaScript,
                     bytes: owner.budget.copy(b"renderer").unwrap(),
                 },

@@ -110,6 +110,15 @@ impl BlockRenderer for Renderer {
 #[derive(Debug)]
 struct Card(Entry);
 impl SurfaceRenderer for Card {
+    fn source(
+        &self,
+        target: ActionTarget,
+        name: String,
+        offset: u64,
+        maximum: usize,
+    ) -> BoxFuture<'static, Result<Vec<u8>>> {
+        crate::preview::source(target, name, offset, maximum)
+    }
     fn model(&self, target: Context) -> BoxFuture<'_, Result<UiModel>> {
         Box::pin(async move {
             let controller = target
@@ -164,40 +173,57 @@ impl SurfaceRenderer for Card {
 #[derive(Debug)]
 pub(crate) struct Open;
 impl UiAction for Open {
+    fn invoke_model(
+        &self,
+        target: ActionTarget,
+        input: ActionInput,
+    ) -> BoxFuture<'static, Result<UiModel>> {
+        Box::pin(async move {
+            let browser = target
+                .context()
+                .lookup_local::<FilesBrowserContract>()
+                .ok_or(UiError::Retired)?;
+            let input = Self::request(&browser, input)?;
+            browser.invoke_model(target, input).await
+        })
+    }
+
     fn invoke(
         &self,
         target: ActionTarget,
         input: ActionInput,
     ) -> BoxFuture<'static, Result<UiView>> {
         Box::pin(async move {
-            if !input.fields.is_empty() {
-                return Err(unavailable());
-            }
-            let entry: Entry = serde_json::from_value(input.value).map_err(|_| unavailable())?;
-            entry.validate()?;
             let browser = target
                 .context()
                 .lookup_local::<FilesBrowserContract>()
                 .ok_or(UiError::Retired)?;
-            let revision = browser
-                .state
-                .lock()
-                .expect("Files browser state poisoned")
-                .revision
-                .to_string();
-            browser
-                .invoke(
-                    target,
-                    ActionInput {
-                        value: serde_json::to_value(Request {
-                            revision,
-                            operation: Operation::Presented { entry },
-                        })
-                        .expect("bounded coordinates"),
-                        fields: std::collections::BTreeMap::default(),
-                    },
-                )
-                .await
+            let input = Self::request(&browser, input)?;
+            browser.invoke(target, input).await
+        })
+    }
+}
+
+impl Open {
+    fn request(browser: &crate::browser::Browser, input: ActionInput) -> Result<ActionInput> {
+        if !input.fields.is_empty() {
+            return Err(unavailable());
+        }
+        let entry: Entry = serde_json::from_value(input.value).map_err(|_| unavailable())?;
+        entry.validate()?;
+        let revision = browser
+            .state
+            .lock()
+            .expect("Files browser state poisoned")
+            .revision
+            .to_string();
+        Ok(ActionInput {
+            value: serde_json::to_value(Request {
+                revision,
+                operation: Operation::Presented { entry },
+            })
+            .expect("bounded coordinates"),
+            fields: std::collections::BTreeMap::default(),
         })
     }
 }
