@@ -1,3 +1,5 @@
+#[path = "export.rs"]
+mod export;
 #[path = "external.rs"]
 mod external;
 #[path = "file_input.rs"]
@@ -75,6 +77,7 @@ impl SubmissionState {
 
 #[derive(Debug)]
 struct Attachment {
+    export: export::State,
     terminal_followers: Mutex<BTreeMap<String, Arc<terminal::Follower>>>,
     terminal_closed: std::sync::atomic::AtomicBool,
     files: Option<
@@ -140,6 +143,7 @@ impl ResourcePreview {
 }
 impl Attachment {
     async fn close(&self) -> Result<()> {
+        self.export.close().await;
         self.detach_terminals().await;
         self.file_read
             .lock()
@@ -561,14 +565,27 @@ impl GuiApplication {
                     .fetch_max(sequence_value, std::sync::atomic::Ordering::AcqRel);
                 let mut catalog = attached.completion_catalog.lock().await;
                 if refresh || catalog.is_none() {
-                    let (entries, notice) = attached
+                    let (mut entries, notice) = attached
                         .controller
-                        .completion_catalog(&[])
+                        .completion_catalog(&["export"])
                         .await
                         .map_err(error)?;
+                    entries.push(rsi_client::InputCompletion {
+                        group: rsi_client::CompletionGroup::Command,
+                        name: "export".into(), replacement: "/export".into(),
+                        description: "Export Session: [filename] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]".into(),
+                        resource: None,
+                    });
                     *catalog = Some((entries, notice));
                 }
                 let (entries, notice) = catalog.as_ref().expect("loaded completion catalog");
+                let agents = query.starts_with('@');
+                let filtered: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| (entry.group == rsi_client::CompletionGroup::Agent) == agents)
+                    .cloned()
+                    .collect();
+                let filter = query.strip_prefix('@').unwrap_or(&query);
                 if attached
                     .completion_sequence
                     .load(std::sync::atomic::Ordering::Acquire)
@@ -578,7 +595,7 @@ impl GuiApplication {
                         .completions
                         .lock()
                         .expect("GUI completions poisoned") = Some(
-                        serde_json::json!({"query":query,"sequence":sequence,"entries":rsi_client::rank_completions(entries, &query),"notice":notice}),
+                        serde_json::json!({"query":query,"sequence":sequence,"entries":rsi_client::rank_completions(&filtered, filter),"notice":notice}),
                     );
                 }
                 Ok(())
@@ -850,6 +867,7 @@ impl GuiApplication {
             .ok_or("Surface UI target is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            export: export::State::default(),
             terminal_followers: Mutex::new(BTreeMap::new()),
             terminal_closed: std::sync::atomic::AtomicBool::new(false),
             files: surface.lookup_local::<rsi_session_files_ui::FilesBrowserContract>(),

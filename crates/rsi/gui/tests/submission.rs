@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 mod admission;
 #[path = "submission/commands.rs"]
 mod commands;
+#[path = "submission/export.rs"]
+mod export;
 #[path = "submission/files.rs"]
 mod files;
 #[path = "submission/frames.rs"]
@@ -68,6 +70,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
     reject_submissions: std::sync::atomic::AtomicBool,
@@ -82,6 +85,8 @@ struct Backend {
     block_source: std::sync::atomic::AtomicBool,
     active_source: std::sync::atomic::AtomicUsize,
     commands: Mutex<Vec<SessionCommandInvocation>>,
+    command_discoveries: std::sync::atomic::AtomicUsize,
+    resource_discoveries: std::sync::atomic::AtomicUsize,
     model_outcome_unknown: std::sync::atomic::AtomicBool,
     model_describe_fails: std::sync::atomic::AtomicBool,
     model_describes: std::sync::atomic::AtomicUsize,
@@ -148,6 +153,20 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn export(
+        &self,
+        options: rsi_session_protocol::export::ExportOptions,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::export::ExportStream> {
+        use rsi_session_protocol::export::ExportEvent;
+        let header = self.header().await?;
+        let gate = self.export_gate.lock().unwrap().clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            yield ExportEvent::Start { session_id:header.session_id().clone(),header_sha256:header.fingerprint().unwrap(),through_seq:"0".into(),options,filename:"fixture.md".into() };
+            if let Some(gate)=gate { gate.entered.cancel(); gate.release.cancelled().await; }
+            yield ExportEvent::Complete {bytes:"0".into(),sha256:"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()};
+        }))
+    }
+
     async fn terminal(
         &self,
         request: terminal::Request,
@@ -244,6 +263,8 @@ impl SessionHandle for Backend {
     async fn commands(
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
+        self.command_discoveries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(SessionCommandsView::new(
             CommandRevision::Draft { revision: 0 },
             vec![
@@ -264,6 +285,16 @@ impl SessionHandle for Backend {
             ],
         )
         .unwrap())
+    }
+    async fn read_resource(
+        &self,
+        _: rsi_agent_session_protocol::SessionResourceRequest,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ResourceSnapshot> {
+        self.resource_discoveries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(rsi_session_protocol::SessionError::NotFound(
+            "Session resources".into(),
+        ))
     }
     async fn execute_command(
         &self,

@@ -6,6 +6,8 @@ mod capture;
 use capture::RawCapture;
 #[path = "tui/dialogs.rs"]
 mod dialogs;
+#[path = "tui/export.rs"]
+mod export;
 #[path = "tui/external.rs"]
 mod external;
 #[path = "tui/history.rs"]

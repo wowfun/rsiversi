@@ -6,6 +6,8 @@ mod acp;
 mod addons;
 #[path = "service_host_cli/commands.rs"]
 mod commands;
+#[path = "service_host_cli/export.rs"]
+mod export;
 #[path = "service_host_cli/inspector.rs"]
 mod inspector;
 #[path = "service_host_cli/reset.rs"]

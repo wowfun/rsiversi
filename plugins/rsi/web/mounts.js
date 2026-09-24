@@ -171,6 +171,7 @@ export class MountTable {
         this.entries.set(key, entry);
       }
       this.staged = undefined;
+      for (const entry of this.entries.values()) entry.mounted.activate?.();
       if (offered && selected.catalog !== null && slots.length === 0) return undefined;
       this.offer = selected;
       if (offered) { this.rejected = undefined; return { revision: offer.revision, accept: true }; }

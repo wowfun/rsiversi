@@ -409,6 +409,12 @@ pub async fn prepare_submission(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Pulls a bounded export event for the selected pane.
+#[wasm_bindgen]
+pub async fn export_input(source: String) -> Result<String, JsValue> {
+    application()?.export_input(&source).await.map_err(failure)
+}
+
 /// Captures or previews immutable reference data for the selected Session.
 #[wasm_bindgen]
 pub async fn reference_input(source: String) -> Result<String, JsValue> {

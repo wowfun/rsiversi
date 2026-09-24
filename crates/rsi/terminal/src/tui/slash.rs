@@ -7,6 +7,10 @@ use termina::event::KeyEvent;
 const BUILTINS: &[(&str, &str)] = &[
     ("help", "Commands and keyboard shortcuts"),
     (
+        "export",
+        "Export session: /export [PATH] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]",
+    ),
+    (
         "history",
         "Search conversation text: /history <session-id|external:id> <query>",
     ),
@@ -640,7 +644,7 @@ impl Ui {
         });
         Ok(Scene::from(ApplicationScene {
             revision:self.revision,
-            title:if self.previewing {format!("RSI · Skill · page {}",self.page+1)} else if detail.is_some() {format!("RSI · Help · page {}",self.page+1)} else {"RSI · Help".into()},
+            title:if self.previewing {format!("RSI · {} · page {}",self.preview_kind,self.page+1)} else if detail.is_some() {format!("RSI · Help · page {}",self.page+1)} else {"RSI · Help".into()},
             explanation:if self.previewing {"Preview only · Esc returns to your draft"} else {"Enter sends · Shift+Enter / Ctrl+J line · Ctrl+P actions · Ctrl+R recall · Ctrl+Y copy ID · Ctrl+C cancel turn"}.into(),
             items:if detail.is_some() {vec![]} else {self.help_entries().iter().map(|e|format!("/{} · {}",e.name,bounded(&e.description,256))).collect()},
             selected:if detail.is_some() {0} else {self.selected},
@@ -732,6 +736,32 @@ mod tests {
                     id: name.into(),
                 }),
             })),
+        }
+    }
+    #[test]
+    fn agent_completion_inserts_only_the_cursor_local_mention() {
+        let mut agent = skill("reviewer", "@reviewer");
+        Arc::make_mut(agent.skill.as_mut().unwrap()).group = rsi_client::CompletionGroup::Agent;
+        let mut ui = Ui {
+            catalog: vec![agent, skill("review", "/review")],
+            ..Ui::default()
+        };
+        let mut editor = editor::Editor::with_text("请用 @rev suffix".into(), 1024);
+        for _ in 0.." suffix".chars().count() {
+            editor.key(KeyCode::Left.into()).unwrap();
+        }
+        ui.update(&editor, None);
+        assert_eq!(ui.popup.as_ref().unwrap().items.len(), 1);
+        assert!(ui.key(KeyCode::Tab.into(), &mut editor));
+        assert_eq!(editor.text(), "请用 @reviewer suffix");
+        for text in [
+            "user@reviewer",
+            "`@reviewer`",
+            "@path_hex:abcd",
+            "@\"file.txt\"",
+        ] {
+            ui.update(&editor::Editor::with_text(text.into(), 1024), None);
+            assert!(ui.popup.is_none(), "{text}");
         }
     }
     #[test]

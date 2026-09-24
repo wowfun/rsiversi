@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-session-export = { path = "../session-export" }
+tauri-plugin-dialog = "=2.7.1"
 rsi = { path = "../core" }
 rsi-application = { path = "../application" }
 rsi-gui = { path = "../gui" }

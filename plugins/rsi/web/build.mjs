@@ -1,6 +1,7 @@
+import { previewDocument } from './preview-document.mjs';
 import { buildRenderers } from "./renderers.mjs";
 import { spawnSync } from "node:child_process";
-import { mkdir, readdir, copyFile } from "node:fs/promises";
+import { mkdir, readdir, copyFile, writeFile } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
@@ -28,8 +29,11 @@ run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
   join(root, `target/wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
 await build({ root: source, configFile: join(source, "vite.config.mjs"), build: { outDir: output } });
-for (const file of ["worker.js", "mounts.js", "drafts.js", "admission.js"]) {
+for (const file of ["worker.js", "mounts.js", "drafts.js", "admission.js", "download-worker.js", "download-frame.js"]) {
   await copyFile(join(source, file), join(output, file));
 }
+const builtBootstrap=await build({configFile:false,root:source,logLevel:"error",build:{write:false,target:"es2022",minify:true,lib:{entry:join(source,"preview-bootstrap.js"),formats:["iife"],name:"PreviewBootstrap"},rollupOptions:{output:{inlineDynamicImports:true}}}});
+const bootstrap=builtBootstrap[0].output.find(item=>item.type==="chunk").code;
+for(const file of ["preview-local.html","preview-online.html"])await writeFile(join(output,file),previewDocument(bootstrap));
 await buildRenderers(output);
 console.log(JSON.stringify({ event: "web-built", directory: output, profile }));

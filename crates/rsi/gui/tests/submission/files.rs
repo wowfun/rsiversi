@@ -6,6 +6,7 @@ use rsi_files_protocol::{
 use rsi_session_files::{SessionFiles, SessionFilesContract};
 use serde_json::{Value, json};
 use sources::view;
+use std::fmt::Write as _;
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -20,6 +21,9 @@ struct Reader {
     active: AtomicUsize,
     block: AtomicBool,
     changed: AtomicBool,
+    contents: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
+    block_path: Mutex<Option<Vec<u8>>>,
+    missing_path: Mutex<Option<Vec<u8>>>,
 }
 struct Active<'a>(&'a AtomicUsize);
 impl Drop for Active<'_> {
@@ -35,10 +39,20 @@ impl SessionFiles for Reader {
         path: RelativePath,
         kind: FileKind,
     ) -> rsi_session_files::Result<OpenedFile> {
+        if self.missing_path.lock().unwrap().as_deref() == Some(path.as_bytes()) {
+            return Err(FilesError::Unavailable.into());
+        }
         let opened = OpenedFile {
-            path,
+            path: path.clone(),
             kind,
-            length: if kind == FileKind::File { 8200 } else { 20 },
+            length: self
+                .contents
+                .lock()
+                .unwrap()
+                .get(path.as_bytes())
+                .map_or(if kind == FileKind::File { 8200 } else { 20 }, |bytes| {
+                    bytes.len() as u64
+                }),
             token: format!("{:032x}", self.next.fetch_add(1, Ordering::SeqCst))
                 .try_into()
                 .unwrap(),
@@ -65,7 +79,9 @@ impl SessionFiles for Reader {
             .lock()
             .unwrap()
             .push((file.token.clone(), offset));
-        if self.block.load(Ordering::SeqCst) {
+        if self.block.load(Ordering::SeqCst)
+            || self.block_path.lock().unwrap().as_deref() == Some(file.path.as_bytes())
+        {
             std::future::pending::<()>().await;
         }
         if self.changed.load(Ordering::SeqCst) {
@@ -73,6 +89,20 @@ impl SessionFiles for Reader {
         }
         assert!(self.opened.lock().unwrap().contains_key(&file.token));
         let maximum = maximum.min(usize::try_from(file.length - offset).unwrap());
+        if let Some(bytes) = self.contents.lock().unwrap().get(file.path.as_bytes()) {
+            let start = usize::try_from(offset).unwrap();
+            return Ok(FilePage {
+                offset,
+                total: file.length,
+                bytes_hex: bytes[start..start + maximum].iter().fold(
+                    String::new(),
+                    |mut output, byte| {
+                        write!(output, "{byte:02x}").unwrap();
+                        output
+                    },
+                ),
+            });
+        }
         // Exact control/invalid UTF-8 bytes are deliberately not display text.
         Ok(FilePage {
             offset,
@@ -363,4 +393,164 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     ));
     assert_eq!(replacement.next.load(Ordering::SeqCst), 0);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+async fn open_path(app: &Arc<rsi_gui::GuiApplication>, path: &str) {
+    open_card(app, "main").await;
+    let mut command = ui::button(&view(app)["ui_detail"], Some("Read file"));
+    command["input"]["fields"] = json!({"path":path});
+    app.command(&command.to_string()).await.unwrap();
+}
+#[tokio::test]
+async fn missing_html_resources_are_diagnostics_not_empty_image_sources() {
+    let (runtime, reader, app, _files) = fixture().await;
+    *reader.missing_path.lock().unwrap() = Some(b"gone.png".to_vec());
+    reader.contents.lock().unwrap().insert(
+        b"missing.html".to_vec(),
+        b"<h1>Still visible</h1><img src=gone.png alt=Missing>".to_vec(),
+    );
+    open_path(&app, "missing.html").await;
+    let model = view(&app)["ui_detail"]["model"].clone();
+    assert_eq!(model["renderer"], "rsi.file-preview");
+    assert_eq!(model["sources"].as_array().unwrap().len(), 2);
+    assert!(
+        model["data"]["diagnostics"]
+            .to_string()
+            .contains("gone.png")
+    );
+    click(&app, "Release snapshot").await;
+    assert!(reader.opened.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn rich_preview_sources_keep_version_authority_and_release_resource_tokens() {
+    let (runtime, reader, app, _files) = fixture().await;
+    reader.contents.lock().unwrap().extend([
+        (
+            b"report.md".to_vec(),
+            b"# Report\n\n![diagram](diagram.svg)".to_vec(),
+        ),
+        (
+            b"diagram.svg".to_vec(),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+        ),
+    ]);
+    open_path(&app, "report.md").await;
+    let detail = view(&app)["ui_detail"].clone();
+    assert_eq!(detail["model"]["renderer"], "rsi.file-preview");
+    assert_eq!(detail["model"]["sources"].as_array().unwrap().len(), 3);
+    assert_eq!(reader.opened.lock().unwrap().len(), 2);
+    let ticket = detail["ticket"].as_str().unwrap();
+    let source = detail["model"]["sources"][1]["name"].as_str().unwrap();
+    let rendered = app.read_ui_source(ticket, source, 0, 65536).await.unwrap();
+    assert!(String::from_utf8_lossy(rendered.as_bytes()).contains("<h1>Report</h1>"));
+    reader.changed.store(true, Ordering::SeqCst);
+    assert!(
+        app.read_ui_source(ticket, source, 0, 10).await.is_err(),
+        "derived bytes must revalidate their captured file"
+    );
+    reader.changed.store(false, Ordering::SeqCst);
+    click(&app, "Refresh").await;
+    assert!(
+        app.read_ui_source(ticket, source, 0, 10).await.is_err(),
+        "old presentation source must retire"
+    );
+    assert_eq!(reader.opened.lock().unwrap().len(), 2);
+    click(&app, "Release snapshot").await;
+    assert!(reader.opened.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+#[tokio::test]
+async fn preview_paging_retains_resource_tokens_and_prepared_bytes_until_refresh() {
+    let (runtime, reader, app, _files) = fixture().await;
+    reader.contents.lock().unwrap().extend([
+        (
+            b"report.html".to_vec(),
+            format!("<link rel=stylesheet href=theme.css>{}", "x".repeat(9000)).into_bytes(),
+        ),
+        (b"theme.css".to_vec(), b"body { color: green }".to_vec()),
+    ]);
+    open_path(&app, "report.html").await;
+    let original = view(&app)["ui_detail"]["model"].clone();
+    let opens = reader.next.load(Ordering::SeqCst);
+    let reads = reader.reads.lock().unwrap().len();
+    reader
+        .contents
+        .lock()
+        .unwrap()
+        .insert(b"theme.css".to_vec(), b"body { color: red }".to_vec());
+    for label in ["Next page", "View exact hex", "Previous page"] {
+        let detail = click(&app, label).await;
+        assert_eq!(
+            detail["model"]["data"]["revision"],
+            original["data"]["revision"]
+        );
+        assert_eq!(detail["model"]["sources"], original["sources"]);
+        assert_eq!(
+            reader.next.load(Ordering::SeqCst),
+            opens,
+            "paging must not reopen resources"
+        );
+    }
+    assert_eq!(
+        reader.reads.lock().unwrap().len(),
+        reads + 3,
+        "only the three requested pages may be read"
+    );
+    let detail = view(&app)["ui_detail"].clone();
+    let bytes = app
+        .read_ui_source(
+            detail["ticket"].as_str().unwrap(),
+            original["sources"][2]["name"].as_str().unwrap(),
+            0,
+            65536,
+        )
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(bytes.as_bytes()).contains("green"));
+    let refreshed = click(&app, "Refresh").await;
+    assert_ne!(
+        refreshed["model"]["data"]["revision"],
+        original["data"]["revision"]
+    );
+    assert_eq!(reader.next.load(Ordering::SeqCst), opens + 2);
+    assert!(runtime.shutdown().await.is_clean());
+}
+#[tokio::test]
+async fn cancelling_rich_preview_preparation_releases_already_opened_resources() {
+    let (runtime, reader, app, _files) = fixture().await;
+    reader.contents.lock().unwrap().extend([
+        (
+            b"report.html".to_vec(),
+            b"<link rel=\"stylesheet\" href=\"theme.css\">".to_vec(),
+        ),
+        (b"theme.css".to_vec(), b"body { color: green }".to_vec()),
+    ]);
+    *reader.block_path.lock().unwrap() = Some(b"theme.css".to_vec());
+    open_card(&app, "main").await;
+    let mut command = ui::button(&view(&app)["ui_detail"], Some("Read file"));
+    command["input"]["fields"] = json!({"path":"report.html"});
+    let pending = app.command(&command.to_string());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if reader.active.load(Ordering::SeqCst) == 1 && reader.opened.lock().unwrap().len() == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    pending.await.unwrap();
+    assert_eq!(reader.active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        reader.opened.lock().unwrap().len(),
+        1,
+        "only the browser's root snapshot may remain"
+    );
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(reader.opened.lock().unwrap().is_empty());
 }

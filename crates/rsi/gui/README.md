@@ -1,5 +1,11 @@
 # rsi-gui
 
+Native panes expose Export and `/export`, sharing the terminal argument parser.
+Export bypasses model submission and is bound to the pane attachment generation.
+The document pulls one bounded stream item at a time; detach, logout and explicit
+cancel drop its stream. Filenames are hints, never service filesystem paths.
+The [shared export contract](../session-export/README.md) owns artifact semantics.
+
 Attention navigation uses the shared workbench's bounded current-owner view.
 Opening a target revalidates its exact Native Session/Turn/request or External
 connection/request identity. Native requests open the existing interaction detail;

@@ -1,5 +1,10 @@
 # rsi-desktop
 
+Session export opens a Rust-owned native save dialog, then consumes the shared
+verified export stream into the [atomic file sink](../session-export/README.md).
+The document supplies only a filename hint and selected pane; it gains no general
+filesystem or Tauri IPC authority. Cancel and close discard incomplete files.
+
 The Linux desktop adapter composes ordinary Application-only GUI, navigation and
 setup and Plugins workbench plugins with the standard Service connection. It uses the shared Web
 document and `rsi-gui`; Tauri owns only the main-thread event loop, a private
@@ -18,10 +23,16 @@ or owns an embedded Service. Closing the GUI drains the Application and owned
 Service; a borrowed daemon remains alive.
 
 The `rsi` custom protocol serves the existing closed immutable asset owner and a
-native mailbox, never arbitrary paths. Only the main window at `rsi://localhost`
-can call its private routes. The main document has one Tauri window-close
-capability, which enters the same document drain path; no filesystem capability
-is granted. Startup composition, protocol admission and Runtime/event-loop
+native mailbox, never arbitrary paths. Navigation admits the application root and
+`/preview-local.html` or `/preview-online.html` at `rsi://localhost`. These immutable
+preview responses use opaque, script-enabled sandbox policies, respectively with
+external resources disabled or explicit HTTPS access; neither exposes native routes.
+Errors on those exact preview paths retain their sandbox response policy and are
+JSON with nosniff, even when the asset owner is absent or lookup fails.
+Only the main window at `rsi://localhost`
+can call its private routes. The document has no Tauri IPC capabilities. Window-manager close events and the
+application's existing Close action enter the same document drain path; JavaScript
+cannot invoke the Tauri window-close command. Startup composition, protocol admission and Runtime/event-loop
 lifetime each have one internal owner. A single view request and one pending frame are
 admitted. The shared 32-MiB frame bound remains authoritative. ACK names its exact
 frame; a 30-second missing ACK requests Application teardown. Ordinary requests

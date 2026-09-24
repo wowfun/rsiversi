@@ -38,6 +38,7 @@ pub(super) enum Command {
     Models,
     Effort,
     Help,
+    Export(rsi_client::ExportCommand),
     Markdown(Option<bool>),
     Plugins,
     Profiles,
@@ -52,6 +53,13 @@ pub(super) enum Command {
     Invalid,
 }
 pub(super) fn command(text: &str) -> Option<Command> {
+    if let Some(args) = text.trim_start().strip_prefix("/export")
+        && (args.is_empty() || args.starts_with(char::is_whitespace))
+    {
+        return Some(
+            rsi_client::parse_export_arguments(args).map_or(Command::Invalid, Command::Export),
+        );
+    }
     if text.contains(['\r', '\n']) {
         return None;
     }
@@ -1609,6 +1617,16 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_dispatch_requires_a_complete_command_and_valid_options() {
+        assert!(command("/exporter").is_none());
+        assert!(command("/export-file").is_none());
+        assert!(matches!(command("/export -f yaml"), Some(Command::Invalid)));
+        assert!(matches!(command("/export\nsecret"), Some(Command::Invalid)));
+        assert!(
+            matches!(command("/export -f json"), Some(Command::Export(parsed)) if parsed.options.format == rsi_session_protocol::export::ExportFormat::Json)
+        );
+    }
     #[test]
     fn inline_count_describes_the_filtered_catalog_not_the_display_window() {
         let mut ui = Ui::new(None, Arc::new(EmptyCatalog));

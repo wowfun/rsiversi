@@ -53,6 +53,7 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
     );
     let generation = generation.as_str().unwrap();
     assert_commands_survive_unavailable_skills(&app, generation).await;
+    assert_completion_discovery_is_cached(&app, &backend, generation).await;
     let prepared = prepare(&app, generation, "/plan on", vec![], false).await;
     assert_eq!(prepared["kind"], "command");
     assert!(backend.commands.lock().unwrap().is_empty());
@@ -113,5 +114,32 @@ async fn assert_commands_survive_unavailable_skills(
             .unwrap()
             .starts_with("Skills unavailable:"),
         "commands remain usable when skill discovery fails"
+    );
+}
+
+async fn assert_completion_discovery_is_cached(
+    app: &Arc<rsi_gui::GuiApplication>,
+    backend: &Backend,
+    generation: &str,
+) {
+    assert_eq!(
+        backend
+            .resource_discoveries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "catalog shares one resource discovery"
+    );
+    let discoveries = backend
+        .command_discoveries
+        .load(std::sync::atomic::Ordering::SeqCst);
+    for (index, query) in ["@", "@r", "@re", "@rev"].into_iter().enumerate() {
+        app.command(&json!({"action":"completions","pane":"main","generation":generation,"query":query,"sequence":(index+2).to_string(),"refresh":false}).to_string()).await.unwrap();
+    }
+    assert_eq!(
+        backend
+            .command_discoveries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        discoveries,
+        "typing filters the cached catalog"
     );
 }

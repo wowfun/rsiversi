@@ -9,7 +9,7 @@ pub(super) struct HeaderGate {
     pub(super) release: CancellationToken,
 }
 
-async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
+pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());

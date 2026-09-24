@@ -1,6 +1,5 @@
 {
   "identifier": "main-window",
   "windows": ["main"],
-  "remote": { "urls": ["rsi://localhost/*"] },
-  "permissions": ["core:window:allow-close"]
+  "permissions": []
 }

@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { connect, command, terminal, restore_session, prepare_submission, reference_input, file_input, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { connect, command, terminal, restore_session, prepare_submission, export_input, reference_input, file_input, dispatch_submission, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const initialized = init();
 let connected = false;
@@ -66,6 +66,8 @@ async function dispatch(data) {
     result = await prepare_submission(data.payload);
   } else if (data.method === "file_input") {
     result = await file_input(data.payload);
+  } else if (data.method === "export_input") {
+    result = await export_input(data.payload);
   } else if (data.method === "reference_input") {
     result = await reference_input(data.payload);
   } else if (data.method === "dispatch_submission") {

@@ -1,3 +1,4 @@
+import { build } from "vite";
 import { createHash } from "node:crypto";
 import { readFile, writeFile, rename, stat } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
@@ -12,9 +13,12 @@ export async function buildRenderers(output) {
     files: [{ name: "standard.js", sha256: createHash("sha256").update(bytes).digest("hex") }],
     schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["root", "pane", "sidebar", "dialog"],
   }] };
+  const built=await build({configFile:false,root:source,logLevel:"error",build:{write:false,target:"es2022",minify:true,lib:{entry:join(source,"file-preview.js"),formats:["es"],fileName:()=>"file-preview.js"},rollupOptions:{output:{inlineDynamicImports:true}}}});
+  const preview=Buffer.from(built[0].output.find(item=>item.type==="chunk").code);
+  catalog.renderers.push({id:"rsi.file-preview",abi:1,entry:"file-preview.js",files:[{name:"file-preview.js",sha256:createHash("sha256").update(preview).digest("hex")}],schemas:[{name:"rsi.file-preview",version:1}],capabilities:["invoke","source","clipboard"],surfaces:["root","pane","sidebar","dialog"]});
   // Each file is replaced atomically; the admission manifest is published last.
   // A filesystem observer between these renames retains the old valid generation.
-  for (const [name, body] of [["standard.js", bytes], ["ui-renderers.json", JSON.stringify(catalog)]]) {
+  for (const [name, body] of [["standard.js", bytes], ["file-preview.js",preview], ["ui-renderers.json", JSON.stringify(catalog)]]) {
     const temporary = join(output, `.${name}.${process.pid}.tmp`);
     await writeFile(temporary, body, { flag: "wx" });
     await rename(temporary, join(output, name));
@@ -24,11 +28,11 @@ export async function buildRenderers(output) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [output, watch, ...extra] = process.argv.slice(2);
   if (!output || (watch && watch !== "--watch") || extra.length) throw new Error("Usage: renderers.mjs /absolute/bundle [--watch]");
-  if (watch) console.log("Watching standard.js; app.js, mounts.js, worker.js, styles.css, index.html and Worker Rust changes require a full bundle rebuild and application restart.");
+  if (watch) console.log("Watching standard.js and file-preview.js; app.js, mounts.js, worker.js, styles.css, index.html and Worker Rust changes require a full bundle rebuild and application restart.");
   let previous;
   do {
     const bytes = await readFile(join(source, "standard.js"));
-    const digest = createHash("sha256").update(bytes).digest("hex");
+    const digest = createHash("sha256").update(bytes).update(await readFile(join(source,"file-preview.js"))).update(await readFile(join(source,"image-bounds.js"))).digest("hex");
     if (digest !== previous) {
       const revision = await buildRenderers(output);
       previous = digest;

@@ -1,5 +1,11 @@
 # Web document bridge
 
+Export uses a download-only Service Worker and a demand-driven MessagePort. It
+never collects a whole artifact Blob or caches exported data. One-use download
+identities bind the originating page; the Worker handles only its download path,
+not application or authenticated API traffic. Rust owns Session authority and
+stream validation. Disconnect and cancellation release the source stream.
+
 Needs attention renders the shared Rust workbench's bounded activity projection.
 It displays unknown ownership and truncation explicitly; request buttons send exact
 targets back to Rust. The document does not infer execution from recent history,
@@ -334,3 +340,42 @@ submission.
 
 External panes keep their switch guard through same-generation frames; only a
 confirmed new binding clears it. Both buttons and keyboard submission respect it.
+
+File previews use the [Files contribution contract](../../../crates/rsi/session-files-ui/README.md#rich-file-previews).
+The independently admitted `rsi.file-preview` renderer builds code and Markdown
+DOM from bounded source windows. Its bundled Shiki grammars use the JavaScript
+regex engine; large inputs retain plain source. HTML uses immutable sandbox
+bootstrap documents whose response policies are owned by the asset transport.
+The parent renderer is trusted same-origin application code, like other admitted
+renderer modules; hostile same-origin code is outside the iframe isolation boundary.
+A one-use MessagePort accepts only the immediate parent whose message Origin
+matches the bootstrap document URL, transfers approved bytes and closes before
+user scripts run. WebKitGTK custom-scheme responses do not reliably enforce
+frame-ancestors; native navigation and this origin check remain required even
+with the response CSP. An unauthorized embed cannot submit executable content. The
+[preview boundary decision](../../../.agents/notes/implemented/bug-fix/2026-09-22-preview-input-and-native-authority.md)
+records the engine evidence and native authority rationale. Frame replacement discards that frame's state and authority. Previewing uses
+no Media import. Video remains outside this preview renderer.
+
+Typing `@name` offers Agent definitions with a human preview. Opening the completion
+popup refreshes its catalog once; further keystrokes filter that snapshot. The explicit
+file-path button opens the separate workspace picker. Both insert text only;
+spawn resolution and definition refresh stay with the Agent contribution.
+
+Renderer `mount` and `update` stage DOM while their bound host is inactive. An
+optional synchronous `activate()` callback runs after the current snapshot and
+DOM are committed and the host is active. Renderers may start asynchronous
+source reads there, own their failures, and cancel them through the existing
+abort/dispose lifetime. Staged and rejected renderers never receive activation;
+mounting itself cannot invoke application authority.
+
+An unchanged retained transcript keeps message nodes in place, including when its
+omitted-history notice is present. Refreshes must not detach action controls
+between pointer down and click. Unchanged transcript frames preserve the scroll
+position even near the bottom; automatic tail scrolling follows changed content
+or a newly bound conversation, so unrelated frames cannot move a pressed action.
+
+The download worker serves an inert bootstrap frame under `/downloads/`. The
+initiating page attests its exact frame window through its private MessagePort;
+the worker then binds the one-use response to that controlled frame client. A
+foreign page or a replayed URL cannot consume the stream.

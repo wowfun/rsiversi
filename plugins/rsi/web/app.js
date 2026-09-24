@@ -1,3 +1,4 @@
+import { downloadSession } from "./session-export.js";
 import { lane, limits } from "./admission.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
@@ -361,9 +362,6 @@ class Pane {
     });
     this.input.addEventListener("keydown", event => {
       if (event.isComposing || event.keyCode === 229) return;
-      if (event.key === "@" && !event.ctrlKey && !event.metaKey && !event.altKey && this.input.selectionStart === this.input.selectionEnd && (this.input.selectionStart === 0 || /\s/u.test(this.input.value[this.input.selectionStart-1]))) {
-        event.preventDefault(); perform(() => {const cursor=this.input.selectionStart; const text=this.input.value.slice(0,cursor)+"@"+this.input.value.slice(cursor); this.edit(text); this.input.value=text; this.input.setSelectionRange(cursor+1,cursor+1); openFilePicker(this, call, button);}); return;
-      }
       if (this.completionKey(event)) return;
       if (event.key === "Enter" && !event.shiftKey && (event.metaKey || event.ctrlKey || this.enterSubmit)) { event.preventDefault(); perform(() => this.submit(false)); }
     });
@@ -371,7 +369,7 @@ class Pane {
     this.input.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) this.updateCompletions(); });
     this.completionPanel = element("section", "input-completions");
     this.completionPanel.hidden = true;
-    this.completionPanel.setAttribute("aria-label", "Commands and skills");
+    this.completionPanel.setAttribute("aria-label", "Commands, skills and agents");
     this.resourcePreview = element("section", "input-resource-preview");
     this.resourcePreview.hidden = true;
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
@@ -395,6 +393,8 @@ class Pane {
     });
     this.attach = button("Add images", () => this.imageInput.click(), "quiet");
     this.addReference = button("Reference session", () => this.showReferencePicker(), "quiet");
+    this.exportButton = button("Export", () => this.exportSession(""), "quiet");
+    this.exportAbort = undefined;
     this.searchHistory = button("Search history", () => openHistoryPicker(this, view, call, button), "quiet");
     this.addFile = button("@ File path", () => openFilePicker(this, call, button), "quiet");
     this.referenceList = element("div", "draft-references");
@@ -407,7 +407,7 @@ class Pane {
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
-    actions.append(this.attach, this.addFile, this.addReference, this.searchHistory, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
+    actions.append(this.attach, this.addFile, this.addReference, this.searchHistory, this.exportButton, this.cancel, this.steer, this.send); bar.append(this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
     this.composer.append(this.resourcePreview, this.completionPanel, this.referenceList, this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.recovery, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
@@ -611,8 +611,23 @@ class Pane {
     document.body.append(dialog); dialog.showModal();
     if (existing) show(existing); else source.focus();
   }
+  async exportSession(args) {
+    if (this.exportAbort) { this.exportAbort.abort(); return; }
+    if (!this.generation || !this.editor) throw new Error("Open a native conversation first");
+    const abort = new AbortController(), generation = this.generation;
+    this.exportAbort = abort; this.exportButton.textContent = "Cancel export";
+    const closed = () => abort.abort(); window.addEventListener("pagehide",closed,{once:true});
+    try { await downloadSession(call,this.index,generation,args,abort.signal); }
+    finally { window.removeEventListener("pagehide",closed); this.exportAbort = undefined; this.exportButton.textContent = "Export"; }
+  }
   async submit(steer) {
     if (this.submitting || this.uploading) return;
+    if (this.editor && /^\s*\/export(?:\s|$)/.test(this.editor.text)) {
+      if (this.editor.images.length || this.editor.references.length) throw new Error("Export does not accept attachments");
+      const text = this.editor.text;
+      await this.exportSession(text.replace(/^\s*\/export/, ""));
+      return;
+    }
     this.submitting = true; this.renderComposer();
     try {
       await this.flush();
@@ -745,27 +760,40 @@ class Pane {
       return row;
     }));
   }
-  reset() { this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.exportAbort?.abort(); this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
   completionToken() {
     const text = this.input.value, cursor = this.input.selectionStart;
-    if (this.composing || !this.generation || this.switching || !text.startsWith("/") || text.startsWith("//") || /[\r\n]/.test(text)) return;
+    if (this.composing || !this.generation || this.switching || this.input.selectionEnd !== cursor) return;
+    const before = text.slice(0, cursor), match = /(?:^|[\s([{])(@[A-Za-z0-9_.-]*)$/.exec(before);
+    if (match) {
+      const start = cursor - match[1].length, suffix = /^[A-Za-z0-9_.-]*/.exec(text.slice(cursor))[0];
+      const end = cursor + suffix.length;
+      const name = text.slice(start + 1, end), trailing = text[end];
+      const locator = trailing === '/' || trailing === ':' && (name === 'path_hex' || end + 1 < text.length && !/\s/u.test(text[end + 1]));
+      if ((!name || /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) && !locator && !(before.split("```").length % 2 === 0) && !(before.split("`").length % 2 === 0))
+        return { query: text.slice(start,end), start, end, text, cursor, agent: true };
+    }
+    if (!text.startsWith("/") || text.startsWith("//") || /[\r\n]/.test(text)) return;
     const end = text.search(/\s/), stop = end < 0 ? text.length : end;
-    if (cursor > stop || this.input.selectionEnd !== cursor) return;
-    return { query: text.slice(1, stop), end: stop, text, cursor };
+    if (cursor > stop) return;
+    return { query: text.slice(1, stop), start: 0, end: stop, text, cursor, agent: false };
   }
+
   updateCompletions(refresh = false) {
     const token = this.completionToken();
     if (!token) { this.closeCompletions(); this.completionRequestKey = undefined; return; }
+    refresh ||= !this.completionState || this.completionState.refreshPending;
     const key = JSON.stringify([this.generation, token.text, token.cursor]);
     if (!refresh && key === this.completionRequestKey) return;
     this.completionRequestKey = key;
     this.completionFailure = undefined;
-    this.completionState = { ...token, sequence: String(this.completionSequence = (this.completionSequence ?? 0) + 1), generation: this.generation, selected: 0 };
+    this.completionState = { ...token, sequence: String(this.completionSequence = (this.completionSequence ?? 0) + 1), generation: this.generation, selected: 0, refreshPending: refresh };
     const state = this.completionState;
     clearTimeout(this.completionTimer);
     this.renderCompletions(view?.surfaces[this.index]);
     this.completionTimer = setTimeout(() => {
       if (this.completionState !== state) return;
+      state.refreshPending = false;
       void this.action("completions", { query: state.query, sequence: state.sequence, refresh }).catch(error => {
         if (this.completionState === state) { this.completionFailure = error.message; this.renderCompletions(view?.surfaces[this.index]); }
       });
@@ -785,7 +813,7 @@ class Pane {
   pickCompletion(item) {
     const state = this.completionState, token = this.completionToken();
     if (!state || !token || state.text !== token.text || state.cursor !== token.cursor || state.generation !== this.generation) return;
-    this.input.setRangeText(item.replacement, 0, token.end, "end");
+    this.input.setRangeText(item.replacement, token.start, token.end, "end");
     this.edit(this.input.value);
     this.completionRequestKey = JSON.stringify([this.generation, this.input.value, this.input.selectionStart]);
     this.closeCompletions();
@@ -834,7 +862,7 @@ class Pane {
     this.input.removeAttribute("aria-activedescendant");
     let group;
     for (const [index, item] of (entries ?? []).entries()) {
-      if (group !== item.group) { group = item.group; const heading = element("div", "completion-group", group === "skill" ? "Skills" : "Commands"); heading.setAttribute("role", "presentation"); list.append(heading); }
+      if (group !== item.group) { group = item.group; const heading = element("div", "completion-group", group === "agent" ? "Agents" : group === "skill" ? "Skills" : "Commands"); heading.setAttribute("role", "presentation"); list.append(heading); }
       const row = button(item.replacement, () => this.pickCompletion(item), "completion-option");
       row.id = `${list.id}-${index}`; row.tabIndex = -1; row.setAttribute("role", "option");
       row.setAttribute("aria-selected", String(state.selected === index));
@@ -843,11 +871,11 @@ class Pane {
       list.append(row);
       if (state.selected === index) this.input.setAttribute("aria-activedescendant", row.id);
     }
-    if (!entries?.length) { const status = element("p", "hint", this.completionFailure ?? (entries ? "No matching commands or skills" : "Loading commands and skills…")); status.setAttribute("role", "status"); list.append(status); }
+    if (!entries?.length) { const status = element("p", "hint", this.completionFailure ?? (entries ? "No matching entries" : "Loading entries…")); status.setAttribute("role", "status"); list.append(status); }
     const tools = element("div", "completion-tools");
     tools.append(element("span", "hint", "↑ ↓ choose · Enter / Tab insert · F2 preview · Esc close"));
     const selected = entries?.[state.selected];
-    if (selected?.resource) tools.append(button("Preview skill", () => this.action("resource_read", { request: selected.resource }), "quiet"));
+    if (selected?.resource) tools.append(button(selected.group === "agent" ? "Preview agent" : "Preview skill", () => this.action("resource_read", { request: selected.resource }), "quiet"));
     tools.append(button("Refresh", () => this.updateCompletions(true), "quiet"));
     const scroll = this.completionPanel.querySelector(".completion-options")?.scrollTop ?? 0;
     this.completionPanel.replaceChildren(list, tools);
@@ -915,6 +943,7 @@ class Pane {
       this.referenceDialog?.close();
       this.fileDialog?.close();
       this.switching = false;
+      this.exportAbort?.abort();
       this.generation = data?.generation;
       this.completionState = undefined; this.completionRequestKey = undefined;
       this.completionFailure = undefined; this.completionPanel.hidden = true;
@@ -992,11 +1021,18 @@ class Pane {
     this.notice.textContent = data.notice;
   }
   renderTranscript(transcript, changed) {
-    const atEnd = this.transcript.scrollHeight - this.transcript.clientHeight - this.transcript.scrollTop < 70;
+    const previousHeight = this.transcript.scrollHeight;
+    const atEnd = previousHeight - this.transcript.clientHeight - this.transcript.scrollTop < 70;
     const keys = new Set(transcript.blocks.map(block => block.key));
     for (const [key, entry] of this.blocks) if (!keys.has(key)) { entry.node.remove(); this.blocks.delete(key); }
     if (this.transcript.querySelector(".empty-pane")) this.transcript.replaceChildren();
-    let previous;
+    let omitted = this.transcript.querySelector(":scope > .omitted");
+    if (transcript.omitted && !omitted) {
+      omitted = element("p", "omitted", "Older content was omitted from this view. Open history to read earlier facts.");
+      this.transcript.prepend(omitted);
+    }
+    if (!transcript.omitted) { omitted?.remove(); omitted = undefined; }
+    let previous = omitted;
     for (const block of transcript.blocks) {
       let entry = this.blocks.get(block.key);
       if (!entry) {
@@ -1034,13 +1070,7 @@ class Pane {
       if (expected !== entry.node) this.transcript.insertBefore(entry.node, expected);
       previous = entry.node;
     }
-    let omitted = this.transcript.querySelector(":scope > .omitted");
-    if (transcript.omitted) {
-      omitted ??= element("p", "omitted", "Older content was omitted from this view. Open history to read earlier facts.");
-      this.transcript.prepend(omitted);
-    }
-    if (!transcript.omitted) omitted?.remove();
-    if (changed || atEnd) this.transcript.scrollTop = this.transcript.scrollHeight;
+    if (changed || (atEnd && this.transcript.scrollHeight !== previousHeight)) this.transcript.scrollTop = this.transcript.scrollHeight;
   }
 }
 function basename(path) { return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path; }

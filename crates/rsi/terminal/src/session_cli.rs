@@ -48,7 +48,7 @@ pub(super) async fn notice(renderer: &Renderer, kind: &'static str, value: Value
         .map_err(|_| RsiError::Run("terminal renderer stopped".into()))
 }
 
-fn session_error(error: impl std::fmt::Display) -> RsiError {
+pub(super) fn session_error(error: impl std::fmt::Display) -> RsiError {
     RsiError::Run(error.to_string())
 }
 
@@ -403,6 +403,13 @@ pub(crate) async fn run_session_application(
     work: ApplicationWork,
     context: rsi_meta::Context,
 ) -> u8 {
+    if command.export.is_some() {
+        return tokio::select! {
+            () = work.stop.cancelled() => 130,
+            _ = tokio::signal::ctrl_c() => 130,
+            result = crate::export::run_cli(application.as_ref(), &command) => match result { Ok(()) => 0, Err(error) => report_error(&error) },
+        };
+    }
     let (renderer, receiver) = tokio::sync::mpsc::channel(CLI_RENDER_CHANNEL_CAPACITY);
     let rendering = spawn_cli_renderer(command.output, receiver, &work);
     let surfaces = match crate::surfaces::TerminalSurfaces::start(&context, &renderer).await {
@@ -558,6 +565,11 @@ async fn run(
                             let cursor = attach_snapshot(&next, snapshot, renderer, &mut observer, surfaces).await?;
                             handle = next; durable = true; before = cursor; history_exhausted = before.is_none(); owned.clear(); draft = None;
                         }
+                        "export" => {
+                            let command = rsi_client::parse_export_arguments(arguments).map_err(session_error)?;
+                            let path = crate::export::save(handle.clone(), command).await?;
+                            notice(renderer, "export", json!({"path":path})).await?;
+                        }
                         "history" => {
                             if arguments.is_empty() && history_exhausted {
                                 notice(renderer, "history", json!({"has_more":false,"next_before_seq":null})).await?;
@@ -606,7 +618,7 @@ async fn run(
                             notice(renderer, "output", json!({"id":page.id,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":String::from_utf8_lossy(&page.bytes),"bytes_hex":hex::encode(&page.bytes)})).await?;
                         }
                         "steer" => { if arguments.is_empty() { return Err(session_error("usage: :steer TEXT")); } delivery = MessageDelivery::Steer; text = arguments.to_owned(); }
-                        "help" => notice(renderer, "help", json!({"commands":":sessions :attach SESSION :history [BEFORE] :status :agents :queue :commands :command-result /NAME ARGUMENTS :steer TEXT :cancel [ID] :approvals :allow SESSION ID :deny SESSION ID :questions :answer ID :output ID [OFFSET] :exit ::TEXT"})).await?,
+                        "help" => notice(renderer, "help", json!({"commands":":sessions :attach SESSION :export [PATH] [-f FORMAT] [-i INCLUDE] :history [BEFORE] :status :agents :queue :commands :command-result /NAME ARGUMENTS :steer TEXT :cancel [ID] :approvals :allow SESSION ID :deny SESSION ID :questions :answer ID :output ID [OFFSET] :exit ::TEXT"})).await?,
                         _ => return Err(session_error(format!("unknown Session command: :{name}"))),
                     }
                     if name != "steer" { return Ok(false); }

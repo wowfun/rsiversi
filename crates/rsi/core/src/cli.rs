@@ -10,6 +10,7 @@ pub(super) const HELP: &str = "Usage:\n\
                 [--output text|jsonl]\n\
       cli:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
                 [--agent-preset ID] [--output text|jsonl]\n\
+  rsi --profile cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
       tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
       devices: <register LABEL|list|revoke DEVICE_ID>\n\

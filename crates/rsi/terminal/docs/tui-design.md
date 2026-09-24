@@ -313,3 +313,8 @@ time at the right only from one second onward. Completion freezes duration and
 stops animation. Historical unfinished tools without the matching active turn
 are interrupted evidence, with no live timer or spinner. Rendering receives
 explicit clock/lifecycle data; it neither reads a clock nor starts animation tasks.
+
+Typing `@name` opens Agent completion from the current Session resource catalog.
+Tab inserts the selected mention; F2 previews the definition. The main Agent
+interprets the mention and delegates. `Alt+@` opens the workspace file picker;
+file selection inserts a canonical locator, keeping it distinct from Agent names.

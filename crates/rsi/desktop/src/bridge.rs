@@ -27,6 +27,8 @@ struct Frames {
 #[derive(Debug)]
 pub(crate) struct Bridge {
     pub app: Arc<GuiApplication>,
+    pub app_handle: Mutex<Option<tauri::AppHandle>>,
+    pub export_cancel: Mutex<Option<CancellationToken>>,
     pub assets: Arc<WebAssetControl>,
     pub identity: String,
     pub lifetime: Arc<ApplicationLifetime>,
@@ -47,6 +49,8 @@ impl Bridge {
         failed: Arc<AtomicBool>,
     ) -> Self {
         Self {
+            app_handle: Mutex::new(None),
+            export_cancel: Mutex::new(None),
             app,
             assets,
             identity,
@@ -192,7 +196,11 @@ impl Bridge {
         frames.awaiting.take().expect("checked ACK").1.cancel();
         Ok(())
     }
-    pub fn asset(&self, path: &str) -> std::result::Result<(Vec<u8>, &'static str), NativeError> {
+    pub fn asset(
+        &self,
+        path: &str,
+    ) -> std::result::Result<(Vec<u8>, &'static str, rsi_api_http::DocumentPolicy), NativeError>
+    {
         let _delivery = self.asset_delivery.lock().expect("asset delivery poisoned");
         if self.stop.is_cancelled() {
             return Err(NativeError::Closed);
@@ -210,7 +218,7 @@ impl Bridge {
             AssetType::Json => "application/json",
             AssetType::Png => "image/png",
         };
-        Ok((asset.bytes.as_bytes().to_vec(), mime))
+        Ok((asset.bytes.as_bytes().to_vec(), mime, asset.policy))
     }
     pub async fn call(&self, method: &str, source: &[u8]) -> Result<Vec<u8>> {
         #[derive(Deserialize)]
@@ -242,6 +250,9 @@ impl Bridge {
                 Ok(Vec::new())
             }
             "restore_session" => Ok(self.app.restore_session(text(source)?).await?.into_bytes()),
+            "export_save" => self.save_export(text(source)?).await,
+            "export_cancel" => self.cancel_export(),
+            "export_input" => Ok(self.app.export_input(text(source)?).await?.into_bytes()),
             "reference_input" => Ok(self.app.reference_input(text(source)?).await?.into_bytes()),
             "file_input" => Ok(self.app.file_input(text(source)?).await?.into_bytes()),
             "prepare_submission" => Ok(self

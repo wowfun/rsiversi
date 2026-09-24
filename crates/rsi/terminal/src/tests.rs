@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn cli_export_accepts_inline_values_for_every_short_option() {
+    for arguments in [
+        vec!["--export", "latest", "-f=json", "-i=h,m", "-o=out.json"],
+        vec![
+            "--export",
+            "latest",
+            "--format=json",
+            "--include=h,m",
+            "--export-path=out.json",
+        ],
+    ] {
+        let command =
+            SessionCommand::parse(arguments.into_iter().map(OsString::from).collect()).unwrap();
+        assert_eq!(
+            command.export_command.options.format,
+            rsi_session_protocol::export::ExportFormat::Json
+        );
+        assert_eq!(command.export_command.path.as_deref(), Some("out.json"));
+        assert_eq!(command.export_command.options.include.len(), 2);
+    }
+}
+
+#[test]
 fn interrupted_line_reads_preserve_the_partial_input() {
     struct Source(usize);
     impl std::io::Read for Source {

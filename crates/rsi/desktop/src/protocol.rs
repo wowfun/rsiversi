@@ -139,6 +139,8 @@ pub(super) fn handle(
     request: tauri::http::Request<Vec<u8>>,
     responder: tauri::UriSchemeResponder,
 ) {
+    let fallback = error_policy(request.uri().path());
+    let respond = move |responder, result| respond_with_policy(responder, result, &fallback);
     if let Err(error) = validate_request(label, &request) {
         respond(responder, Err(error));
         return;
@@ -208,7 +210,10 @@ pub(super) fn handle(
     }
     if !path.starts_with("/_") && request.method() == tauri::http::Method::GET {
         drop(guard);
-        respond(responder, bridge.asset(&path));
+        match bridge.asset(&path) {
+            Ok((bytes, mime, policy)) => respond_with_policy(responder, Ok((bytes, mime)), &policy),
+            Err(error) => respond(responder, Err(error)),
+        }
         return;
     }
     let permit = match bridge.admission.acquire(lane) {
@@ -270,18 +275,40 @@ async fn run_operation<T>(
     }
 }
 
-fn respond(
+fn error_policy(path: &str) -> rsi_api_http::DocumentPolicy {
+    match path {
+        "/preview-local.html" => rsi_api_http::DocumentPolicy::SandboxLocal,
+        "/preview-online.html" => rsi_api_http::DocumentPolicy::SandboxHttps,
+        _ => rsi_api_http::DocumentPolicy::default(),
+    }
+}
+fn respond_with_policy(
     responder: tauri::UriSchemeResponder,
     result: Result<(Vec<u8>, &'static str), NativeError>,
+    policy: &rsi_api_http::DocumentPolicy,
 ) {
+    responder.respond(response(result, policy));
+}
+fn response(
+    result: Result<(Vec<u8>, &'static str), NativeError>,
+    policy: &rsi_api_http::DocumentPolicy,
+) -> tauri::http::Response<Vec<u8>> {
+    let csp = policy
+        .content_security_policy("rsi://localhost")
+        .expect("closed product asset policy");
     let (status, bytes, mime) = match result {
         Ok((bytes, mime)) => (200, bytes, mime),
         Err(error) => (409, error.encode(), "application/json"),
     };
-    responder.respond(tauri::http::Response::builder().status(status)
-        .header("Content-Type", mime).header("Cache-Control", "no-store")
-        .header("Content-Security-Policy", "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' blob:; font-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'")
-        .body(bytes).expect("constant native headers"));
+    tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", mime)
+        .header("Cache-Control", "no-store")
+        .header("Content-Security-Policy", csp)
+        .header("Referrer-Policy", policy.referrer_policy())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(bytes)
+        .expect("constant native headers")
 }
 
 async fn respond_admitted<T>(
@@ -298,6 +325,27 @@ async fn respond_admitted<T>(
 mod tests {
     use super::{Admission, NativeError, classify, respond_admitted, run_operation};
     use std::sync::Arc;
+
+    #[test]
+    fn rejected_preview_requests_keep_opaque_sandbox_headers() {
+        for path in ["/preview-local.html", "/preview-online.html"] {
+            let response = super::response(Err(NativeError::Closed), &super::error_policy(path));
+            assert_eq!(response.status(), 409);
+            assert_eq!(response.headers()["Content-Type"], "application/json");
+            assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+            assert_eq!(response.headers()["Referrer-Policy"], "no-referrer");
+            assert!(
+                response.headers()["Content-Security-Policy"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("sandbox allow-scripts;")
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(response.body()).unwrap()["code"],
+                "closed"
+            );
+        }
+    }
     use tokio::sync::{Semaphore, oneshot};
 
     #[test]

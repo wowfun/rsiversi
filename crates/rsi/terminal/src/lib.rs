@@ -7,6 +7,7 @@ mod devices;
 mod document;
 #[cfg(unix)]
 pub use document::ManagementWriter;
+mod export;
 mod headless_commands;
 mod inspector;
 mod native_addons;
@@ -66,11 +67,14 @@ pub const HELP: &str = "Session command options (headless):\n  --commands | --co
       [--output text|jsonl]\n\
   rsi --profile cli [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
       [--agent-preset ID] [--output text|jsonl]\n\
+  rsi --profile cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
   rsi --profile tui [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       [--agent-preset ID]\n";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCommand {
+    export: Option<String>,
+    export_command: rsi_client::ExportCommand,
     list: bool,
     history: Option<SessionId>,
     cwd: Option<PathBuf>,
@@ -299,6 +303,8 @@ pub(crate) struct OutcomeEnvelope<'a> {
 impl SessionCommand {
     pub(crate) fn parse(arguments: Vec<OsString>) -> Result<Self> {
         let mut command = Self {
+            export: None,
+            export_command: rsi_client::ExportCommand::default(),
             list: false,
             history: None,
             cwd: None,
@@ -309,9 +315,32 @@ impl SessionCommand {
         };
         let mut arguments = arguments.into_iter();
         let mut output_set = false;
+        let mut export_tokens = Vec::new();
         while let Some(argument) = arguments.next() {
             let argument = utf8(argument)?;
             match argument.as_str() {
+                "--export" => set_option(
+                    &mut command.export,
+                    rsi_application::arguments::string_value(&mut arguments, "--export")?,
+                    "--export",
+                )?,
+                "-f" | "--format" | "-i" | "--include" | "-o" | "--export-path" => {
+                    export_tokens.push(argument.clone());
+                    export_tokens.push(rsi_application::arguments::string_value(
+                        &mut arguments,
+                        &argument,
+                    )?);
+                }
+                option
+                    if option.starts_with("--format=")
+                        || option.starts_with("--include=")
+                        || option.starts_with("--export-path=")
+                        || option.starts_with("-f=")
+                        || option.starts_with("-i=")
+                        || option.starts_with("-o=") =>
+                {
+                    export_tokens.push(argument);
+                }
                 "--list" => set_flag(&mut command.list, "--list")?,
                 "--history" => set_option(
                     &mut command.history,
@@ -353,32 +382,52 @@ impl SessionCommand {
                 }
             }
         }
-        if (u8::from(command.list)
-            + u8::from(command.history.is_some())
-            + u8::from(command.resume.is_some()))
+        if command.export.is_some() {
+            if command.list
+                || command.history.is_some()
+                || command.resume.is_some()
+                || command.session_id.is_some()
+                || command.agent_preset.is_some()
+                || output_set
+            {
+                return Err(usage(
+                    "--export cannot be combined with Session selection or --output",
+                ));
+            }
+            command.export_command = rsi_client::parse_export_tokens(export_tokens)
+                .map_err(|error| usage(error.to_string()))?;
+        } else if !export_tokens.is_empty() {
+            return Err(usage("export format, include and path require --export"));
+        }
+        command.validate_selection()?;
+
+        Ok(command)
+    }
+    fn validate_selection(&self) -> Result<()> {
+        if (u8::from(self.list)
+            + u8::from(self.history.is_some())
+            + u8::from(self.resume.is_some()))
             > 1
         {
             return Err(usage(
                 "--list, --history and --resume are mutually exclusive",
             ));
         }
-        if (command.list || command.history.is_some())
-            && (command.cwd.is_some()
-                || command.session_id.is_some()
-                || command.agent_preset.is_some())
+        if (self.list || self.history.is_some())
+            && (self.cwd.is_some() || self.session_id.is_some() || self.agent_preset.is_some())
         {
             return Err(usage(
                 "read-only Session commands cannot change creation settings",
             ));
         }
-        if command.resume.is_some() && command.session_id.is_some() {
+        if self.resume.is_some() && self.session_id.is_some() {
             return Err(usage("--resume and --session-id are mutually exclusive"));
         }
-        if command.resume.is_some() && command.agent_preset.is_some() {
+        if self.resume.is_some() && self.agent_preset.is_some() {
             return Err(usage("--resume and --agent-preset are mutually exclusive"));
         }
 
-        Ok(command)
+        Ok(())
     }
 }
 

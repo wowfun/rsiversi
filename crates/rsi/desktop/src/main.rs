@@ -1,4 +1,5 @@
 mod bridge;
+mod export;
 mod protocol;
 use async_trait::async_trait;
 use bridge::{Bridge, error};
@@ -105,18 +106,34 @@ fn run() -> Result<i32, String> {
     let stopped = Arc::new(AtomicBool::new(false));
     let status = Arc::new(AtomicI32::new(0));
     let protocol_owner = owner.clone();
+    let dialog_owner = owner.clone();
     let built = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("rsi", move |context, request, responder| {
             protocol::handle(&protocol_owner, context.webview_label(), request, responder);
         })
         .setup(move |app| {
+            if let Some(bridge) = dialog_owner
+                .lock()
+                .expect("desktop owner poisoned")
+                .as_ref()
+            {
+                *bridge.app_handle.lock().expect("desktop dialog poisoned") =
+                    Some(app.handle().clone());
+            }
             tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::External("rsi://localhost/".parse()?),
             )
             .on_navigation(|url| {
-                url.scheme() == "rsi" && url.host_str() == Some("localhost") && url.path() == "/"
+                url.scheme() == "rsi"
+                    && url.host_str() == Some("localhost")
+                    && url.query().is_none()
+                    && matches!(
+                        url.path(),
+                        "/" | "/preview-local.html" | "/preview-online.html"
+                    )
             })
             .title("RSI")
             .inner_size(1440.0, 980.0)

@@ -1,5 +1,17 @@
 # rsi-terminal
 
+`/export [PATH] [-f markdown|md|json] [-i INCLUDE]` exports the selected native
+Session without submitting a message. Quoted paths are supported; the default
+file is `rsi-session-<safe-id>.md` (or `.json`) in the client working directory.
+Line mode accepts `:export` with the same arguments. Scripted export uses
+`rsi --profile cli --export SESSION|latest [-f FORMAT] [-i INCLUDE] [-o PATH]`:
+Each short or long export option accepts a separate value or `=VALUE`.
+without a path the artifact goes to stdout and status/errors go to stderr.
+`latest` selects the newest durable root in the selected workspace. Export is
+exclusive with creation, resume, list, history and `--output` reporting modes.
+See the [shared export contract](../session-export/README.md) for include names,
+diagnostic precision, streaming and file replacement behavior.
+
 `/profiles` opens reviewed Host leaf management from Home or a Native conversation.
 It uses the same Rust workbench as Settings → Plugins, preserving the conversation
 draft while editing. Source selection, exact Local-issued grants, configuration
@@ -52,8 +64,13 @@ Application commands are `/help`, `/login [deepseek|openai|openai-compatible]`,
 bypass message submission, prompt recall and Session command receipts, and shadow
 same-name Session commands. Recognition requires raw single-line input and a
 cursor at the end; invalid arguments retain the draft. Multi-line input starting
-with a reserved name and `//` input are literal Human text in both dispatch layers.
+with other reserved names and `//` input are literal Human text in both dispatch layers.
+`/export` rejects multiline arguments and never submits them as Human text.
 Editing and submission keys follow the [interaction design](docs/tui-design.md).
+`@name` opens Agent completion. Ctrl+P → “@ Workspace file · browse and insert
+path” opens the separate file picker on all supported key decoders. A decoded
+Alt+@ is an additional shortcut; whether a terminal emits it depends on its
+keyboard configuration. Both picker paths insert text, without adding file contents.
 Exit has no confirmation; current and retained process-local drafts and undo
 history are discarded. Session switching retains them.
 
