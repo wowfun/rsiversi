@@ -59,6 +59,7 @@ pub struct LocalSessionService {
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
+    export_workers: Arc<tokio::sync::Semaphore>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -142,6 +143,7 @@ impl LocalSessionService {
             jobs: None,
             jobs_retention: rsi_session_protocol::JobsRetention::default(),
             preview_workers: Arc::new(tokio::sync::Semaphore::new(2)),
+            export_workers: Arc::new(tokio::sync::Semaphore::new(2)),
             continuations: None,
             projection_service: projections,
             projection_retention: rsi_session_protocol::ProjectionRetention::default(),
@@ -215,6 +217,7 @@ impl LocalSessionService {
             jobs: self.jobs.clone(),
             jobs_retention: self.jobs_retention.clone(),
             preview_workers: self.preview_workers.clone(),
+            export_workers: self.export_workers.clone(),
             projection_service: self.projection_service.clone(),
             projection_retention: self.projection_retention.clone(),
             projection_stopped: self.projection_stopped.clone(),
@@ -426,6 +429,7 @@ struct LocalSessionHandle {
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
+    export_workers: Arc<tokio::sync::Semaphore>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -961,6 +965,36 @@ impl SessionHandle for LocalSessionHandle {
             .cancel_target(self.session_id(), target, reason)
             .await
             .map_err(map_turn_error)
+    }
+
+    async fn export(
+        &self,
+        options: rsi_session_protocol::export::ExportOptions,
+    ) -> Result<rsi_session_protocol::export::ExportStream> {
+        let _activity = self.begin_activity()?;
+        options.validate()?;
+        let published = self.reconcile_fresh_read().await?;
+        let header = self.header_snapshot().await?;
+        let permit = self
+            .export_workers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SessionError::Capacity)?;
+        let mut source = if published {
+            rsi_session_export::export(
+                self.store.clone(),
+                (*header).clone(),
+                options,
+                self.projection_stopped.clone(),
+            )
+            .await?
+        } else {
+            rsi_session_export::empty((*header).clone(), options, self.projection_stopped.clone())?
+        };
+        Ok(Box::pin(async_stream::try_stream! {
+            let _permit = permit;
+            while let Some(item) = futures_util::StreamExt::next(&mut source).await { yield item?; }
+        }))
     }
 
     async fn history_before(

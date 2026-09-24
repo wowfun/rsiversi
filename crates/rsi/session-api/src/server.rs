@@ -133,6 +133,7 @@ impl SessionApi {
             registrations.push(registrar.register(operation.spec(), handler)?);
         }
         for (operation, service) in [
+            Operation::Export,
             Operation::Observe,
             Operation::Interactions,
             Operation::Projections,
@@ -141,6 +142,7 @@ impl SessionApi {
         ]
         .into_iter()
         .zip([
+            service.clone(),
             service.clone(),
             service.clone(),
             service.clone(),

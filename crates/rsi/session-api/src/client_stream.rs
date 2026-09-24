@@ -188,3 +188,26 @@ pub(super) async fn interactions(
         }
     }))
 }
+
+pub(super) async fn export(
+    handle: &Handle,
+    options: rsi_session_protocol::export::ExportOptions,
+) -> rsi_session_protocol::Result<rsi_session_protocol::export::ExportStream> {
+    use rsi_session_protocol::export::{ExportEvent, ExportVerifier};
+    options.validate()?;
+    let handle = handle.frozen();
+    let target = handle.target();
+    let operation = Operation::Export;
+    let mut source = open(&handle, operation, &options).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        let mut verifier = ExportVerifier::default();
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let event: ExportEvent = decode(&handle, operation, &message)?;
+            verifier.accept(&event, Some((&target.session_id, &target.header_key, &options)))?;
+            drop(message);
+            yield event;
+        }
+        verifier.finish()?;
+    }))
+}

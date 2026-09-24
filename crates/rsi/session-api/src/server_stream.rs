@@ -30,6 +30,35 @@ impl ApiHandler for Handler {
             ));
         };
         match self.operation {
+            Operation::Export => {
+                let request: HandleRequest<rsi_session_protocol::export::ExportOptions> =
+                    serde_json::from_slice(input.as_bytes())
+                        .map_err(|_| ApiError::Invalid("invalid Session export request".into()))?;
+                request
+                    .input
+                    .validate()
+                    .map_err(|_| ApiError::Invalid("invalid export options".into()))?;
+                let result = async {
+                    handle(self.service.as_ref(), &request.target)
+                        .await?
+                        .export(request.input)
+                        .await
+                }
+                .await;
+                let mut source = match wire::domain(result)? {
+                    Ok(source) => source,
+                    Err(failure) => {
+                        return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
+                    }
+                };
+                Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+                    while let Some(event) = source.next().await {
+                        let body = match wire::domain(event)? { Ok(body) => body, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
+                        let json = budget.encode(&HandleReply { target:request.target.clone(), body }, maximum)?;
+                        yield ApiMessage { json, binary:None };
+                    }
+                })))
+            }
             Operation::TerminalOutput => {
                 terminal_output(self.service.as_ref(), input, budget, maximum).await
             }

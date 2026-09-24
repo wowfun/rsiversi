@@ -546,6 +546,12 @@ impl SessionHandle for Handle {
             .map_err(|_| malformed(Operation::GoalStatus))?;
         Ok(state)
     }
+    async fn export(
+        &self,
+        options: rsi_session_protocol::export::ExportOptions,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::export::ExportStream> {
+        crate::client_stream::export(self, options).await
+    }
     async fn observe_goal(&self) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
         crate::client_stream::goal(self).await
     }

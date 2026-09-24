@@ -1,5 +1,11 @@
 # rsi-session-protocol
 
+`SessionHandle::export` returns a finite read-only export stream. Its options,
+bounded UTF-8 chunks and completion validation are shared by every application;
+the [export contract](../session-export/README.md) owns artifact semantics.
+Filename suggestions are single components: empty names, `.` and `..`, path
+separators and line/NUL controls are rejected by the stream verifier.
+
 `SessionService::activity` reads only the current generation's first 64 resident
 identities and its 64 most recently opened/created identities, deduplicated. It
 never discovers historical sessions, prepares a generation or retains a Session

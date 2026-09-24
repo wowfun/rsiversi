@@ -5,6 +5,8 @@ mod commands;
 
 #[path = "client_tests/draft.rs"]
 mod draft;
+#[path = "client_tests/export.rs"]
+mod export;
 #[path = "client_tests/jobs.rs"]
 mod jobs;
 #[path = "client_tests/projections.rs"]

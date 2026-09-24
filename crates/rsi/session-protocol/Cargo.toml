@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+sha2.workspace = true
+hex.workspace = true
 rsi-pty-protocol = { path = "../../rsi-pty/protocol" }
 rsi-conversation = { path = "../conversation" }
 rsi-goal = { path = "../goal" }

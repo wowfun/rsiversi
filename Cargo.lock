@@ -6683,6 +6683,7 @@ dependencies = [
  "rsi-process",
  "rsi-pty-protocol",
  "rsi-sandbox",
+ "rsi-session-export",
  "rsi-session-protocol",
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
@@ -6720,6 +6721,31 @@ dependencies = [
  "tokio",
  "tokio-util",
  "web-time",
+]
+
+[[package]]
+name = "rsi-session-export"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-agent-context",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6778,6 +6804,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "hex",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -6794,6 +6821,7 @@ dependencies = [
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio-util",
 ]

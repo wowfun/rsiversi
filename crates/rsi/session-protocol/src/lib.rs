@@ -23,6 +23,8 @@ use thiserror::Error;
 
 mod activity;
 mod evidence;
+/// Read-only conversation artifacts and stream verification.
+pub mod export;
 pub use activity::{ActivityRequest, ActivityStatus, SessionActivity, SessionActivityPage};
 mod reads;
 /// Session-bound live terminal requests.
@@ -361,6 +363,11 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Exports a fixed durable cut without submitting or resuming execution.
+    async fn export(&self, options: export::ExportOptions) -> Result<export::ExportStream> {
+        let _ = options;
+        Err(SessionError::NotFound("Session export".into()))
+    }
     /// Operates a live terminal bound to this persisted Session and frozen workspace policy.
     async fn terminal(&self, request: terminal::Request) -> Result<terminal::Reply> {
         let _ = request;

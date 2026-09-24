@@ -17,6 +17,7 @@ pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_R
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Operation {
+    Export,
     Terminal,
     TerminalOutput,
     TerminalInput,
@@ -56,7 +57,8 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
+        Self::Export,
         Self::Terminal,
         Self::TerminalOutput,
         Self::TerminalInput,
@@ -99,6 +101,7 @@ impl Operation {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};
         let (name, class, effect, input, output) = match self {
+            Self::Export => ("export", Subscription, Read, 8192, 512 * 1024),
             Self::Terminal => ("terminal", Control, Mutation, 8192, 128 * 1024),
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
             Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),

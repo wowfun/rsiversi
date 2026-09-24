@@ -1,5 +1,11 @@
 # rsi-session-api
 
+`session/export` v1 is an authenticated Subscription Read bound to the attached
+Session/Header. Requests fit 8 KiB; each JSON stream item fits 512 KiB, including
+worst-case escaping of a 64 KiB chunk. Clients check start identity, options,
+offsets, terminal byte count and digest and reject EOF without completion.
+The [export owner](../session-export/README.md) defines content and source cuts.
+
 The closed `setup_required` domain failure preserves `SessionError::SetupRequired`
 across local and remote creation. Backend diagnostics remain redacted and retain
 their API failure category. Clients may show setup without treating data or Store

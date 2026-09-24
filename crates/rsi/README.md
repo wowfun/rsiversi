@@ -13,6 +13,10 @@ transcript presentation, editing, model/effort selection and Session navigation.
 The [pure presentation library](terminal-ui/README.md) owns validated scenes,
 cells, geometry and acknowledged source maps.
 
+Native Session artifacts use the shared [Session export contract](session-export/README.md).
+The [terminal](terminal/README.md) and [GUI](gui/README.md) entrypoints authorize
+the selected handle and deliver the same fixed-cut Markdown or JSON stream.
+
 ## Line application
 
 The line application accepts ordinary text directly into the durable next-Turn
