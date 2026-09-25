@@ -139,6 +139,9 @@ impl PluginsFeature {
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect();
+            if let Some(attempt) = &page.last_attempt {
+                view.guidance.push(attempt.guidance());
+            }
             let availability = match page.context.availability {
                 PluginAvailability::NotResident => Some(
                     "This Session has no resident generation. Normal resume may use the current preset.",

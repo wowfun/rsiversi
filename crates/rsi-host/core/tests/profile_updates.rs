@@ -285,7 +285,7 @@ async fn replacement_preserves_context_and_unused_catalog_changes_advance_only_i
         ReloadOutcome::Unchanged(_)
     ));
     assert_eq!(running.updater.input_revision(), 2);
-    assert_eq!(running.control.status().revision(), 1);
+    assert_eq!(running.control.snapshot().revision(), 1);
     assert!(Arc::ptr_eq(&old_label, &running.label()));
     assert_eq!(first.calls.load(Ordering::SeqCst), 1);
     let next = host(&Leaf::new("second"), "2", UpdateMode::Replayable, true);
@@ -312,6 +312,62 @@ async fn replacement_preserves_context_and_unused_catalog_changes_advance_only_i
     assert_eq!(independent.label().as_str(), "first");
     assert_eq!(old_label.as_str(), "first");
     assert!(independent.runtime.shutdown().await.is_clean());
+    assert!(running.runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn failed_input_replacement_keeps_watching_the_previous_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("old.toml");
+    let candidate_source = directory.path().join("candidate.toml");
+    let document = |value| {
+        format!("format = 1\n[[steps]]\nkind = 'patch'\ntarget = 'leaf'\nconfig = {value}\n")
+    };
+    std::fs::write(&source, document(1)).unwrap();
+    std::fs::write(&candidate_source, document(1)).unwrap();
+    let original = Leaf::new("original");
+    let first = host(&original, "1", UpdateMode::Replayable, false);
+    let running = Running::start_program(&first, ProfileProgram::from_file(&source)).await;
+    let failed = Leaf::new("candidate");
+    failed.fail.store(true, Ordering::SeqCst);
+    let candidate = host(&failed, "2", UpdateMode::Replayable, false);
+    let outcome = running
+        .updater
+        .submit(
+            1,
+            candidate
+                .profile_input(ProfileProgram::from_file(&candidate_source))
+                .unwrap(),
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
+    assert_eq!(running.updater.input_revision(), 1);
+    let mut changes = running.control.subscribe();
+    std::fs::remove_file(&candidate_source).unwrap();
+    std::fs::write(&source, document(2)).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = changes.borrow_and_update().clone();
+            if current.last_attempt().is_some_and(|attempt| {
+                attempt.origin == rsi_meta_profile::ProfileAttemptOrigin::Watcher
+                    && attempt.outcome == rsi_meta_profile::ProfileAttemptOutcome::Applied
+            }) {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("old source remains watched after compensation");
+    assert_eq!(
+        running.control.status().watcher(),
+        rsi_meta_profile::WatcherHealth::Healthy
+    );
+    assert_eq!(running.label().as_str(), "original");
+    assert_eq!(original.calls.load(Ordering::SeqCst), 3);
     assert!(running.runtime.shutdown().await.is_clean());
 }
 
@@ -392,7 +448,7 @@ async fn refused_input_preserves_committed_target_and_restart_status_across_relo
     for _ in 0..3 {
         let outcome = running.control.reload().await.unwrap();
         assert!(matches!(outcome, ReloadOutcome::RestartRequired(_)));
-        assert_eq!(outcome.status().revision(), before.revision());
+        assert!(outcome.status().revision() > before.revision());
         assert_eq!(running.control.snapshot(), before);
         assert_eq!(running.updater.input_revision(), 1);
     }
@@ -543,7 +599,7 @@ async fn dropping_manual_reload_waiter_during_cleanup_does_not_abandon_convergen
     let mut status = running.control.subscribe();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if status.borrow_and_update().revision() == 2 {
+            if status.borrow_and_update().last_attempt().is_some() {
                 break;
             }
             status.changed().await.unwrap();

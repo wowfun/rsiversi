@@ -1,5 +1,7 @@
 # rsi-configuration-api
 
+Host pages also carry an optional last completed update with decimal command identity, closed origin, outcome and failure categories. This is not an action receipt or an authorization to retry. Non-Host pages omit it.
+
 The typed configuration-grant API carries redacted authority status and a
 Local-only grant snapshot and CAS mutation. Revisions are exact canonical
 u64 decimal strings; lists contain at most 64 unique ordered DeviceIds.
@@ -8,7 +10,7 @@ requested membership. Malformed or lost mutation replies remain unknown;
 this client never replays a grant change. Endpoint implementations and durable
 policy belong to the [configuration owner](../configuration-access/README.md).
 
-`configuration/plugins/2` is a separate grant-gated read. Its explicit target is
+`configuration/plugins/3` is a separate grant-gated read. Its explicit target is
 Host observations, a current preset preview, or a Session's resident generation.
 Preset compilation is pure; Session reads validate the Header correlation and
 peek at residency without pinning, preparing or building a generation. A cold
@@ -75,9 +77,9 @@ Every Host handler retains the actual Configuration grant through completion.
 Receipts contain no secret or local store path, and never enable Tools or submit
 a search. The fixed `rsi.retrieval/exa` binding is not an AI provider slot.
 
-The Plugins wire contract is v2. It breaks v1 with an explicit target, asynchronous
-resident-generation lookup and optional health/watcher evidence. There is no v1
-migration or compatibility shim; in-tree clients use the v2 contract together.
+The Plugins wire contract is v3. It includes an explicit target, asynchronous
+resident-generation lookup, health/watcher evidence and the typed last update
+attempt. Earlier versions are unsupported; in-tree clients use v3 together.
 
 Host Profile leaf management uses separate `profile-leaves` version 1 operations.
 Its exact root identity, user Profile, leaf and enable/disable/configuration

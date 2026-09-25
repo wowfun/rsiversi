@@ -132,6 +132,7 @@ impl Source {
                 WatcherHealth::Healthy => PluginWatcher::Healthy,
                 WatcherHealth::Faulted => PluginWatcher::Faulted,
             }),
+            last_attempt: status.last_attempt().map(update_attempt),
             offset: request.offset,
             total,
             next_offset: (next < total).then_some(next),
@@ -248,6 +249,7 @@ fn empty_page(request: &PluginStatusRequest) -> PluginStatusPage {
         observed_revision: "0".into(),
         health: None,
         watcher: None,
+        last_attempt: None,
         offset: request.offset,
         total: 0,
         next_offset: None,
@@ -285,4 +287,45 @@ fn populate(
         .collect();
     let next = request.offset + page.plugins.len();
     page.next_offset = (next < page.total).then_some(next);
+}
+
+fn update_attempt(
+    value: &rsi_meta_profile::ProfileAttempt,
+) -> rsi_configuration_api::PluginUpdateAttempt {
+    use rsi_configuration_api::{
+        PluginUpdateAttempt, PluginUpdateFailure, PluginUpdateOrigin, PluginUpdateOutcome,
+    };
+    use rsi_meta_profile::{ProfileAttemptOrigin, ProfileAttemptOutcome, ProfileFailureKind};
+    let failure = |kind| match kind {
+        ProfileFailureKind::Source => PluginUpdateFailure::Source,
+        ProfileFailureKind::Compile => PluginUpdateFailure::Compile,
+        ProfileFailureKind::Resolve => PluginUpdateFailure::Resolve,
+        ProfileFailureKind::Bind => PluginUpdateFailure::Bind,
+        ProfileFailureKind::Prepare => PluginUpdateFailure::Prepare,
+        ProfileFailureKind::Apply => PluginUpdateFailure::Apply,
+        ProfileFailureKind::Retire => PluginUpdateFailure::Retire,
+        ProfileFailureKind::InputConflict => PluginUpdateFailure::InputConflict,
+        ProfileFailureKind::IncompatibleInput => PluginUpdateFailure::IncompatibleInput,
+        ProfileFailureKind::Capacity => PluginUpdateFailure::Capacity,
+        ProfileFailureKind::Stopped => PluginUpdateFailure::Stopped,
+    };
+    PluginUpdateAttempt {
+        sequence: value.sequence.to_string(),
+        origin: match value.origin {
+            ProfileAttemptOrigin::Manual => PluginUpdateOrigin::Manual,
+            ProfileAttemptOrigin::Watcher => PluginUpdateOrigin::Watcher,
+            ProfileAttemptOrigin::InputReplacement => PluginUpdateOrigin::InputReplacement,
+        },
+        outcome: match value.outcome {
+            ProfileAttemptOutcome::Applied => PluginUpdateOutcome::Applied,
+            ProfileAttemptOutcome::Unchanged => PluginUpdateOutcome::Unchanged,
+            ProfileAttemptOutcome::RestartRequired => PluginUpdateOutcome::RestartRequired,
+            ProfileAttemptOutcome::RolledBack => PluginUpdateOutcome::RolledBack,
+            ProfileAttemptOutcome::Degraded => PluginUpdateOutcome::Degraded,
+            ProfileAttemptOutcome::Rejected => PluginUpdateOutcome::Rejected,
+            ProfileAttemptOutcome::Failed => PluginUpdateOutcome::Failed,
+        },
+        failure: value.failure.map(failure),
+        rollback_failure: value.rollback_failure.map(failure),
+    }
 }

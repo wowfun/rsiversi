@@ -45,6 +45,7 @@ impl ApiClient for Remote {
 }
 fn page(offset: usize, observed: &str) -> PluginStatusPage {
     PluginStatusPage {
+        last_attempt: None,
         context: PluginStatusContext::default(),
         desired_revision: "3".into(),
         observed_revision: observed.into(),

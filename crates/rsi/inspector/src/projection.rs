@@ -117,7 +117,8 @@ pub(super) fn profile(
                 S::Unloading => "unloading",
                 S::Disposed => "disposed",
             };
-            json!({"id":instance.id(),"factory":instance.factory(),"state":state})
+            json!({"id":instance.id(),"factory":instance.factory(),"state":state,
+                "pending": match instance.state() { S::Pending(report) => Some(report), _ => None }})
         })
         .collect();
     let observed_next = request.offset.saturating_add(observed.len());
@@ -136,7 +137,13 @@ pub(super) fn profile(
     json!({
         "revision": snapshot.revision().to_string(), "source_digest": snapshot.source_digest(),
         "status_revision": status.revision().to_string(), "status_source_digest": status.source_digest(),
-        "health": health, "watcher": watcher, "total": total,
+        "health": health, "watcher": watcher,
+        "last_attempt": status.last_attempt().map(|attempt| json!({
+            "sequence": attempt.sequence.to_string(), "origin": format!("{:?}", attempt.origin),
+            "outcome": format!("{:?}", attempt.outcome),
+            "failure": attempt.failure.map(|kind| format!("{kind:?}")),
+            "rollback_failure": attempt.rollback_failure.map(|kind| format!("{kind:?}"))
+        })), "total": total,
         "next_offset": (next < total).then_some(next), "nodes": rows,
         "observed_total":status.observed().len(),
         "observed_next_offset":(observed_next < status.observed().len()).then_some(observed_next),

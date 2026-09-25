@@ -53,7 +53,7 @@ impl ConfigurationOperation {
             id: OperationId::new(
                 "configuration",
                 name,
-                if matches!(self, Self::Plugins) { 2 } else { 1 },
+                if matches!(self, Self::Plugins) { 3 } else { 1 },
             )
             .expect("static operation"),
             access,
@@ -188,7 +188,8 @@ mod plugins;
 pub use plugins::{
     PluginAvailability, PluginDiagnostic, PluginHealth, PluginLifecycle, PluginObservation,
     PluginOrigin, PluginPresetSource, PluginStatusContext, PluginStatusPage, PluginStatusRequest,
-    PluginStatusRow, PluginStatusSource, PluginStatusTarget, PluginWatcher,
+    PluginStatusRow, PluginStatusSource, PluginStatusTarget, PluginUpdateAttempt,
+    PluginUpdateFailure, PluginUpdateOrigin, PluginUpdateOutcome, PluginWatcher,
 };
 mod providers;
 pub use discovery::{DiscoveryRequest, DiscoverySnapshot};

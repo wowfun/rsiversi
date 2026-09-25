@@ -2,9 +2,14 @@ use super::{
     CandidateLeaf, ProfileCandidate, ProfileCompiler, ProfileEnvironment, ProfileError,
     ProfileLimits, ProfileProgram, Result, TreeNode, bound_message,
 };
+mod attempt;
 mod bindings;
 mod updates;
 use async_trait::async_trait;
+use attempt::ConvergenceFailure;
+pub use attempt::{
+    ProfileAttempt, ProfileAttemptOrigin, ProfileAttemptOutcome, ProfileFailureKind,
+};
 use bindings::{BindingSnapshot, EffectiveBindings, Namespace};
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use updates::Command;
@@ -190,10 +195,15 @@ pub struct ProfileStatus {
     target: Vec<ProfileTargetStatus>,
     observed: Vec<ProfileInstanceStatus>,
     diagnostic: Option<String>,
+    last_attempt: Option<ProfileAttempt>,
 }
 
 impl ProfileStatus {
-    /// Monotonic completed convergence revision.
+    /// Last command completed by the serialized worker, absent at bootstrap.
+    pub fn last_attempt(&self) -> Option<&ProfileAttempt> {
+        self.last_attempt.as_ref()
+    }
+    /// Monotonic version of the complete published observation.
     pub const fn revision(&self) -> u64 {
         self.revision
     }
@@ -308,6 +318,8 @@ pub enum ReloadOutcome {
         status: ProfileStatus,
         /// Bounded redacted candidate failure.
         error: String,
+        /// Product-neutral candidate failure category.
+        error_kind: ProfileFailureKind,
     },
     /// Candidate application and compensation both failed.
     Degraded {
@@ -317,6 +329,10 @@ pub enum ReloadOutcome {
         error: String,
         /// Bounded redacted compensation failure.
         rollback_error: String,
+        /// Product-neutral candidate failure category.
+        error_kind: ProfileFailureKind,
+        /// Product-neutral compensation failure category.
+        rollback_error_kind: ProfileFailureKind,
     },
 }
 
@@ -754,6 +770,7 @@ struct ControllerState {
     health: ProfileHealth,
     watcher: WatcherHealth,
     diagnostic: Option<String>,
+    last_attempt: Option<ProfileAttempt>,
     context: Context,
     target: ResolvedTarget,
     converged_target: ResolvedTarget,
@@ -772,6 +789,7 @@ impl Controller {
             target: target_status(initial),
             observed: Vec::new(),
             diagnostic: None,
+            last_attempt: None,
         };
         let (status_tx, _) = watch::channel(initial_status);
         let (commands, receiver) = mpsc::channel(1);
@@ -823,6 +841,7 @@ impl Controller {
             health: ProfileHealth::Converged,
             watcher,
             diagnostic: None,
+            last_attempt: None,
             context,
             converged_target: target.clone(),
             input_restart_required: false,
@@ -861,7 +880,11 @@ impl Controller {
     }
 
     async fn reload(&self) -> Result<ReloadOutcome> {
-        self.submit(None)?.wait().await
+        self.reload_from(ProfileAttemptOrigin::Manual).await
+    }
+
+    async fn reload_from(&self, origin: ProfileAttemptOrigin) -> Result<ReloadOutcome> {
+        self.submit_command(None, origin)?.wait().await
     }
 
     async fn reload_serialized(
@@ -921,6 +944,20 @@ impl Controller {
         let candidate_target = candidate.target.clone();
         let acknowledge_restart =
             replacement || !semantic_equal(&previous_target, &candidate_target);
+        // Replacement failure retains the previous complete input, so its
+        // watcher must retain that input's sources as well. A file reload still
+        // watches the candidate sources, allowing the operator to repair them.
+        let rollback_watch = if replacement {
+            self.state
+                .lock()
+                .expect("Profile state poisoned")
+                .as_ref()
+                .expect("checked active state")
+                .watch_plan
+                .clone()
+        } else {
+            watch_plan.clone()
+        };
         self.set_converging(&candidate.target);
 
         let mut active = {
@@ -949,7 +986,7 @@ impl Controller {
                     candidate_target,
                     active,
                     rollback,
-                    watch_plan,
+                    rollback_watch,
                     error,
                 )
                 .await
@@ -964,17 +1001,23 @@ impl Controller {
         mut active: Vec<ActiveLeaf>,
         rollback: BoundTarget,
         watch_plan: WatchPlan,
-        error: String,
+        error: ConvergenceFailure,
     ) -> Result<ReloadOutcome> {
-        let error = bound_message(error, self.limits.maximum_diagnostic_bytes);
+        let error_kind = error.kind;
+        let error = bound_message(error.message, self.limits.maximum_diagnostic_bytes);
         match self.converge_once(&mut active, rollback).await {
             Ok(restored) => {
                 let status = self.complete_applied(revision, restored, active, watch_plan, false);
-                Ok(ReloadOutcome::RolledBack { status, error })
+                Ok(ReloadOutcome::RolledBack {
+                    status,
+                    error,
+                    error_kind,
+                })
             }
             Err(rollback_error) => {
+                let rollback_error_kind = rollback_error.kind;
                 let rollback_error =
-                    bound_message(rollback_error, self.limits.maximum_diagnostic_bytes);
+                    bound_message(rollback_error.message, self.limits.maximum_diagnostic_bytes);
                 let status = self.complete_degraded(
                     revision,
                     candidate_target,
@@ -986,6 +1029,8 @@ impl Controller {
                     status,
                     error,
                     rollback_error,
+                    error_kind,
+                    rollback_error_kind,
                 })
             }
         }
@@ -1038,7 +1083,7 @@ impl Controller {
         &self,
         active: &mut Vec<ActiveLeaf>,
         mut candidate: BoundTarget,
-    ) -> std::result::Result<ResolvedTarget, String> {
+    ) -> std::result::Result<ResolvedTarget, ConvergenceFailure> {
         let wanted = candidate
             .target
             .leaves
@@ -1063,14 +1108,17 @@ impl Controller {
             self.remove_active(index, &removed);
             let report = removed.handle.dispose().await;
             if !report.is_clean() {
-                return Err(format!(
-                    "disposing Profile instance `{}` reported {} cleanup failures",
-                    removed.resolved.candidate.id(),
-                    report.total_failures()
-                ));
+                return Err(ConvergenceFailure {
+                    kind: ProfileFailureKind::Retire,
+                    message: format!(
+                        "disposing Profile instance `{}` reported {} cleanup failures",
+                        removed.resolved.candidate.id(),
+                        report.total_failures()
+                    ),
+                });
             }
         }
-        publish_order(&candidate).map_err(|error| error.to_string())?;
+        publish_order(&candidate)?;
         active.sort_by_key(|leaf| wanted[leaf.resolved.candidate.id()]);
         for leaf in active.iter_mut() {
             leaf.resolved = candidate.target.leaves[wanted[leaf.resolved.candidate.id()]].clone();
@@ -1095,22 +1143,16 @@ impl Controller {
                         resolved.factory.clone(),
                         resolved.candidate.config().clone(),
                     )
-                    .map_err(|_| {
-                        ProfileError::Preparation {
-                            instance: resolved.candidate.id().clone(),
-                        }
-                        .to_string()
+                    .map_err(|_| ProfileError::Preparation {
+                        instance: resolved.candidate.id().clone(),
                     })?,
             };
             let handle = candidate.leaves[index]
                 .context
                 .apply_prepared(prepared)
                 .await
-                .map_err(|_| {
-                    ProfileError::Application {
-                        instance: resolved.candidate.id().clone(),
-                    }
-                    .to_string()
+                .map_err(|_| ProfileError::Application {
+                    instance: resolved.candidate.id().clone(),
                 })?;
             let state = handle.snapshot().state;
             active.insert(
@@ -1126,7 +1168,10 @@ impl Controller {
             if let Some(diagnostic) =
                 settled_failure(candidate.target.leaves[index].candidate.id(), &state)
             {
-                return Err(diagnostic);
+                return Err(ConvergenceFailure {
+                    kind: ProfileFailureKind::Apply,
+                    message: diagnostic,
+                });
             }
         }
         Ok(candidate.target)
@@ -1327,10 +1372,7 @@ impl Controller {
                 self.limits.maximum_diagnostic_bytes,
             ));
         }
-        let status = status_from_state(state);
-        if *self.status_tx.borrow() != status {
-            self.status_tx.send_replace(status);
-        }
+        self.publish_locked_state(state);
     }
 
     fn publish_locked(&self, state: &mut Option<ControllerState>) {
@@ -1340,8 +1382,19 @@ impl Controller {
     }
 
     fn publish_locked_state(&self, state: &mut ControllerState) -> ProfileStatus {
-        let status = status_from_state(state);
-        self.status_tx.send_replace(status.clone());
+        let mut status = status_from_state(state);
+        self.status_tx.send_if_modified(|previous| {
+            status.revision = previous.revision;
+            if *previous == status {
+                return false;
+            }
+            status.revision = previous
+                .revision
+                .checked_add(1)
+                .expect("Profile observation revision exhausted");
+            *previous = status.clone();
+            true
+        });
         status
     }
 
@@ -1427,7 +1480,7 @@ impl Controller {
         let mut consecutive_failures = 0_u32;
         loop {
             if self.dirty.swap(false, Ordering::AcqRel) {
-                if let Err(error) = self.reload().await {
+                if let Err(error) = self.reload_from(ProfileAttemptOrigin::Watcher).await {
                     if matches!(error, ProfileError::Busy) {
                         self.mark_dirty();
                     }
@@ -1998,6 +2051,7 @@ fn status_from_state(state: &ControllerState) -> ProfileStatus {
             })
             .collect(),
         diagnostic: state.diagnostic.clone(),
+        last_attempt: state.last_attempt.clone(),
     }
 }
 
@@ -2030,6 +2084,7 @@ fn stopped_status() -> ProfileStatus {
         target: Vec::new(),
         observed: Vec::new(),
         diagnostic: None,
+        last_attempt: None,
     }
 }
 

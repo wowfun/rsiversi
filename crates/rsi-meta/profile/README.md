@@ -80,7 +80,7 @@ rollback does the same for the retired members. This keeps reload possible at th
 Runtime Fiber ceiling instead of requiring a shadow copy of either graph. A
 prepared leaf may commit as Pending when its declared dependencies are absent.
 
-Equal healthy trees return `Unchanged` without advancing revision. Degraded
+Equal healthy trees return `Unchanged` without advancing graph revision. Degraded
 state never suppresses a same-content retry. A changed `RestartRequired` leaf in the committed source program
 publishes the candidate source digest and `RestartRequired` status without
 changing the observed graph. Replayable changes converge in the existing Meta
@@ -185,6 +185,19 @@ when its own consumers may observe that generation. The wrapper factory rejects
 Meta reconfiguration so it cannot activate again as an empty generation.
 
 ## Watching and control
+
+`ProfileStatus::revision` versions the complete observation, including watcher,
+diagnostic, lifecycle and last completed attempt changes. Equal observations do
+not advance it. `ProfileSnapshot::revision` remains the independent graph
+revision; neither revision implies an atomic desired/observed graph.
+The command worker alone publishes `last_attempt`, with a sequential identity,
+manual/watcher/input-replacement origin, closed outcome and typed primary and
+compensation failure kinds. Meta capacity/payload/busy errors retain the Capacity category; closed Runtime or disposed Context errors retain Stopped rather than Bind. It records dequeued input conflicts and preflight
+failures as well as convergence outcomes. Admission-only Busy/Stopped errors,
+polling and an in-progress command do not replace the last completed attempt.
+An input replacement that rolls back restores the previous input's watch plan.
+Local diagnostics remain bounded and redacted; remote presentation maps only
+closed categories and never forwards these strings or dependency identities.
 
 The Profile Fiber watches the root and every transitive include. Change signals
 use a serialized single-flight worker with a dirty bit, so a signal arriving

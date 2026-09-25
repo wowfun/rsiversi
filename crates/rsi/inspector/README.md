@@ -1,5 +1,7 @@
 # rsi-inspector
 
+Local Profile inspection includes bounded Pending dependency reasons and the last completed update categories. Dependency details remain Local-only; remote plugin status receives only closed categories.
+
 The product Inspector registers read-only `inspector.runtime`, `inspector.profile`,
 `inspector.factories` and `inspector.native` version 1 operations through the
 ordinary API registrar. All require local operator access: remote credentials

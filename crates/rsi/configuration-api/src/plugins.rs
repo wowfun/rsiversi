@@ -221,6 +221,114 @@ pub struct PluginStatusRow {
     /// Session targets do not inspect current per-instance lifecycle; preset-only rows omit this.
     pub observed: Option<PluginObservation>,
 }
+/// Closed, path-free Profile update category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginUpdateOrigin {
+    /// Explicit reload.
+    Manual,
+    /// Source notification.
+    Watcher,
+    /// Composition input replacement.
+    InputReplacement,
+}
+/// Closed, path-free Profile update category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginUpdateOutcome {
+    /// Candidate applied.
+    Applied,
+    /// Equal healthy target.
+    Unchanged,
+    /// Restart required.
+    RestartRequired,
+    /// Prior target restored.
+    RolledBack,
+    /// Application and compensation failed.
+    Degraded,
+    /// Input rejected before preflight.
+    Rejected,
+    /// Preflight failed.
+    Failed,
+}
+/// Closed, path-free Profile update category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginUpdateFailure {
+    /// Source observation failed.
+    Source,
+    /// Compilation failed.
+    Compile,
+    /// Factory resolution failed.
+    Resolve,
+    /// Binding failed.
+    Bind,
+    /// Factory preparation failed.
+    Prepare,
+    /// Application failed.
+    Apply,
+    /// Cleanup failed.
+    Retire,
+    /// Stale input revision.
+    InputConflict,
+    /// Incompatible input.
+    IncompatibleInput,
+    /// Capacity exceeded.
+    Capacity,
+    /// Owner stopped.
+    Stopped,
+}
+/// Safe last-completed update observation, never a mutation receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginUpdateAttempt {
+    /// Canonical positive decimal command identity.
+    pub sequence: String,
+    /// Executed command source.
+    pub origin: PluginUpdateOrigin,
+    /// Completed outcome.
+    pub outcome: PluginUpdateOutcome,
+    /// Primary failure category.
+    pub failure: Option<PluginUpdateFailure>,
+    /// Compensation failure category.
+    pub rollback_failure: Option<PluginUpdateFailure>,
+}
+impl PluginUpdateAttempt {
+    fn validate(&self) -> Result<()> {
+        use PluginUpdateOutcome as O;
+        revision(&self.sequence)?;
+        let valid = match self.outcome {
+            O::Applied | O::Unchanged | O::RestartRequired => {
+                self.failure.is_none() && self.rollback_failure.is_none()
+            }
+            O::RolledBack | O::Rejected | O::Failed => {
+                self.failure.is_some() && self.rollback_failure.is_none()
+            }
+            O::Degraded => self.failure.is_some() && self.rollback_failure.is_some(),
+        };
+        if !valid || self.sequence == "0" {
+            return Err(ApiError::Invalid(
+                "Invalid Profile update observation".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// Fixed explanation generated only from closed categories.
+    pub fn guidance(&self) -> String {
+        use PluginUpdateOutcome as O;
+        let result = match self.outcome {
+            O::Applied => "applied",
+            O::Unchanged => "unchanged",
+            O::RestartRequired => "requires a restart",
+            O::RolledBack => "failed; the previous configuration was restored",
+            O::Degraded => "failed, and restoring the previous configuration also failed",
+            O::Rejected => "was rejected before changing the running configuration",
+            O::Failed => "failed before changing the running configuration",
+        };
+        format!("Last update #{}: {}.", self.sequence, result)
+    }
+}
+
 /// Redacted bounded snapshot page. The two revisions never imply one atomic graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,6 +343,8 @@ pub struct PluginStatusPage {
     pub health: Option<PluginHealth>,
     /// Aggregate source watcher category.
     pub watcher: Option<PluginWatcher>,
+    /// Last completed Host update, absent for other sources.
+    pub last_attempt: Option<PluginUpdateAttempt>,
     /// Echoed request offset.
     pub offset: usize,
     /// Total flat identities.
@@ -257,11 +367,15 @@ impl PluginStatusPage {
         request.validate()?;
         revision(&self.desired_revision)?;
         revision(&self.observed_revision)?;
+        if let Some(attempt) = &self.last_attempt {
+            attempt.validate()?;
+        }
         let next = self.offset.saturating_add(self.plugins.len());
         let host = matches!(request.target, PluginStatusTarget::Host);
         if self.context.target != request.target
             || self.health.is_some() != host
             || self.watcher.is_some() != host
+            || (!host && self.last_attempt.is_some())
             || self.context.source_digest.as_ref().is_some_and(|digest| {
                 digest.len() != 64
                     || !digest
@@ -326,6 +440,7 @@ mod tests {
             observed_revision: "9".into(),
             health: Some(PluginHealth::Degraded),
             watcher: Some(PluginWatcher::Faulted),
+            last_attempt: None,
             offset: 0,
             total: 1,
             next_offset: None,

@@ -32,10 +32,11 @@ mod native_source;
 use native_source::read_profile_source;
 
 pub use control::{
-    ProfileBootstrap, ProfileControl, ProfileControlContract, ProfileGenerationPlan, ProfileHealth,
-    ProfileInput, ProfileInstanceState, ProfileInstanceStatus, ProfileResolver, ProfileSnapshot,
-    ProfileStatus, ProfileTargetStatus, ProfileUpdateHandle, ProfileUpdateTicket, ReloadOutcome,
-    SnapshotNode, WatcherHealth,
+    ProfileAttempt, ProfileAttemptOrigin, ProfileAttemptOutcome, ProfileBootstrap, ProfileControl,
+    ProfileControlContract, ProfileFailureKind, ProfileGenerationPlan, ProfileHealth, ProfileInput,
+    ProfileInstanceState, ProfileInstanceStatus, ProfileResolver, ProfileSnapshot, ProfileStatus,
+    ProfileTargetStatus, ProfileUpdateHandle, ProfileUpdateTicket, ReloadOutcome, SnapshotNode,
+    WatcherHealth,
 };
 
 const PROFILE_FORMAT: u32 = 1;

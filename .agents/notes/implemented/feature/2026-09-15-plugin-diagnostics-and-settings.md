@@ -26,6 +26,11 @@ holds the actual ConfigurationAccess lease until the read finishes. It exposes
 neither Runtime topology nor raw errors, source paths, configurations or values.
 Desired-tree, Profile-status and provider desired/applied revisions remain
 separate; no client infers an atomic snapshot or calls a configured plugin active.
+Profile-status revision advances for all observation changes, including watcher
+and lifecycle transitions and preflight errors. A command-worker-owned completed
+attempt records a separate sequence, origin and closed outcome/failure categories.
+Busy admission and polling do not overwrite it. Local Inspector retains bounded
+Pending reasons; remote version 3 pages expose only the closed attempt categories.
 
 An ordinary shared workbench feature owns read/refresh and bounded page state.
 TUI /plugins and GUI Settings → Plugins consume it. GUI Settings forms follow the

@@ -731,6 +731,26 @@ async fn late_child_failure_is_observed_and_its_diagnostic_is_bounded() {
 }
 
 #[tokio::test]
+async fn preflight_failure_advances_observation_without_advancing_graph() {
+    let clock = manual_clock::hold().await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "ok");
+    let (runtime, _handle, control, _) = start(temp.path(), UpdateMode::Replayable).await;
+    let before = control.status().revision();
+    let graph = control.snapshot().revision();
+    std::fs::write(&path, "not valid TOML = [").unwrap();
+    assert!(control.reload().await.is_err());
+    let failed = control.status();
+    assert!(failed.revision() > before);
+    assert!(failed.diagnostic().is_some());
+    assert_eq!(control.snapshot().revision(), graph);
+    assert_eq!(control.status().revision(), failed.revision());
+    let _ = runtime.shutdown().await;
+    clock.finish().await;
+}
+
+#[tokio::test]
 async fn control_is_a_typed_local_service_and_healthy_equal_tree_is_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     write_profile(&temp.path().join("profile.toml"), "ok");
@@ -747,7 +767,11 @@ async fn control_is_a_typed_local_service_and_healthy_equal_tree_is_unchanged() 
 
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::Unchanged(_)));
-    assert_eq!(outcome.status().revision(), 1);
+    assert_eq!(control.snapshot().revision(), 1);
+    assert_eq!(
+        outcome.status().last_attempt().unwrap().outcome,
+        rsi_meta_profile::ProfileAttemptOutcome::Unchanged
+    );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     assert_eq!(control.snapshot().nodes().len(), 1);
 
@@ -768,12 +792,20 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
     assert_eq!(starts.load(Ordering::SeqCst), 2);
-    assert_eq!(control.status().revision(), 2);
+    assert_eq!(control.snapshot().revision(), 2);
+    assert_eq!(
+        outcome.status().last_attempt().unwrap().failure,
+        Some(rsi_meta_profile::ProfileFailureKind::Prepare)
+    );
 
     write_profile(&path, "activate-fail");
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
-    assert_eq!(outcome.status().revision(), 3);
+    assert_eq!(control.snapshot().revision(), 3);
+    assert_eq!(
+        outcome.status().last_attempt().unwrap().failure,
+        Some(rsi_meta_profile::ProfileFailureKind::Apply)
+    );
     assert_eq!(outcome.status().health(), ProfileHealth::Converged);
     assert_eq!(starts.load(Ordering::SeqCst), 3);
     let _ = runtime.shutdown().await;
@@ -874,7 +906,8 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     let repeated = control.reload().await.unwrap();
     assert!(matches!(repeated, ReloadOutcome::RestartRequired(_)));
-    assert_eq!(repeated.status().revision(), old_revision);
+    assert!(repeated.status().revision() > old_revision);
+    assert_eq!(control.snapshot().revision(), 1);
     assert_eq!(
         starts.load(Ordering::SeqCst),
         1,
@@ -884,7 +917,8 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
     let reverted = control.reload().await.unwrap();
     assert!(matches!(reverted, ReloadOutcome::Unchanged(_)));
     assert_eq!(reverted.status().health(), ProfileHealth::Converged);
-    assert_eq!(reverted.status().revision(), old_revision);
+    assert!(reverted.status().revision() > repeated.status().revision());
+    assert_eq!(control.snapshot().revision(), 1);
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     let _ = runtime.shutdown().await;
 
@@ -909,7 +943,7 @@ async fn watcher_reloads_changed_sources_and_subscription_observes_completion() 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             changes.changed().await.unwrap();
-            if changes.borrow().revision() >= 2 {
+            if changes.borrow().last_attempt().is_some() {
                 break;
             }
         }

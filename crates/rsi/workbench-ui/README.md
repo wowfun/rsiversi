@@ -1,5 +1,7 @@
 # rsi-workbench-ui
 
+Plugin status guidance includes the last completed Host update separately from current health; its observation revision fences pagination. Polling and Busy admission do not manufacture completed attempts.
+
 Navigation observes the bounded attention API with at most one poll or explicit
 navigation operation in flight. An unchanged page backs off from one to eight
 seconds; a local invalidation or changed page resets that delay. A failed refresh

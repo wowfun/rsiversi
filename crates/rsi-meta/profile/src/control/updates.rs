@@ -1,3 +1,4 @@
+use super::ProfileAttemptOrigin;
 use super::{
     Controller, ProfileCompiler, ProfileEnvironment, ProfileError, ProfileLimits, ProfileProgram,
     ProfileResolver, ReloadOutcome, Result,
@@ -140,6 +141,7 @@ impl ProfileUpdateTicket {
 
 #[derive(Debug)]
 pub(super) struct Command {
+    origin: ProfileAttemptOrigin,
     replacement: Option<(u64, ProfileInput)>,
     completion: oneshot::Sender<Result<ReloadOutcome>>,
 }
@@ -149,12 +151,26 @@ impl Controller {
         &self,
         replacement: Option<(u64, ProfileInput)>,
     ) -> Result<ProfileUpdateTicket> {
+        let origin = if replacement.is_some() {
+            ProfileAttemptOrigin::InputReplacement
+        } else {
+            ProfileAttemptOrigin::Manual
+        };
+        self.submit_command(replacement, origin)
+    }
+
+    pub(super) fn submit_command(
+        &self,
+        replacement: Option<(u64, ProfileInput)>,
+        origin: ProfileAttemptOrigin,
+    ) -> Result<ProfileUpdateTicket> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(ProfileError::Stopped);
         }
         let (completion, receiver) = oneshot::channel();
         self.commands
             .try_send(Command {
+                origin,
                 replacement,
                 completion,
             })
@@ -188,7 +204,9 @@ impl Controller {
             let result = if *stop.borrow() || self.command_stop.is_cancelled() {
                 Err(ProfileError::Stopped)
             } else {
-                self.execute_command(command.replacement).await
+                let mut result = self.execute_command(command.replacement).await;
+                self.finish_attempt(command.origin, &mut result);
+                result
             };
             let _ = command.completion.send(result);
         }
