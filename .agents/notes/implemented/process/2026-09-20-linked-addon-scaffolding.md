@@ -37,3 +37,7 @@ public SDK and testkit with development path dependencies and a real server.
 The initial immutable revision predates uncommitted work. Its tests prove the
 public distribution path only; current-tree protocol and product tests remain
 separate evidence. SDK upgrades require an explicit revision and lockfile update.
+
+The [shared relocatable SDK decision](2026-09-24-relocatable-native-addon-sdk.md)
+updates both templates to a published Portable-compatible revision and preserves
+the separation between distribution and current-tree evidence.

@@ -36,7 +36,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     }
     let repository = std::env::current_dir().map_err(|e| e.to_string())?;
     super::repository_root::require(&repository, "addon new")?;
-    generate(&repository, name, Path::new(directory))
+    generate(name, Path::new(directory))
 }
 
 fn generate_linked(name: &str, directory: &Path) -> Result<(), String> {
@@ -81,7 +81,7 @@ fn generate_linked(name: &str, directory: &Path) -> Result<(), String> {
     publish(root, directory)
 }
 
-fn generate(repository: &Path, name: &str, directory: &Path) -> Result<(), String> {
+fn generate(name: &str, directory: &Path) -> Result<(), String> {
     validate_destination(name, directory)?;
     let parent = directory.parent().ok_or("destination parent required")?;
     let temporary = tempfile::Builder::new()
@@ -94,17 +94,6 @@ fn generate(repository: &Path, name: &str, directory: &Path) -> Result<(), Strin
     let service = format!("{plugin}.tools");
     let mut manifest: toml::Value = toml::from_str(MANIFEST).map_err(|e| e.to_string())?;
     *template_field(&mut manifest, &["package", "name"])? = toml::Value::String(package.clone());
-    for (dependency, relative) in [
-        ("rsi-meta-native", "crates/rsi-meta/native"),
-        ("rsi-tools-protocol", "crates/rsi-tools/protocol"),
-    ] {
-        let absolute = repository
-            .join(relative)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        *template_field(&mut manifest, &["dependencies", dependency, "path"])? =
-            toml::Value::String(absolute.to_str().ok_or("SDK path must be UTF-8")?.into());
-    }
     write(
         root,
         "Cargo.toml",
@@ -148,7 +137,7 @@ fn generate(repository: &Path, name: &str, directory: &Path) -> Result<(), Strin
         root,
         "README.md",
         &format!(
-            "# {package}\n\nA native Portable Tool addon using the RSI safe SDK.\n\nFrom this directory run `cargo build --locked --offline --target-dir target` with\ncached dependencies (omit `--offline` to fetch them). The addon manifest build\nallows fetching dependencies so installation also works with a cold Cargo cache. Then run\n`rsi addon install addon.toml` and `rsi addon enable {plugin}`.\nAppend the `[[steps]]` from `agent-profile.toml` to an Agent preset; the snippet\nis not a complete preset. Start a new Session using that preset.\n\nSDK dependency paths in Cargo.toml point to the checkout used for generation.\nMoving or deleting that checkout requires updating the paths. Generation itself\ndoes not install, enable, or edit a preset. The addon manifest build watch uses\nthe existing product watcher; a failed build retains the last usable generation.\n"
+            "# {package}\n\nA native Portable Tool addon using the RSI safe SDK.\n\nFrom this directory run `cargo build --locked --offline --target-dir target` with\ncached dependencies (omit `--offline` to fetch them). The addon manifest build\nallows fetching dependencies so installation also works with a cold Cargo cache. Then run\n`rsi addon install addon.toml` and `rsi addon enable {plugin}`.\nAppend the `[[steps]]` from `agent-profile.toml` to an Agent preset; the snippet\nis not a complete preset. Start a new Session using that preset.\n\nSDK dependencies use one immutable published Git revision and this project owns\nits lockfile. Moving or deleting the generator checkout does not affect builds. Generation itself\ndoes not install, enable, or edit a preset. The addon manifest build watch uses\nthe existing product watcher; a failed build retains the last usable generation.\n"
         ),
     )?;
     publish(root, directory)
@@ -247,6 +236,7 @@ mod tests {
         let manifest: toml::Value =
             toml::from_str(&fs::read_to_string(destination.join("Cargo.toml")).unwrap()).unwrap();
         let dependencies = manifest["dependencies"].as_table().unwrap();
+        let sdk_revision = dependencies["rsi"]["rev"].as_str().unwrap();
         for (name, dependency) in dependencies
             .iter()
             .filter(|(name, _)| name.starts_with("rsi"))
@@ -257,6 +247,10 @@ mod tests {
                 "{name}"
             );
             let revision = dependency["rev"].as_str().unwrap();
+            assert_eq!(
+                revision, sdk_revision,
+                "{name} must use the same SDK revision"
+            );
             assert_eq!(revision.len(), 40);
             assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
             assert!(dependency.get("path").is_none());
@@ -296,14 +290,10 @@ mod tests {
         );
     }
     #[test]
-    fn complete_workspace_is_published_once_with_literal_paths_and_pinned_graph() {
+    fn complete_workspace_is_published_once_with_relocatable_pinned_graph() {
         let parent = tempfile::tempdir().unwrap();
         let destination = parent.path().join("space 引号 \" $(`x`) addon");
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .unwrap();
-        generate(&repository, "example-1", &destination).unwrap();
+        generate("example-1", &destination).unwrap();
         let manifest: toml::Value =
             toml::from_str(&fs::read_to_string(destination.join("Cargo.toml")).unwrap()).unwrap();
         assert_eq!(
@@ -311,9 +301,25 @@ mod tests {
             Some("rsi-addon-example-1")
         );
         assert_eq!(
-            manifest["dependencies"]["rsi-meta-native"]["path"].as_str(),
-            repository.join("crates/rsi-meta/native").to_str()
+            manifest["dependencies"]["rsi-meta-native"]["rev"],
+            toml::from_str::<toml::Value>(LINKED_MANIFEST).unwrap()["dependencies"]["rsi"]["rev"]
         );
+        for (name, dependency) in manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("rsi"))
+        {
+            assert_eq!(
+                dependency["git"].as_str(),
+                Some("https://github.com/wowfun/rsiversi.git")
+            );
+            assert_eq!(
+                dependency["rev"], manifest["dependencies"]["rsi-meta-native"]["rev"],
+                "{name}"
+            );
+            assert!(dependency.get("path").is_none());
+        }
         let generated = fs::read_to_string(destination.join("Cargo.lock")).unwrap();
         assert_eq!(
             toml::from_str::<toml::Value>(
@@ -327,16 +333,16 @@ mod tests {
                 .unwrap()
                 .contains("[[steps]]")
         );
-        assert!(generate(&repository, "example-1", &destination).is_err());
+        assert!(generate("example-1", &destination).is_err());
         for invalid in ["", "../../x", "Upper", "x_y", "a\n", "a.b", "foo-", "a--b"] {
-            assert!(generate(&repository, invalid, &parent.path().join("invalid")).is_err());
+            assert!(generate(invalid, &parent.path().join("invalid")).is_err());
         }
         for path in ["line\nfeed", "tab\tname", "escape\x1b"] {
-            assert!(generate(&repository, "example", &parent.path().join(path)).is_err());
+            assert!(generate("example", &parent.path().join(path)).is_err());
         }
         let link = parent.path().join("link");
         std::os::unix::fs::symlink(parent.path().join("absent"), &link).unwrap();
-        assert!(generate(&repository, "example", &link).is_err());
+        assert!(generate("example", &link).is_err());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(!fs::read_dir(parent.path()).unwrap().any(|entry| {
             entry

@@ -27,6 +27,9 @@ Copying the entire fixture would retain unrelated probes. Resolving dependencies
 at generation time would make file creation depend on Cargo configuration and
 network state. Embedding a second SDK copy would obscure which ABI is exercised.
 
+The [relocatable SDK decision](2026-09-24-relocatable-native-addon-sdk.md)
+replaces only the absolute-path distribution choice.
+
 ## Consequences
 
 An external project can build offline against cached dependencies and inspect a

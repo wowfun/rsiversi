@@ -10,8 +10,8 @@ explicit build and installation steps and the Portable Tool bridge.
 
 The template is maintained in [addon-template](../../../fixtures/rsi/addon-template/README.md).
 Generation copies its lockfile and rewrites only the root package name. SDK
-dependencies are absolute public-crate paths into this checkout: moving that
-checkout requires updating those paths. With dependencies cached, the generated
+dependencies share the linked template's immutable published Git revision. The
+project remains relocatable after the generator checkout is moved or removed. With dependencies cached, the generated
 workspace builds with `cargo build --locked --offline` without changing its lock.
 The format-2 addon manifest targets the launcher's native OS/architecture and watches its
 explicit source files. Native Windows/macOS scaffolding is currently unavailable.

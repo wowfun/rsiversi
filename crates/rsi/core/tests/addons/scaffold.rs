@@ -1,6 +1,14 @@
 use super::*;
 use rsi_meta_native_loader::{CatalogOptions, NativeCatalog};
 
+fn sdk_cargo() -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO"));
+    if let Some(cache) = std::env::var_os("RSI_SCAFFOLD_CARGO_HOME") {
+        command.env("CARGO_HOME", cache);
+    }
+    command
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -32,10 +40,65 @@ async fn generated_external_locked_workspace_loads_describes_and_executes() {
             .unwrap()
             .success()
     );
+    let manifest_path = project.join("Cargo.toml");
+    let generated = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut manifest: toml::Value = toml::from_str(&generated).unwrap();
+    for dependency in ["rsi-meta-native", "rsi-tools-protocol"] {
+        assert!(manifest["dependencies"][dependency].get("path").is_none());
+        assert_eq!(
+            manifest["dependencies"][dependency]["rev"].as_str(),
+            Some("386858d6f266fdf8d5c58e19793e5d2d09d3da34")
+        );
+    }
+    // Default deterministic evidence exercises the current SDK through explicit
+    // temporary dependency overrides. The opt-in published proof uses the
+    // generated manifest and its original lock without alteration.
+    if std::env::var_os("RSI_SCAFFOLD_PUBLISHED_SDK").is_none() {
+        for (dependency, relative) in [
+            ("rsi-meta-native", "crates/rsi-meta/native"),
+            ("rsi-tools-protocol", "crates/rsi-tools/protocol"),
+        ] {
+            let entry = manifest["dependencies"][dependency].as_table_mut().unwrap();
+            entry.remove("git");
+            entry.remove("rev");
+            entry.insert(
+                "path".into(),
+                toml::Value::String(repository.join(relative).to_str().unwrap().into()),
+            );
+        }
+        std::fs::write(&manifest_path, toml::to_string_pretty(&manifest).unwrap()).unwrap();
+        assert!(
+            sdk_cargo()
+                .current_dir(&project)
+                .args(["generate-lockfile", "--offline"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     let lock = std::fs::read(project.join("Cargo.lock")).unwrap();
-    let target = repository.join("target/addon-scaffold-test");
+    let target = repository.join(
+        if std::env::var_os("RSI_SCAFFOLD_PUBLISHED_SDK").is_some() {
+            "target/addon-scaffold-published-test"
+        } else {
+            "target/addon-scaffold-test"
+        },
+    );
     assert!(
-        std::process::Command::new(env!("CARGO"))
+        sdk_cargo()
+            .current_dir(&project)
+            .args(["build", "--locked", "--offline", "--target-dir"])
+            .arg(&target)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(std::fs::read(project.join("Cargo.lock")).unwrap(), lock);
+    let relocated = external.path().join("Relocated addon 空间");
+    std::fs::rename(&project, &relocated).unwrap();
+    let project = relocated;
+    assert!(
+        sdk_cargo()
             .current_dir(&project)
             .args(["build", "--locked", "--offline", "--target-dir"])
             .arg(&target)

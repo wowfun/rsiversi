@@ -15,6 +15,9 @@ and registration lifetime. Actual renderers and native Loader retention require
 separate evidence; an in-process projection assertion is not visual evidence.
 
 Run `cargo test --locked -p rsi --test session_service addon_acceptance`.
+The integration provider selects each response script by its exact latest user
+input, so child and completion Turns cannot consume another Session's responses.
+A deterministic interleaving check exercises that fixture boundary.
 The deterministic provider deliberately uses Chat Completions; this does not
 change the standard product's Responses default or establish live model behavior.
 
