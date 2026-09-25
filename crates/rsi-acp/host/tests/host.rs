@@ -131,11 +131,10 @@ fn id(text: &str) -> ConversationId {
     ConversationId::new(text).unwrap()
 }
 fn assert_reaped(root: &Path) {
-    for pid in std::fs::read_to_string(root.join("peer-pids"))
-        .unwrap()
-        .lines()
-    {
-        #[cfg(target_os = "linux")]
+    let pids = std::fs::read_to_string(root.join("peer-pids")).unwrap();
+    assert!(!pids.is_empty(), "fixture must have launched a peer");
+    #[cfg(target_os = "linux")]
+    for pid in pids.lines() {
         assert!(!Path::new("/proc").join(pid).exists(), "peer {pid} remains");
     }
 }

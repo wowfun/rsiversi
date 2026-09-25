@@ -303,13 +303,14 @@ pub(super) fn connect(connection: &mut Connection, id: &ConversationId) -> Resul
     Ok(snapshot)
 }
 pub(super) fn bind(
-    connection: &Connection,
+    connection: &mut Connection,
     id: &ConversationId,
     generation: u64,
     remote: String,
     capabilities: Capabilities,
 ) -> Result<Snapshot> {
-    let mut snapshot = current(connection, id, generation)?;
+    let transaction = connection.transaction().map_err(|error| sql(&error))?;
+    let mut snapshot = current(&transaction, id, generation)?;
     if snapshot
         .remote
         .as_ref()
@@ -319,8 +320,24 @@ pub(super) fn bind(
     }
     snapshot.remote = Some(remote);
     snapshot.capabilities = capabilities;
+    if snapshot.status == Status::Loading {
+        snapshot.epoch = transaction
+            .query_row(
+                "SELECT write_epoch FROM sessions WHERE id=?",
+                [id.as_str()],
+                |row| unsigned(row, 0),
+            )
+            .map_err(|error| sql(&error))?;
+        transaction
+            .execute(
+                "UPDATE sessions SET visible_epoch=write_epoch WHERE id=?",
+                [id.as_str()],
+            )
+            .map_err(|error| sql(&error))?;
+    }
     snapshot.status = Status::Ready;
-    save(connection, &snapshot)?;
+    save(&transaction, &snapshot)?;
+    transaction.commit().map_err(|error| sql(&error))?;
     Ok(snapshot)
 }
 pub(super) fn append(

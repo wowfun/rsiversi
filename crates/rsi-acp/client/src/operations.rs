@@ -1,4 +1,4 @@
-use crate::{CONTROL, Error, Result, Setup, State, incoming};
+use crate::{CONTROL, Error, Result, Setup, State, Transition, incoming};
 use rsi_acp_journal::{Completion, RecordKind, Snapshot, Status};
 use rsi_acp_protocol::schema;
 use serde_json::{Value, json};
@@ -30,17 +30,40 @@ pub(super) async fn request(
 }
 
 pub(super) async fn initialize(
-    state: &State,
+    state: Arc<State>,
     mode: Setup,
     servers: Vec<schema::McpServer>,
     selections: &[rsi_acp_protocol::configuration::ConfigSelection],
 ) -> Result<Snapshot> {
     rsi_acp_protocol::configuration::validate(selections).map_err(|_| Error::Input)?;
-    state.accepting()?;
-    let _operation = state.operation.try_lock().map_err(|_| Error::Busy)?;
-    if state.initialized.load(Ordering::Acquire) {
-        return Err(Error::Busy);
-    }
+    let selections = selections.to_vec();
+    let operation = state
+        .operation
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| Error::Busy)?;
+    let task = {
+        let _admission = state.permissions.lock().expect("ACP permissions");
+        state.accepting()?;
+        if state.initialized.load(Ordering::Acquire) {
+            return Err(Error::Busy);
+        }
+        let owner = state.clone();
+        state.tasks.spawn(async move {
+            let _operation = operation;
+            setup(&owner, mode, servers, &selections).await
+        })
+    };
+    task.await.map_err(|_| Error::Unknown)?
+}
+
+async fn setup(
+    state: &Arc<State>,
+    mode: Setup,
+    servers: Vec<schema::McpServer>,
+    selections: &[rsi_acp_protocol::configuration::ConfigSelection],
+) -> Result<Snapshot> {
+    let mut replay_started = false;
     let result = async {
         let initialized = request(state, "initialize", &json!({"protocolVersion":1,"clientInfo":{"name":"rsiversi","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}), Duration::from_secs(10)).await?;
         let capabilities = rsi_acp_protocol::validate_agent_initialize(&initialized).map_err(|_| Error::Input)?;
@@ -55,34 +78,20 @@ pub(super) async fn initialize(
         if mode != Setup::New { params["sessionId"] = json!(saved.remote); }
         rsi_acp_protocol::validate_session_setup(&params, mode != Setup::New).map_err(|_| Error::Input)?;
         if mode == Setup::Load {
-            let loading = state.journal.begin_replay(&state.id, state.generation).await.map_err(|_| Error::Journal)?;
-            *state.snapshot.lock().expect("ACP client snapshot") = loading;
-            state.changed();
+            replay_started = true;
+            state.transition(Transition::BeginReplay).await?;
         }
         let response = request(state, method, &params, CONTROL).await?;
         let target = if mode == Setup::New { response.get("sessionId").and_then(Value::as_str).ok_or(Error::Input)?.to_owned() } else { saved.remote.ok_or(Error::Input)? };
         state.bind_target(&target)?;
         tokio::time::timeout(CONTROL, crate::configuration::apply(state, &response, selections)).await.map_err(|_| Error::Unknown)??;
-        if mode == Setup::Load { state.journal.finish_replay(&state.id, state.generation, true).await.map_err(|_| Error::Journal)?; }
-        state.accepting()?;
-        let snapshot = state.journal.bind(&state.id, state.generation, target, capabilities).await.map_err(|_| Error::Journal)?;
-        {
-            let mut current = state.snapshot.lock().expect("ACP client snapshot");
-            // EOF may settle while the durable bind waits for its blocking worker.
-            // Check under the same lock used by the reader's final publication.
-            state.accepting()?;
-            *current = snapshot.clone();
-            state.initialized.store(true, Ordering::Release);
-        }
-        state.changed();
-        Ok(snapshot)
+        let bound = state.transition(Transition::Bind(target, capabilities)).await?;
+        replay_started = false;
+        Ok(bound)
     }.await;
     if let Err(error) = result {
-        if state.snapshot().status == Status::Loading {
-            let _rollback = state
-                .journal
-                .finish_replay(&state.id, state.generation, false)
-                .await;
+        if replay_started {
+            let _rollback = state.transition(Transition::FinishReplay(false)).await;
         }
         let _recorded = state
             .status(if error == Error::Remote || error == Error::Unsupported {
@@ -133,7 +142,7 @@ pub(super) async fn submit(
                     owner.stop.cancel();
                 }
             }
-            owner.active.lock().expect("ACP active prompt").take();
+            incoming::close_permission_admission(&owner);
             drop(operation);
         });
     }
@@ -141,7 +150,7 @@ pub(super) async fn submit(
 }
 
 async fn run_prompt(
-    state: &State,
+    state: &Arc<State>,
     parameters: &Value,
     cancellation: &CancellationToken,
     accepted: tokio::sync::oneshot::Sender<Result<Snapshot>>,
@@ -171,9 +180,16 @@ async fn run_prompt(
         result = &mut response => result.map_err(|_| Error::Unknown)?,
         () = cancellation.cancelled() => {
             tokio::time::timeout(CONTROL, async {
-                state.port.notify("session/cancel", &json!({"sessionId":state.target()?})).await.map_err(|_| Error::Unknown)?;
-                incoming::cancel_permissions(state).await?;
-                response.await.map_err(|_| Error::Unknown)
+                let cleanup = async {
+                    state.port.notify("session/cancel", &json!({"sessionId":state.target()?})).await.map_err(|_| Error::Unknown)?;
+                    incoming::cancel_permissions(state).await
+                };
+                // A final response is authoritative even while cancellation writes
+                // are blocked or fail. Keep polling its exact correlation waiter.
+                tokio::select! { biased;
+                    result = &mut response => result,
+                    _ = cleanup => response.await,
+                }.map_err(|_| Error::Unknown)
             }).await.map_err(|_| Error::Unknown)??
         }
     };
@@ -189,18 +205,13 @@ async fn run_prompt(
         Some("cancelled") => Completion::Cancelled,
         _ => return Err(Error::Unknown),
     };
-    incoming::cancel_permissions(state).await?;
-    let snapshot = state
-        .journal
-        .complete(&state.id, state.generation, completion)
-        .await
-        .map_err(|_| Error::Journal)?;
-    *state.snapshot.lock().expect("ACP client snapshot") = snapshot;
-    state.changed();
-    Ok(())
+    incoming::close_permission_admission(state);
+    let completed = state.transition(Transition::Complete(completion)).await;
+    let cancelled = incoming::cancel_permissions(state).await;
+    completed.and(cancelled)
 }
 
-pub(super) async fn cancel(state: &State) -> Result<()> {
+pub(super) async fn cancel(state: &Arc<State>) -> Result<()> {
     if state.operation.try_lock().is_ok() {
         return Ok(());
     }

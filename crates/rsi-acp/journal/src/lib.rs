@@ -169,6 +169,7 @@ impl Journal {
             .await
     }
     /// Saves the confirmed remote identity and advertised stable capabilities.
+    /// While Loading, also publishes the staged replay in the same transaction.
     pub async fn bind(
         &self,
         id: &ConversationId,

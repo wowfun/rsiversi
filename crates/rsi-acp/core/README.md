@@ -10,7 +10,14 @@ inert before dispatch. Once a request is queued, cancellation means unknown deli
 Outbound envelopes are assembled from validated in-process values and encoded once
 under the frame byte bound; only external bytes use the untrusted-input decoder.
 
-Writes are serialized and acknowledged only after flush. A drain waits for
+Writes are serialized and acknowledged only after flush. `try_respond`
+synchronously admits an exact reply and returns
+a `ResponseWrite` receipt. Capacity means temporary byte/write-queue saturation;
+Protocol rejects an unencodable or oversized local frame, and Closed means the
+writer is unavailable. Local rejection leaves the incoming request intact so a
+corrected reply can be admitted. Dropping
+the receipt relinquishes observation only, not the admitted write. `respond`
+combines this same admission with waiting for flush. A drain waits for
 write-queue capacity, with connection cancellation ending that wait. A drain barrier passes
 all earlier writes and is required before a load response. Request cancellation
 or response timeout retires the connection: delivery is then unknown and never
@@ -25,6 +32,10 @@ Incoming messages have monotonic connection-local ordinals. Each correlated
 response records the preceding incoming-message horizon; consumers must process
 through that horizon before publishing replay completion or a prompt's final
 projection. Correlation alone does not mean a consumer has drained its queue.
+
+`PeerHandle::abort` synchronously closes wire admission and signals both driver
+tasks through the short frame/drain admission lock, recording Closed when no earlier failure exists. It cannot retract an
+already accepted transport prefix; the Peer owner still joins transport cleanup.
 
 `Peer` owns the reader and writer tasks. Its explicit close cancels, joins and
 closes transport; dropping the owner cancels transport work. Detached product UI
@@ -44,7 +55,8 @@ of admitted native work, even when a caller or handler future disappears.
 
 Transport close reports settlement failure. In particular, a Process wait error
 cannot become a successful peer close or a Closed external conversation. Retiring
-a connection still joins both driver tasks and attempts the transport cleanup.
+a connection still joins both driver tasks and attempts the transport cleanup;
+a driver join failure remains a close failure even if transport cleanup succeeds.
 
 Handler first polls follow incoming wire order before concurrent continuation.
 A prompt backend must synchronously admit or reject its operation before its first

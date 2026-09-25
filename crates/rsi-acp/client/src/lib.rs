@@ -6,6 +6,7 @@
 mod configuration;
 mod incoming;
 mod operations;
+mod transitions;
 use rsi_acp::{Incoming, Peer, PeerHandle};
 use rsi_acp_journal::{ConversationId, Journal, Snapshot, Status};
 use std::{
@@ -21,6 +22,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use transitions::Transition;
 
 const CONTROL: Duration = Duration::from_secs(30);
 
@@ -69,6 +71,9 @@ struct State {
     closing: AtomicBool,
     initialized: AtomicBool,
     operation: Arc<AsyncMutex<()>>,
+    transition: AsyncMutex<()>,
+    #[cfg(test)]
+    publication_hook: Mutex<Option<transitions::PublicationHook>>,
     active: Mutex<Option<CancellationToken>>,
     permissions: Mutex<BTreeMap<String, PendingPermission>>,
     processed: watch::Sender<u64>,
@@ -83,15 +88,8 @@ impl State {
     fn snapshot(&self) -> Snapshot {
         self.snapshot.lock().expect("ACP client snapshot").clone()
     }
-    async fn status(&self, status: Status) -> Result<Snapshot> {
-        let snapshot = self
-            .journal
-            .settle(&self.id, self.generation, status)
-            .await
-            .map_err(|_| Error::Journal)?;
-        *self.snapshot.lock().expect("ACP client snapshot") = snapshot.clone();
-        self.changed();
-        Ok(snapshot)
+    async fn status(self: &Arc<Self>, status: Status) -> Result<Snapshot> {
+        self.transition(Transition::Status(status)).await
     }
     fn accepting(&self) -> Result<()> {
         if self.closing.load(Ordering::Acquire) || self.stop.is_cancelled() || self.port.is_closed()
@@ -166,6 +164,9 @@ impl Client {
             closing: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
             operation: Arc::new(AsyncMutex::new(())),
+            transition: AsyncMutex::new(()),
+            #[cfg(test)]
+            publication_hook: Mutex::new(None),
             active: Mutex::new(None),
             permissions: Mutex::new(BTreeMap::new()),
             processed: watch::channel(0).0,
@@ -189,17 +190,22 @@ impl Client {
         mcp_servers: Vec<rsi_acp_protocol::schema::McpServer>,
         selections: &[rsi_acp_protocol::configuration::ConfigSelection],
     ) -> Result<Snapshot> {
-        operations::initialize(&self.state, mode, mcp_servers, selections).await
+        operations::initialize(self.state.clone(), mode, mcp_servers, selections).await
     }
     /// Cancels active work, optionally closes the remote Session, and joins peer cleanup.
     ///
     /// # Panics
     /// Panics if a prior internal panic poisoned the owner state.
-    pub async fn close(mut self) -> Result<Snapshot> {
+    pub async fn close(self) -> Result<Snapshot> {
         {
             let _admission = self.state.permissions.lock().expect("ACP permissions");
             self.state.closing.store(true, Ordering::Release);
         }
+        tokio::spawn(self.close_owned())
+            .await
+            .map_err(|_| Error::Unknown)?
+    }
+    async fn close_owned(mut self) -> Result<Snapshot> {
         let settled = operations::cancel(&self.state).await.is_ok();
         let before = self.state.snapshot();
         let known = settled
@@ -222,19 +228,18 @@ impl Client {
                 false
             };
         }
+        self.state.port.abort();
         self.state.stop.cancel();
         self.state.tasks.close();
-        tokio::time::timeout(CONTROL, self.state.tasks.wait())
-            .await
-            .map_err(|_| Error::Unknown)?;
+        self.state.tasks.wait().await;
         if let Some(reader) = self.reader.take() {
             reader.await.map_err(|_| Error::Unknown)??;
         }
         self.state
-            .status(if closed {
-                Status::Closed
+            .transition(if closed {
+                Transition::Status(Status::Closed)
             } else {
-                Status::Unknown
+                Transition::Disconnected
             })
             .await
     }
@@ -302,3 +307,6 @@ impl Handle {
         incoming::answer(&self.0, generation, permission, option).await
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -437,3 +437,42 @@ async fn setup_response_followed_by_eof_cannot_publish_ready_after_reader_settle
         journal.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn failed_completion_journal_still_answers_pending_permissions() {
+    let (_root, journal, client, mut peer) = fixture(false).await;
+    ready(&client, &mut peer).await;
+    let handle = client.handle();
+    handle
+        .submit(vec![rsi_acp_protocol::schema::ContentBlock::Text(
+            rsi_acp_protocol::schema::TextContent::new("work"),
+        )])
+        .await
+        .unwrap();
+    let Message::Request { id, method, .. } = peer.next().await.unwrap().message else {
+        panic!("prompt")
+    };
+    assert_eq!(method, "session/prompt");
+    let port = peer.handle();
+    let permission = tokio::spawn(async move {
+        port.request_permission(&json!({"sessionId":"remote","toolCall":{"toolCallId":"pending","title":"Requested tool"},"options":[{"optionId":"once","name":"Once","kind":"allow_once"}]})).await
+    });
+    observed(&handle, || !handle.permissions().is_empty()).await;
+    journal.close().await.unwrap();
+    peer.handle()
+        .respond(&id, Ok(&json!({"stopReason":"end_turn"})))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), permission)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        response.result().unwrap()["outcome"]["outcome"],
+        "cancelled"
+    );
+    assert!(handle.permissions().is_empty());
+    let _ = client.close().await;
+    peer.close().await.unwrap();
+}

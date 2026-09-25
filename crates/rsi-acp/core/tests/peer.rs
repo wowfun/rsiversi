@@ -175,7 +175,7 @@ async fn local_frame_rejection_is_inert_and_large_typed_frames_do_not_use_input_
             CancellationToken::new()
         )
         .await,
-        Err(Error::Capacity)
+        Err(Error::Protocol)
     ));
     assert!(
         !port.is_closed(),
@@ -347,7 +347,7 @@ async fn locally_rejected_response_keeps_the_exact_incoming_request() {
             Ok(&json!("x".repeat(rsi_acp_protocol::MAX_FRAME_BYTES)))
         )
         .await,
-        Err(Error::Capacity)
+        Err(Error::Protocol)
     );
     assert!(!port.is_closed());
     port.respond(id, Ok(&json!({"ok":true}))).await.unwrap();

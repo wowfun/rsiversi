@@ -15,6 +15,8 @@ history pages contain at most 64 records and 256 KiB. A record too large for the
 remaining page is returned through explicit 64 KiB byte windows. Records retain
 exact local sequence and replay epoch; a replay is staged in a new epoch and
 becomes the visible projection only after the remote load response succeeds.
+Binding while Loading atomically publishes that epoch with the confirmed remote
+identity, capabilities and Ready status; a failed binding publishes none of them.
 Failed replay never masquerades as a complete replacement.
 
 The journal limits observed data to 64 MiB per conversation and 1 GiB per owner,

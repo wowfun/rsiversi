@@ -1,6 +1,6 @@
-use crate::{Error, PendingPermission, Permission, PermissionOption, Result, State};
+use crate::{Error, PendingPermission, Permission, PermissionOption, Result, State, Transition};
 use rsi_acp::{Incoming, Peer};
-use rsi_acp_journal::{RecordKind, Status};
+use rsi_acp_journal::RecordKind;
 use rsi_acp_protocol::Message;
 use serde_json::json;
 use std::sync::Arc;
@@ -67,14 +67,7 @@ pub(super) async fn run(mut peer: Peer, state: Arc<State>) -> Result<()> {
     }
     state.permissions.lock().expect("ACP permissions").clear();
     let closed = peer.close().await.map_err(|_| Error::Unknown);
-    if closed.is_err()
-        || matches!(
-            state.snapshot().status,
-            Status::Starting | Status::Ready | Status::Loading | Status::Running
-        )
-    {
-        let _recorded = state.status(Status::Unknown).await;
-    }
+    let _recorded = state.transition(Transition::Disconnected).await;
     state.changed();
     closed
 }
@@ -111,7 +104,7 @@ fn is_update(incoming: &Incoming) -> bool {
     matches!(&incoming.message, Message::Notification { method, .. } if method == "session/update")
 }
 
-async fn accept(state: &State, incoming: Incoming) -> Result<()> {
+async fn accept(state: &Arc<State>, incoming: Incoming) -> Result<()> {
     match &incoming.message {
         Message::Request { method, params, .. } if method == "session/request_permission" => {
             rsi_acp_protocol::validate_permission(params).map_err(|_| Error::Input)?;
@@ -166,7 +159,7 @@ async fn accept(state: &State, incoming: Incoming) -> Result<()> {
                     .lock()
                     .expect("ACP active prompt")
                     .as_ref()
-                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+                    .is_none_or(tokio_util::sync::CancellationToken::is_cancelled);
                 permissions.insert(view.id.clone(), PendingPermission { incoming, view });
                 cancelled
             };
@@ -174,32 +167,44 @@ async fn accept(state: &State, incoming: Incoming) -> Result<()> {
                 cancel_permissions(state).await?;
             }
         }
-        Message::Request { id, .. } => state
-            .port
-            .respond(
-                id,
-                Err(&json!({"code":-32601,"message":"Method not supported"})),
-            )
-            .await
-            .map_err(|_| Error::Unknown)?,
+        Message::Request { id, .. } => {
+            tokio::select! { biased;
+                () = state.stop.cancelled() => return Ok(()),
+                result = unsupported_answer(state, id) => result?,
+            }
+        }
         Message::Notification { .. } => {}
         Message::Response { .. } => return Err(Error::Input),
     }
     Ok(())
 }
 
+pub(super) fn close_permission_admission(state: &State) {
+    let _admission = state.permissions.lock().expect("ACP permissions");
+    state.active.lock().expect("ACP active prompt").take();
+}
+
 pub(super) async fn answer(
-    state: &State,
+    state: &Arc<State>,
     generation: u64,
     permission: &str,
     option: &str,
 ) -> Result<()> {
-    state.accepting()?;
-    if generation != state.generation {
-        return Err(Error::Stale);
-    }
-    let pending = {
+    let task = {
         let mut permissions = state.permissions.lock().expect("ACP permissions");
+        state.accepting()?;
+        if state
+            .active
+            .lock()
+            .expect("ACP active prompt")
+            .as_ref()
+            .is_none_or(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(Error::Stale);
+        }
+        if generation != state.generation {
+            return Err(Error::Stale);
+        }
         let pending = permissions.get(permission).ok_or(Error::Stale)?;
         if !pending
             .view
@@ -209,37 +214,81 @@ pub(super) async fn answer(
         {
             return Err(Error::Input);
         }
-        permissions.remove(permission).ok_or(Error::Stale)?
+        let Message::Request { id, .. } = &pending.incoming.message else {
+            unreachable!("validated permission");
+        };
+        let receipt = state
+            .port
+            .try_respond(
+                id,
+                Ok(&json!({"outcome":{"outcome":"selected","optionId":option}})),
+            )
+            .map_err(|error| {
+                if error == rsi_acp::Error::Capacity {
+                    Error::Busy
+                } else {
+                    state.port.abort();
+                    state.stop.cancel();
+                    Error::Unknown
+                }
+            })?;
+        permissions.remove(permission);
+        flush(state, [receipt])
     };
-    let Message::Request { id, .. } = &pending.incoming.message else {
-        return Err(Error::Input);
-    };
-    let result = state
-        .port
-        .respond(
-            id,
-            Ok(&json!({"outcome":{"outcome":"selected","optionId":option}})),
-        )
-        .await
-        .map_err(|_| Error::Unknown);
     state.changed();
-    result
+    task.await.map_err(|_| Error::Unknown)?
 }
 
-pub(super) async fn cancel_permissions(state: &State) -> Result<()> {
-    let permissions = std::mem::take(&mut *state.permissions.lock().expect("ACP permissions"));
-    for pending in permissions.into_values() {
-        let Message::Request { id, .. } = &pending.incoming.message else {
-            return Err(Error::Input);
-        };
-        state
-            .port
-            .respond(id, Ok(&json!({"outcome":{"outcome":"cancelled"}})))
-            .await
-            .map_err(|_| Error::Unknown)?;
-    }
+pub(super) async fn cancel_permissions(state: &Arc<State>) -> Result<()> {
+    let task = {
+        let mut permissions = state.permissions.lock().expect("ACP permissions");
+        let mut receipts = Vec::with_capacity(permissions.len());
+        for pending in permissions.values() {
+            let Message::Request { id, .. } = &pending.incoming.message else {
+                unreachable!("validated permission")
+            };
+            if let Ok(receipt) = state
+                .port
+                .try_respond(id, Ok(&json!({"outcome":{"outcome":"cancelled"}})))
+            {
+                receipts.push(receipt);
+            } else {
+                state.port.abort();
+                state.stop.cancel();
+                permissions.clear();
+                state.changed();
+                return Err(Error::Unknown);
+            }
+        }
+        permissions.clear();
+        flush(state, receipts)
+    };
     state.changed();
-    Ok(())
+    task.await.map_err(|_| Error::Unknown)?
+}
+
+fn flush<I>(state: &Arc<State>, receipts: I) -> tokio::task::JoinHandle<Result<()>>
+where
+    I: IntoIterator<Item = rsi_acp::ResponseWrite> + Send + 'static,
+    I::IntoIter: Send,
+{
+    let owner = state.clone();
+    state.tasks.spawn(async move {
+        let result = tokio::time::timeout(crate::CONTROL, async {
+            for receipt in receipts {
+                receipt.wait().await?;
+            }
+            Ok::<_, rsi_acp::Error>(())
+        })
+        .await;
+        if matches!(result, Ok(Ok(()))) {
+            Ok(())
+        } else {
+            owner.port.abort();
+            owner.stop.cancel();
+            Err(Error::Unknown)
+        }
+    })
 }
 
 fn label(value: &str, maximum: usize) -> String {
@@ -248,6 +297,25 @@ fn label(value: &str, maximum: usize) -> String {
         end -= 1;
     }
     value[..end].to_owned()
+}
+
+pub(super) async fn unsupported_answer(
+    state: &State,
+    id: &rsi_acp_protocol::RequestId,
+) -> Result<()> {
+    let unsupported = json!({"code":-32601,"message":"Method not supported"});
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match state.port.try_respond(id, Err(&unsupported)) {
+                Ok(receipt) => return receipt.wait().await,
+                Err(rsi_acp::Error::Capacity) => state.port.drain().await?,
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| Error::Unknown)?
+    .map_err(|_| Error::Unknown)
 }
 
 #[cfg(test)]

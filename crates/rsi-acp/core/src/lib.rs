@@ -24,10 +24,10 @@ pub use transport::{ProcessTransport, StreamTransport, Transport};
 /// Categorical transport failures; no wire payload appears in diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
-    /// Retention or pending-request admission was exhausted.
+    /// Temporary retention, request-count, byte-budget or write-queue saturation.
     #[error("ACP peer capacity exceeded")]
     Capacity,
-    /// Invalid wire input or unexpected response correlation.
+    /// Invalid external envelope/correlation or unencodable/oversized local frame.
     #[error("ACP peer protocol failed")]
     Protocol,
     /// Peer terminated, or cancellation left request delivery unknown.
@@ -89,6 +89,7 @@ enum Write {
 /// Cloneable request port. Only the separate Peer owner controls task lifetime.
 pub struct PeerHandle {
     stop: CancellationToken,
+    admission: Arc<Mutex<()>>,
     failure: Arc<Mutex<Option<Error>>>,
     incoming_budget: Arc<Semaphore>,
     outgoing_budget: Arc<Semaphore>,
@@ -103,10 +104,29 @@ impl std::fmt::Debug for PeerHandle {
     }
 }
 
+/// Flush observation for one admitted reply; dropping it leaves writer ownership intact.
+#[derive(Debug)]
+pub struct ResponseWrite {
+    peer: PeerHandle,
+    receive: oneshot::Receiver<()>,
+}
+impl ResponseWrite {
+    /// Waits for the admitted frame's serialized flush or connection failure.
+    pub async fn wait(self) -> Result<(), Error> {
+        self.peer.flushed(self.receive).await
+    }
+}
+
 impl PeerHandle {
     /// Whether this exact peer has been retired.
     pub fn is_closed(&self) -> bool {
         self.stop.is_cancelled()
+    }
+
+    /// Synchronously retires wire admission and signals both driver tasks.
+    /// Already accepted transport bytes cannot be retracted; the owner still joins cleanup.
+    pub fn abort(&self) {
+        self.retire(Error::Closed);
     }
 
     /// First categorical retirement failure; clean EOF or explicit close has none.
@@ -216,6 +236,16 @@ impl PeerHandle {
         id: &RequestId,
         result: Result<&Value, &Value>,
     ) -> Result<(), Error> {
+        self.try_respond(id, result)?.wait().await
+    }
+
+    /// Synchronously admits a reply. Capacity leaves the exact request answerable.
+    /// Dropping the receipt does not cancel or replay an admitted frame.
+    pub fn try_respond(
+        &self,
+        id: &RequestId,
+        result: Result<&Value, &Value>,
+    ) -> Result<ResponseWrite, Error> {
         let receive = {
             let mut incoming = self
                 .incoming_requests
@@ -231,15 +261,28 @@ impl PeerHandle {
             incoming.remove(id);
             receive
         };
-        self.flushed(receive).await
+        Ok(ResponseWrite {
+            peer: self.clone(),
+            receive,
+        })
     }
 
     /// Waits until every earlier admitted write has crossed the transport flush.
     pub async fn drain(&self) -> Result<(), Error> {
         let (send, receive) = oneshot::channel();
-        tokio::select! { biased;
+        let slot = tokio::select! { biased;
             () = self.stop.cancelled() => return Err(Error::Closed),
-            result = self.writes.send(Write::Drain(send)) => result.map_err(|_| Error::Closed)?,
+            result = self.writes.reserve() => result.map_err(|_| Error::Closed)?,
+        };
+        {
+            let _admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.is_closed() {
+                return Err(Error::Closed);
+            }
+            slot.send(Write::Drain(send));
         }
         tokio::select! { biased; () = self.stop.cancelled() => Err(Error::Closed), result = receive => result.map_err(|_| Error::Closed) }
     }
@@ -253,21 +296,34 @@ impl PeerHandle {
             return Err(Error::Closed);
         }
         let mut frame = BoundedFrame(Vec::new());
-        serde_json::to_writer(&mut frame, value).map_err(|_| Error::Capacity)?;
+        serde_json::to_writer(&mut frame, value).map_err(|_| Error::Protocol)?;
         let permit = self
             .outgoing_budget
             .clone()
-            .try_acquire_many_owned(u32::try_from(frame.0.len()).map_err(|_| Error::Capacity)?)
-            .map_err(|_| Error::Capacity)?;
+            .try_acquire_many_owned(u32::try_from(frame.0.len()).map_err(|_| Error::Protocol)?)
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => Error::Closed,
+                tokio::sync::TryAcquireError::NoPermits => Error::Capacity,
+            })?;
         frame.0.push(b'\n');
         let (send, receive) = oneshot::channel();
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
         self.writes
             .try_send(Write::Frame {
                 bytes: frame.0,
                 _permit: permit,
                 written: send,
             })
-            .map_err(|_| Error::Capacity)?;
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Closed(_) => Error::Closed,
+                mpsc::error::TrySendError::Full(_) => Error::Capacity,
+            })?;
         Ok(receive)
     }
 
@@ -275,7 +331,19 @@ impl PeerHandle {
         tokio::select! { biased; result = receive => result.map_err(|_| self.retire(Error::Closed)), () = self.stop.cancelled() => Err(Error::Closed) }
     }
 
+    fn close_admission(&self) {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.stop.cancel();
+    }
+
     fn retire(&self, error: Error) -> Error {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -326,6 +394,7 @@ impl Peer {
         let (events, incoming) = mpsc::channel(8_192);
         let handle = PeerHandle {
             stop: CancellationToken::new(),
+            admission: Arc::new(Mutex::new(())),
             failure: Arc::new(Mutex::new(None)),
             incoming_budget: Arc::new(Semaphore::new(MAX_DIRECTION_BYTES)),
             outgoing_budget: Arc::new(Semaphore::new(MAX_DIRECTION_BYTES)),
@@ -360,16 +429,20 @@ impl Peer {
 
     /// Cancels and joins transport work, then closes/reaps its owned transport.
     pub async fn close(mut self) -> Result<(), Error> {
-        self.handle.stop.cancel();
+        self.handle.close_admission();
+        let mut joined = Ok(());
         for task in self.tasks.drain(..) {
-            let _ignored = task.await;
+            if task.await.is_err() {
+                joined = Err(Error::Closed);
+            }
         }
-        self.transport.close().await
+        let closed = self.transport.close().await;
+        joined.and(closed)
     }
 }
 impl Drop for Peer {
     fn drop(&mut self) {
-        self.handle.stop.cancel();
+        self.handle.close_admission();
     }
 }
 
@@ -440,7 +513,7 @@ async fn read_loop(
     tokio::select! { biased; () = peer.stop.cancelled() => {}, result = reading => {
         if let Err(error) = result { peer.retire(error); }
     } }
-    peer.stop.cancel();
+    peer.close_admission();
     peer.pending
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -457,6 +530,9 @@ async fn write_loop(
 ) {
     let writing = async {
         while let Some(write) = writes.recv().await {
+            if peer.stop.is_cancelled() {
+                return Err(Error::Closed);
+            }
             match write {
                 Write::Frame {
                     bytes,
@@ -464,6 +540,9 @@ async fn write_loop(
                     written,
                 } => {
                     transport.write(&bytes).await?;
+                    if peer.stop.is_cancelled() {
+                        return Err(Error::Closed);
+                    }
                     transport.flush().await?;
                     let _ignored = written.send(());
                 }
@@ -478,7 +557,7 @@ async fn write_loop(
     tokio::select! { biased; () = peer.stop.cancelled() => {}, result = writing => {
         if let Err(error) = result { peer.retire(error); }
     } }
-    peer.stop.cancel();
+    peer.close_admission();
 }
 
 struct BoundedFrame(Vec<u8>);
@@ -499,6 +578,58 @@ impl std::io::Write for BoundedFrame {
 mod drain_tests {
     use super::*;
     use std::future::Future as _;
+    #[tokio::test]
+    async fn abort_fences_a_frame_whose_encoding_started_before_retirement() {
+        struct Encoding {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Serialize for Encoding {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                serializer.serialize_str("held")
+            }
+        }
+        let peer = Peer::start(Arc::new(HeldWrites::default()));
+        let port = peer.handle();
+        let (entered, encoding) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let sender = port.clone();
+        let task = std::thread::spawn(move || {
+            sender.queue(&Encoding {
+                entered,
+                release: held,
+            })
+        });
+        encoding
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        port.abort();
+        release.send(()).unwrap();
+        assert!(matches!(task.join().unwrap(), Err(Error::Closed)));
+        assert_eq!(port.writes.capacity(), MAX_PENDING);
+        peer.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn successful_transport_cleanup_does_not_hide_driver_panic() {
+        let mut peer = Peer::start(Arc::new(HeldWrites::default()));
+        peer.tasks.push(tokio::spawn(async {
+            panic!("fixture driver failure");
+        }));
+        assert_eq!(peer.close().await, Err(Error::Closed));
+    }
+    #[tokio::test]
+    async fn closed_writer_admission_reports_closed_before_stop_is_published() {
+        let peer = Peer::start(Arc::new(HeldWrites::default()));
+        let mut port = peer.handle();
+        let (send, receive) = mpsc::channel(1);
+        drop(receive);
+        port.writes = send;
+        assert!(!port.is_closed());
+        assert!(matches!(port.queue(&json!({})), Err(Error::Closed)));
+        peer.close().await.unwrap();
+    }
     #[derive(Debug, Default)]
     struct HeldWrites {
         release: CancellationToken,

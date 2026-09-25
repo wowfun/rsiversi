@@ -40,6 +40,13 @@ business prompt cannot prove that the peer performed no effects and is excluded.
 
 ## Consequences
 
+A borrowed async lock would release on cancellation while Journal's blocking
+commit continues, so the [client](../../../../crates/rsi-acp/client/README.md)
+retains ownership through publication. Separating completion from connection
+availability prevents a cleanup failure from erasing a validated remote result.
+Separating admission from flush observation distinguishes local rejection from
+unknown remote effects without adding a second journal revision.
+
 The independent TypeScript SDK 1.4.0 exercises both ACP roles over stdio.
 The [interop fixture](../../../../fixtures/rsi/acp/README.md) owns its pinned
 dependency and commands. It covers permissions, load replay, cancellation and
