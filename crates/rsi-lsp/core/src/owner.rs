@@ -20,11 +20,30 @@ struct State {
     closed: bool,
     slots: BTreeMap<PathBuf, Slot>,
     live: BTreeSet<PathBuf>,
+    retiring: BTreeMap<PathBuf, Arc<AsyncMutex<Connection>>>,
 }
 struct Source {
     text: String,
     position: crate::Position,
     uri: String,
+}
+struct QueryWork {
+    workspace: PathBuf,
+    query: Query,
+    language: String,
+    stop: CancellationToken,
+    deadline: Instant,
+}
+impl QueryWork {
+    fn check(&self) -> Result<()> {
+        if self.stop.is_cancelled() {
+            Err(Error::Cancelled)
+        } else if Instant::now() >= self.deadline {
+            Err(Error::Deadline)
+        } else {
+            Ok(())
+        }
+    }
 }
 /// One exact provider generation with bounded, retained per-workspace processes.
 #[derive(Debug)]
@@ -89,10 +108,14 @@ impl LanguageService {
         let _cancel = stop.clone().drop_guard();
         let owner = self.clone();
         let work_stop = stop.clone();
+        let deadline = Instant::now() + Duration::from_secs(30);
         let task = {
             let mut state = self.state.lock().expect("language admission");
             if state.closed {
                 return Err(Error::Retired);
+            }
+            if state.retiring.contains_key(&workspace) {
+                return Err(Error::Capacity);
             }
             let permit = self
                 .reads
@@ -101,41 +124,160 @@ impl LanguageService {
                 .map_err(|_| Error::Capacity)?;
             let slot = state.slots.entry(workspace.clone()).or_default().clone();
             let mut connection = slot.try_lock_owned().map_err(|_| Error::Capacity)?;
-            self.execution.spawn(self.tasks.track_future(async move{
-                let _permit=permit;
-                let deadline=Instant::now()+Duration::from_secs(30);
-                let source=tokio::select!{biased;()=work_stop.cancelled()=>Err(Error::Cancelled),result=timeout_at(deadline,owner.source(&workspace,&query,&work_stop))=>result.unwrap_or(Err(Error::Deadline))};
-                let source=match source {Ok(source)=>source,Err(error)=>{
-                    if connection.is_none(){owner.state.lock().expect("remove unused language slot").slots.remove(&workspace);}
-                    return Err(error);
-                }};
-                // A validated source may evict idle processes. Cleanup remains
-                // retained even when the query's wait budget has expired.
-                let retired=match owner.evict_idle(&workspace){Ok(retired)=>retired,Err(error)=>{
-                    owner.state.lock().expect("remove rejected language slot").slots.remove(&workspace);
-                    return Err(error);
-                }};
-                for previous in retired {if let Err(error)=previous.close().await {
-                    let mut state=owner.state.lock().expect("remove failed replacement slot");state.slots.remove(&workspace);state.live.remove(&workspace);
-                    return Err(error);
-                }}
-                let work=owner.run(&workspace,&query,&language,&mut connection,&source);
-                let result=tokio::select!{biased;()=work_stop.cancelled()=>Err(Error::Cancelled),result=timeout_at(deadline,work)=>result.unwrap_or(Err(Error::Deadline))};
-                if result.is_err(){
-                    let cleanup=if let Some(failed)=connection.take(){failed.close().await}else{Ok(())};
-                    {let mut state=owner.state.lock().expect("remove failed language slot");state.slots.remove(&workspace);state.live.remove(&workspace);}
-                    cleanup?;
-                }
-                result
+            self.execution.spawn(self.tasks.track_future(async move {
+                let _permit = permit;
+                owner
+                    .execute_query(
+                        QueryWork {
+                            workspace,
+                            query,
+                            language,
+                            stop: work_stop,
+                            deadline,
+                        },
+                        &mut connection,
+                    )
+                    .await
             }))
         };
-        tokio::select! {biased;()=cancellation.cancelled()=>Err(Error::Cancelled),()=self.stop.cancelled()=>Err(Error::Retired),result=task=>result.map_err(|_|Error::Unavailable)?}
+        tokio::select! {biased;()=cancellation.cancelled()=>Err(Error::Cancelled),()=self.stop.cancelled()=>Err(Error::Retired),result=timeout_at(deadline, task)=>result.map_err(|_|Error::Deadline)?.map_err(|_|Error::Unavailable)?}
     }
-    fn evict_idle(&self, workspace: &std::path::Path) -> Result<Vec<Connection>> {
+    fn check_work(&self, work: &QueryWork) -> Result<()> {
+        work.check()?;
+        if self.retired() {
+            Err(Error::Retired)
+        } else {
+            Ok(())
+        }
+    }
+    fn forget(&self, workspace: &std::path::Path) {
+        let mut state = self.state.lock().expect("language slot cleanup");
+        state.slots.remove(workspace);
+        state.live.remove(workspace);
+    }
+
+    async fn execute_query(
+        &self,
+        work: QueryWork,
+        connection: &mut Option<Connection>,
+    ) -> Result<Output> {
+        self.retire_failed(&work.workspace, connection).await?;
+        let source = tokio::select! { biased;
+            () = work.stop.cancelled() => Err(Error::Cancelled),
+            result = timeout_at(work.deadline, self.source(&work.workspace, &work.query, &work.stop)) => result.unwrap_or(Err(Error::Deadline)),
+        };
+        let source = match source {
+            Ok(source) => source,
+            Err(error) => {
+                // Preserve the source error while still joining an idle failure
+                // that occurred during source validation.
+                let _cleanup = self.retire_failed(&work.workspace, connection).await;
+                if connection.is_none() {
+                    self.forget(&work.workspace);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.check_work(&work) {
+            if connection.is_none() {
+                self.forget(&work.workspace);
+            }
+            return Err(error);
+        }
+        // Only authoritative, valid source may evict an idle process. Admitted
+        // cleanup stays owned even after the caller's deadline or cancellation.
+        let retired = match self.evict_idle(&work.workspace) {
+            Ok(retired) => retired,
+            Err(error) => {
+                self.forget(&work.workspace);
+                return Err(error);
+            }
+        };
+        for (workspace, previous) in retired {
+            if let Err(error) = self.join_retirement(&workspace, &previous).await {
+                self.forget(&work.workspace);
+                return Err(error);
+            }
+        }
+        if connection.as_ref().is_some_and(Connection::failed) {
+            let failed = connection.take().expect("failed connection");
+            if let Err(error) = self.retire(&work.workspace, failed).await {
+                self.forget(&work.workspace);
+                return Err(error);
+            }
+        }
+        let result = tokio::select! { biased;
+            () = work.stop.cancelled() => Err(Error::Cancelled),
+            result = timeout_at(work.deadline, self.run(&work, connection, &source)) => result.unwrap_or(Err(Error::Deadline)),
+        };
+        if result.is_err() {
+            if let Some(failed) = connection.take() {
+                // Primary query classification remains authoritative. Failed cleanup
+                // withdraws admission and stays observable through provider close.
+                let _cleanup = self.retire(&work.workspace, failed).await;
+            }
+            self.forget(&work.workspace);
+        }
+        result
+    }
+
+    async fn retire_failed(
+        &self,
+        workspace: &std::path::Path,
+        connection: &mut Option<Connection>,
+    ) -> Result<()> {
+        if connection.as_ref().is_some_and(Connection::failed) {
+            let failed = connection.take().expect("failed connection");
+            let result = self.retire(workspace, failed).await;
+            if result.is_err() {
+                self.forget(workspace);
+            }
+            result?;
+        }
+        Ok(())
+    }
+    async fn retire(&self, workspace: &std::path::Path, connection: Connection) -> Result<()> {
+        let retained = Arc::new(AsyncMutex::new(connection));
+        self.state
+            .lock()
+            .expect("language retirement")
+            .retiring
+            .insert(workspace.to_owned(), retained.clone());
+        self.join_retirement(workspace, &retained).await
+    }
+    async fn join_retirement(
+        &self,
+        workspace: &std::path::Path,
+        retained: &Arc<AsyncMutex<Connection>>,
+    ) -> Result<()> {
+        let result = retained.lock().await.close().await;
+        let mut state = self.state.lock().expect("language retirement");
+        if result.is_ok() {
+            if state
+                .retiring
+                .get(workspace)
+                .is_some_and(|item| Arc::ptr_eq(item, retained))
+            {
+                state.retiring.remove(workspace);
+            }
+        } else {
+            state.closed = true;
+            self.reads.close();
+        }
+        result
+    }
+
+    fn evict_idle(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<Vec<(PathBuf, Arc<AsyncMutex<Connection>>)>> {
         let mut state = self.state.lock().expect("language pool replacement");
         let mut retired = Vec::new();
         if state.live.contains(workspace) {
             return Ok(retired);
+        }
+        if !state.retiring.is_empty() {
+            return Err(Error::Capacity);
         }
         if state.live.len() == 4 {
             let Some((path, mut guard)) = state.live.iter().find_map(|path| {
@@ -148,7 +290,9 @@ impl LanguageService {
                 return Err(Error::Capacity);
             };
             if let Some(connection) = guard.take() {
-                retired.push(connection);
+                let retained = Arc::new(AsyncMutex::new(connection));
+                state.retiring.insert(path.clone(), retained.clone());
+                retired.push((path.clone(), retained));
             }
             state.slots.remove(&path);
             state.live.remove(&path);
@@ -178,12 +322,18 @@ impl LanguageService {
     }
     async fn run(
         &self,
-        workspace: &std::path::Path,
-        query: &Query,
-        language: &str,
+        work: &QueryWork,
         connection: &mut Option<Connection>,
         source: &Source,
     ) -> Result<Output> {
+        self.check_work(work)?;
+        let QueryWork {
+            workspace,
+            query,
+            language,
+            deadline,
+            ..
+        } = work;
         if connection.is_none() {
             let confined = self
                 .sandbox
@@ -197,6 +347,7 @@ impl LanguageService {
                 })
                 .await
                 .map_err(|_| Error::Unavailable)?;
+            self.check_work(work)?;
             let process = self
                 .process
                 .spawn(DuplexProcessSpec {
@@ -212,14 +363,28 @@ impl LanguageService {
                     termination_grace_ms: 200,
                 })
                 .map_err(|_| Error::Unavailable)?;
-            *connection = Some(Connection::new(process, &self.config));
+            *connection = Some(Connection::new(
+                process,
+                &self.config,
+                &self.execution,
+                self.stop.child_token(),
+            ));
+            connection
+                .as_ref()
+                .expect("inserted server")
+                .begin(*deadline)
+                .await?;
             connection
                 .as_mut()
                 .expect("inserted server")
                 .initialize(workspace, &self.config)
                 .await?;
         } else {
-            connection.as_mut().expect("existing server").reset_budget();
+            connection
+                .as_ref()
+                .expect("existing server")
+                .begin(*deadline)
+                .await?;
         }
         let value = connection
             .as_mut()
@@ -232,6 +397,7 @@ impl LanguageService {
                 source.position,
             )
             .await?;
+        connection.as_ref().expect("ready server").end().await?;
         Ok(Output {
             query: query.clone(),
             result: protocol::normalize(workspace, query.operation, value)?,
@@ -271,7 +437,7 @@ impl LanguageService {
     }
     /// Whether this exact provider generation has withdrawn admission.
     pub fn retired(&self) -> bool {
-        self.stop.is_cancelled()
+        self.reads.is_closed()
     }
     /// Retire admission and join actual query tasks and subprocess settlement.
     ///
@@ -286,19 +452,36 @@ impl LanguageService {
             self.tasks.close();
         }
         self.tasks.wait().await;
-        let slots = {
+        let (slots, retiring) = {
             let mut state = self.state.lock().expect("language pool cleanup");
             state.live.clear();
-            std::mem::take(&mut state.slots)
+            (
+                state
+                    .slots
+                    .iter()
+                    .map(|(path, slot)| (path.clone(), slot.clone()))
+                    .collect::<Vec<_>>(),
+                state.retiring.clone(),
+            )
         };
         let mut result = Ok(());
-        for slot in slots.into_values() {
+        for (workspace, retained) in retiring {
+            if let Err(error) = self.join_retirement(&workspace, &retained).await {
+                result = Err(error);
+            }
+        }
+        for (workspace, slot) in slots {
             if let Some(connection) = slot.lock().await.take()
-                && let Err(error) = connection.close().await
+                && let Err(error) = self.retire(&workspace, connection).await
             {
                 result = Err(error);
             }
         }
+        self.state
+            .lock()
+            .expect("language pool cleanup")
+            .slots
+            .clear();
         result
     }
 }

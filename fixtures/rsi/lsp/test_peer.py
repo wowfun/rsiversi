@@ -26,12 +26,20 @@ while True:
     method = message.get('method')
     if method == 'initialize':
         send({'id':message['id'],'result':{'capabilities':{'positionEncoding':'utf-8' if mode=='encoding' else 'utf-16','textDocumentSync':{'openClose':True,'change':1},'definitionProvider':True,'referencesProvider':True,'implementationProvider':True,'hoverProvider':True}}})
+    elif method == 'initialized' and mode in ['duplex-pressure', 'reply-pressure']:
+        # More than the host's stdout buffer, below its active query budget.
+        # Do not read didOpen until this burst crosses the actual stdout pipe.
+        if mode == 'reply-pressure':
+            for i in range(32): send({'id':f'config-{i}','method':'workspace/configuration','params':{'items':[{}]*16}})
+        for _ in range(128): send({'method':'window/logMessage','params':{'message':'x'*16384}})
+        log('burst_complete')
     elif method == 'shutdown': send({'id':message['id'],'result':None})
     elif method == 'exit': log('exit');sys.exit(0)
     elif method == 'textDocument/didOpen':
         doc = message['params']['textDocument'];documents[doc['uri']] = doc['text'];log('open',text=doc['text'],version=doc['version'])
     elif method == 'textDocument/didClose':
         uri = message['params']['textDocument']['uri'];documents.pop(uri);log('close')
+        if mode == 'idle-request': send({'id':'idle','method':'window/workDoneProgress/create','params':{'token':'idle'}})
     elif method == '$/cancelRequest':
         log('cancel',id=message['params']['id']);send({'id':message['params']['id'],'error':{'code':-32800,'message':'cancelled'}})
     elif method and method.startswith('textDocument/'):
@@ -58,3 +66,8 @@ while True:
         else: send({'id':message['id']+1 if mode=='wrong-id' else message['id'],'result':result})
     elif message.get('id') == 'edit':
         assert message.get('error',{}).get('code') == -32601;log('edit_rejected');send(pending);pending=None
+    elif message.get('id') == 'idle':
+        assert message['result'] is None;log('idle_reply')
+    elif str(message.get('id', '')).startswith('config-'):
+        assert len(message['result']) == 16 and len(message['result'][0]['payload']) == 12000
+        log('configuration_reply')

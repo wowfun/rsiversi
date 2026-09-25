@@ -4,201 +4,58 @@ use serde_json::{Value, json};
 
 const HEADER_BYTES: usize = 8192;
 const MESSAGE_BYTES: usize = 1024 * 1024;
-/// One serialized stream; no detached reader or unbounded pending-request map.
+mod pump;
+
+/// Query-side handle; the retained pump owns byte progress and retirement.
 #[derive(Debug)]
 pub(crate) struct Connection {
-    pub process: ManagedDuplexProcess,
-    buffer: Vec<u8>,
-    next: u64,
-    pub active: Option<u64>,
-    pub capabilities: Value,
-    configuration: Value,
-    incoming: usize,
-    server_requests: usize,
+    wire: pump::Wire,
+    capabilities: Value,
     version: i32,
 }
 impl Connection {
-    pub fn new(process: ManagedDuplexProcess, config: &Config) -> Self {
+    pub fn new(
+        process: ManagedDuplexProcess,
+        config: &Config,
+        execution: &rsi_meta::Execution,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
-            process,
-            buffer: vec![],
-            next: 0,
-            active: None,
+            wire: pump::Wire::new(process, config.configuration.clone(), execution, stop),
             capabilities: Value::Null,
-            configuration: config.configuration.clone(),
-            incoming: 0,
-            server_requests: 0,
             version: 0,
         }
     }
-    pub fn reset_budget(&mut self) {
-        self.incoming = 0;
-        self.server_requests = 0;
+    pub fn failed(&self) -> bool {
+        self.wire.failed()
     }
-    pub async fn send(&self, value: Value) -> Result<()> {
-        let body = serde_json::to_vec(&value).map_err(|_| Error::Protocol)?;
-        if body.len() > MESSAGE_BYTES {
-            return Err(Error::Limit);
-        }
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        let bytes = [header.as_bytes(), &body].concat();
-        let input = self.process.stdin();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let end = (offset + rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES).min(bytes.len());
-            let written = input
-                .write(&bytes[offset..end])
-                .await
-                .map_err(|_| Error::Unavailable)?;
-            if written == 0 || written > end - offset {
-                return Err(Error::Protocol);
-            }
-            offset += written;
-        }
-        Ok(())
-    }
-    async fn more(&mut self) -> Result<()> {
-        let chunk = self
-            .process
-            .stdout()
-            .read(65536)
+    pub async fn begin(&self, deadline: tokio::time::Instant) -> Result<()> {
+        self.wire
+            .call(pump::Action::Begin(deadline))
             .await
-            .map_err(|_| Error::Unavailable)?;
-        if chunk.bytes.is_empty() {
-            return Err(Error::Unavailable);
-        }
-        self.incoming = self
-            .incoming
-            .checked_add(chunk.bytes.len())
-            .ok_or(Error::Limit)?;
-        if self.incoming > 4 * 1024 * 1024
-            || self.buffer.len() + chunk.bytes.len() > MESSAGE_BYTES + HEADER_BYTES + 65536
-        {
-            return Err(Error::Limit);
-        }
-        self.buffer.extend_from_slice(&chunk.bytes);
-        Ok(())
+            .map(|_| ())
     }
-    async fn receive(&mut self) -> Result<Value> {
-        let header_end = loop {
-            if let Some(end) = self
-                .buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-            {
-                if end > HEADER_BYTES {
-                    return Err(Error::Limit);
-                }
-                break end;
-            }
-            if self.buffer.len() > HEADER_BYTES {
-                return Err(Error::Limit);
-            }
-            self.more().await?;
-        };
-        let length = length(&self.buffer[..header_end])?;
-        let end = header_end + 4 + length;
-        while self.buffer.len() < end {
-            self.more().await?;
-        }
-        let value = crate::json::decode(&self.buffer[header_end + 4..end])?;
-        self.buffer.drain(..end);
-        if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || !value.is_object() {
-            return Err(Error::Protocol);
-        }
-        Ok(value)
+    pub async fn end(&self) -> Result<()> {
+        self.wire.call(pump::Action::End).await.map(|_| ())
     }
-    pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.next = self
-            .next
-            .checked_add(1)
-            .filter(|n| i32::try_from(*n).is_ok())
-            .ok_or(Error::Limit)?;
-        let id = self.next;
-        self.active = Some(id);
-        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
-        loop {
-            let message = self.receive().await?;
-            if let Some(method) = message.get("method") {
-                let method = method.as_str().ok_or(Error::Protocol)?;
-                if message.get("result").is_some() || message.get("error").is_some() {
-                    return Err(Error::Protocol);
-                }
-                if let Some(id) = message.get("id") {
-                    self.server_requests += 1;
-                    if self.server_requests > 256 {
-                        return Err(Error::Limit);
-                    }
-                    if !valid_id(id) {
-                        return Err(Error::Protocol);
-                    }
-                    let result = match method {
-                        "workspace/configuration" => {
-                            let items = message
-                                .pointer("/params/items")
-                                .and_then(Value::as_array)
-                                .filter(|v| v.len() <= 16)
-                                .ok_or(Error::Protocol)?;
-                            Some(Value::Array(
-                                items
-                                    .iter()
-                                    .map(|item| {
-                                        item.get("section")
-                                            .and_then(Value::as_str)
-                                            .filter(|s| s.len() <= 128)
-                                            .map_or_else(
-                                                || self.configuration.clone(),
-                                                |section| {
-                                                    section
-                                                        .split('.')
-                                                        .try_fold(&self.configuration, |v, key| {
-                                                            v.get(key)
-                                                        })
-                                                        .cloned()
-                                                        .unwrap_or(Value::Null)
-                                                },
-                                            )
-                                    })
-                                    .collect(),
-                            ))
-                        }
-                        "window/workDoneProgress/create" => Some(Value::Null),
-                        _ => None,
-                    };
-                    let reply = match result {
-                        Some(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                        None => {
-                            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Read-only client method unavailable"}})
-                        }
-                    };
-                    self.send(reply).await?;
-                }
-                continue;
-            }
-            if message.get("id").and_then(Value::as_u64) != Some(id)
-                || message.get("result").is_some() == message.get("error").is_some()
-            {
-                return Err(Error::Protocol);
-            }
-            self.active = None;
-            if let Some(error) = message.get("error") {
-                let code = error
-                    .get("code")
-                    .and_then(Value::as_i64)
-                    .and_then(|code| i32::try_from(code).ok())
-                    .ok_or(Error::Protocol)?;
-                if !error.get("message").is_some_and(Value::is_string) {
-                    return Err(Error::Protocol);
-                }
-                return Err(Error::Server(code));
-            }
-            return Ok(message["result"].clone());
-        }
-    }
-    pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.wire
+            .call(pump::Action::Send {
+                method: method.into(),
+                params,
+                request: true,
+            })
             .await
+    }
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        self.wire
+            .call(pump::Action::Send {
+                method: method.into(),
+                params,
+                request: false,
+            })
+            .await
+            .map(|_| ())
     }
     pub async fn initialize(&mut self, workspace: &std::path::Path, config: &Config) -> Result<()> {
         let root = url::Url::from_directory_path(workspace)
@@ -253,42 +110,11 @@ impl Connection {
             .await;
         result.and_then(|value| closed.map(|()| value))
     }
-    pub async fn close(mut self) -> Result<()> {
-        if let Some(id) = self.active {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                self.notify("$/cancelRequest", json!({"id":id})),
-            )
-            .await;
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-                loop {
-                    let message = self.receive().await?;
-                    if message.get("id").and_then(Value::as_u64) == Some(id) {
-                        break Ok::<(), Error>(());
-                    }
-                }
-            })
-            .await;
-        } else if tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            self.request("shutdown", Value::Null),
-        )
-        .await
-        .is_ok()
-        {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                self.notify("exit", Value::Null),
-            )
-            .await;
-        }
-        self.process.terminate();
-        self.process
-            .wait_settlement()
-            .await
-            .map_err(|_| Error::Unavailable)
+    pub async fn close(&mut self) -> Result<()> {
+        self.wire.close().await
     }
 }
+
 fn valid_id(value: &Value) -> bool {
     value.as_i64().is_some() || value.as_str().is_some_and(|s| s.len() <= 128)
 }

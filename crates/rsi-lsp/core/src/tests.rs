@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+// Independent test providers still share LocalFiles' process-wide job budget.
+static FILE_FIXTURES: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(rsi_files_protocol::MAXIMUM_FILE_JOBS);
 #[derive(Debug)]
 struct TestSandbox;
 #[async_trait::async_trait]
@@ -41,7 +44,75 @@ impl Sandbox for TestSandbox {
         })
     }
 }
+#[derive(Debug, Default)]
+struct SettlementGate {
+    used: std::sync::atomic::AtomicBool,
+    entered: CancellationToken,
+    release: CancellationToken,
+}
+#[derive(Debug)]
+struct FailedSettlement {
+    process: rsi_process::ManagedDuplexProcess,
+    joins: Arc<std::sync::atomic::AtomicUsize>,
+    gate: Option<Arc<SettlementGate>>,
+}
+#[async_trait::async_trait]
+impl rsi_process::DuplexControl for FailedSettlement {
+    fn pid(&self) -> u32 {
+        self.process.pid()
+    }
+    fn stdin(&self) -> Arc<dyn rsi_process::DuplexInput> {
+        self.process.stdin()
+    }
+    fn stdout(&self) -> Arc<dyn rsi_process::DuplexOutput> {
+        self.process.stdout()
+    }
+    fn stderr(&self) -> Arc<dyn rsi_process::ProcessOutput> {
+        self.process.stderr()
+    }
+    fn terminate(&self) {
+        self.process.terminate();
+    }
+    async fn wait(&self) -> rsi_process::Result<rsi_process::ProcessOutcome> {
+        self.process.wait().await
+    }
+    async fn wait_settlement(&self) -> rsi_process::Result<()> {
+        if let Some(gate) = &self.gate
+            && !gate.used.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            gate.entered.cancel();
+            gate.release.cancelled().await;
+        }
+        self.process.wait_settlement().await?;
+        if self.joins.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+            Err(rsi_process::ProcessError::SettlementTimeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+#[derive(Debug)]
+struct FailingProcess {
+    inner: Arc<dyn rsi_process::DuplexProcess>,
+    joins: Arc<std::sync::atomic::AtomicUsize>,
+    gate: Option<Arc<SettlementGate>>,
+}
+impl rsi_process::DuplexProcess for FailingProcess {
+    fn spawn(
+        &self,
+        spec: rsi_process::DuplexProcessSpec,
+    ) -> rsi_process::Result<rsi_process::ManagedDuplexProcess> {
+        Ok(rsi_process::ManagedDuplexProcess::new(Arc::new(
+            FailedSettlement {
+                process: self.inner.spawn(spec)?,
+                joins: self.joins.clone(),
+                gate: self.gate.clone(),
+            },
+        )))
+    }
+}
 struct Fixture {
+    _file_budget: tokio::sync::SemaphorePermit<'static>,
     temporary: tempfile::TempDir,
     runtime: Runtime,
     process: rsi_meta::FiberHandle,
@@ -52,6 +123,20 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(mode: &str) -> Self {
+        Self::with_settlement_failure(mode, None).await
+    }
+    async fn with_settlement_failure(
+        mode: &str,
+        joins: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> Self {
+        Self::with_controls(mode, joins, None).await
+    }
+    async fn with_controls(
+        mode: &str,
+        joins: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        gate: Option<Arc<SettlementGate>>,
+    ) -> Self {
+        let file_budget = FILE_FIXTURES.acquire().await.unwrap();
         let temporary = tempfile::tempdir().unwrap();
         let workspace = temporary.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -94,20 +179,36 @@ impl Fixture {
             .into(),
             languages: [(".rs".into(), "rust".into())].into(),
             initialization_options: serde_json::Value::Null,
-            configuration: serde_json::Value::Null,
+            configuration: if mode == "reply-pressure" {
+                serde_json::json!({"payload":"c".repeat(12000)})
+            } else {
+                serde_json::Value::Null
+            },
         };
+        let inner = runtime
+            .root()
+            .lookup_local::<rsi_process::DuplexProcessContract>()
+            .unwrap();
+        let provider = joins.map_or_else(
+            || inner.clone(),
+            |joins| {
+                Arc::new(FailingProcess {
+                    inner: inner.clone(),
+                    joins,
+                    gate,
+                }) as Arc<dyn rsi_process::DuplexProcess>
+            },
+        );
         let service = LanguageService::new(
             config,
-            runtime
-                .root()
-                .lookup_local::<rsi_process::DuplexProcessContract>()
-                .unwrap(),
+            provider,
             Arc::new(TestSandbox),
             files.clone(),
             runtime.execution().clone(),
         )
         .unwrap();
         Self {
+            _file_budget: file_budget,
             temporary,
             runtime,
             process,
@@ -145,18 +246,110 @@ impl Fixture {
         .unwrap();
     }
     async fn close(self) {
-        self.service.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), self.service.close())
+            .await
+            .expect("LSP close deadline")
+            .unwrap();
         for record in self.records().iter().filter(|r| r["event"] == "start") {
             assert!(
                 !Path::new(&format!("/proc/{}", record["pid"])).exists(),
                 "actual child must be reaped"
             );
         }
-        self.files.close().await;
-        assert!(self.process.dispose().await.is_clean());
-        assert!(self.runtime.shutdown().await.is_clean());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.files.close().await;
+            assert!(self.process.dispose().await.is_clean());
+            assert!(self.runtime.shutdown().await.is_clean());
+        })
+        .await
+        .expect("LSP fixture cleanup deadline");
     }
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_limit_bidirectional_pipe_pressure_completes_and_reaps() {
+    for mode in ["duplex-pressure", "reply-pressure"] {
+        let fixture = Fixture::new(mode).await;
+        std::fs::write(fixture.workspace.join("main.rs"), "x".repeat(512 * 1024)).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            fixture.service.query(
+                fixture.workspace.clone(),
+                Fixture::query(Operation::Hover),
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(10), fixture.service.close())
+            .await
+            .expect("LSP close deadline")
+            .unwrap();
+        assert!(
+            matches!(result, Ok(Ok(_))),
+            "under-limit duplex exchange: {result:?}"
+        );
+        assert!(
+            fixture
+                .records()
+                .iter()
+                .any(|record| record["event"] == "burst_complete")
+        );
+        if mode == "reply-pressure" {
+            assert_eq!(
+                fixture
+                    .records()
+                    .iter()
+                    .filter(|record| record["event"] == "configuration_reply")
+                    .count(),
+                32
+            );
+        }
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn idle_connection_answers_requests_without_a_new_query() {
+    let fixture = Fixture::new("idle-request").await;
+    fixture
+        .service
+        .query(
+            fixture.workspace.clone(),
+            Fixture::query(Operation::Hover),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !fixture
+            .records()
+            .iter()
+            .any(|record| record["event"] == "idle_reply")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture
+        .service
+        .query(
+            fixture.workspace.clone(),
+            Fixture::query(Operation::Definition),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .records()
+            .iter()
+            .filter(|record| record["event"] == "start")
+            .count(),
+        1
+    );
+    fixture.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_stdio_four_queries_sync_current_unicode_source_and_reject_server_edits() {
     let fixture = Fixture::new("edit").await;
@@ -300,7 +493,7 @@ async fn oversized_hung_exited_and_invalid_responses_retire_actual_processes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retirement_drain() {
     let fixture = Fixture::new("hang").await;
-    let task = tokio::spawn({
+    let mut task = tokio::spawn({
         let owner = fixture.service.clone();
         let workspace = fixture.workspace.clone();
         async move {
@@ -313,7 +506,10 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
                 .await
         }
     });
-    fixture.entered().await;
+    tokio::select! {
+        () = fixture.entered() => {},
+        result = &mut task => panic!("query finished before peer entry: {result:?}; records={:?}", fixture.records()),
+    }
     assert_eq!(
         fixture
             .service
@@ -327,7 +523,10 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
     );
     task.abort();
     let _ = task.await;
-    fixture.service.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), fixture.service.close())
+        .await
+        .expect("LSP close deadline")
+        .unwrap();
     assert!(fixture.records().iter().any(|r| r["event"] == "cancel"));
     assert_eq!(
         fixture
@@ -686,4 +885,216 @@ async fn indexing_notifications_do_not_consume_server_request_admission() {
         .await
         .unwrap();
     fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_settlement_is_retained_without_masking_query_failure() {
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = Fixture::with_settlement_failure("server-error", Some(joins.clone())).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture.service.query(
+            fixture.workspace.clone(),
+            Fixture::query(Operation::Hover),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.unwrap_err(), Error::Server(-32801));
+    assert!(fixture.service.retired());
+    assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let second = fixture
+        .service
+        .query(
+            fixture.workspace.clone(),
+            Fixture::query(Operation::Hover),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(second.unwrap_err(), Error::Retired);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), fixture.service.close())
+            .await
+            .unwrap(),
+        Err(Error::Unavailable)
+    );
+    assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 2);
+    fixture.close().await;
+    assert_eq!(
+        joins.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "close retries the same retained control"
+    );
+}
+
+#[tokio::test]
+async fn dropping_close_keeps_unvisited_connections_owned_for_the_next_join() {
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = Fixture::with_settlement_failure("normal", Some(joins.clone())).await;
+    let second = fixture.temporary.path().join("second");
+    std::fs::create_dir(&second).unwrap();
+    std::fs::copy(fixture.workspace.join("main.rs"), second.join("main.rs")).unwrap();
+    for workspace in [fixture.workspace.clone(), second] {
+        fixture
+            .service
+            .query(
+                workspace,
+                Fixture::query(Operation::Hover),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    tokio::task::yield_now().await;
+    let mut close = Box::pin(fixture.service.close());
+    assert!(futures_util::poll!(&mut close).is_pending()); // first pump join cannot complete without yielding this runtime
+    drop(close);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), fixture.service.close())
+            .await
+            .unwrap(),
+        Err(Error::Unavailable)
+    );
+    fixture.close().await;
+    assert_eq!(
+        joins.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "both controls must be joined, including the unvisited slot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retiring_workspace_stays_reserved_until_its_managed_process_settles() {
+    let gate = Arc::new(SettlementGate::default());
+    let fixture = Fixture::with_controls(
+        "normal",
+        Some(Arc::new(std::sync::atomic::AtomicUsize::new(2))),
+        Some(gate.clone()),
+    )
+    .await;
+    let mut workspaces = Vec::new();
+    for index in 0..6 {
+        let workspace = fixture.temporary.path().join(format!("pool-{index}"));
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::copy(fixture.workspace.join("main.rs"), workspace.join("main.rs")).unwrap();
+        workspaces.push(workspace);
+    }
+    for workspace in &workspaces[..4] {
+        fixture
+            .service
+            .query(
+                workspace.clone(),
+                Fixture::query(Operation::Hover),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let service = fixture.service.clone();
+    let next = workspaces[4].clone();
+    let replacement = tokio::spawn(async move {
+        service
+            .query(
+                next,
+                Fixture::query(Operation::Hover),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.cancelled())
+        .await
+        .unwrap();
+    for workspace in [&workspaces[0], &workspaces[5]] {
+        assert_eq!(
+            fixture
+                .service
+                .query(
+                    workspace.clone(),
+                    Fixture::query(Operation::Hover),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap_err(),
+            Error::Capacity
+        );
+    }
+    assert_eq!(
+        fixture
+            .records()
+            .iter()
+            .filter(|record| record["event"] == "start")
+            .count(),
+        4
+    );
+    gate.release.cancel();
+    tokio::time::timeout(Duration::from_secs(5), replacement)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .records()
+            .iter()
+            .filter(|record| record["event"] == "start")
+            .count(),
+        5
+    );
+    fixture.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_source_still_joins_failed_idle_process() {
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = Fixture::with_settlement_failure("normal", Some(joins.clone())).await;
+    fixture
+        .service
+        .query(
+            fixture.workspace.clone(),
+            Fixture::query(Operation::Hover),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let pid = fixture
+        .records()
+        .iter()
+        .find(|record| record["event"] == "start")
+        .unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while joins.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut query = Fixture::query(Operation::Hover);
+    query.line = 9999;
+    assert_eq!(
+        fixture
+            .service
+            .query(fixture.workspace.clone(), query, CancellationToken::new())
+            .await
+            .unwrap_err(),
+        Error::Unavailable
+    );
+    assert!(fixture.service.retired());
+    assert_eq!(
+        joins.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "first join observes the pump's retained failure"
+    );
+    assert_eq!(fixture.service.close().await, Err(Error::Unavailable));
+    assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 2);
+    fixture.close().await;
+    assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
