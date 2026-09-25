@@ -1,5 +1,7 @@
 # rsi-terminal
 
+The Plugins view displays the shared workbench last-update guidance separately from current Profile health and watcher status.
+
 `/export [PATH] [-f markdown|md|json] [-i INCLUDE]` exports the selected native
 Session without submitting a message. Quoted paths are supported; the default
 file is `rsi-session-<safe-id>.md` (or `.json`) in the client working directory.
@@ -440,3 +442,32 @@ reuse the terminal form editor and generation-fenced actions.
 
 Opening an external attention target retains the attached conversation even if
 recording its read position fails; the status shows that failure independently.
+
+File exports are retained by ApplicationWork through actual persistence. Ctrl-C
+during a line export requests cancellation and waits for its result without a
+forced-exit deadline: precommit cancellation exits a one-shot export with 130, while an admitted successful save
+still reports success. The line export cancellation token is installed before starting persistence.
+Interactive export does not use the generic interruption
+grace or cancel an Agent turn. TUI exports retain their original Session identity,
+result and request-capacity charge across attachment changes; normal exit cancels
+and joins them. Forced waiter loss does not imply that the destination was untouched.
+
+TUI shutdown restores the terminal before awaiting retained exports or other
+service cleanup, then reports their Session identity and actual result on stderr,
+including persistence failures. A committed file remains successful even if its
+best-effort diagnostic cannot be delivered.
+
+Export persistence owns the line interruption exception only until its result
+settles; subsequent renderer delivery uses ordinary interruption. Export stderr
+diagnostics are best-effort and do not change the export or shutdown result. They neutralize terminal controls, retain at most 16 KiB per result and use
+one process-wide diagnostic worker with a one-second delivery deadline. A stalled
+system write retains that worker and its descriptor until it returns; no further
+diagnostic worker is admitted meanwhile, and runtime shutdown does not join it.
+Diagnostic delivery failure does not imply that a completed save was rolled back. Concurrent
+file exports use atomic replacement: the last successful replacement at the same
+path determines its contents; each result confirms its own replacement only.
+
+Closed human reviews display the exact request and explicit action choices.
+Terminal clients accept a choice number followed by optional feedback; Web and
+Desktop send the selected stable action and request binding. Free text cannot
+approve a review. An answer receipt confirms delivery, not durable approval.

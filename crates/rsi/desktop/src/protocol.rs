@@ -36,6 +36,7 @@ pub(super) struct Admission {
     writes: Arc<Semaphore>,
     frames: Arc<Semaphore>,
     lifecycle: Arc<Semaphore>,
+    export_control: Arc<Semaphore>,
 }
 impl Default for Admission {
     fn default() -> Self {
@@ -45,6 +46,7 @@ impl Default for Admission {
             writes: Arc::new(Semaphore::new(8)),
             frames: Arc::new(Semaphore::new(1)),
             lifecycle: Arc::new(Semaphore::new(1)),
+            export_control: Arc::new(Semaphore::new(8)),
         }
     }
 }
@@ -55,6 +57,7 @@ enum Lane {
     Write,
     Frame,
     Lifecycle,
+    ExportControl,
 }
 
 fn classify(path: &str, body: &[u8]) -> Lane {
@@ -70,6 +73,7 @@ fn classify(path: &str, body: &[u8]) -> Lane {
     }
     match path {
         "/_frame" => Lane::Frame,
+        "/_call/export_cancel" => Lane::ExportControl,
         "/_call/connect" | "/_disconnect" => Lane::Lifecycle,
         "/_call/terminal" if body.len() <= 512 * 1024 => {
             match serde_json::from_slice::<Intent<'_>>(body).map(|input| input.request.kind) {
@@ -90,6 +94,7 @@ impl Admission {
             Lane::Write => &self.writes,
             Lane::Frame => &self.frames,
             Lane::Lifecycle => &self.lifecycle,
+            Lane::ExportControl => &self.export_control,
         };
         slots.clone().try_acquire_owned().map_err(Into::into)
     }
@@ -100,6 +105,7 @@ impl Admission {
             &self.writes,
             &self.frames,
             &self.lifecycle,
+            &self.export_control,
         ] {
             slots.close();
         }
@@ -358,6 +364,7 @@ mod tests {
             ("/_call/terminal", r#"{"request":{"type":"write"}}"#, 8),
             ("/_frame", "", 1),
             ("/_call/connect", "", 1),
+            ("/_call/export_cancel", "{}", 8),
         ] {
             for _ in 0..capacity {
                 permits.push(admission.acquire(classify(path, body.as_bytes())).unwrap());
@@ -370,7 +377,7 @@ mod tests {
             assert_eq!(wire["notAdmitted"], true);
             assert_eq!(wire["retryable"], true);
         }
-        assert_eq!(permits.len(), 50);
+        assert_eq!(permits.len(), 58);
         assert!(matches!(
             admission.acquire(classify("/_disconnect", b"")),
             Err(NativeError::Busy)

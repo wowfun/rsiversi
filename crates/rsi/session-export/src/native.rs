@@ -23,12 +23,70 @@ pub async fn write_stream(
     Ok(bytes)
 }
 
-/// Replaces a client-selected path only after the complete stream verifies.
-/// Dropping this future removes its temporary file, including during pending I/O.
+/// Native file output failed before commit or while observing its actual result.
+#[derive(Debug)]
+pub enum FileWriteError {
+    /// Cancelled before persistence admission; the destination was not replaced.
+    Cancelled,
+    /// Stream, validation, filesystem or persistence observation failure.
+    Export(rsi_session_protocol::SessionError),
+}
+impl std::fmt::Display for FileWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Export cancelled"),
+            Self::Export(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for FileWriteError {}
+impl From<rsi_session_protocol::SessionError> for FileWriteError {
+    fn from(error: rsi_session_protocol::SessionError) -> Self {
+        Self::Export(error)
+    }
+}
+
+/// Replaces the destination only after verified completion and synchronization.
+/// Cancellation before commit returns Cancelled. Once commit is admitted, awaits
+/// its actual result. Dropping that waiter cannot cancel an admitted persistence.
 ///
 /// # Errors
-/// Returns stream, validation, or filesystem errors; failed streams never replace the destination.
-pub async fn write_file(source: ExportStream, path: &Path) -> Result<u64> {
+/// Returns cancellation, stream, validation or filesystem errors. A lost commit
+/// observation does not establish whether the destination was replaced.
+pub async fn write_file(
+    source: ExportStream,
+    path: &Path,
+    stop: tokio_util::sync::CancellationToken,
+) -> std::result::Result<u64, FileWriteError> {
+    write_file_with(source, path, stop, |temporary, destination| {
+        temporary.persist(destination).map_err(encoding)
+    })
+    .await
+}
+
+pub(super) async fn write_file_with(
+    source: ExportStream,
+    path: &Path,
+    stop: tokio_util::sync::CancellationToken,
+    persist: impl FnOnce(tempfile::TempPath, std::path::PathBuf) -> Result<()> + Send + 'static,
+) -> std::result::Result<u64, FileWriteError> {
+    let (temporary, bytes) = tokio::select! { biased;
+        () = stop.cancelled() => return Err(FileWriteError::Cancelled),
+        result = prepare_file(source, path) => result?,
+    };
+    let destination = path.to_path_buf();
+    // Synchronous admission: there is no cancellation point between this check
+    // and handing the TempPath to the blocking persistence owner.
+    if stop.is_cancelled() {
+        return Err(FileWriteError::Cancelled);
+    }
+    tokio::task::spawn_blocking(move || persist(temporary, destination))
+        .await
+        .map_err(encoding)??;
+    Ok(bytes)
+}
+
+async fn prepare_file(source: ExportStream, path: &Path) -> Result<(tempfile::TempPath, u64)> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -48,10 +106,5 @@ pub async fn write_file(source: ExportStream, path: &Path) -> Result<u64> {
     let bytes = write_stream(source, &mut file).await?;
     file.sync_all().await.map_err(encoding)?;
     drop(file);
-    let destination = path.to_path_buf();
-    tokio::task::spawn_blocking(move || temporary.persist(destination))
-        .await
-        .map_err(encoding)?
-        .map_err(encoding)?;
-    Ok(bytes)
+    Ok((temporary, bytes))
 }

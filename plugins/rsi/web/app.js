@@ -1266,7 +1266,27 @@ function renderDetail(next) {
     if (dialogKey === key) return;
     const form = element("form");
     const base = { pane: detail.pane, generation: detail.generation, id: request.id };
-    if (detail.kind === "question") {
+    if (detail.kind === "question" && request.review) {
+      const review = request.review;
+      form.append(element("pre", "review-plan", request.questions[0].prompt));
+      const feedback = element("textarea"); feedback.rows = 3;
+      feedback.setAttribute("aria-label", "Optional review feedback");
+      const failure = element("p", "error");
+      const actions = element("div", "actions");
+      for (const choice of review.choices) {
+        actions.append(button(choice.label, async () => {
+          if (new TextEncoder().encode(feedback.value).length > 4096) {
+            failure.textContent = "Feedback must fit within 4 KiB."; return;
+          }
+          await command({ action: "answer", ...base, answers: [], review: {
+            binding: review.binding, choice_id: choice.id, feedback: feedback.value || null,
+          }});
+        }));
+      }
+      form.addEventListener("submit", event => event.preventDefault());
+      form.append(element("label", "", "Optional review feedback"), feedback, failure, actions);
+      showDialog(key, "Review plan", form);
+    } else if (detail.kind === "question") {
       const inputs = request.questions.map(question => {
         const field = element("div", "question-field"); const input = element("textarea"); input.rows = 2; input.required = true; input.setAttribute("aria-label", question.prompt);
         const choices = element("div", "actions");

@@ -35,9 +35,19 @@ whole-artifact byte limit. Cancellation yields one error then EOF, releasing the
 producer, pending reads and validation leases; it never emits a successful completion.
 The native sink writes a unique temporary file beside the destination, creates
 parents as needed and replaces the destination only after verified completion.
-Failure and cancellation remove the temporary file. Stdout cannot retract bytes
-already delivered and reports failure separately.
+Before final persistence, explicit cancellation removes the temporary file and
+returns `FileWriteError::Cancelled`. The last token check after file synchronization
+is commit admission. Once admitted, persistence runs to its actual success or
+filesystem failure; late cancellation does not change that result. Dropping an
+admitted wait future loses confirmation and cannot promise that no file was saved.
+Application owners retain their worker through completion. Stdout cannot retract
+bytes already delivered and reports failure separately.
 
 Tests exercise this public stream and sink with isolated deterministic Stores,
 including selection, inherited history, request evidence, concurrent append,
 large artifacts, backpressure, malformed streams and interrupted file output.
+
+Native facts preserve Model and Program Tool origins and the sealed program role.
+Program evidence remains exportable even though its internal Tool results are
+excluded from provider Context. Human-readable projections label that origin
+without fabricating a model request for an internal program call.

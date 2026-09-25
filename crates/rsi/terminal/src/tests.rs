@@ -103,6 +103,7 @@ async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() 
 
 #[derive(Debug, Default)]
 pub(crate) struct UnknownThenAcceptedHandle {
+    pub(crate) answers: std::sync::Mutex<Vec<rsi_user_questions_protocol::QuestionAnswer>>,
     pub(crate) commands:
         std::sync::Mutex<Vec<rsi_agent_session_protocol::SessionCommandInvocation>>,
     pub(crate) command_receipt:
@@ -134,6 +135,8 @@ pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) history_requests: std::sync::Mutex<Vec<Option<u64>>>,
     pub(crate) read_gate: Option<Arc<tokio::sync::Semaphore>>,
     pub(crate) read_active: std::sync::atomic::AtomicUsize,
+    pub(crate) export_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub(crate) exports_entered: std::sync::atomic::AtomicUsize,
 }
 
 impl UnknownThenAcceptedHandle {
@@ -155,6 +158,19 @@ impl UnknownThenAcceptedHandle {
 
 #[async_trait::async_trait]
 impl SessionHandle for UnknownThenAcceptedHandle {
+    async fn export(
+        &self,
+        _: rsi_session_protocol::export::ExportOptions,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::export::ExportStream> {
+        let gate = self.export_gate.lock().unwrap().clone();
+        self.exports_entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        Err(SessionError::NotFound("fixture export".into()))
+    }
+
     async fn tree_metrics(
         &self,
         _: bool,
@@ -292,8 +308,9 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn answer_question(
         &self,
         _: &str,
-        _: rsi_user_questions_protocol::QuestionAnswer,
+        answer: rsi_user_questions_protocol::QuestionAnswer,
     ) -> rsi_session_protocol::Result<bool> {
+        self.answers.lock().unwrap().push(answer);
         Ok(false)
     }
 

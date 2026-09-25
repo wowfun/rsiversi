@@ -69,6 +69,7 @@ impl Projection {
                     | InputMessageSource::Agent { .. }
                     | InputMessageSource::Completion { .. }
                     | InputMessageSource::Continuation { .. }
+                    | InputMessageSource::Program { .. }
             ) =>
             {
                 json!({"role":"user","source":source,"content":content})
@@ -77,8 +78,12 @@ impl Projection {
                 name,
                 identity,
                 arguments,
+                origin,
+                program_role,
                 ..
-            } => json!({"role":"tool_call","name":name,"identity":identity,"arguments":arguments}),
+            } => {
+                json!({"role":"tool_call","name":name,"identity":identity,"arguments":arguments,"origin":origin,"program_role":program_role})
+            }
             SessionFactBody::ToolResult {
                 identity, result, ..
             } => {

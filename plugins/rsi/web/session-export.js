@@ -14,12 +14,30 @@ async function downloadWorker() {
 // At most one 64 KiB chunk is outstanding. Never collect or Blob the artifact.
 export async function downloadSession(call, pane, generation, args, signal) {
   if (location.protocol === "rsi:") {
-    const cancel = () => { void call("export_cancel", "").catch(()=>{}); };
-    signal.addEventListener("abort",cancel,{once:true});
+    const { token } = JSON.parse(await call("export_open", ""));
+    let cancellation, saved = false;
+    const cancel = () => cancellation ??= (async () => {
+      for (let attempt=0; ;attempt++) {
+        try { return await call("export_cancel", JSON.stringify({token})); }
+        catch (error) {
+          if (error.notAdmitted !== true || error.retryable !== true || attempt >= 20) throw error;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+      }
+    })();
+    const abort = () => { void cancel().catch(()=>{}); };
+    signal.addEventListener("abort",abort,{once:true});
     try {
-      if (signal.aborted) throw new Error("Export cancelled");
-      return JSON.parse(await call("export_save",JSON.stringify({pane,generation,arguments:args})));
-    } finally { signal.removeEventListener("abort",cancel); }
+      if (signal.aborted) { await cancel(); throw new Error("Export cancelled"); }
+      const result = JSON.parse(await call("export_save",JSON.stringify({token,source:JSON.stringify({pane,generation,arguments:args})})));
+      saved = true;
+      return result;
+    } finally {
+      signal.removeEventListener("abort",abort);
+      // Also releases an unclaimed reservation if save admission failed.
+      if (!saved) await cancel();
+      else if (cancellation) await cancellation.catch(()=>{}); // confirmed save remains authoritative
+    }
   }
   const worker = await downloadWorker();
   if (signal.aborted) throw new Error("Export cancelled");

@@ -58,6 +58,10 @@ replaced through Vite HMR. The production build emits only flat self-contained
 assets before publishing its renderer manifest. `package-lock.json` pins the
 complete npm graph; builds use `npm ci` and never consume DSH's node_modules.
 
+Development WASM preserves original, undemangled symbol names. After assembling
+the complete bundle, the build runs the native WebAssets provider preflight and
+reports success only after its default bundle and renderer graph are admitted.
+
 These assets render the views of the ordinary [Rust Web application](../../../crates/rsi/web/README.md).
 The document owns DOM nodes, focus and input delivery; the Dedicated Worker owns
 the actual Rust Profile and application. One view crosses the bridge at a time,
@@ -379,3 +383,14 @@ The download worker serves an inert bootstrap frame under `/downloads/`. The
 initiating page attests its exact frame window through its private MessagePort;
 the worker then binds the one-use response to that controlled frame client. A
 foreign page or a replayed URL cannot consume the stream.
+
+Native export cancellation carries the token returned by `export_open` and uses
+an independent eight-call control lane. Only a positively classified pre-admission
+Busy response may be retried; cancellation delivery is awaited and a failure is
+visible to the export caller unless saving already confirmed success. A late
+cancellation delivery failure cannot turn that confirmed save into a failed export.
+
+Closed human reviews display the exact request and explicit action choices.
+Terminal clients accept a choice number followed by optional feedback; Web and
+Desktop send the selected stable action and request binding. Free text cannot
+approve a review. An answer receipt confirms delivery, not durable approval.

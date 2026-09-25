@@ -27,6 +27,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "sign
 tokio-util.workspace = true
 tauri = "=2.11.5"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [build-dependencies]
 tauri-build = "=2.6.3"
 

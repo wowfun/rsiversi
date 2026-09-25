@@ -237,6 +237,48 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn list_program_notices(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreProgramNoticePage> {
+        self.inner.list_program_notices(after, limit).await
+    }
+
+    async fn read_program_records(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreProgramRecords>>
+    {
+        self.inner.read_program_records(session, run).await
+    }
+    async fn program_run_for_creator(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_session_protocol::ProgramRunId>> {
+        self.inner.program_run_for_creator(session, turn).await
+    }
+    async fn read_program_records_after(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+        after: u64,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreProgramRecords>>
+    {
+        self.inner
+            .read_program_records_after(session, run, after)
+            .await
+    }
+    async fn list_active_program_runs(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreProgramPage> {
+        self.inner.list_active_program_runs(after, limit).await
+    }
+
     async fn prepare_session(&self, session_id: &SessionId) -> StoreResult<SessionValidationLease> {
         let lease = self.inner.prepare_session(session_id).await?;
         self.leases.fetch_add(1, Ordering::SeqCst);

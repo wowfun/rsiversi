@@ -26,6 +26,7 @@ run("cargo", ["build", "--locked", "-p", "rsi-web", "--target", "wasm32-unknown-
   ...(profile === "release" ? ["--release"] : [])]);
 run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
   "--target", "web", "--no-typescript", "--out-dir", output,
+  ...(profile === "debug" ? ["--no-demangle"] : []),
   join(root, `target/wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
 await build({ root: source, configFile: join(source, "vite.config.mjs"), build: { outDir: output } });
@@ -36,4 +37,10 @@ const builtBootstrap=await build({configFile:false,root:source,logLevel:"error",
 const bootstrap=builtBootstrap[0].output.find(item=>item.type==="chunk").code;
 for(const file of ["preview-local.html","preview-online.html"])await writeFile(join(output,file),previewDocument(bootstrap));
 await buildRenderers(output);
+const compiler = spawnSync("rustc", ["--print", "host-tuple"], { cwd: root, encoding: "utf8" });
+if (compiler.status !== 0) throw compiler.error ?? new Error("rustc host lookup failed");
+const host = compiler.stdout.trim();
+if (!host) throw new Error("rustc did not report its native host");
+run("cargo", ["run", "--locked", "-p", "rsi-web-assets", "--example", "check_bundle",
+  "--target", host, ...(profile === "release" ? ["--release"] : []), "--", output]);
 console.log(JSON.stringify({ event: "web-built", directory: output, profile }));

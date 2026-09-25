@@ -84,3 +84,18 @@ not a temporary directory and is never shared with the browser's Device store.
 Validation uses actual Linux WebKitGTK/WebDriver, isolated Host paths and the
 shared product fixtures. Native Windows/macOS behavior is not established by
 Linux builds or browser tests.
+
+Native export preparation is cancellable. An open save dialog retains the export
+slot until the user selects a path or dismisses it; the dialog API cannot dismiss
+it programmatically. Cancellation discards any later selection. Application cleanup
+also waits for this callback. After the file sink admits persistence, cancellation
+keeps the slot occupied until actual success or filesystem failure. Bridge tasks
+retain the worker across request-waiter loss and application cleanup joins that work.
+
+Native file export first reserves an opaque operation token through `export_open`;
+`export_save` and `export_cancel` must carry that exact token. Unclaimed reservations
+expire after thirty seconds. Claim wins when claim and expiry are simultaneously
+ready; expiry rechecks claim and reservation identity under the owner lock. Cancellation before save admission removes only that
+reservation; an old token cannot affect a later export. Cancellation has a separate
+bounded control lane in the document and native bridge, and its caller awaits
+admission, retrying only explicitly rejected Busy responses.

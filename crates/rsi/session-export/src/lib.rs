@@ -6,7 +6,7 @@ mod projection;
 #[cfg(test)]
 mod tests;
 use futures_util::{Stream, StreamExt};
-pub use native::{write_file, write_stream};
+pub use native::{FileWriteError, write_file, write_stream};
 use rsi_agent_session_protocol::{SessionFact, SessionHeader, SessionId};
 use rsi_agent_store_protocol::{SessionStore, SessionValidationLease, StoreError};
 use rsi_session_protocol::{

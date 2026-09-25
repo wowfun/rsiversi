@@ -705,7 +705,10 @@ async fn tools_media_usage_and_provider_private_replay_are_projected_without_pay
             SessionFactBody::ToolIntent {
                 turn_id: turn(),
                 effect_id: EffectId::new("tool-effect").unwrap(),
-                source_model_effect_id: EffectId::new("one").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("one").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: identity.clone(),
                 name: "lookup".into(),
                 arguments: json!({"replay":"ordinary tool data"}),
@@ -870,15 +873,23 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
 async fn native_sink_replaces_atomically_and_preserves_old_file_on_failures_and_cancel() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested/output.md");
-    write_file(Box::pin(futures_util::stream::iter(framed("first"))), &path)
-        .await
-        .unwrap();
+    write_file(
+        Box::pin(futures_util::stream::iter(framed("first"))),
+        &path,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let mut truncated = framed("truncated");
     truncated.pop();
     assert!(
-        write_file(Box::pin(futures_util::stream::iter(truncated)), &path)
-            .await
-            .is_err()
+        write_file(
+            Box::pin(futures_util::stream::iter(truncated)),
+            &path,
+            CancellationToken::new()
+        )
+        .await
+        .is_err()
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -889,7 +900,10 @@ async fn native_sink_replaces_atomically_and_preserves_old_file_on_failures_and_
         ready.notify_one(); std::future::pending::<()>().await;
     });
     let destination = path.clone();
-    let task = tokio::spawn(async move { write_file(source, &destination).await });
+    let task =
+        tokio::spawn(
+            async move { write_file(source, &destination, CancellationToken::new()).await },
+        );
     entered.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -901,6 +915,7 @@ async fn native_sink_replaces_atomically_and_preserves_old_file_on_failures_and_
     write_file(
         Box::pin(futures_util::stream::iter(framed("replacement"))),
         &path,
+        CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -909,10 +924,165 @@ async fn native_sink_replaces_atomically_and_preserves_old_file_on_failures_and_
     assert!(
         write_file(
             Box::pin(futures_util::stream::iter(framed("failure"))),
-            path.parent().unwrap()
+            path.parent().unwrap(),
+            CancellationToken::new(),
         )
         .await
         .is_err()
     );
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn native_cancel_before_commit_preserves_destination() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("output.md");
+    std::fs::write(&path, "old").unwrap();
+    let stop = CancellationToken::new();
+    let token = stop.clone();
+    let source = Box::pin(async_stream::stream! {
+        for event in framed("new") { yield event; }
+        token.cancel();
+    });
+    assert!(matches!(
+        write_file(source, &path, stop).await,
+        Err(FileWriteError::Cancelled)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn admitted_native_commit_reports_actual_result_after_cancellation_or_waiter_drop() {
+    for (drop_waiter, fail) in [(false, false), (false, true), (true, false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("output.md");
+        std::fs::write(&path, "old").unwrap();
+        let destination = path.clone();
+        let stop = CancellationToken::new();
+        let token = stop.clone();
+        let (entered, enter) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            native::write_file_with(
+                Box::pin(futures_util::stream::iter(framed("new"))),
+                &destination,
+                token,
+                move |temporary, destination| {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                    let result = if fail {
+                        Err(encoding("fixture persist failure"))
+                    } else {
+                        temporary.persist(destination).map_err(encoding)
+                    };
+                    let _ = done.send(());
+                    result
+                },
+            )
+            .await
+        });
+        enter.await.unwrap();
+        stop.cancel();
+        assert!(!task.is_finished());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        if drop_waiter {
+            task.abort();
+        }
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        if drop_waiter {
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else if fail {
+            assert!(matches!(
+                task.await.unwrap(),
+                Err(FileWriteError::Export(_))
+            ));
+        } else {
+            assert_eq!(task.await.unwrap().unwrap(), 3);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            if fail { "old" } else { "new" }
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn program_tool_exports_preserve_exact_origin_and_internal_evidence() {
+    let fact = SessionFact::new(
+        2,
+        1,
+        SessionFactBody::ToolIntent {
+            turn_id: turn(),
+            effect_id: EffectId::new("nested").unwrap(),
+            origin: ToolOrigin::Program {
+                parent_effect_id: EffectId::new("coordinator").unwrap(),
+                ordinal: 4,
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Callable,
+            identity: rsi_tools_protocol::ToolResultIdentity::new(
+                "owner",
+                "nested",
+                "call",
+                "b".repeat(64),
+            )
+            .unwrap(),
+            name: "file_read".into(),
+            arguments: json!({"path":"evidence.txt"}),
+            approval: None,
+            parallel_safe: true,
+        },
+    )
+    .unwrap();
+    let mut projection = projection::Projection::default();
+    let record = projection
+        .record(header().session_id(), &fact, false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record["origin"],
+        json!({"kind":"program","parent_effect_id":"coordinator","ordinal":4})
+    );
+    assert_eq!(record["arguments"]["path"], "evidence.txt");
+    assert_eq!(record["program_role"], "callable");
+    let markdown = projection::Markdown::default().record(&record).unwrap();
+    assert!(markdown.contains("coordinator") && markdown.contains("evidence.txt"));
+    let restored: SessionFact =
+        serde_json::from_value(serde_json::to_value(&fact).unwrap()).unwrap();
+    assert_eq!(restored, fact);
+}
+
+#[test]
+fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
+    let source = rsi_agent_session_protocol::InputMessageSource::Program {
+        message_id: rsi_agent_session_protocol::MessageId::new("notice").unwrap(),
+        source: rsi_agent_session_protocol::ProgramCompletionSource {
+            run_id: rsi_agent_session_protocol::ProgramRunId::new("workflow").unwrap(),
+            generation: "a".repeat(64),
+            terminal_control_seq: 7,
+        },
+    };
+    let fact = SessionFact::new(
+        2,
+        1,
+        SessionFactBody::InputMessageEntered {
+            turn_id: turn(),
+            step_id: rsi_agent_session_protocol::StepId::new("step").unwrap(),
+            source: source.clone(),
+            content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+                text: "Workflow completed".into(),
+            }],
+        },
+    )
+    .unwrap();
+    let record = projection::Projection::default()
+        .record(header().session_id(), &fact, false, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record["source"], serde_json::to_value(source).unwrap());
+    let markdown = projection::Markdown::default().record(&record).unwrap();
+    assert!(markdown.contains("Workflow completed") && markdown.contains("workflow"));
 }

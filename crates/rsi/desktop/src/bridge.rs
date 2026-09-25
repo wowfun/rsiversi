@@ -28,7 +28,7 @@ struct Frames {
 pub(crate) struct Bridge {
     pub app: Arc<GuiApplication>,
     pub app_handle: Mutex<Option<tauri::AppHandle>>,
-    pub export_cancel: Mutex<Option<CancellationToken>>,
+    pub export: Mutex<crate::export::State>,
     pub assets: Arc<WebAssetControl>,
     pub identity: String,
     pub lifetime: Arc<ApplicationLifetime>,
@@ -50,7 +50,7 @@ impl Bridge {
     ) -> Self {
         Self {
             app_handle: Mutex::new(None),
-            export_cancel: Mutex::new(None),
+            export: Mutex::default(),
             app,
             assets,
             identity,
@@ -220,7 +220,7 @@ impl Bridge {
         };
         Ok((asset.bytes.as_bytes().to_vec(), mime, asset.policy))
     }
-    pub async fn call(&self, method: &str, source: &[u8]) -> Result<Vec<u8>> {
+    pub async fn call(self: &Arc<Self>, method: &str, source: &[u8]) -> Result<Vec<u8>> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Submission {
@@ -251,7 +251,8 @@ impl Bridge {
             }
             "restore_session" => Ok(self.app.restore_session(text(source)?).await?.into_bytes()),
             "export_save" => self.save_export(text(source)?).await,
-            "export_cancel" => self.cancel_export(),
+            "export_cancel" => self.cancel_export(text(source)?),
+            "export_open" => self.open_export(),
             "export_input" => Ok(self.app.export_input(text(source)?).await?.into_bytes()),
             "reference_input" => Ok(self.app.reference_input(text(source)?).await?.into_bytes()),
             "file_input" => Ok(self.app.file_input(text(source)?).await?.into_bytes()),
