@@ -329,6 +329,8 @@ async fn enter(kernel: &AgentKernel, claim: &TurnClaim, request: &str) -> usize 
             .commit_domains(
                 claim,
                 DomainMutation {
+                    guards: vec![],
+                    require_uncancelled_turn: false,
                     request_id: DomainRequestId::new(request).unwrap(),
                     proposals,
                     facts,
@@ -802,7 +804,10 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     batches.push(vec![SessionFactBody::ToolIntent {
         turn_id: parent.turn_id().clone(),
         effect_id: tool_effect.clone(),
-        source_model_effect_id: model_effect,
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: model_effect,
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         identity: identity.clone(),
         name: "fixture_spawn".into(),
         arguments: serde_json::json!({}),

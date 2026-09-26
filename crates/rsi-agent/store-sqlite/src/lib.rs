@@ -44,11 +44,32 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES: usize = 4096;
+
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 13] = [
+const EXPECTED_TABLES: [(&str, &str); 15] = [
+    ("program_runs", "CREATE TABLE program_runs (
+        session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+        run_id TEXT NOT NULL,
+        creator_turn_id TEXT NOT NULL,
+        terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+        head_json TEXT NOT NULL,
+        PRIMARY KEY (session_id, run_id),
+        UNIQUE (session_id, creator_turn_id)
+    ) STRICT"),
+    ("program_records", "CREATE TABLE program_records (
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+        encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes > 0),
+        PRIMARY KEY (session_id, run_id, control_seq),
+        UNIQUE (session_id, control_seq),
+        FOREIGN KEY (session_id, run_id) REFERENCES program_runs(session_id, run_id) ON DELETE RESTRICT,
+        FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+    ) STRICT"),
     (
         "domain_versions",
         "CREATE TABLE domain_versions (
@@ -116,6 +137,7 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
                 REFERENCES sessions(session_id) ON DELETE RESTRICT,
             path_json TEXT NOT NULL,
             task_name TEXT NOT NULL,
+            execution_owner_json TEXT NOT NULL,
             UNIQUE (parent_session_id, task_name)
          ) STRICT",
     ),
@@ -128,7 +150,8 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
             parent_session_id TEXT,
             turn_id TEXT,
             phase TEXT NOT NULL CHECK (phase IN ('running', 'parked', 'waiting')),
-            completion_reserved_bytes INTEGER CHECK (completion_reserved_bytes > 0)
+            completion_reserved_bytes INTEGER CHECK (completion_reserved_bytes > 0),
+            completion_to_program INTEGER NOT NULL DEFAULT 0 CHECK (completion_to_program IN (0, 1))
          ) STRICT",
     ),
     (
@@ -184,7 +207,7 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
             bound_turn_id TEXT,
             accepted_timestamp_ms INTEGER NOT NULL CHECK (accepted_timestamp_ms > 0),
             root_session_id TEXT NOT NULL,
-            message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation')),
+            message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program')),
             message_json TEXT NOT NULL,
             target TEXT NOT NULL CHECK (target IN ('next_turn', 'next_step')),
             wake_required INTEGER NOT NULL CHECK (wake_required IN (0, 1)),
@@ -230,7 +253,19 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 10] = [
+const EXPECTED_INDEXES: [(&str, &str); 13] = [
+    (
+        "agent_controls_by_activation",
+        "CREATE INDEX agent_controls_by_activation ON agent_controls(session_id, json_extract(control_json,'$.type'), json_extract(control_json,'$.activation_id'))",
+    ),
+    (
+        "pending_program_notices",
+        "CREATE INDEX pending_program_notices ON agent_messages(session_id, message_id) WHERE state = 'pending' AND message_source = 'program'",
+    ),
+    (
+        "active_program_runs",
+        "CREATE INDEX active_program_runs ON program_runs(terminal, session_id, run_id)",
+    ),
     (
         "active_activations_waiting",
         "CREATE INDEX active_activations_waiting ON active_activations (session_id) WHERE phase = 'waiting'",
@@ -867,6 +902,8 @@ mod append;
 mod cas;
 mod domain;
 mod filesystem;
+mod program;
+mod program_graph;
 mod reset;
 pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt, SqliteStoreResetRequest};
 mod preparation;

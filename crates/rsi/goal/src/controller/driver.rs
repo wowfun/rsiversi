@@ -5,8 +5,7 @@ use rsi_agent_goal::{
     round_request_id,
 };
 use rsi_agent_session_protocol::{
-    CommandArguments, CommandRevision, ContinuationProvenance, ContributionId,
-    SessionCommandInvocation,
+    CommandArguments, CommandRevision, ContributionId, SessionCommandInvocation,
 };
 use rsi_agent_turn_protocol::MessageState;
 use std::sync::Arc;
@@ -32,7 +31,17 @@ impl GoalService {
                 if !live.lease.is_armed() || goal.phase != GoalPhase::Active {
                     return Ok(());
                 }
-                self.reserve(owner, live, &snapshot, goal).await?;
+                match self.reserve(owner, live, &snapshot, goal).await {
+                    Ok(()) => {}
+                    Err(GoalError::Busy) => {
+                        owner.publish(live, GoalDriverStage::Waiting, None, None);
+                        drop(gate);
+                        live.session
+                            .wait_idle(&live.lease, live.stop.clone())
+                            .await?;
+                    }
+                    Err(error) => return Err(error),
+                }
                 continue;
             }
             let reservation = goal
@@ -41,32 +50,7 @@ impl GoalService {
                 .ok_or_else(|| invalid("unresolved Goal has no reservation"))?;
             let message_id = reservation.message_id.clone();
             if live.session.message_status(&message_id).await?.is_none() {
-                if !live.lease.is_armed() || goal.phase != GoalPhase::Active {
-                    return Ok(());
-                }
-                let provenance = match &reservation.request_id {
-                    Some(request_id) => ContinuationProvenance::Command {
-                        request_id: request_id.clone(),
-                    },
-                    None if matches!(snapshot.revision, CommandRevision::Draft { .. }) => {
-                        ContinuationProvenance::Baseline {
-                            snapshot_sha256: snapshot.domain.snapshot.sha256().map_err(invalid)?,
-                        }
-                    }
-                    None => {
-                        self.reserve(owner, live, &snapshot, goal).await?;
-                        continue;
-                    }
-                };
-                owner.publish(
-                    live,
-                    GoalDriverStage::Reserving,
-                    Some(message_id.clone()),
-                    None,
-                );
-                live.session
-                    .submit(&live.lease, reservation.input(&goal.id), provenance)
-                    .await?;
+                return Err(invalid("atomic Goal reservation lacks accepted input"));
             }
             owner.publish(
                 live,
@@ -122,9 +106,15 @@ impl GoalService {
             Some(reservation.message_id.clone()),
             None,
         );
-        live.session
-            .internal_command(&live.lease, invocation, Some(reservation.input(&goal.id)))
-            .await?;
+        if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
+            live.session
+                .reserve_initial(&live.lease, invocation, reservation.input(&goal.id))
+                .await?;
+        } else {
+            live.session
+                .internal_command(&live.lease, invocation, Some(reservation.input(&goal.id)))
+                .await?;
+        }
         Ok(())
     }
 

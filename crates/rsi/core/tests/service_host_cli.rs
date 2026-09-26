@@ -10,6 +10,8 @@ mod commands;
 mod export;
 #[path = "service_host_cli/inspector.rs"]
 mod inspector;
+#[path = "service_host_cli/plan_review.rs"]
+mod plan_review;
 #[path = "service_host_cli/reset.rs"]
 mod reset;
 #[path = "service_host_cli/serve.rs"]
@@ -615,6 +617,11 @@ impl JsonClient {
     }
 }
 
+struct RequestGate {
+    matches: fn(&serde_json::Value) -> bool,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
 #[derive(Clone)]
 struct GatedState {
     requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
@@ -622,16 +629,29 @@ struct GatedState {
     release: Arc<Notify>,
     tool: &'static str,
     arguments: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    request_gate: Arc<std::sync::Mutex<Option<RequestGate>>>,
 }
 async fn gated_chat(
     State(state): State<GatedState>,
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> Response {
+    let gate = {
+        let mut gate = state.request_gate.lock().unwrap();
+        if gate.as_ref().is_some_and(|gate| (gate.matches)(&request)) {
+            gate.take()
+        } else {
+            None
+        }
+    };
     let first = {
         let mut requests = state.requests.lock().unwrap();
         requests.push(request);
         requests.len() == 1
     };
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
     if !first {
         return chat().await;
     }
@@ -663,6 +683,7 @@ async fn gated_provider(tool: &'static str) -> (String, GatedState, tokio::task:
         release: Arc::new(Notify::new()),
         tool,
         arguments: Arc::default(),
+        request_gate: Arc::default(),
     };
     let service = Router::new()
         .route("/v1/chat/completions", post(gated_chat))

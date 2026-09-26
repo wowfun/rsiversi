@@ -10,11 +10,14 @@ fn fact(seq: u64, kind: &str, owner: &str) -> SessionFact {
     let effect_id = EffectId::new("effect").unwrap();
     let identity = ToolResultIdentity::new(owner, "invoke", "call", "a".repeat(64)).unwrap();
     let body = match kind {
-        "intent" => SessionFactBody::ToolIntent { source_model_effect_id: EffectId::new("source-model").unwrap(),
+        "intent" => SessionFactBody::ToolIntent { origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: EffectId::new("source-model").unwrap() },
+ program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id, effect_id, identity, name: "bash".into(), arguments: json!({"command":"exit 7"}), approval: None, parallel_safe: false,
         },
         "started" => SessionFactBody::ToolStarted { turn_id, effect_id, identity },
         "rejected" => SessionFactBody::ToolRejected {
+            origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: EffectId::new("source-model").unwrap() },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id, effect_id, identity, name: "bash".into(), arguments: json!({"command":"exit 7"}),
             rejection: ToolRejection::PolicyDenied { contribution_id: ContributionId::new("fixture.policy").unwrap(), reason: "denied".into() },
         },
@@ -136,4 +139,31 @@ fn delegation_navigation_requires_exact_intent_and_successful_bounded_result() {
         assert_eq!(state.external_conversation(), None);
         assert!(state.owned_bytes() < 2048);
     }
+}
+
+#[test]
+fn program_origin_survives_suffix_repair_and_is_visible_without_a_model_source() {
+    let mut body = fact(4, "intent", "owner").body().clone();
+    let origin = rsi_agent_session_protocol::ToolOrigin::Program {
+        parent_effect_id: EffectId::new("coordinator").unwrap(),
+        ordinal: 7,
+    };
+    if let SessionFactBody::ToolIntent {
+        origin: stored,
+        program_role,
+        ..
+    } = &mut body
+    {
+        *stored = origin.clone();
+        *program_role = rsi_tools_protocol::ToolProgramRole::Callable;
+    }
+    let intent = SessionFact::new(4, 1, body).unwrap();
+    let mut state = ToolState::from_fact(&fact(6, "result", "owner")).unwrap();
+    assert!(state.observe(&intent));
+    assert_eq!(state.origin, Some(origin));
+    assert!(state.title().starts_with("Program · "));
+    assert_eq!(
+        serde_json::to_value(&state).unwrap()["origin"]["ordinal"],
+        7
+    );
 }

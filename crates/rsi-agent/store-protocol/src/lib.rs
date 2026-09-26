@@ -20,6 +20,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod domain;
+mod program;
+pub use program::*;
+mod program_graph;
+pub use program_graph::*;
 mod evidence;
 mod suffix;
 mod window;
@@ -34,7 +38,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 23;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 26;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -245,6 +249,14 @@ impl AppendBatch {
             ));
         }
         if let Some(header) = &self.header {
+            if matches!(
+                header.execution_owner(),
+                Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun { .. })
+            ) {
+                return Err(StoreError::Invalid(
+                    "Program child creation requires a paired atomic Agent commit".into(),
+                ));
+            }
             header
                 .validate()
                 .map_err(|error| StoreError::Invalid(error.to_string()))?;
@@ -438,7 +450,33 @@ pub struct AtomicAgentCommit {
     /// Exact active activations which must own their sessions before applying appends.
     pub required_active_activations: Vec<AgentActivationGuard>,
     /// Root whose complete strict descendants must be quiescent after all appends, before commit.
-    pub quiescent_descendants_of: Option<SessionId>,
+    pub quiescent_descendants_of: Option<AgentQuiescenceGuard>,
+}
+
+/// Selects execution ownership for an atomic descendant-quiescence check.
+#[derive(Clone, Debug)]
+pub struct AgentQuiescenceGuard {
+    /// Subtree whose strict descendants are checked in the write transaction.
+    pub session_id: SessionId,
+    /// True excludes every branch crossing a `ProgramRun` ownership edge.
+    pub activation_owned_only: bool,
+}
+impl From<SessionId> for AgentQuiescenceGuard {
+    fn from(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            activation_owned_only: false,
+        }
+    }
+}
+impl AgentQuiescenceGuard {
+    /// Activation settlement excludes independently owned Program branches.
+    pub const fn activation(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            activation_owned_only: true,
+        }
+    }
 }
 
 impl AtomicAgentCommit {
@@ -499,6 +537,25 @@ pub struct AgentActivationGuard {
     pub activation_id: ActivationId,
 }
 
+/// Checks the typed Program completion sink against immutable execution ownership.
+pub fn validate_program_completion_sink(
+    header: &SessionHeader,
+    run_id: &rsi_agent_session_protocol::ProgramRunId,
+    ordinal: u32,
+) -> Result<()> {
+    if !matches!(
+        header.execution_owner(),
+        Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
+            run_id: expected, ordinal: expected_ordinal, ..
+        }) if expected == run_id && *expected_ordinal == ordinal
+    ) {
+        return Err(StoreError::Invalid(
+            "program completion differs from Header ownership".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Indexed lifecycle phase for the single active activation of one session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -524,6 +581,8 @@ pub struct StoreActiveActivation {
     pub phase: StoreActivationPhase,
     /// Parent-mailbox bytes reserved for this activation's completion.
     pub completion_reserved_bytes: Option<u64>,
+    /// Exact initial completion uses the immutable Header Program sink and no mailbox slot.
+    pub completion_to_program: bool,
 }
 
 /// One bounded lexical page of sessions waiting for descendant settlement.
@@ -743,9 +802,11 @@ impl StoreAgentMessage {
     }
     /// Whether this immutable ingress may be promoted when its activation ends.
     pub fn permits_promotion(&self) -> bool {
-        matches!(self.message.source, AgentMessageSource::Completion { .. })
-            || self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
-                && self.bound_turn_id.is_some()
+        matches!(
+            self.message.source,
+            AgentMessageSource::Completion { .. } | AgentMessageSource::Program { .. }
+        ) || self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
+            && self.bound_turn_id.is_some()
     }
 
     /// Ready ordering on promotion; human steering preserves acceptance FIFO.
@@ -1069,6 +1130,7 @@ impl StoreAgentChildPage {
 /// Durable activity flags and watermark for one Session in a single read snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent indexed activity predicates can coexist; they are not lifecycle alternatives.
 pub struct StoreAgentSessionStatus {
     /// Exact Session identity.
     pub session_id: SessionId,
@@ -1082,12 +1144,16 @@ pub struct StoreAgentSessionStatus {
     pub has_active_activation: bool,
     /// At least one message requires activation.
     pub has_waking_message: bool,
+    /// An independent program run remains unfinished.
+    pub has_active_program: bool,
 }
 
 /// Immutable descendant lineage with activity from the same snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreAgentDescendantStatus {
+    /// Immutable execution owner, distinct from the inherited history path.
+    pub execution_owner: rsi_agent_session_protocol::ExecutionOwner,
     /// Durable Session activity.
     pub status: StoreAgentSessionStatus,
     /// Direct parent identity.
@@ -1109,6 +1175,30 @@ pub struct StoreAgentSubtreeSnapshot {
 }
 
 impl StoreAgentSubtreeSnapshot {
+    /// Tests whether a strict descendant belongs to this root's activation lifetime.
+    /// Requires a validated snapshot; parent lookup uses its strict Session ordering.
+    pub fn activation_owns(&self, descendant: &StoreAgentDescendantStatus) -> bool {
+        let mut next = descendant;
+        for _ in 0..MAXIMUM_DURABLE_AGENT_TREE_NODES {
+            if matches!(
+                next.execution_owner,
+                rsi_agent_session_protocol::ExecutionOwner::ProgramRun { .. }
+            ) {
+                return false;
+            }
+            if next.parent_session_id == self.session.session_id {
+                return true;
+            }
+            let Ok(parent) = self
+                .descendants
+                .binary_search_by(|child| child.status.session_id.cmp(&next.parent_session_id))
+            else {
+                return false;
+            };
+            next = &self.descendants[parent];
+        }
+        false
+    }
     /// Checks tree size, strict identity ordering, and closed, acyclic lineage.
     pub fn validate(&self) -> Result<()> {
         if self.descendants.len() >= MAXIMUM_DURABLE_AGENT_TREE_NODES {
@@ -1128,6 +1218,22 @@ impl StoreAgentSubtreeSnapshot {
             }
         }
         for descendant in &self.descendants {
+            descendant
+                .execution_owner
+                .validate()
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let (rsi_agent_session_protocol::ExecutionOwner::TurnActivation {
+                session_id: owner,
+                ..
+            }
+            | rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
+                session_id: owner, ..
+            }) = &descendant.execution_owner;
+            if owner != &descendant.parent_session_id {
+                return Err(StoreError::Corrupt(
+                    "execution owner differs from the immutable parent".into(),
+                ));
+            }
             rsi_agent_session_protocol::validate_identifier(
                 "subagent task name",
                 &descendant.task_name,
@@ -1962,6 +2068,64 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support waiting-activation listing".into(),
         ))
     }
+    /// Looks up the unique durable run for one creator Turn, including terminal runs.
+    async fn program_run_for_creator(
+        &self,
+        _session: &SessionId,
+        _turn: &TurnId,
+    ) -> Result<Option<rsi_agent_session_protocol::ProgramRunId>> {
+        Err(StoreError::Invalid(
+            "Program creator lookup is unsupported".into(),
+        ))
+    }
+    /// Reads all records of one run, bounded by its independent byte and count budgets.
+    async fn read_program_records(
+        &self,
+        session_id: &SessionId,
+        run_id: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<Option<StoreProgramRecords>> {
+        let _ = (session_id, run_id);
+        Err(StoreError::Invalid(
+            "this Store does not support program records".into(),
+        ))
+    }
+    /// Reads the complete bounded indexed suffix after one retained control cursor.
+    /// The returned head and records share a Store snapshot; no old payload is read.
+    async fn read_program_records_after(
+        &self,
+        session_id: &SessionId,
+        run_id: &rsi_agent_session_protocol::ProgramRunId,
+        after: u64,
+    ) -> Result<Option<StoreProgramRecords>> {
+        let _ = (session_id, run_id, after);
+        Err(StoreError::Invalid(
+            "this Store does not support indexed Program suffix reads".into(),
+        ))
+    }
+    /// Enumerates pending typed Program notices, including non-waking next-Step input.
+    async fn list_program_notices(
+        &self,
+        after: Option<&StoreProgramNotice>,
+        limit: usize,
+    ) -> Result<StoreProgramNoticePage> {
+        let _ = after;
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Store does not support Program notice indexing".into(),
+        ))
+    }
+    /// Enumerates unfinished runs without scanning dormant Session history.
+    async fn list_active_program_runs(
+        &self,
+        after: Option<&StoreProgramCursor>,
+        limit: usize,
+    ) -> Result<StoreProgramPage> {
+        let _ = after;
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Store does not support active program indexing".into(),
+        ))
+    }
     /// Reads one optional opaque Context checkpoint.
     async fn read_context_checkpoint(
         &self,
@@ -2325,5 +2489,68 @@ mod tests {
             page.validate(),
             Err(StoreError::Corrupt(message)) if message.contains("control page exceeds")
         ));
+    }
+    #[test]
+    fn indexed_activation_membership_matches_lineage_at_the_tree_bound() {
+        use rsi_agent_session_protocol::{ExecutionOwner, ProgramRunId};
+        let status = |name: &str| StoreAgentSessionStatus {
+            session_id: SessionId::new(name).unwrap(),
+            durable_control_seq: 0,
+            last_settled_control_seq: 0,
+            has_open_turn: false,
+            has_active_activation: false,
+            has_waking_message: false,
+            has_active_program: false,
+        };
+        let mut tree = StoreAgentSubtreeSnapshot {
+            session: status("root"),
+            descendants: vec![],
+        };
+        for group in 0..85 {
+            let mut parent = tree.session.session_id.clone();
+            for depth in 1_usize..=3 {
+                let name = format!("node-{:03}", group * 3 + 4 - depth);
+                let execution_owner =
+                    if (group % 3 == 0 && depth == 2) || (group % 3 == 1 && depth == 1) {
+                        ExecutionOwner::ProgramRun {
+                            session_id: parent.clone(),
+                            run_id: ProgramRunId::new("run").unwrap(),
+                            ordinal: 1,
+                        }
+                    } else {
+                        ExecutionOwner::TurnActivation {
+                            session_id: parent.clone(),
+                            turn_id: TurnId::new("turn").unwrap(),
+                        }
+                    };
+                let mut path = vec![u16::try_from(group + 1).unwrap()];
+                path.resize(depth, 1);
+                tree.descendants.push(StoreAgentDescendantStatus {
+                    execution_owner,
+                    status: status(&name),
+                    parent_session_id: parent,
+                    path: AgentPath::new(path).unwrap(),
+                    task_name: name.clone(),
+                });
+                parent = SessionId::new(name).unwrap();
+            }
+        }
+        tree.descendants
+            .sort_by(|a, b| a.status.session_id.cmp(&b.status.session_id));
+        tree.validate().unwrap();
+        for child in &tree.descendants {
+            let group = usize::from(child.path.segments()[0]) - 1;
+            let expected = match group % 3 {
+                0 => child.path.depth() == 1,
+                1 => false,
+                _ => true,
+            };
+            assert_eq!(
+                tree.activation_owns(child),
+                expected,
+                "{}",
+                child.status.session_id
+            );
+        }
     }
 }

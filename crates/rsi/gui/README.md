@@ -393,3 +393,8 @@ discovery; creation commands and draft reuse carry no workspace-trust setting.
 History search uses the shared history API through the generation-fenced human
 reference bridge. Freeze requests must name the pane's actual target Session;
 source workspace and original evidence are independently checked by their owner.
+
+Closed human reviews display the exact request and explicit action choices.
+Terminal clients accept a choice number followed by optional feedback; Web and
+Desktop send the selected stable action and request binding. Free text cannot
+approve a review. An answer receipt confirms delivery, not durable approval.

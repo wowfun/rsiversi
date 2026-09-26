@@ -24,6 +24,9 @@ use tokio_util::sync::CancellationToken;
 /// Closed byte protocol for explicitly injected Portable tool contributions.
 pub mod portable;
 
+mod fragment;
+pub use fragment::bounded_json_fragment_page;
+
 mod output;
 pub use output::{
     MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES, MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES,
@@ -82,6 +85,8 @@ pub struct ToolDefinition {
     freeform: Option<FreeformToolDefinition>,
     #[serde(skip)]
     scheduling: ToolScheduling,
+    #[serde(skip)]
+    program_role: ToolProgramRole,
 }
 
 impl<'de> Deserialize<'de> for ToolDefinition {
@@ -106,6 +111,7 @@ impl<'de> Deserialize<'de> for ToolDefinition {
             input_schema: wire.input_schema,
             freeform: wire.freeform,
             scheduling: ToolScheduling::Exclusive,
+            program_role: ToolProgramRole::Unavailable,
         };
         definition
             .validate()
@@ -127,6 +133,7 @@ impl ToolDefinition {
             input_schema,
             freeform: None,
             scheduling: ToolScheduling::Exclusive,
+            program_role: ToolProgramRole::Unavailable,
         };
         definition.validate()?;
         Ok(definition)
@@ -171,6 +178,18 @@ impl ToolDefinition {
         self.scheduling
     }
 
+    /// Declares process-local program dispatch eligibility in this sealed catalog.
+    #[must_use]
+    pub const fn with_program_role(mut self, role: ToolProgramRole) -> Self {
+        self.program_role = role;
+        self
+    }
+
+    /// Returns the trusted owner declaration, never taken from model arguments.
+    pub const fn program_role(&self) -> ToolProgramRole {
+        self.program_role
+    }
+
     /// Revalidates a definition decoded from a durable or external boundary.
     pub fn validate(&self) -> Result<()> {
         validate_model_tool_name(&self.name)?;
@@ -191,6 +210,22 @@ impl ToolDefinition {
         }
         Ok(())
     }
+}
+
+/// Trusted program-dispatch role, recorded by Agent for cold provenance validation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProgramRole {
+    /// Cannot participate in internal program dispatch.
+    #[default]
+    Unavailable,
+    /// May be called by one started program coordinator.
+    Callable,
+    /// May request internal calls, but cannot itself be called by a program.
+    Coordinator,
+    /// May create a detached `ProgramRun` from its exact model-origin effect.
+    /// Cannot dispatch nested foreground calls or be called by a coordinator.
+    Workflow,
 }
 
 /// Process-local overlap contract declared by the Tool owner.
@@ -971,6 +1006,14 @@ pub trait ToolCatalogProvider: fmt::Debug + Send + Sync + 'static {
 pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
     /// Returns ordered model-visible definitions of the active tools.
     fn definitions(&self) -> Vec<ToolDefinition>;
+    /// Looks up one definition in the same immutable exact-name authority as preparation.
+    /// Implementations clone only the selected definition, never the complete catalog.
+    fn definition(&self, name: &str) -> Option<ToolDefinition>;
+    /// Exact role from the same immutable authority, without cloning schema payloads.
+    fn program_role(&self, name: &str) -> Option<ToolProgramRole>;
+    /// Names and roles from the same authority, excluding unavailable roles.
+    /// This projection never clones descriptions or input schemas.
+    fn program_roles(&self) -> std::collections::BTreeMap<String, ToolProgramRole>;
     /// Exact-name declarations from this immutable catalog; absent names are opaque.
     fn output_declarations(&self) -> std::collections::BTreeMap<String, ToolOutputDeclaration> {
         std::collections::BTreeMap::new()

@@ -703,9 +703,10 @@ impl GuiApplication {
                 generation,
                 id,
                 answers,
+                review,
             } => {
                 let attachment = self.pane(pane)?.attachment(&generation)?;
-                let answer = rsi_user_questions_protocol::QuestionAnswer { answers };
+                let answer = rsi_user_questions_protocol::QuestionAnswer { review, answers };
                 answer.validate().map_err(error)?;
                 if !attachment
                     .handle

@@ -1,5 +1,5 @@
 use crate::{BlockIdentity, FactField, SourceRef, ToolOutcome};
-use rsi_agent_session_protocol::{SessionFact, SessionFactBody};
+use rsi_agent_session_protocol::{SessionFact, SessionFactBody, ToolOrigin};
 use serde::Serialize;
 
 /// An issued completed-output identity, validated before retaining its bytes.
@@ -39,6 +39,8 @@ pub struct ToolState {
     key: String,
     /// Registered name if an intent or rejection is known.
     pub name: Option<String>,
+    /// Recorded producer; absent when the intent or rejection has not been loaded.
+    pub origin: Option<ToolOrigin>,
     /// Bounded semantic preview of known Tool arguments, without owning their source.
     pub argument_summary: Option<String>,
     /// True only when the exact intent was observed.
@@ -67,6 +69,7 @@ impl ToolState {
         let mut state = Self {
             key,
             name: None,
+            origin: None,
             argument_summary: None,
             intent_present: false,
             arguments: None,
@@ -94,16 +97,22 @@ impl ToolState {
         let seq = fact.seq();
         let phase = match fact.body() {
             SessionFactBody::ToolIntent {
-                name, arguments, ..
+                name,
+                arguments,
+                origin,
+                ..
             } => {
                 self.intent_present = true;
-                self.named(seq, name, arguments);
+                self.named(seq, name, arguments, origin);
                 ToolPhase::Prepared
             }
             SessionFactBody::ToolRejected {
-                name, arguments, ..
+                name,
+                arguments,
+                origin,
+                ..
             } => {
-                self.named(seq, name, arguments);
+                self.named(seq, name, arguments, origin);
                 self.rejection = Some(SourceRef {
                     seq,
                     field: FactField::ToolRejection,
@@ -139,9 +148,10 @@ impl ToolState {
         }
         true
     }
-    fn named(&mut self, seq: u64, name: &str, arguments: &serde_json::Value) {
+    fn named(&mut self, seq: u64, name: &str, arguments: &serde_json::Value, origin: &ToolOrigin) {
         if seq >= self.named_seq {
             self.name = Some(name.into());
+            self.origin = Some(origin.clone());
             self.argument_summary = argument_summary(name, arguments);
             self.arguments = Some(SourceRef {
                 seq,
@@ -168,7 +178,15 @@ impl ToolState {
             ToolPhase::Settled(ToolOutcome::ToolFailed) => "tool failed",
             ToolPhase::Settled(ToolOutcome::ProcessFailed) => "command failed",
         };
-        let title = format!("{} · {status}", self.name.as_deref().unwrap_or("Tool"));
+        let prefix = if matches!(self.origin, Some(ToolOrigin::Program { .. })) {
+            "Program · "
+        } else {
+            ""
+        };
+        let title = format!(
+            "{prefix}{} · {status}",
+            self.name.as_deref().unwrap_or("Tool")
+        );
         self.argument_summary
             .as_ref()
             .map_or(title.clone(), |summary| format!("{title} · {summary}"))
@@ -176,6 +194,12 @@ impl ToolState {
     /// Heap capacities retained in addition to this value's inline size.
     pub fn owned_bytes(&self) -> usize {
         self.key.capacity()
+            + self.origin.as_ref().map_or(0, |origin| match origin {
+                ToolOrigin::Model { effect_id } => effect_id.as_str().len(),
+                ToolOrigin::Program {
+                    parent_effect_id, ..
+                } => parent_effect_id.as_str().len(),
+            })
             + self.external_candidate.as_ref().map_or(0, String::capacity)
             + self.name.as_ref().map_or(0, String::capacity)
             + self.argument_summary.as_ref().map_or(0, String::capacity)

@@ -160,7 +160,11 @@ impl Operation {
                     Self::Create => 7,
                     Self::Submit => 4,
                     Self::MessageStatus => 3,
-                    Self::Jobs | Self::TerminalOutput => 2,
+                    Self::Jobs
+                    | Self::TerminalOutput
+                    | Self::Interactions
+                    | Self::Questions
+                    | Self::AnswerQuestion => 2,
                     Self::Attach
                     | Self::Recent
                     | Self::DraftSnapshot
@@ -395,6 +399,16 @@ impl Failure {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    #[test]
+    fn closed_review_operations_advertise_the_new_wire_version() {
+        for operation in [
+            Operation::Interactions,
+            Operation::Questions,
+            Operation::AnswerQuestion,
+        ] {
+            assert_eq!(operation.spec().id.version(), 2);
+        }
+    }
     #[test]
     fn setup_error_roundtrips_without_exposing_backend_diagnostics() {
         let wire = domain::<()>(Err(SessionError::SetupRequired))

@@ -23,7 +23,45 @@ const PLAN_SOURCES: usize = 1024;
 // fit here even at their maximum JSON escaping and numeric widths.
 const PLAN_SELECTION_BYTES: usize = MAXIMUM_COMPACTION_PLAN_BYTES - 16 * 1024;
 
-type SummaryReplacements<'a> = BTreeMap<TurnId, (Cow<'a, [Message]>, crate::outcomes::Batches)>;
+struct SummaryReplacement {
+    messages: Vec<Message>,
+    batches: crate::outcomes::Batches,
+    remap: TurnRemap,
+}
+type SummaryReplacements = BTreeMap<TurnId, SummaryReplacement>;
+
+pub(super) struct TurnRemap(Vec<Option<usize>>);
+impl TurnRemap {
+    fn new(messages: usize, selections: &[CompactionSelection]) -> Self {
+        let mut ranges = selections.iter().peekable();
+        let mut retained = 0;
+        Self(
+            (0..messages)
+                .map(|index| {
+                    while ranges
+                        .peek()
+                        .is_some_and(|range| (range.first + range.count) as usize <= index)
+                    {
+                        ranges.next();
+                    }
+                    if ranges
+                        .peek()
+                        .is_some_and(|range| range.first as usize <= index)
+                    {
+                        None
+                    } else {
+                        let mapped = retained;
+                        retained += 1;
+                        Some(mapped)
+                    }
+                })
+                .collect(),
+        )
+    }
+    pub(super) fn get(&self, index: usize) -> Option<usize> {
+        self.0[index]
+    }
+}
 
 fn assemble_view<'a>(
     system: Option<&'a Message>,
@@ -308,27 +346,6 @@ fn summary_request(
 // Planner-generated selections are ordered, disjoint whole units within the
 // materialization bound. Replay must reproduce those exact selections before
 // installation; durable arbitrary ranges never reach this coordinate transform.
-pub(super) fn retained_index(
-    selections: &[CompactionSelection],
-    turn: &TurnId,
-    index: usize,
-) -> Option<usize> {
-    let mut removed = 0;
-    for selection in selections
-        .iter()
-        .filter(|selection| &selection.turn == turn)
-    {
-        let start = selection.first as usize;
-        let end = (selection.first + selection.count) as usize;
-        if start <= index && index < end {
-            return None;
-        }
-        if end <= index {
-            removed += selection.count as usize;
-        }
-    }
-    Some(index - removed)
-}
 
 impl ContextFold {
     pub(crate) fn record_semantic_fact(
@@ -378,9 +395,12 @@ impl ContextFold {
         }
         for (turn, indices) in &state.instructions {
             let count = self
-                .turns
-                .iter()
-                .find(|current| &current.id == turn)
+                .turn_index
+                .get(turn)
+                .copied()
+                .map(|ordinal| self.relative_index(ordinal))
+                .transpose()?
+                .map(|index| &self.turns[index])
                 .map_or(0, |turn| turn.messages.len());
             if indices.len() > crate::MAXIMUM_CONTEXT_MESSAGES
                 || indices.keys().any(|index| *index >= count)
@@ -391,9 +411,12 @@ impl ContextFold {
         }
         for (turn, index) in &state.last_human {
             if self
-                .turns
-                .iter()
-                .find(|current| &current.id == turn)
+                .turn_index
+                .get(turn)
+                .copied()
+                .map(|ordinal| self.relative_index(ordinal))
+                .transpose()?
+                .map(|index| &self.turns[index])
                 .is_none_or(|turn| *index >= turn.messages.len())
             {
                 return Err(invalid("semantic cache human position is invalid"));
@@ -569,52 +592,67 @@ impl ContextFold {
         Ok(Some(PlannedCompaction { plan, request }))
     }
 
-    fn summary_replacements(&self, selections: &[CompactionSelection]) -> SummaryReplacements<'_> {
-        self.turns
-            .iter()
-            .map(|turn| {
-                let messages = if selections.iter().any(|selection| selection.turn == turn.id) {
-                    Cow::Owned(
-                        turn.messages
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| {
-                                retained_index(selections, &turn.id, *index).is_some()
-                            })
-                            .map(|(_, message)| message.clone())
-                            .collect(),
-                    )
-                } else {
-                    Cow::Borrowed(turn.messages.as_slice())
-                };
-                (
-                    turn.id.clone(),
-                    (
-                        messages,
-                        crate::outcomes::retained(&turn.batches, &turn.id, selections),
-                    ),
-                )
-            })
-            .collect()
+    fn summary_replacements(&self, selections: &[CompactionSelection]) -> SummaryReplacements {
+        let mut replacements = BTreeMap::new();
+        let mut remaining = selections;
+        for turn in &self.turns {
+            let count = remaining
+                .iter()
+                .take_while(|selection| selection.turn == turn.id)
+                .count();
+            if count == 0 {
+                continue;
+            }
+            let remap = TurnRemap::new(turn.messages.len(), &remaining[..count]);
+            remaining = &remaining[count..];
+            let messages = turn
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| remap.get(*index).is_some())
+                .map(|(_, message)| message.clone())
+                .collect();
+            let batches = crate::outcomes::retained(&turn.batches, &remap);
+            replacements.insert(
+                turn.id.clone(),
+                SummaryReplacement {
+                    messages,
+                    batches,
+                    remap,
+                },
+            );
+        }
+        debug_assert!(
+            remaining.is_empty(),
+            "planner selections follow retained turn order"
+        );
+        replacements
     }
 
     fn replacement_view_size(
         &self,
-        replacements: &SummaryReplacements<'_>,
+        replacements: &SummaryReplacements,
         text: &str,
     ) -> Result<(usize, usize)> {
-        let projected = crate::pruning::project(
-            self.turns
-                .iter()
-                .map(|turn| (&turn.id, replacements[&turn.id].0.as_ref())),
-        )?;
+        let projected = crate::pruning::project(self.turns.iter().map(|turn| {
+            (
+                &turn.id,
+                replacements
+                    .get(&turn.id)
+                    .map_or(turn.messages.as_slice(), |replacement| {
+                        replacement.messages.as_slice()
+                    }),
+            )
+        }))?;
         let view = assemble_view(
             self.system_message.as_ref(),
             Some(text),
             self.turns.iter().map(|turn| {
                 (
                     projected[&turn.id].as_ref(),
-                    &replacements[&turn.id].1,
+                    replacements
+                        .get(&turn.id)
+                        .map_or(&turn.batches, |replacement| &replacement.batches),
                     turn.terminal,
                 )
             }),
@@ -914,9 +952,9 @@ impl ContextFold {
         model: ModelRef,
         seq: u64,
         output: &LanguageOutput,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let Some(_) = self.semantic else {
-            return Ok(false);
+            return Ok(());
         };
         let session = self
             .header
@@ -937,14 +975,14 @@ impl ContextFold {
                     input_tokens: usage.input_tokens(),
                 });
             }
-            return Ok(false);
+            return Ok(());
         };
         // Inert summaries still consume their real provider events, never ordinary content.
         if !eligible {
-            return Ok(true);
+            return Ok(());
         }
         let Ok(text) = validate_summary_output(plan, output) else {
-            return Ok(true);
+            return Ok(());
         };
         self.install_summary(effect, plan, session, seq, text)
     }
@@ -957,53 +995,79 @@ impl ContextFold {
         session: SessionId,
         seq: u64,
         text: String,
-    ) -> Result<bool> {
-        let replacements = self.summary_replacements(&plan.selections);
+    ) -> Result<()> {
         let projected = self.projected_turns()?;
         let current = self.semantic_messages_from(&projected)?;
         if view_digest(&current)?.0 != plan.view_sha256 {
-            return Ok(true);
+            return Ok(());
         }
+        let replacements = self.summary_replacements(&plan.selections);
         let (_, bytes) = self.replacement_view_size(&replacements, &text)?;
         if bytes as u64 >= plan.original_bytes {
-            return Ok(true);
+            return Ok(());
         }
-        let mut replacements: BTreeMap<_, _> = replacements
+        let mut replacements = replacements
             .into_iter()
-            .map(|(id, (messages, batches))| (id, (messages.into_owned(), batches)))
-            .collect();
-        self.retained_messages = 0;
-        self.retained_message_bytes = 0;
-        for turn in &mut self.turns {
-            (turn.messages, turn.batches) = replacements.remove(&turn.id).expect("captured Turn");
-            turn.message_bytes = turn
-                .messages
-                .iter()
-                .map(encoded_message_bytes)
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .sum();
-            self.retained_messages += turn.messages.len();
-            self.retained_message_bytes += turn.message_bytes;
+            .map(|(id, replacement)| {
+                let bytes = replacement
+                    .messages
+                    .iter()
+                    .try_fold(0usize, |sum, message| {
+                        sum.checked_add(encoded_message_bytes(message)?)
+                            .ok_or_else(|| invalid("compaction byte overflow"))
+                    })?;
+                Ok((id, (replacement, bytes)))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut retained_messages = 0usize;
+        let mut retained_bytes = 0usize;
+        for turn in &self.turns {
+            let (count, bytes) = if let Some((replacement, bytes)) = replacements.get(&turn.id) {
+                (replacement.messages.len(), *bytes)
+            } else {
+                (turn.messages.len(), turn.message_bytes)
+            };
+            retained_messages = retained_messages
+                .checked_add(count)
+                .ok_or_else(|| invalid("compaction count overflow"))?;
+            retained_bytes = retained_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| invalid("compaction byte overflow"))?;
         }
+        // Everything that can fail has completed. Preserve untouched allocations.
         let state = self.semantic.as_mut().expect("semantic cursor");
         for (turn, indices) in &mut state.instructions {
-            *indices = indices
-                .iter()
-                .filter_map(|(index, kind)| {
-                    retained_index(&plan.selections, turn, *index)
-                        .map(|index| (index, kind.clone()))
-                })
-                .collect();
+            if let Some((replacement, _)) = replacements.get(turn) {
+                *indices = std::mem::take(indices)
+                    .into_iter()
+                    .filter_map(|(index, kind)| {
+                        replacement.remap.get(index).map(|mapped| (mapped, kind))
+                    })
+                    .collect();
+            }
         }
         state.last_human.retain(|turn, index| {
-            if let Some(retained) = retained_index(&plan.selections, turn, *index) {
-                *index = retained;
-                true
+            if let Some((replacement, _)) = replacements.get(turn) {
+                if let Some(mapped) = replacement.remap.get(*index) {
+                    *index = mapped;
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                true
             }
         });
+        for turn in &mut self.turns {
+            if let Some((replacement, bytes)) = replacements.remove(&turn.id) {
+                turn.messages = replacement.messages;
+                turn.batches = replacement.batches;
+                turn.message_bytes = bytes;
+            }
+        }
+        self.retained_messages = retained_messages;
+        self.retained_message_bytes = retained_bytes;
+        let state = self.semantic.as_mut().expect("semantic cursor");
         state.summary = Some(InstalledSummary {
             prior: CompactionPrior {
                 session,
@@ -1017,7 +1081,7 @@ impl ContextFold {
         });
         state.usage = None;
         self.release_summarized_turns();
-        Ok(true)
+        Ok(())
     }
 
     fn release_summarized_turns(&mut self) {
@@ -1054,6 +1118,207 @@ impl ContextFold {
 mod view_tests {
     use super::*;
     use rsi_ai_protocol::MessageContent;
+
+    #[test]
+    fn ordered_remap_matches_scan_oracle_for_fragmented_selections() {
+        let turn = TurnId::new("fragmented").unwrap();
+        let mut seed = 19_u64;
+        for size in 1..1024usize {
+            let mut selections = Vec::new();
+            let mut index = 0;
+            while index < size {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let count = ((seed >> 32) as usize % 7 + 1).min(size - index);
+                if seed & 1 == 0 {
+                    selections.push(CompactionSelection {
+                        turn: turn.clone(),
+                        first: u32::try_from(index).unwrap(),
+                        count: u32::try_from(count).unwrap(),
+                    });
+                }
+                index += count;
+            }
+            let remap = TurnRemap::new(size, &selections);
+            for index in 0..size {
+                let mut removed = 0;
+                let mut selected = false;
+                for selection in &selections {
+                    let start = selection.first as usize;
+                    let end = (selection.first + selection.count) as usize;
+                    selected |= start <= index && index < end;
+                    if end <= index {
+                        removed += selection.count as usize;
+                    }
+                }
+                assert_eq!(remap.get(index), (!selected).then_some(index - removed));
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One staged install checks all retained coordinate owners together.
+    fn summary_install_preserves_untouched_vectors_and_stages_before_mutation() {
+        use crate::{DefaultContextBuilder, ModelContextBuilder, ProjectedTurn};
+        use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
+        let header = SessionHeader::new(
+            SessionId::new("remap").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                ModelRef::new("fixture", "model").unwrap(),
+                rsi_sandbox::SandboxMode::ReadOnly,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut fold = ContextFold::new(header).unwrap();
+        fold.enable_semantic(DefaultContextBuilder::default().identity())
+            .unwrap();
+        for id in ["affected", "untouched"] {
+            let messages = vec![
+                Message::assistant(vec![MessageContent::Text {
+                    text: "large payload ".repeat(10000),
+                }])
+                .unwrap(),
+            ];
+            let message_bytes = encoded_message_bytes(&messages[0]).unwrap();
+            fold.retained_messages += 1;
+            fold.retained_message_bytes += message_bytes;
+            fold.turn_index
+                .insert(TurnId::new(id).unwrap(), fold.turns.len());
+            fold.turns.push_back(ProjectedTurn {
+                id: TurnId::new(id).unwrap(),
+                messages,
+                message_bytes,
+                terminal: true,
+                batches: BTreeMap::new(),
+            });
+        }
+        let affected = fold.turns[0].id.clone();
+        let call = Message::assistant(vec![MessageContent::ToolCall(rsi_ai_protocol::ToolCall {
+            id: "call".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+            kind: rsi_ai_protocol::ToolCallKind::Function,
+        })])
+        .unwrap();
+        let mut batch = crate::outcomes::prepare_batch(
+            &BTreeMap::new(),
+            3,
+            &EffectId::new("tool-model").unwrap(),
+            &call,
+        )
+        .unwrap()
+        .unwrap();
+        *batch.calls.get_mut("call").unwrap() = crate::outcomes::Call {
+            effect: Some(EffectId::new("tool-effect").unwrap()),
+            identity: Some(
+                rsi_tools_protocol::ToolResultIdentity::new(
+                    "owner",
+                    "invocation",
+                    "call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+            ),
+            started: true,
+            settled: true,
+            superseded: false,
+            program: None,
+        };
+        for message in [
+            Message::user_text("protected instructions").unwrap(),
+            Message::user_text("latest human").unwrap(),
+            call,
+            Message::tool_result(
+                "call",
+                vec![MessageContent::Text {
+                    text: "superseded".into(),
+                }],
+                true,
+            )
+            .unwrap(),
+            Message::assistant(vec![MessageContent::Text {
+                text: "old removable tail".repeat(1000),
+            }])
+            .unwrap(),
+        ] {
+            fold.push_turn_message(&affected, message).unwrap();
+        }
+        fold.turns[0].batches.insert(3, batch);
+        let state = fold.semantic.as_mut().unwrap();
+        state.instructions.insert(
+            affected.clone(),
+            [(1, InstructionKind::Agent("AGENTS.md".into()))].into(),
+        );
+        state.last_human.insert(affected.clone(), 2);
+        let pointer = fold.turns[1].messages.as_ptr();
+        let untouched_bytes = fold.turns[1].message_bytes;
+        let (digest, original_bytes) = view_digest(
+            &fold
+                .semantic_messages_from(&fold.projected_turns().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut plan = ContextCompactionPlan {
+            session: fold.header.session_id().clone(),
+            version: 1,
+            builder: fold.semantic.as_ref().unwrap().identity.clone(),
+            header_fingerprint: fold.header.fingerprint().unwrap(),
+            sources: vec![],
+            selections: vec![
+                CompactionSelection {
+                    turn: fold.turns[0].id.clone(),
+                    first: 0,
+                    count: 1,
+                },
+                CompactionSelection {
+                    turn: affected.clone(),
+                    first: 5,
+                    count: 1,
+                },
+            ],
+            prior: None,
+            trigger: CompactionTrigger::ProviderContextLimit,
+            through_seq: 1,
+            view_sha256: "0".repeat(64),
+            original_bytes,
+            maximum_text_bytes: 32768,
+            maximum_output_tokens: 8192,
+        };
+        let effect = EffectId::new("summary").unwrap();
+        let session = plan.session.clone();
+        fold.install_summary(&effect, &plan, session.clone(), 2, "brief".into())
+            .unwrap();
+        assert_eq!(fold.turns.len(), 2, "digest rejection is inert");
+        plan.view_sha256 = digest;
+        fold.install_summary(&effect, &plan, session, 2, "brief".into())
+            .unwrap();
+        assert_eq!(fold.turns.len(), 2);
+        assert_eq!(fold.turns[1].messages.as_ptr(), pointer);
+        assert_eq!(fold.turns[1].message_bytes, untouched_bytes);
+        assert_eq!(fold.turns[0].messages.len(), 4);
+        assert_eq!(
+            fold.turns[0].batches.keys().copied().collect::<Vec<_>>(),
+            [2]
+        );
+        crate::outcomes::validate(&fold.turns[0].batches, &fold.turns[0].messages).unwrap();
+        let state = fold.semantic.as_ref().unwrap();
+        assert_eq!(
+            state.instructions[&affected],
+            [(0, InstructionKind::Agent("AGENTS.md".into()))].into()
+        );
+        assert_eq!(state.last_human[&affected], 1);
+        assert_eq!(
+            fold.retained_message_bytes,
+            untouched_bytes + fold.turns[0].message_bytes
+        );
+        assert_eq!(fold.retained_messages, 5);
+    }
 
     #[test]
     fn borrowed_digest_matches_owned_json_after_reasoning_removal() {

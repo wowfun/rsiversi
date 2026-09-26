@@ -26,6 +26,7 @@ impl ToolSettlementContributor for Settlement {
         let view = &context.domains[0];
         let count = self.state.decode(&view.snapshot).unwrap();
         Ok(rsi_agent_composition_protocol::ToolSettlement {
+            require_uncancelled_turn: false,
             domains: vec![self.state.propose(view.revision, &(count + 1)).unwrap()],
             conclusion: self
                 .conclude
@@ -291,7 +292,8 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
         vec![SessionFactBody::ToolIntent {
             turn_id: claim.turn_id().clone(),
             effect_id: effect.clone(),
-            source_model_effect_id: source,
+            origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: source },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             identity: identity.clone(),
             name: "echo".into(),
             arguments: json!({"value":42}),

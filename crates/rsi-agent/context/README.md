@@ -98,8 +98,7 @@ pass; no-pressure attempts do not hash the view. Live outcome validation travers
 without materializing messages. Remainder preflight and installation use the same
 post-selection pruning and provider-view assembly.
 Remainder measurement borrows turns with no removed messages; turns changed by
-selection own their retained subset. Installation materializes replacements only
-after its digest and strict-shrink checks pass. Selection byte counting borrows
+selection own their retained subset. Selection byte counting borrows
 provider-neutral messages and copies only provider-state changes.
 Unchanged turns borrow their retained messages; only turns containing a pruned
 result are copied. Replay eligibility also shares one projection across its checks.
@@ -118,6 +117,12 @@ The builder renders frozen reference previews as user data with exact recorded
 read coordinates. It performs no CAS reads. It also binds newly selected source spans plus the exact previously
 installed summary. That prior is an inductive proof: it is usable only after
 its own sources and prior were validated in this same replay/fork selection.
+A source binding describes the frozen Fact prefix at summary intent, not the
+latest source head at installation. Eligibility validates that complete prefix
+before the intent is recorded; subsequent summary Facts advance the source head
+without altering its bound prefix. Installation rechecks the projected view and
+shrink, while replay repeats the intent-time validation. Comparing the frozen
+binding to the latest head would reject valid summaries of an active Turn.
 Transitive raw bindings are not copied into every descendant plan. Fully
 summarized completed Turns and their source metadata are released. The cold
 materialization bounds count projected messages (4,096 / 32 MiB), not Facts.
@@ -161,11 +166,11 @@ to the raw bounded provider payload. Restore validates this envelope before
 calling the builder and requires the restored cursor's position to agree.
 Rejected or mismatched caches are rebuilt from Facts; a failed restore leaves
 the current cursor intact. The Store's single Session cache slot does not change. The envelope writes metadata and raw payload once without
-deep-cloning projected messages. The default provider uses the version-8 fold
+deep-cloning projected messages. The default provider uses the version-10 fold
 encoding below as its opaque payload; other providers own their payload schema.
 
 Exact Fact prefixes with no active model assembler may be encoded as the
-version-8 Context checkpoint. Retained nonterminal turns are encoded with their
+version-10 Context checkpoint. Retained nonterminal turns are encoded with their
 lifecycle state, so accepted queued turns do not prevent a checkpoint. Context
 alone owns and validates that schema, recomputes all message accounting on
 restore, and binds the retained projection to the immutable header, exact
@@ -215,3 +220,19 @@ Both fold modes reject orphan Tool results during ingestion; request constructio
 and compaction also reject misordered results. Legacy non-semantic projection
 does not apply builder 2.7.0's semantic pruning. Unit shape discovery performs no JSON byte accounting. Compaction
 measures the pruned messages only after shape validation.
+
+Compaction constructs one coordinate remap per affected turn from its ordered,
+disjoint selections. Messages, Tool batches and protected coordinates share that
+map. Installation checks the current digest, stages replacements, verifies strict
+shrink, and completes fallible accounting before mutation. Metadata remaps then
+update only affected coordinates in place;
+unaffected message vectors, batches and accounting retain their existing ownership.
+Replay eligibility and view/source digests remain authoritative, with unchanged
+builder and checkpoint encodings.
+
+Program-origin Tool intent/start/result records retain bounded provenance in the
+fold and checkpoint but create no provider ToolCall or ToolResult messages. Only
+the enclosing model-origin coordinator result enters ordinary Context. Replays
+validate exact nesting, unique active ordinals and full Tool identity (owner,
+invocation, call and request digest) for both model and Program calls; compaction preserves that
+state while its parent call remains retained and drops it with the parent batch.

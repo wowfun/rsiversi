@@ -2,7 +2,12 @@
 
 A request contains an opaque Host-generation identity, Session and Turn routing
 identities, and one to three questions. Each question has a unique identifier,
-prompt, and up to eight suggested answers. Free text is always permitted.
+prompt, and up to eight suggested answers. Ordinary questions permit free text.
+A closed review instead carries exactly one display question without suggestions,
+an opaque binding and two to eight stable choice identities/labels. Its answer
+contains the exact binding and one registered choice, plus optional feedback of
+at most 4 KiB; ordinary answer strings cannot settle it. The broker validates
+correspondence but assigns no product meaning to choices or bindings.
 Request and answer documents are each bounded to 64 KiB and revalidated at their
 owning external boundary. Answers correspond to questions in request order.
 

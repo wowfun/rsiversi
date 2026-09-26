@@ -100,9 +100,12 @@ The binary owns launcher and management parsing, explicit daemon process control
 process signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
 owner; the product Host adds live multiplexing and process ownership without
 moving Agent semantics into a wire adapter.
-The standard [Host Goal controller](../crates/rsi/goal/README.md) drives explicitly
-armed continuation through the Session bridge. Reading Goal state or reopening
-an application does not recreate that scheduling authority.
+The standard [Host Goal controller](../crates/rsi/goal/README.md) and
+[Schedule controller](../crates/rsi/schedule/README.md) drive independently armed
+continuations through the Session bridge. Reading durable state or reopening an
+application does not recreate either scheduling authority. Agent owns the
+[Program runtime](../crates/rsi-agent/program/README.md) and durable workflow
+lifecycle; the standard product supplies its native Process and Jobs composition.
 
 Dependencies point from the standard product through product implementations
 and protocols toward `rsi-meta`; foundation packages never depend back on a

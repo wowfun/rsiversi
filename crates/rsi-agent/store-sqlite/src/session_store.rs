@@ -46,6 +46,68 @@ const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_mess
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn list_program_notices(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramNoticePage> {
+        use rsi_agent_store_protocol::{StoreProgramNotice, StoreProgramNoticePage};
+        validate_session_read_limit(limit)?;
+        let after = after.cloned();
+        self.with_reader(move|connection| {
+            let sql=if after.is_some(){"SELECT session_id,message_id FROM agent_messages WHERE state='pending' AND message_source='program' AND (session_id,message_id)>(?1,?2) ORDER BY session_id,message_id LIMIT ?3"}else{"SELECT session_id,message_id FROM agent_messages WHERE state='pending' AND message_source='program' ORDER BY session_id,message_id LIMIT ?1"};
+            let mut statement=connection.prepare(sql).map_err(sql_error)?;
+            let mut rows=if let Some(after)=after {statement.query(params![after.session_id.as_str(),after.message_id.as_str(),sqlite_u64("program notice limit", (limit+1) as u64)?])}else{statement.query([sqlite_u64("program notice limit", (limit+1) as u64)?])}.map_err(sql_error)?;
+            let mut notices=Vec::new();while let Some(row)=rows.next().map_err(sql_error)? {notices.push(StoreProgramNotice {session_id:SessionId::new(bounded_text(row,0,256).map_err(sql_error)?).map_err(|e|StoreError::Corrupt(e.to_string()))?,message_id:MessageId::new(bounded_text(row,1,256).map_err(sql_error)?).map_err(|e|StoreError::Corrupt(e.to_string()))?});}
+            let has_more=notices.len()>limit;notices.truncate(limit);Ok(StoreProgramNoticePage{notices,has_more})
+        }).await
+    }
+    async fn program_run_for_creator(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> Result<Option<rsi_agent_session_protocol::ProgramRunId>> {
+        self.ensure_session_validated(session).await?;
+        let (session, turn) = (session.clone(), turn.clone());
+        self.with_reader(move |connection| {
+            let run = connection
+                .query_row(
+                    "SELECT run_id FROM program_runs WHERE session_id=?1 AND creator_turn_id=?2",
+                    params![session.as_str(), turn.as_str()],
+                    |row| bounded_text(row, 0, 256),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            run.map(|run| {
+                rsi_agent_session_protocol::ProgramRunId::new(run)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))
+            })
+            .transpose()
+        })
+        .await
+    }
+    async fn read_program_records(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<Option<rsi_agent_store_protocol::StoreProgramRecords>> {
+        self.program_records(session, run).await
+    }
+    async fn read_program_records_after(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+        after: u64,
+    ) -> Result<Option<rsi_agent_store_protocol::StoreProgramRecords>> {
+        self.program_records_after(session, run, after).await
+    }
+    async fn list_active_program_runs(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramPage> {
+        self.active_programs(after, limit).await
+    }
     async fn read_fact_window(
         &self,
         session_id: &SessionId,
@@ -150,7 +212,8 @@ impl SessionStore for SqliteStore {
                         .transaction_with_behavior(TransactionBehavior::Immediate)
                         .map_err(sql_error)?;
                     validate_sqlite_activation_guards(&transaction, &commit)?;
-                    if let Some(root) = &commit.quiescent_descendants_of {
+                    if let Some(guard) = &commit.quiescent_descendants_of {
+                        let root = &guard.session_id;
                         let exists = transaction
                             .query_row(
                                 "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
@@ -166,10 +229,13 @@ impl SessionStore for SqliteStore {
                             }
                         }
                     }
+                    let graph =
+                        rsi_agent_store_protocol::ProgramGraphChecks::capture(&commit.sessions);
                     let mut sessions = Vec::with_capacity(commit.sessions.len());
                     for append in commit.sessions {
                         sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
                     }
+                    graph.validate(&program_graph::Graph(&transaction))?;
                     let subtree = validate_sqlite_quiescence_guard(
                         &transaction,
                         commit.quiescent_descendants_of.as_ref(),
@@ -1320,7 +1386,7 @@ impl SessionStore for SqliteStore {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).map_err(sql_error)?;
             let mut statement = transaction.prepare("SELECT
                 message_id, delivery, target, bound_turn_id,
-                accepted_control_seq, (message_source = 'completion' OR delivery = 'steer' AND bound_turn_id IS NOT NULL) FROM agent_messages WHERE session_id = ?1 AND state = 'pending' ORDER BY accepted_control_seq LIMIT ?2").map_err(sql_error)?;
+                accepted_control_seq, (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL) FROM agent_messages WHERE session_id = ?1 AND state = 'pending' ORDER BY accepted_control_seq LIMIT ?2").map_err(sql_error)?;
             let rows = statement.query_map(params![session_id.as_str(), i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("bounded mailbox")], |row| {
                 Ok((bounded_text(row, 0, 256)?, bounded_text(row, 1, 16)?, bounded_text(row, 2, 16)?, optional_text(row, 3, 256)?, row.get::<_, i64>(4)?, row.get::<_, bool>(5)?))
             }).map_err(sql_error)?;
@@ -1506,7 +1572,7 @@ impl SessionStore for SqliteStore {
                     "SELECT message_id FROM agent_messages
                      WHERE session_id = ?1 AND state = 'pending'
                        AND target = 'next_step' AND wake_required = 0
-                       AND (message_source = 'completion' OR delivery = 'steer' AND bound_turn_id IS NOT NULL)
+                       AND (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL)
                      ORDER BY accepted_control_seq LIMIT ?2",
                 )
                 .map_err(sql_error)?;
@@ -1626,7 +1692,7 @@ impl SessionStore for SqliteStore {
             connection
                 .query_row(
                     "SELECT activation_id, parent_session_id, turn_id, phase,
-                            completion_reserved_bytes
+                            completion_reserved_bytes, completion_to_program
                      FROM active_activations WHERE session_id = ?1",
                     [session_id.as_str()],
                     |row| {
@@ -1636,13 +1702,14 @@ impl SessionStore for SqliteStore {
                             optional_text(row, 2, 256)?,
                             bounded_text(row, 3, 32)?,
                             row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, bool>(5)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(sql_error)?
                 .map(
-                    |(activation_id, parent_session_id, turn_id, phase, reserved)| {
+                    |(activation_id, parent_session_id, turn_id, phase, reserved, program)| {
                         Ok(StoreActiveActivation {
                             activation_id: rsi_agent_session_protocol::ActivationId::new(
                                 activation_id,
@@ -1666,6 +1733,7 @@ impl SessionStore for SqliteStore {
                                     ));
                                 }
                             },
+                            completion_to_program: program,
                             completion_reserved_bytes: reserved
                                 .map(|value| decode_u64("completion reservation bytes", value))
                                 .transpose()?,
@@ -1682,9 +1750,7 @@ impl SessionStore for SqliteStore {
         self.with_reader(move |connection| {
             let count = connection
                 .query_row(
-                    "SELECT COUNT(*) FROM active_activations
-                     WHERE parent_session_id = ?1
-                       AND completion_reserved_bytes IS NOT NULL",
+                    "SELECT (SELECT COUNT(*) FROM active_activations WHERE parent_session_id=?1 AND completion_reserved_bytes IS NOT NULL) + (SELECT COUNT(*) FROM program_runs WHERE session_id=?1 AND terminal=0)",
                     [parent_session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -2140,7 +2206,10 @@ pub(super) fn read_agent_subtree(
            CASE WHEN subtree.session_id = ?1 THEN
              EXISTS(SELECT 1 FROM subtree ancestry WHERE ancestry.session_id = node.parent_session_id)
              ELSE 0 END,
-           (SELECT last_settled_control_seq FROM sessions WHERE session_id = subtree.session_id)
+           (SELECT last_settled_control_seq FROM sessions WHERE session_id = subtree.session_id),
+           EXISTS(SELECT 1 FROM program_runs WHERE session_id = subtree.session_id AND terminal=0),
+           length(CAST(node.execution_owner_json AS BLOB)),
+           CASE WHEN length(CAST(node.execution_owner_json AS BLOB)) <= ?5 THEN node.execution_owner_json END
          FROM subtree LEFT JOIN agent_nodes node ON node.session_id = subtree.session_id
          ORDER BY subtree.session_id",
         )
@@ -2153,7 +2222,9 @@ pub(super) fn read_agent_subtree(
             i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_TREE_DEPTH * 6 + 2)
                 .expect("path bound fits SQLite INTEGER"),
             i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES)
-                .expect("identifier bound fits SQLite INTEGER")
+                .expect("identifier bound fits SQLite INTEGER"),
+            i64::try_from(super::MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES)
+                .expect("owner bound fits SQLite INTEGER")
         ])
         .map_err(sql_error)?;
     let mut session = None;
@@ -2181,6 +2252,7 @@ pub(super) fn read_agent_subtree(
             has_open_turn: row.get(5).map_err(sql_error)?,
             has_active_activation: row.get(6).map_err(sql_error)?,
             has_waking_message: row.get(7).map_err(sql_error)?,
+            has_active_program: row.get(10).map_err(sql_error)?,
         };
         if &status.session_id == root {
             if row.get::<_, bool>(8).map_err(sql_error)? {
@@ -2192,6 +2264,14 @@ pub(super) fn read_agent_subtree(
             continue;
         }
         descendants.push(StoreAgentDescendantStatus {
+            execution_owner: decode_projected_json(
+                "execution owner",
+                (
+                    row.get(11).map_err(sql_error)?,
+                    row.get(12).map_err(sql_error)?,
+                ),
+                super::MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES,
+            )?,
             status,
             parent_session_id: SessionId::new(
                 row.get::<_, Option<String>>(1)

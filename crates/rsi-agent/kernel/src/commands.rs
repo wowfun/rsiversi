@@ -228,6 +228,13 @@ impl AgentKernel {
         {
             return matching_receipt(receipt, &authorization.source(invocation.clone())).map(Ok);
         }
+        if let CommandAuthorization::Continuation {
+            lease,
+            reservation: Some(_),
+        } = &authorization
+        {
+            self.inner.continuation_issuer.request_round(lease)?;
+        }
         let callback: SessionCommandRegistration = composition
             .contributions()
             .entries()
@@ -247,6 +254,16 @@ impl AgentKernel {
         let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
             .await
             .map_err(turn_store_error)?;
+        if matches!(
+            authorization,
+            CommandAuthorization::Continuation {
+                reservation: Some(_),
+                ..
+            }
+        ) && check_revision(&invocation, page.durable_control_seq).is_err()
+        {
+            return Err(TurnError::SessionBusy);
+        }
         check_revision(&invocation, page.durable_control_seq)?;
         composition
             .domains()
@@ -295,6 +312,10 @@ impl AgentKernel {
         .await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep the frozen candidate, idle admission and atomic control suffix together."
+    )]
     async fn stage_session_command(
         &self,
         mut candidate: CommandCandidate,
@@ -329,6 +350,16 @@ impl AgentKernel {
         let page = observation::read_domain_states_bounded(&self.inner, &session_id, None)
             .await
             .map_err(turn_store_error)?;
+        if let CommandAuthorization::Continuation {
+            lease,
+            reservation: Some(_),
+        } = &candidate.authorization
+            && (!self.automatic_turn_selected(lease)
+                || !self.automatic_session_idle(&session_id).await?
+                || check_revision(&candidate.invocation, page.durable_control_seq).is_err())
+        {
+            return Err(TurnError::SessionBusy);
+        }
         check_revision(&candidate.invocation, page.durable_control_seq)?;
         candidate.proposals.sort_by(|a, b| {
             a.snapshot()
@@ -376,6 +407,46 @@ impl AgentKernel {
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let receipt = DomainMutationReceipt::new(session_id.clone(), control.clone())?;
+        let mut controls = vec![control];
+        if let CommandAuthorization::Continuation {
+            lease,
+            reservation: Some(input),
+        } = &candidate.authorization
+        {
+            let source = rsi_agent_session_protocol::ContinuationSource {
+                domain: lease.binding().domain.clone(),
+                owner: input.owner.clone(),
+                round: input.round,
+                reserved_revision: receipt.commit().updates()[0].revision(),
+                provenance: rsi_agent_session_protocol::ContinuationProvenance::Command {
+                    request_id: candidate.invocation.request_id.clone(),
+                },
+                text_sha256: input.text_sha256(),
+            };
+            controls.push(
+                AgentControlRecord::new(
+                    seq.checked_add(1)
+                        .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
+                    self.inner.clock.now_ms().max(1),
+                    AgentControlRecordBody::MessageAccepted {
+                        message: AgentMessage {
+                            message_id: input.message_id.clone(),
+                            source: AgentMessageSource::Continuation { source },
+                            content: vec![AgentMessageContent::Text {
+                                text: input.text.clone(),
+                            }],
+                            options: MessageOptions::default(),
+                        },
+                        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                        bound_turn_id: None,
+                        root_session_id: agent_root_and_path(header).0,
+                        target: MessageTarget::NextTurn,
+                        wake_required: true,
+                    },
+                )
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            );
+        }
         Ok(Err(PreparedCommandCommit {
             candidate,
             _admission: admission,
@@ -385,7 +456,7 @@ impl AgentKernel {
                 expected_control_seq: page.durable_control_seq,
                 header: None,
                 facts: vec![],
-                controls: vec![control],
+                controls,
             },
             receipt,
         }))
@@ -406,10 +477,22 @@ impl AgentKernel {
             .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                 sessions: vec![append],
                 required_active_activations: vec![],
-                quiescent_descendants_of: None,
+                quiescent_descendants_of: matches!(
+                    candidate.authorization,
+                    CommandAuthorization::Continuation {
+                        reservation: Some(_),
+                        ..
+                    }
+                )
+                .then(|| session_id.clone().into()),
             })
             .await;
-        if let Err(error) = result.and_then(|result| result.map_err(turn_store_error)) {
+        if let Err(error) = result.and_then(|result| {
+            result.map_err(|error| match error {
+                StoreError::SessionNotQuiescent { .. } => TurnError::SessionBusy,
+                error => turn_store_error(error),
+            })
+        }) {
             match self
                 .domain_request(&session_id, &candidate.invocation.request_id)
                 .await
@@ -418,8 +501,6 @@ impl AgentKernel {
                     if stored != receipt {
                         return Err(request_conflict(&candidate.invocation));
                     }
-                    self.inner.session_changes.committed(&session_id);
-                    return Ok(stored);
                 }
                 Ok(None) => return Err(error),
                 Err(_) => {
@@ -428,6 +509,33 @@ impl AgentKernel {
                     });
                 }
             }
+        }
+        if let CommandAuthorization::Continuation {
+            lease,
+            reservation: Some(input),
+        } = &candidate.authorization
+        {
+            let revision = receipt.commit().updates()[0].revision();
+            self.inner
+                .continuation_issuer
+                .set_revision(lease, revision)?;
+            self.inner.continuation_issuer.guard_source(
+                lease,
+                rsi_agent_session_protocol::ContinuationSource {
+                    domain: lease.binding().domain.clone(),
+                    owner: input.owner.clone(),
+                    round: input.round,
+                    reserved_revision: revision,
+                    provenance: rsi_agent_session_protocol::ContinuationProvenance::Command {
+                        request_id: candidate.invocation.request_id.clone(),
+                    },
+                    text_sha256: input.text_sha256(),
+                },
+            )?;
+            self.inner
+                .continuation_issuer
+                .admitted_round(lease, receipt.control_seq() + 1)?;
+            self.request_ready_scan();
         }
         self.inner.session_changes.committed(&session_id);
         Ok(receipt)

@@ -7,6 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+getrandom.workspace = true
+sha2.workspace = true
+rsi-agent-turn-protocol = { path = "../turn-protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true
 rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-session-protocol = { path = "../session-protocol" }
@@ -24,7 +28,6 @@ rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-presets = { path = "../presets" }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
-rsi-agent-turn-protocol = { path = "../turn-protocol" }
 rsi-meta-profile = { path = "../../rsi-meta/profile" }
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-tools = { path = "../../rsi-tools/core" }

@@ -236,7 +236,10 @@ struct KernelInner {
     submission_admission: SubmissionAdmission,
     commands: commands::CommandRequests,
     continuation_issuer: rsi_agent_turn_protocol::ContinuationIssuer,
-    continuations: Mutex<BTreeMap<SessionId, rsi_agent_turn_protocol::WeakContinuationLease>>,
+    continuations:
+        Mutex<BTreeMap<(SessionId, String), rsi_agent_turn_protocol::WeakContinuationLease>>,
+    program_generation: String,
+    programs: Mutex<BTreeMap<SessionId, Weak<program::LiveRun>>>,
     projection_admission: Arc<Semaphore>,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
@@ -624,6 +627,7 @@ struct LiveWatermarks {
 struct TurnControl {
     initial_messages: BTreeSet<MessageId>,
     claim_composition: Option<AgentCompositionPin>,
+    program_roles: Arc<BTreeMap<String, rsi_tools_protocol::ToolProgramRole>>,
     conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
     evidence_inline_bytes: usize,
     tool_source: Option<Arc<tool_origin::ToolSource>>,
@@ -702,11 +706,14 @@ enum ActiveEffect {
     },
     Tool {
         name: String,
-        source_selection: rsi_agent_session_protocol::ModelSelection,
+        source_selection: Arc<rsi_agent_session_protocol::ModelSelection>,
         effect_id: EffectId,
         identity: rsi_tools_protocol::ToolResultIdentity,
         started: bool,
         parallel_safe: bool,
+        origin: rsi_agent_session_protocol::ToolOrigin,
+        program_role: rsi_tools_protocol::ToolProgramRole,
+        next_program_ordinal: u32,
     },
 }
 
@@ -715,6 +722,7 @@ impl TurnControl {
         Self {
             initial_messages: BTreeSet::new(),
             claim_composition: None,
+            program_roles: Arc::new(BTreeMap::new()),
             conclusion: None,
             tool_source: None,
             seen_model_effects: Arc::new(BTreeSet::new()),
@@ -870,6 +878,7 @@ mod human_wait;
 mod jobs;
 mod lifecycle;
 mod notifications;
+mod program;
 mod projection;
 mod resource;
 mod structured;

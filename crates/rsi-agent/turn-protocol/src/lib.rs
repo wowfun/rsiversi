@@ -28,6 +28,8 @@ pub use execution_observer::{
     ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
     ExecutionObserverContract,
 };
+mod initial_input;
+pub use initial_input::{InitialTurnInput, initial_turn_input};
 mod job_preview;
 mod jobs;
 pub use job_preview::{
@@ -37,6 +39,8 @@ pub use jobs::{
     MAXIMUM_TURN_JOBS_BYTES, MAXIMUM_TURN_JOBS_ITEMS, TurnJobStatusSource, TurnJobs,
     TurnJobsContract, TurnJobsPage, TurnJobsRequest,
 };
+mod program;
+pub use program::*;
 mod continuation;
 pub use continuation::{
     ContinuationBinding, ContinuationIssuer, ContinuationLease, SessionContinuations,
@@ -52,7 +56,7 @@ pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;
 pub use command::{SessionCommands, SessionCommandsContract};
 mod observation;
-pub use domain::{DomainMutation, DomainMutationReceipt};
+pub use domain::{DomainMutation, DomainMutationReceipt, DomainReadGuard};
 pub use observation::{
     DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
 };
@@ -396,7 +400,7 @@ impl SpawnRoleSelection {
 /// Exact retries recover the original child and initial message without another write.
 #[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
-    /// Trusted initial-activation contract; not exposed as a model-authored schema.
+    /// Validated initial-activation contract; model adapters enforce their smaller schema budget.
     pub output_contract: Option<rsi_agent_session_protocol::OutputContract>,
     /// Configured role selected by the trusted Tool adapter, never a model permission object.
     pub role: Option<SpawnRoleSelection>,
@@ -418,6 +422,15 @@ pub struct SpawnAgentRequest {
     pub message: String,
     /// Completed parent turns inherited before the invoking Turn.
     pub fork_turns: ForkTurnSelection,
+}
+
+/// Complete validated child result with its exact durable reference.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentResult {
+    /// Exact initial-activation result and validated schema/value digests.
+    pub reference: rsi_agent_session_protocol::AgentResultRef,
+    /// Complete schema-validated value; model adapters apply presentation bounds.
+    pub value: serde_json::Value,
 }
 
 /// Durable receipt for one ready continuable child.
@@ -645,6 +658,35 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             "this Turn service does not expose Agent tree membership".into(),
         ))
     }
+    /// Prepares independent workflow authority from an exact started creator Tool.
+    async fn prepare_program(&self, request: PrepareProgram) -> Result<Arc<dyn ProgramRun>> {
+        let _ = request;
+        Err(TurnError::Invalid(
+            "this Turn service does not support program runs".into(),
+        ))
+    }
+    /// Reads complete bounded run data within the caller's own Session.
+    async fn read_program(
+        &self,
+        caller: &AgentCallerAuthority,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<ProgramSnapshot> {
+        let _ = (caller, run);
+        Err(TurnError::Invalid(
+            "this Turn service does not support program observation".into(),
+        ))
+    }
+    /// Cancels the exact live run in the caller's own Session.
+    async fn cancel_program(
+        &self,
+        caller: &AgentCallerAuthority,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<()> {
+        let _ = (caller, run);
+        Err(TurnError::Invalid(
+            "this Turn service does not support program cancellation".into(),
+        ))
+    }
     /// Creates one durable, ready, continuable fork child.
     async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<SpawnedAgent> {
         let _ = request;
@@ -657,7 +699,7 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         &self,
         caller: &AgentCallerAuthority,
         locator: &rsi_agent_session_protocol::AgentResultLocator,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<AgentResult> {
         let _ = (caller, locator);
         Err(TurnError::Invalid(
             "this Turn service does not expose structured results".into(),
@@ -1163,6 +1205,19 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
             "execution contributions are unsupported".into(),
         ))
     }
+    /// Captures a read-only policy horizon for one exact started foreground coordinator.
+    /// No nested effect may be active; this does not authorize contribution writes.
+    async fn program_policy_context(
+        &self,
+        claim: &TurnClaim,
+        parent: &EffectId,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_composition_protocol::ContributionContext> {
+        let _ = (claim, parent, cancellation);
+        Err(TurnError::Invalid(
+            "program policy snapshots are unsupported".into(),
+        ))
+    }
     /// Publishes an ordinary charged Step closure. Turn finalization uses `finish_turn`.
     async fn close_current_step(&self, claim: &TurnClaim, outcome: &TurnOutcome) -> Result<()>;
     /// Durably closes the current Step and Turn in one bounded ending transaction.
@@ -1235,6 +1290,19 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, mutation);
         Err(TurnError::Invalid(
             "domain mutation admission is unsupported".into(),
+        ))
+    }
+    /// Commits domain work authenticated by the exact still-started Tool effect.
+    /// The owning Tool supplies its typed proposal; Kernel retains the caller seal
+    /// through mutation admission and canonical commit.
+    async fn commit_tool_domains(
+        &self,
+        caller: &AgentCallerAuthority,
+        mutation: DomainMutation,
+    ) -> Result<DomainMutationReceipt> {
+        let _ = (caller, mutation);
+        Err(TurnError::Invalid(
+            "Tool domain mutation admission is unsupported".into(),
         ))
     }
     /// Publishes validated bodies as the next live Facts without claiming durability.
@@ -1440,6 +1508,9 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// Automatic work was deferred because the Session subtree is not idle.
+    #[error("Session is busy; automatic work was not admitted")]
+    SessionBusy,
     /// Only optional request evidence exceeds a budget, before any publication.
     #[error("optional request evidence exceeds the remaining prepublication byte budget")]
     EvidenceBudget,
@@ -1558,6 +1629,18 @@ pub enum TurnError {
 
 /// Turn runtime result.
 pub type Result<T> = std::result::Result<T, TurnError>;
+
+impl TurnError {
+    /// Whether a continuation command was rejected before commit by admission or
+    /// revision contention. Its lease remains valid and the caller may retry with
+    /// fresh state. This does not authorize replay after Store or unknown-outcome errors.
+    pub fn is_continuation_contention(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionBusy | Self::Capacity | Self::CommandRevisionConflict { .. }
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {

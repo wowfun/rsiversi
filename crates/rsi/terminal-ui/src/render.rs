@@ -995,11 +995,20 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
     } else if let Some(answer) = &state.answer
         && let Some(question) = answer.request.questions.get(answer.answered)
     {
+        let choices: Vec<&str> = answer.request.review.as_ref().map_or_else(
+            || question.options.iter().map(String::as_str).collect(),
+            |review| {
+                review
+                    .choices
+                    .iter()
+                    .map(|choice| choice.label.as_str())
+                    .collect()
+            },
+        );
         let text = format!(
             "{}\n\n{}",
             question.prompt,
-            question
-                .options
+            choices
                 .iter()
                 .enumerate()
                 .map(|(i, value)| format!("{}. {value}", i + 1))
@@ -1011,11 +1020,19 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
             answer.answered + 1,
             answer.request.questions.len()
         );
-        panel.title = &title;
+        panel.title = if answer.request.review.is_some() {
+            "Review plan"
+        } else {
+            &title
+        };
         panel.detail = Some(&text);
         panel.offset = answer.scroll;
         panel.field = Some(crate::dialog::Field {
-            label: "Option number or answer",
+            label: if answer.request.review.is_some() {
+                "Choice number [feedback]"
+            } else {
+                "Option number or answer"
+            },
             text: &answer.editor.text,
             cursor: answer.editor.cursor,
         });
@@ -1454,7 +1471,10 @@ mod tests {
                     turn_id: turn_id.clone(),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
-                    source_model_effect_id: EffectId::new("model").unwrap(),
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                        effect_id: EffectId::new("model").unwrap(),
+                    },
+                    program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                     name: "bash".into(),
                     arguments: serde_json::json!({"command":"sleep 2"}),
                     approval: None,

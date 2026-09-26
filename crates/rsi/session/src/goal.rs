@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rsi_agent_goal::{GOAL_DOMAIN, GoalState, RoundOutcome, RoundSettlement};
 use rsi_agent_session_protocol::{
-    CommandRevision, ContinuationInput, ContinuationProvenance, DomainRequestId, DomainRevision,
-    DomainStateView, MessageId, SessionCommandInvocation, SessionCommandReceipt, SessionId,
+    CommandRevision, ContinuationInput, DomainRequestId, DomainRevision, DomainStateView,
+    MessageId, SessionCommandInvocation, SessionCommandReceipt, SessionId,
 };
 use rsi_agent_turn_protocol::{
     CancelTarget, ContinuationBinding, ContinuationLease, DomainMutationReceipt, MessageReceipt,
@@ -167,6 +167,48 @@ impl GoalSession for LocalSessionHandle {
         deadline(self.retain_goal(binding, false)).await
     }
 
+    async fn wait_idle(
+        &self,
+        lease: &ContinuationLease,
+        cancellation: CancellationToken,
+    ) -> GoalResult<()> {
+        self.continuation_service()?
+            .wait_idle(lease, cancellation)
+            .await
+            .map_err(turn_error)
+    }
+    async fn reserve_initial(
+        &self,
+        lease: &ContinuationLease,
+        invocation: SessionCommandInvocation,
+        input: ContinuationInput,
+    ) -> GoalResult<MessageReceipt> {
+        let _activity = self.begin_activity().map_err(goal_error)?;
+        self.reconcile_fresh_read().await.map_err(goal_error)?;
+        let header = self.header_snapshot().await.map_err(goal_error)?;
+        let selected = self
+            .current_model_selection(&header)
+            .await
+            .map_err(goal_error)?;
+        self.validate_model_selection(&selected)
+            .map_err(goal_error)?;
+        let mut state = self.state.lock().await;
+        let HandleState::Fresh(draft) = &*state else {
+            return Err(GoalError::Busy);
+        };
+        if draft.revision() != invocation.expected_revision {
+            return Err(GoalError::Busy);
+        }
+        self.prepare_workspace(&header).await.map_err(goal_error)?;
+        let result = self
+            .continuation_service()?
+            .reserve_initial(lease, draft.freeze(), invocation, input)
+            .await;
+        self.reconcile_fresh_submission(&mut state, result.is_ok())
+            .await;
+        result.map_err(turn_error)
+    }
+
     async fn internal_command(
         &self,
         lease: &ContinuationLease,
@@ -193,53 +235,6 @@ impl GoalSession for LocalSessionHandle {
             .query(lease, request)
             .await
             .map_err(turn_error)
-    }
-
-    async fn submit(
-        &self,
-        lease: &ContinuationLease,
-        input: ContinuationInput,
-        provenance: ContinuationProvenance,
-    ) -> GoalResult<MessageReceipt> {
-        let _activity = self.begin_activity().map_err(goal_error)?;
-        input
-            .validate()
-            .map_err(|error| GoalError::Invalid(error.to_string()))?;
-        let header = self.header_snapshot().await.map_err(goal_error)?;
-        let selected = self
-            .current_model_selection(&header)
-            .await
-            .map_err(goal_error)?;
-        self.validate_model_selection(&selected)
-            .map_err(goal_error)?;
-        let mut state = self.state.lock().await;
-        if matches!(*state, HandleState::Attached(_)) {
-            drop(state);
-            let session = SubmitSession::Resume(
-                self.turns
-                    .prepare_resume(self.session_id())
-                    .await
-                    .map_err(turn_error)?,
-            );
-            self.prepare_workspace(&header).await.map_err(goal_error)?;
-            return self
-                .continuation_service()?
-                .submit(lease, session, input, provenance)
-                .await
-                .map_err(turn_error);
-        }
-        let HandleState::Fresh(draft) = &*state else {
-            return Err(GoalError::Unavailable);
-        };
-        let session = SubmitSession::Fresh(draft.freeze());
-        self.prepare_workspace(&header).await.map_err(goal_error)?;
-        let result = self
-            .continuation_service()?
-            .submit(lease, session, input, provenance)
-            .await;
-        self.reconcile_fresh_submission(&mut state, result.is_ok())
-            .await;
-        result.map_err(turn_error)
     }
 
     async fn message_status(&self, message: &MessageId) -> GoalResult<Option<MessageReceipt>> {
@@ -337,6 +332,7 @@ fn goal_error(error: SessionError) -> GoalError {
 fn turn_error(error: TurnError) -> GoalError {
     match error {
         TurnError::ContinuationDisarmed => GoalError::Disarmed,
+        TurnError::SessionBusy => GoalError::Busy,
         TurnError::DomainOutcomeUnknown { request_id } => GoalError::OutcomeUnknown(request_id),
         TurnError::CommandRevisionConflict { expected, actual } => {
             GoalError::RevisionConflict { expected, actual }
@@ -356,7 +352,7 @@ fn turn_error(error: TurnError) -> GoalError {
 pub(super) fn session_error(error: GoalError) -> SessionError {
     match error {
         GoalError::Unavailable => SessionError::NotFound("Goal controller or state".into()),
-        GoalError::Capacity => SessionError::Capacity,
+        GoalError::Capacity | GoalError::Busy => SessionError::Capacity,
         GoalError::ShuttingDown => SessionError::ShuttingDown,
         GoalError::Invalid(message) => SessionError::Invalid(message),
         GoalError::RevisionConflict { expected, actual } => {
@@ -367,5 +363,16 @@ pub(super) fn session_error(error: GoalError) -> SessionError {
             Err(error) => SessionError::Backend(error.to_string()),
         },
         other => SessionError::Backend(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn goal_contention_remains_a_retryable_session_error() {
+        assert!(matches!(
+            super::session_error(rsi_goal::GoalError::Busy),
+            rsi_session_protocol::SessionError::Capacity
+        ));
     }
 }

@@ -45,17 +45,38 @@ async fn stray_agent_filenames_do_not_hide_valid_definitions() {
         )
         .unwrap();
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt as _;
-        fs::write(
-            root.join(std::ffi::OsString::from_vec(b"\xff.md".to_vec())),
-            "bad",
-        )
-        .unwrap();
-    }
     let source = context(None, vec![]);
     let entries = source
+        .agents(
+            &header(temp.path()),
+            None,
+            &BTreeSet::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "review");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn non_utf8_agent_filename_does_not_hide_valid_definitions() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(".agents/agents");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join(std::ffi::OsString::from_vec(b"\xff.md".to_vec())),
+        "bad",
+    )
+    .unwrap();
+    fs::write(
+        root.join("review.md"),
+        "---\ndescription: review\n---\nReview code",
+    )
+    .unwrap();
+    let entries = context(None, vec![])
         .agents(
             &header(temp.path()),
             None,

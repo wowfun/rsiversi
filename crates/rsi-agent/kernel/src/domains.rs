@@ -55,10 +55,12 @@ impl AgentKernel {
         &self,
         claim: &TurnClaim,
         mut request: DomainMutation,
+        tool_caller: Option<&AgentCallerAuthority>,
     ) -> TurnResult<DomainMutationReceipt> {
         execution::validate_executor_fact_ownership(&request.facts)?;
         if request.proposals.is_empty()
             || request.proposals.len() > MAXIMUM_SESSION_DOMAINS
+            || request.guards.len() > MAXIMUM_SESSION_DOMAINS
             || request.facts.len() > MAXIMUM_STORE_BATCH_FACTS
             || request.facts.iter().any(|body| {
                 matches!(
@@ -72,7 +74,18 @@ impl AgentKernel {
                     .into(),
             ));
         }
-        let caller = self.agent_caller(claim)?;
+        let caller = if let Some(caller) = tool_caller {
+            let effect = caller.tool_effect_id().ok_or_else(|| {
+                TurnError::Invalid("Tool domain mutation requires a started effect".into())
+            })?;
+            let authenticated = self.tool_caller(claim, effect)?;
+            if &authenticated != caller {
+                return Err(TurnError::StaleClaim);
+            }
+            authenticated
+        } else {
+            self.agent_caller(claim)?
+        };
         for body in &request.facts {
             evidence::validate_references(
                 self.inner.store.as_ref(),
@@ -163,6 +176,20 @@ impl AgentKernel {
             self.validate_agent_caller(&caller)?;
             return Ok(existing);
         }
+        for guard in &request.guards {
+            let actual = page
+                .states
+                .iter()
+                .find(|state| state.head.identity == guard.domain)
+                .ok_or_else(|| TurnError::Invalid("guarded domain is absent".into()))?;
+            if actual.head.revision != guard.revision {
+                return Err(TurnError::DomainRevisionConflict {
+                    domain: guard.domain.id().into(),
+                    expected: guard.revision,
+                    actual: actual.head.revision,
+                });
+            }
+        }
         let seq = page
             .durable_control_seq
             .checked_add(1)
@@ -203,6 +230,7 @@ impl AgentKernel {
         };
         let mut staged = clone_turn_control(&original);
         for fact in &facts {
+            execution::validate_program_role(&staged, fact.body())?;
             super::structured::validate_conclusion(claim.header(), &staged, fact.body())?;
             apply_executor_body(&mut staged, fact.body())?;
             if let SessionFactBody::ToolResult {
@@ -229,7 +257,7 @@ impl AgentKernel {
         let lease = self.admit_domain_or_agent_mutation(
             &caller,
             &CancellationToken::new(),
-            tool_settlement,
+            tool_settlement && !request.require_uncancelled_turn,
         )?;
         let candidate = Candidate {
             caller,

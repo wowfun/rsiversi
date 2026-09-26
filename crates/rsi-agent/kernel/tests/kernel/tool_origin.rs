@@ -63,7 +63,8 @@ async fn control_tool_caller_with_snapshot(
         vec![SessionFactBody::ToolIntent {
             turn_id: turn_id.clone(),
             effect_id: tool.clone(),
-            source_model_effect_id: model,
+            origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: model },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             identity: identity.clone(),
             name: "fixture_control".into(),
             arguments: serde_json::json!({}),
@@ -340,7 +341,10 @@ async fn frozen_tool_policy_is_enforced_before_kernel_publication() {
             vec![SessionFactBody::ToolIntent {
                 turn_id: claim.turn_id().clone(),
                 effect_id: EffectId::new("denied-effect").unwrap(),
-                source_model_effect_id: EffectId::new("source-model").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("source-model").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: ToolResultIdentity::new(
                     "owner",
                     "denied-effect",
@@ -404,7 +408,10 @@ async fn executor_cannot_inject_kernel_owned_supersession() {
         &claim,
         vec![SessionFactBody::ToolIntent {
             turn_id: submitted.turn_id,
-            source_model_effect_id: EffectId::new("source-model").unwrap(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: EffectId::new("source-model").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             effect_id: EffectId::new("tool").unwrap(),
             identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),
             name: "read".into(),
@@ -637,3 +644,6 @@ async fn named_spawn_resolves_once_and_retries_use_the_durable_seed() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
     cold.shutdown(workers).await.unwrap();
 }
+
+#[path = "tool_origin/program.rs"]
+mod program;

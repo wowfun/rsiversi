@@ -38,6 +38,19 @@ Kernel's read-only Jobs port consumes public Jobs
 status types and validates an executor-published source against the live claim;
 it cannot create or own the underlying Jobs scope.
 
+The opt-in [Program runtime](../program/README.md) owns Node execution through
+Process duplex and Jobs. Kernel owns the separate durable ProgramRun lifecycle;
+Jobs remain process-local. [Execution ownership](../kernel/README.md) is distinct
+from immutable fork lineage, so a detached run retains a frozen composition and
+policy without retaining a retired Tool claim. Its initial child completions
+settle into run receipts. A bounded generation-bound notice publishes only the
+curated completion back to the Session. Startup interrupts unfinished runs and
+discards their unclaimed work and old notices without replaying external effects.
+
+[Schedule](../schedule/README.md) and Goal share atomic idle admission through
+independent continuation domains. The Kernel arbitrates before either domain
+reserves a round; durable intent alone never recreates a live timer or Goal owner.
+
 ```text
 SQLite Store --Local--> Kernel --Local Turn service--> callers
                             ^
@@ -299,15 +312,16 @@ messages close the current Step, start the next, and become Facts atomically
 with their durable claims. Turn terminal and activation settlement are distinct:
 the terminal closes model execution, while an activation with non-quiescent
 descendants remains durably waiting. Settlement is admitted only by a Store
-transaction that still observes every descendant without an active activation,
-open Turn, or waking message. Child settlement atomically consumes its
+transaction that still observes every activation-owned descendant without an active activation,
+open Turn, or waking message. Ordinary child settlement atomically consumes its
 per-activation parent-mailbox reservation and emits one completion message;
 the message wakes an idle parent and becomes next-Step input for a running one.
 An unsuccessful activation terminal concurrently attempts durable cancellation
 of every currently open descendant Turn under one cumulative durability
 deadline, aggregates failures only after addressing the complete bounded tree,
 then releases its lane while settlement waits for those descendants to close;
-accepted mailbox messages are not erased.
+ordinary accepted mailbox messages are not erased. Program retirement separately
+revokes its owned pending automatic work as specified by the ProgramRun contract.
 The `interrupt_agent` Tool remains narrower and cancels only its exact target's
 current Turn without cascading.
 

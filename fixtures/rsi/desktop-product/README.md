@@ -17,6 +17,10 @@ Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
 After scenarios close a dialog, the final composer geometry check waits for the
 closed document view; native click delivery alone does not settle a Rust command.
+The frame-admission probe holds one real document ACK before requesting a second
+frame, then releases that same ACK. It cannot assume the ordinary polling loop
+always occupies the frame lane or consume an unacknowledged frame itself. Each
+rejection checks its exact source-defined category and message.
 The native window also reads and refreshes Plugins status, reads the separate
 Exa credential status, and opens the typed retrieval Settings controls without
 submitting a model request. Screenshots, capabilities, request summaries and
@@ -40,6 +44,11 @@ SHA-256 in `foreign-build/binary.json`. CI excludes the two native executable
 paths in that directory, retaining the scenario evidence and the distribution's
 receipt, build-family manifest and build log. The receipt identifies both paired
 executables; these hashes cannot restore the programs for binary replay.
+The export scenario exercises cancellation before a reservation is claimed and a
+late cancellation of the previous token while a replacement chooser is open. The
+replacement must still save; the cancelled chooser retains its waiter until its
+actual callback. Native lane capacity and positively classified control retries
+have separate unit coverage.
 The paired `rsi` companion must already be beside the desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
@@ -102,6 +111,8 @@ Adapter unit tests separately cover unknown-outcome non-replay. These are distin
 actual WebKitGTK controls and the native bridge before configuring a Native model.
 It validates four-option permissions without a local always-grant, literal remote
 text, cancellation, 1,200-record replay, bounded display and process reaping.
+After delegation it reopens the original native Session by exact displayed identity
+and waits for that attachment, so later draft/restart checks use the same Session.
 Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
 
 
@@ -155,5 +166,16 @@ on an existing desktop display fail before sending events. Save-dialog input als
 checks X input focus after raising the selected visible chooser and before keys.
 
 `--export` drives the Rust-owned native Save dialog using XTest keys on the
-private Xvfb display, verifies JSON bytes and cancellation, and asserts no
+private Xvfb display, verifies JSON bytes, Escape dismissal, and API cancellation
+while the chooser is open. It checks retained admission, rejects a second chooser,
+discards a cancelled selection and reuses the slot after the callback. It asserts no
 additional model requests. It requires libXtst and does not automate host dialogs.
+
+`--plan-review` adds an actual native WebKit closed-plan review using a
+deterministic provider. It checks literal plan text, three choices, native
+feedback input and that the next model request observes the committed mode exit.
+The screenshots and requests are native Desktop evidence, separate from live
+model or browser-only checks.
+
+The Linux desktop CI mode loop includes `--plan-review`, collecting its native
+WebKitGTK acceptance evidence alongside the other isolated modes.

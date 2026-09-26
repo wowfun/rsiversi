@@ -108,6 +108,10 @@ fn rejection_recovery_facts(turn: &TurnId, with_source: bool) -> Vec<SessionFact
             seq,
             seq,
             SessionFactBody::ToolRejected {
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: effect.clone(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 turn_id: turn.clone(),
                 effect_id: EffectId::new("denied").unwrap(),
                 identity: ToolResultIdentity::new("owner", "request", "call", "a".repeat(64))

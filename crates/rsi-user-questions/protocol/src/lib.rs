@@ -11,6 +11,65 @@ use tokio_util::sync::CancellationToken;
 /// Maximum encoded size of a request or answer.
 pub const MAXIMUM_QUESTION_BYTES: usize = 64 * 1024;
 
+/// One stable action in a closed review; labels carry no action authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewChoice {
+    /// Stable action identity.
+    pub id: String,
+    /// Display label.
+    pub label: String,
+}
+/// Product-opaque closed review binding, distinct from suggested answers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosedReview {
+    /// Exact content/version binding assigned by the requester.
+    pub binding: String,
+    /// Closed choices in presentation order.
+    pub choices: Vec<ReviewChoice>,
+}
+impl ClosedReview {
+    fn validate(&self) -> Result<()> {
+        validate_identity(&self.binding)?;
+        let mut ids = std::collections::BTreeSet::new();
+        if !(2..=8).contains(&self.choices.len()) {
+            return Err(invalid("review requires two to eight choices"));
+        }
+        for choice in &self.choices {
+            validate_identity(&choice.id)?;
+            if !ids.insert(&choice.id) || choice.label.trim().is_empty() || choice.label.len() > 256
+            {
+                return Err(invalid(
+                    "review choices require unique identities and bounded labels",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// Typed response to a closed review, never inferred by the broker from prose.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewAnswer {
+    /// Exact displayed request binding.
+    pub binding: String,
+    /// One choice identity from that request.
+    pub choice_id: String,
+    /// Optional human feedback, at most 4 KiB.
+    pub feedback: Option<String>,
+}
+impl ReviewAnswer {
+    fn validate(&self) -> Result<()> {
+        validate_identity(&self.binding)?;
+        validate_identity(&self.choice_id)?;
+        if self.feedback.as_ref().is_some_and(|text| text.len() > 4096) {
+            return Err(invalid("review feedback exceeds 4 KiB"));
+        }
+        Ok(())
+    }
+}
+
 /// One prompt with optional suggestions; free text is always accepted.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +87,9 @@ pub struct Question {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "QuestionRequestWire")]
 pub struct QuestionRequest {
+    /// Closed review variant, or ordinary questions when absent.
+    #[serde(default)]
+    pub review: Option<ClosedReview>,
     /// Opaque identity allocated by the requester for this Host generation.
     pub id: String,
     /// Exact owning Session.
@@ -45,6 +107,14 @@ impl QuestionRequest {
             validate_identity(identity)?;
         }
         validate_questions(&self.questions)?;
+        if let Some(review) = &self.review {
+            review.validate()?;
+            if self.questions.len() != 1 || !self.questions[0].options.is_empty() {
+                return Err(invalid(
+                    "closed review requires one display question without suggestions",
+                ));
+            }
+        }
         bounded(self)
     }
 }
@@ -77,6 +147,9 @@ pub fn validate_questions(questions: &[Question]) -> Result<()> {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "QuestionAnswerWire")]
 pub struct QuestionAnswer {
+    /// Closed review answer; ordinary answer strings must be empty in this variant.
+    #[serde(default)]
+    pub review: Option<ReviewAnswer>,
     /// One nonempty answer for each question, in request order.
     pub answers: Vec<String>,
 }
@@ -84,6 +157,13 @@ pub struct QuestionAnswer {
 impl QuestionAnswer {
     /// Validates the answer document before request lookup.
     pub fn validate(&self) -> Result<()> {
+        if let Some(review) = &self.review {
+            review.validate()?;
+            if !self.answers.is_empty() {
+                return Err(invalid("review cannot contain ordinary answers"));
+            }
+            return bounded(self);
+        }
         if !(1..=3).contains(&self.answers.len())
             || self.answers.iter().any(|answer| answer.trim().is_empty())
         {
@@ -95,10 +175,57 @@ impl QuestionAnswer {
     /// Validates correspondence to this exact request.
     pub fn validate_for(&self, request: &QuestionRequest) -> Result<()> {
         self.validate()?;
+        match (&self.review, &request.review) {
+            (Some(answer), Some(review))
+                if answer.binding == review.binding
+                    && review
+                        .choices
+                        .iter()
+                        .any(|choice| choice.id == answer.choice_id) =>
+            {
+                return Ok(());
+            }
+            (None, None) => {}
+            _ => return Err(invalid("answer does not match the exact closed review")),
+        }
         if self.answers.len() != request.questions.len() {
             return Err(invalid("answer count does not match the request"));
         }
         Ok(())
+    }
+
+    /// Converts an explicit numbered terminal selection and optional feedback
+    /// for the displayed closed review. Ordinary prose never chooses an action.
+    pub fn select_review(request: &QuestionRequest, input: &str) -> Result<Self> {
+        let review = request
+            .review
+            .as_ref()
+            .ok_or_else(|| invalid("request is not a closed review"))?;
+        let (number, feedback) = input
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((input.trim(), ""));
+        let index = number
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .ok_or_else(|| {
+                invalid("enter a review choice number, optionally followed by feedback")
+            })?;
+        let choice = review
+            .choices
+            .get(index)
+            .ok_or_else(|| invalid("review choice is out of range"))?;
+        let answer = Self {
+            answers: vec![],
+            review: Some(ReviewAnswer {
+                binding: review.binding.clone(),
+                choice_id: choice.id.clone(),
+                feedback: (!feedback.trim().is_empty()).then(|| feedback.trim().to_owned()),
+            }),
+        };
+        answer.validate_for(request)?;
+        Ok(answer)
     }
 }
 
@@ -184,6 +311,8 @@ pub type Result<T> = std::result::Result<T, QuestionError>;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuestionRequestWire {
+    #[serde(default)]
+    review: Option<ClosedReview>,
     id: String,
     session_id: String,
     turn_id: String,
@@ -194,6 +323,7 @@ impl TryFrom<QuestionRequestWire> for QuestionRequest {
     type Error = QuestionError;
     fn try_from(wire: QuestionRequestWire) -> Result<Self> {
         let value = Self {
+            review: wire.review,
             id: wire.id,
             session_id: wire.session_id,
             turn_id: wire.turn_id,
@@ -207,6 +337,8 @@ impl TryFrom<QuestionRequestWire> for QuestionRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuestionAnswerWire {
+    #[serde(default)]
+    review: Option<ReviewAnswer>,
     answers: Vec<String>,
 }
 
@@ -214,6 +346,7 @@ impl TryFrom<QuestionAnswerWire> for QuestionAnswer {
     type Error = QuestionError;
     fn try_from(wire: QuestionAnswerWire) -> Result<Self> {
         let value = Self {
+            review: wire.review,
             answers: wire.answers,
         };
         value.validate()?;
@@ -224,6 +357,62 @@ impl TryFrom<QuestionAnswerWire> for QuestionAnswer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closed_review_requires_exact_binding_action_and_bounded_feedback() {
+        let request = QuestionRequest {
+            id: "review".into(),
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            questions: vec![Question {
+                id: "plan".into(),
+                prompt: "Exact saved plan".into(),
+                options: vec![],
+            }],
+            review: Some(ClosedReview {
+                binding: "plan-and-version".into(),
+                choices: vec![
+                    ReviewChoice {
+                        id: "approve_execute".into(),
+                        label: "Approve".into(),
+                    },
+                    ReviewChoice {
+                        id: "decline".into(),
+                        label: "Decline".into(),
+                    },
+                ],
+            }),
+        };
+        request.validate().unwrap();
+        for input in ["yes", "approve_execute", "0", "3", ""] {
+            assert!(QuestionAnswer::select_review(&request, input).is_err());
+        }
+        let answer = QuestionAnswer::select_review(&request, "1 please proceed").unwrap();
+        assert_eq!(answer.review.as_ref().unwrap().choice_id, "approve_execute");
+        assert_eq!(
+            answer.review.as_ref().unwrap().feedback.as_deref(),
+            Some("please proceed")
+        );
+        assert!(
+            QuestionAnswer {
+                review: None,
+                answers: vec!["Approve".into()]
+            }
+            .validate_for(&request)
+            .is_err()
+        );
+        let mut stale = answer.clone();
+        stale.review.as_mut().unwrap().binding = "old-plan".into();
+        assert!(stale.validate_for(&request).is_err());
+        let mut unknown = answer.clone();
+        unknown.review.as_mut().unwrap().choice_id = "execute_other".into();
+        assert!(unknown.validate_for(&request).is_err());
+        assert!(
+            QuestionAnswer::select_review(&request, &format!("1 {}", "x".repeat(4097))).is_err()
+        );
+        let roundtrip: QuestionAnswer =
+            serde_json::from_value(serde_json::to_value(&answer).unwrap()).unwrap();
+        roundtrip.validate_for(&request).unwrap();
+    }
     #[test]
     fn decoding_rejects_invalid_answer_and_request_documents() {
         for answers in [
@@ -238,6 +427,7 @@ mod tests {
             );
         }
         let valid = QuestionAnswer {
+            review: None,
             answers: vec!["one".into()],
         };
         assert_eq!(

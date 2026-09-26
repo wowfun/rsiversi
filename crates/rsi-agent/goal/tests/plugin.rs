@@ -192,7 +192,7 @@ async fn linked_factory_contributes_typed_state_pure_callbacks_and_a_bounded_rep
     }
     create(&mut draft).await;
     let projected = view(&draft).await;
-    assert_eq!(projected["goal"]["allocated_rounds"], 1);
+    assert_eq!(projected["goal"]["allocated_rounds"], 0);
     assert_eq!(projected["goal"]["max_rounds"], 3);
     for (index, args) in [serde_json::json!({"goal_id":"goal-task","kind":"resume","evidence":"keep running"}), serde_json::json!({"goal_id":"goal-task","kind":"complete","evidence":"ok","max_rounds":999})].into_iter().enumerate() {
         let prepared = tools.prepare(&format!("invalid-report-{index}"), rsi_tools_protocol::ToolCall { id: "call".into(), name: "report_goal".into(), arguments: args }).unwrap();
@@ -364,6 +364,48 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
     let fixture = Fixture::new().await;
     let mut draft = fixture.draft().await;
     create(&mut draft).await;
+    let mut state: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
+    let goal = state.goal.as_mut().unwrap();
+    goal.reserve().unwrap();
+    let reservation = goal.reservation.as_ref().unwrap();
+    let command = draft
+        .composition()
+        .contributions()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry.kind() {
+            ContributionKind::Command(command)
+                if entry.id().as_str() == rsi_agent_goal::GOAL_RESERVE =>
+            {
+                Some(command.callback().clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let context = rsi_agent_composition_protocol::SessionCommandContext {
+        request_id: reservation.request_id.clone().unwrap(),
+        continuation_input: Some(reservation.input(&goal.id)),
+        header: Arc::new(draft.header().clone()),
+        revision: draft.revision(),
+        domains: draft
+            .baseline()
+            .initial_states()
+            .into_iter()
+            .map(|snapshot| DomainStateView {
+                revision: DomainRevision::new(0),
+                snapshot,
+            })
+            .collect(),
+    };
+    let proposals = command
+        .execute(
+            &context,
+            &CommandArguments::new(serde_json::json!({"id": goal.id})).unwrap(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    draft.apply_domain_initial_batch(&proposals).unwrap();
     let domains = draft
         .baseline()
         .initial_states()
@@ -437,7 +479,8 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
             )
             .unwrap(),
         );
-        let intent = Arc::new(SessionFact::new(2, 1, SessionFactBody::ToolIntent { source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(), turn_id: turn.clone(), effect_id: effect.clone(), identity: if fault == "wrong-identity" { ToolResultIdentity::new("other", "invocation", "call", "a".repeat(64)).unwrap() } else { identity.clone() }, name: if fault == "wrong-name" { "bash" } else { "report_goal" }.into(), arguments: if fault == "wrong-args" { serde_json::json!({"goal_id":"goal-task","kind":"blocked","evidence":"different"}) } else { args.clone() }, approval: None, parallel_safe: false }).unwrap());
+        let intent = Arc::new(SessionFact::new(2, 1, SessionFactBody::ToolIntent { origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap() },
+ program_role: rsi_tools_protocol::ToolProgramRole::Unavailable, turn_id: turn.clone(), effect_id: effect.clone(), identity: if fault == "wrong-identity" { ToolResultIdentity::new("other", "invocation", "call", "a".repeat(64)).unwrap() } else { identity.clone() }, name: if fault == "wrong-name" { "bash" } else { "report_goal" }.into(), arguments: if fault == "wrong-args" { serde_json::json!({"goal_id":"goal-task","kind":"blocked","evidence":"different"}) } else { args.clone() }, approval: None, parallel_safe: false }).unwrap());
         let settled = Arc::new(
             SessionFact::new(
                 3,

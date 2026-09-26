@@ -1,5 +1,15 @@
 # rsi-agent testing
 
+Program validation spans the closest protocol, Kernel, Store, Context and executor
+targets because origin and ownership change durable replay. Kernel workflow tests
+exercise exclusive receipts beyond ordinary mailbox capacity, creator retirement,
+cancel/detach ordering, policy acknowledgement loss and restart revocation. The shared mechanical Store contract checks sequence-ordered mixed mailbox/Program
+admission and exhausts progress capacity, prove suffix reads and reject unpaired child/notice graphs, then reopen SQLite. The shared budget function separately admits all 128 maximally escaped closure receipts; synthetic receipts cannot bypass Store graph validation. Default in-memory duplex tests exercise framing, RPC capacity, cancellation and
+curated-result bounds without Node. Native Node tests require explicit `RSI_TEST_NODE`
+and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
+Live browser probes and provider usage belong to the standard product fixtures;
+deterministic suites do not resolve developer credentials or call live providers.
+
 Protocol suites exercise constructor and deserialization rejection, exact
 round trips, Agent preset identity grammar and required Header membership,
 sequence invariants, byte limits, and dependency direction. The

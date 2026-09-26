@@ -224,6 +224,8 @@ escapes its process group can outlive hard process death as recorded by the
 Service Host decision.
 
 The standard model-facing spawn intentionally does not accept arbitrary schemas.
+The [bounded model producer decision](../../implemented/feature/2026-09-24-model-structured-delegation.md)
+partially supersedes this schema-authority and reader-default decision when shipped.
 Its result reader is therefore disabled by default; trusted embeddings with a
 programmatic producer explicitly enable `read_structured_results` in the Agent
 Tools contribution. This keeps schema choice at the existing owner instead of

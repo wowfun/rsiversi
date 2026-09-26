@@ -4433,8 +4433,10 @@ dependencies = [
  "rsi-agent-model-selection",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
+ "rsi-agent-program",
  "rsi-agent-references",
  "rsi-agent-repeat-tool-reminder",
+ "rsi-agent-schedule",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
@@ -4509,6 +4511,7 @@ dependencies = [
  "rsi-retrieval",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-schedule",
  "rsi-serve",
  "rsi-service-host",
  "rsi-service-ui",
@@ -4840,6 +4843,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-session-protocol",
@@ -4880,6 +4884,7 @@ name = "rsi-agent-plan-policy"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
@@ -4896,8 +4901,10 @@ dependencies = [
  "rsi-sandbox",
  "rsi-tools",
  "rsi-tools-protocol",
+ "rsi-user-questions-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -4919,6 +4926,33 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "rsi-agent-program"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-goal",
+ "rsi-agent-plan-policy",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-jobs",
+ "rsi-jobs-local",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4955,6 +4989,23 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-meta",
  "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-schedule"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -6612,6 +6663,21 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "rsi-schedule"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

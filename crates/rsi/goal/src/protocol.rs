@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_agent_goal::{GoalAction, GoalState, RoundSettlement};
 use rsi_agent_session_protocol::{
-    CommandRevision, ContinuationInput, ContinuationProvenance, DomainRequestId, DomainStateView,
-    MessageId, SessionCommandInvocation, SessionCommandReceipt, SessionHeader, SessionId,
+    CommandRevision, ContinuationInput, DomainRequestId, DomainStateView, MessageId,
+    SessionCommandInvocation, SessionCommandReceipt, SessionHeader, SessionId,
 };
 use rsi_agent_turn_protocol::{
     ContinuationBinding, ContinuationLease, DomainMutationReceipt, MessageReceipt,
@@ -144,6 +144,9 @@ pub struct GoalSnapshot {
 /// Closed controller error classes; reply uncertainty never means command rejection.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum GoalError {
+    /// Automatic allocation was deferred without spending a round.
+    #[error("Session is busy; Goal allocation was deferred")]
+    Busy,
     /// Live scheduling was revoked or its guarded revision changed.
     #[error("Goal scheduling is disarmed")]
     Disarmed,
@@ -207,6 +210,19 @@ pub trait GoalSession: fmt::Debug + Send + Sync + 'static {
         &self,
         binding: ContinuationBinding,
     ) -> GoalResult<ContinuationLease>;
+    /// Waits without allocation until an advisory idle observation or cancellation.
+    async fn wait_idle(
+        &self,
+        lease: &ContinuationLease,
+        cancellation: CancellationToken,
+    ) -> GoalResult<()>;
+    /// Publishes a private first reservation and its exact input atomically.
+    async fn reserve_initial(
+        &self,
+        lease: &ContinuationLease,
+        invocation: SessionCommandInvocation,
+        input: ContinuationInput,
+    ) -> GoalResult<MessageReceipt>;
     /// Delegates one frozen internal reserve or settlement to Kernel admission.
     async fn internal_command(
         &self,
@@ -220,13 +236,6 @@ pub trait GoalSession: fmt::Debug + Send + Sync + 'static {
         lease: &ContinuationLease,
         request: &DomainRequestId,
     ) -> GoalResult<Option<DomainMutationReceipt>>;
-    /// Prepares Workspace access and atomically publishes a fresh draft if necessary.
-    async fn submit(
-        &self,
-        lease: &ContinuationLease,
-        input: ContinuationInput,
-        provenance: ContinuationProvenance,
-    ) -> GoalResult<MessageReceipt>;
     /// Canonical message state; `None` means a successful read proved absence.
     async fn message_status(&self, message: &MessageId) -> GoalResult<Option<MessageReceipt>>;
     /// Waits for this exact input's canonical discard or Turn terminal, with bounded reads.

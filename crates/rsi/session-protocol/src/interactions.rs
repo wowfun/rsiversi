@@ -216,6 +216,7 @@ mod tests {
     }
     fn question(index: usize, bytes: usize) -> QuestionRequest {
         QuestionRequest {
+            review: None,
             id: format!("question-{index}"),
             session_id: "session".into(),
             turn_id: "turn".into(),

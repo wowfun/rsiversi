@@ -187,10 +187,11 @@ async fn expanding_a_process_preserves_its_visible_row_even_when_content_overflo
                                 turn_id: turn_id.clone(),
                                 effect_id: effect_id.clone(),
                                 identity: identity.clone(),
-                                source_model_effect_id: rsi_agent_session_protocol::EffectId::new(
-                                    "model",
-                                )
-                                .unwrap(),
+                                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                                    effect_id: rsi_agent_session_protocol::EffectId::new("model")
+                                        .unwrap(),
+                                },
+                                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                                 name: "bash".into(),
                                 arguments: serde_json::json!({"command":"true"}),
                                 approval: None,
@@ -927,6 +928,7 @@ async fn pending_menu_waits_for_transient_read_capacity_without_losing_the_draft
                 has_open_turn: false,
                 has_active_activation: false,
                 has_waking_message: false,
+                has_active_program: false,
             },
             descendants: Vec::new(),
         },
@@ -1075,6 +1077,7 @@ async fn cancel_keeps_draft_and_targets_attached_turn_and_only_owned_pending_mes
         has_open_turn: true,
         has_active_activation: false,
         has_waking_message: true,
+        has_active_program: false,
     };
     *handle.inspection.lock().unwrap() = Some(StoreSessionInspection {
         header,
@@ -1108,6 +1111,7 @@ async fn stale_question_draft_is_not_dispatched_and_empty_draft_does_not_prefetc
     let (mut client, _, runtime, surface) = client().await;
     assert!(!client.history.backfill);
     let request = rsi_user_questions_protocol::QuestionRequest {
+        review: None,
         id: "request".into(),
         session_id: client.state.header.session_id().to_string(),
         turn_id: "turn".into(),
@@ -1155,6 +1159,28 @@ async fn bounded_requests_reserve_submission_and_cancellation_capacity() {
     client.cancel();
     assert_eq!(client.tasks.len(), 10);
     assert!(client.cancellation_queued);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn eight_retained_exports_leave_submission_and_cancellation_capacity() {
+    let (mut client, _, runtime, surface) = client().await;
+    let exports: Vec<_> = (0..8).map(|_| ExportCharge::new(&client.exports)).collect();
+    for _ in 0..4 {
+        client.spawn(std::future::pending());
+    }
+    assert!(
+        client.tasks.is_empty(),
+        "ordinary work cannot fill the control reserve"
+    );
+    client.state.editor.insert("durable input").unwrap();
+    client.submit(MessageDelivery::NextTurn, false);
+    client.cancel();
+    assert_eq!(client.pending_requests(), 10);
+    assert!(client.cancelling);
+    assert!(client.submission.cancel_when_accepted);
+    drop(exports);
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -1258,6 +1284,7 @@ async fn restoring_a_saved_anchor_reads_its_neighborhood_and_a_separate_live_tai
                 has_open_turn: false,
                 has_active_activation: false,
                 has_waking_message: false,
+                has_active_program: false,
             },
             descendants: vec![],
         },
@@ -1309,7 +1336,10 @@ async fn expanded_long_command_preserves_its_full_source_and_copy_bytes() {
         SessionFactBody::ToolIntent {
             turn_id: rsi_agent_session_protocol::TurnId::new("command").unwrap(),
             effect_id: rsi_agent_session_protocol::EffectId::new("tool").unwrap(),
-            source_model_effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             identity: rsi_tools_protocol::ToolResultIdentity::new(
                 "owner",
                 "invoke",
@@ -1532,18 +1562,37 @@ async fn accepted_message_detail_is_bounded_and_keeps_its_cancellation_identity(
 }
 
 #[tokio::test]
-async fn output_close_failure_still_awaits_presentation_disposal() {
+async fn output_close_failure_still_awaits_disposal_and_reports_settled_exports() {
     use std::{future::Future as _, task::Poll};
     let (started, mut entered) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let finished = disposed.clone();
-    let mut closing = std::pin::pin!(super::close_rendering(
+    let mut report = Vec::new();
+    let mut closing = Box::pin(super::close_rendering(
         async { Err(std::io::Error::other("fixture output restoration failure")) },
         async move {
             started.send(()).unwrap();
             released.await.unwrap();
             finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+        async {
+            vec![
+                (
+                    SessionId::new("saved-session").unwrap(),
+                    Ok(PathBuf::from("saved.json")),
+                ),
+                (
+                    SessionId::new("failed-session").unwrap(),
+                    Err(crate::export::Error::Failed(error(
+                        "fixture persist failure",
+                    ))),
+                ),
+            ]
+        },
+        |messages| async {
+            report = messages;
             Ok(())
         },
     ));
@@ -1564,6 +1613,10 @@ async fn output_close_failure_still_awaits_presentation_disposal() {
             .contains("fixture output restoration failure")
     );
     assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        report.join("\n"),
+        "Exported saved.json (saved-session)\nExport failed-session: fixture persist failure"
+    );
 }
 
 #[tokio::test]
@@ -1671,4 +1724,203 @@ async fn gated_attachment_keeps_pretransition_input_with_its_original_session() 
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn export_capacity_survives_attachment_clear_until_owned_work_settles() {
+    let (mut client, handle, runtime, surface) = client().await;
+    let work = ApplicationWork::default();
+    *handle.export_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    let directory = tempfile::tempdir().unwrap();
+    let options = rsi_client::ExportCommand {
+        path: Some(directory.path().join("output.md").to_str().unwrap().into()),
+        options: rsi_session_protocol::export::ExportOptions::default(),
+    };
+    let saves: Vec<_> = (0..8)
+        .map(|_| {
+            crate::export::start(
+                &work,
+                handle.clone(),
+                options.clone(),
+                work.stop.child_token(),
+                ExportCharge::new(&client.exports),
+            )
+        })
+        .collect();
+    while handle
+        .exports_entered
+        .load(std::sync::atomic::Ordering::SeqCst)
+        < 8
+    {
+        tokio::task::yield_now().await;
+    }
+    client.tasks.clear();
+    client.generation += 1;
+    assert_eq!(client.pending_requests(), 8);
+    assert!(!client.spawn_as(WorkKind::Read, async {
+        Ok(Update::Notice("should not enter".into()))
+    }));
+    drop(saves);
+    assert_eq!(
+        client.pending_requests(),
+        8,
+        "waiter loss cannot release the worker's capacity"
+    );
+    work.tasks.close();
+    work.tasks.wait().await;
+    assert_eq!(client.pending_requests(), 0);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One UI scenario covers retained draft, validation and typed review dispatch.
+async fn closed_review_renders_actions_and_preserves_invalid_draft_before_typed_dispatch() {
+    use rsi_user_questions_protocol::{ClosedReview, Question, QuestionRequest, ReviewChoice};
+    let (mut client, handle, runtime, surface) = client().await;
+    let request = QuestionRequest {
+        id: "review".into(),
+        session_id: client.state.header.session_id().to_string(),
+        turn_id: "turn".into(),
+        questions: vec![Question {
+            id: "plan".into(),
+            prompt: "Inspect source and verify the change.".into(),
+            options: vec![],
+        }],
+        review: Some(ClosedReview {
+            binding: "exact-plan-and-revisions".into(),
+            choices: vec![
+                ReviewChoice {
+                    id: "approve_execute".into(),
+                    label: "Approve and execute".into(),
+                },
+                ReviewChoice {
+                    id: "request_changes".into(),
+                    label: "Request changes".into(),
+                },
+                ReviewChoice {
+                    id: "decline".into(),
+                    label: "Decline and end turn".into(),
+                },
+            ],
+        }),
+    };
+    client.interactions = Some(
+        rsi_session_protocol::InteractionRetention::default()
+            .retain(vec![], vec![request.clone()])
+            .unwrap(),
+    );
+    client.state.answer = Some(state::Answer {
+        scroll: 0,
+        request: request.clone(),
+        editor: editor::Editor::default(),
+        answers: vec![],
+    });
+    for width in [80, 40] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render::draw(frame, &client.state);
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Review plan"), "{text}");
+        assert!(text.contains("1. Approve and execute"), "{text}");
+        assert!(text.contains("2. Request changes"), "{text}");
+        assert!(text.contains("3. Decline and end turn"), "{text}");
+        if std::env::var_os("RSI_REVIEW_SCREEN_REPORT").is_some() {
+            println!("TUI width {width}\n{text}");
+        }
+    }
+    client
+        .state
+        .answer
+        .as_mut()
+        .unwrap()
+        .editor
+        .insert("yes please")
+        .unwrap();
+    client.answer();
+    assert!(client.tasks.is_empty());
+    assert_eq!(
+        client.state.answer.as_ref().unwrap().editor.text(),
+        "yes please"
+    );
+    client.state.answer.as_mut().unwrap().editor.take();
+    client
+        .state
+        .answer
+        .as_mut()
+        .unwrap()
+        .editor
+        .insert("1 checked source")
+        .unwrap();
+    client.answer();
+    client.tasks.next().await.unwrap().result.unwrap();
+    let actual = handle.answers.lock().unwrap().clone();
+    assert_eq!(actual.len(), 1);
+    actual[0].validate_for(&request).unwrap();
+    assert_eq!(
+        actual[0].review.as_ref().unwrap().choice_id,
+        "approve_execute"
+    );
+    assert_eq!(
+        actual[0].review.as_ref().unwrap().feedback.as_deref(),
+        Some("checked source")
+    );
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn terminal_is_restored_before_waiting_for_export_io() {
+    let restored = std::sync::atomic::AtomicBool::new(false);
+    let mut closing = Box::pin(super::close_rendering(
+        async {
+            restored.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+        async { Ok(()) },
+        std::future::pending(),
+        |_| async { Ok(()) },
+    ));
+    assert!(futures_util::poll!(&mut closing).is_pending());
+    assert!(restored.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn export_diagnostic_failure_does_not_fail_successful_shutdown() {
+    let result = super::close_rendering(
+        async { Ok(()) },
+        async { Ok(()) },
+        async {
+            vec![(
+                SessionId::new("saved").unwrap(),
+                Ok(PathBuf::from("saved.json")),
+            )]
+        },
+        |messages| async move {
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].contains("saved.json"));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "stderr stalled",
+            ))
+        },
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
 }

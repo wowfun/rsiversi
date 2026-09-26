@@ -47,6 +47,11 @@ plugin = "rsi.agent.goal"
 
 [[steps]]
 kind = "plugin"
+id = "schedule"
+plugin = "rsi.agent.schedule"
+
+[[steps]]
+kind = "plugin"
 id = "repeat-tool-reminder"
 plugin = "rsi.agent.repeat-tool-reminder"
 
@@ -71,7 +76,7 @@ plugin = "rsi.jobs.tools"
 kind = "plugin"
 id = "agents"
 plugin = "rsi.agent.tools"
-config = { markdown_agents = true }
+config = { markdown_agents = true, read_structured_results = true }
 
 [[steps]]
 kind = "plugin"
@@ -115,3 +120,9 @@ kind = "plugin"
 id = "host-profile-management"
 plugin = "rsi.profile-leaves.tools"
 enabled_rhai = "defines.standard_host_profile_edits"
+
+[[steps]]
+kind = "plugin"
+id = "program"
+plugin = "rsi.agent.program.tools"
+enabled = false

@@ -1,3 +1,6 @@
+mod program;
+pub use program::assert_program_store_contract;
+
 use super::{
     ActivationId, ActivationOutcome, AgentActivationGuard, AgentControlRecord,
     AgentControlRecordBody, AgentMessage, AgentMessageContent, AgentMessageSource, AgentPath,
@@ -867,7 +870,7 @@ pub async fn assert_mechanical_store_contract(
             controls: vec![child_control(&session_id, "first-child-message")],
         }],
         required_active_activations: Vec::new(),
-        quiescent_descendants_of: Some(session_id.clone()),
+        quiescent_descendants_of: Some((session_id.clone()).into()),
     };
     assert!(
         matches!(
@@ -899,7 +902,7 @@ pub async fn assert_mechanical_store_contract(
                 controls: vec![child_control(&session_id, "first-child-message")],
             }],
             required_active_activations: Vec::new(),
-            quiescent_descendants_of: Some(first_child_id.clone()),
+            quiescent_descendants_of: Some((first_child_id.clone()).into()),
         })
         .await
         .expect("create a new guard root with no strict descendants");
@@ -1004,7 +1007,7 @@ pub async fn assert_mechanical_store_contract(
     );
     assert!(matches!(store.commit_agent(AtomicAgentCommit {
         sessions: vec![AtomicSessionAppend { session_id: first_child_id.clone(), expected_fact_seq: 0, expected_control_seq: 1, header: None, facts: Vec::new(), controls: vec![AgentControlRecord::new(2, 32, child_control(&session_id, "guarded-message").body().clone()).unwrap()] }],
-        required_active_activations: Vec::new(), quiescent_descendants_of: Some(first_child_id.clone()),
+        required_active_activations: Vec::new(), quiescent_descendants_of: Some((first_child_id.clone()).into()),
     }).await, Err(StoreError::SessionNotQuiescent { session }) if session == grandchild_id.as_str()));
     store
         .commit_agent(AtomicAgentCommit {
@@ -1026,7 +1029,7 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_descendants_of: Some(grandchild_id.clone()),
+            quiescent_descendants_of: Some((grandchild_id.clone()).into()),
         })
         .await
         .expect("a busy root is excluded from its strict-descendant guard");
@@ -1627,6 +1630,7 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(store.put_cas(Arc::clone(&bytes)).await.unwrap(), object);
     assert_eq!(store.read_cas(&object).await.unwrap(), bytes);
     assert_unbound_steer_inspection(store, &header).await;
+    assert_program_store_contract(store, &header, &accepted).await;
 }
 
 async fn assert_unbound_steer_inspection(store: &dyn SessionStore, template: &SessionHeader) {

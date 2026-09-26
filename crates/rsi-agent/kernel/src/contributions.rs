@@ -50,13 +50,16 @@ impl AgentKernel {
         &self,
         claim: &TurnClaim,
         cancellation: CancellationToken,
+        program: Option<&EffectId>,
     ) -> TurnResult<ContributionContext> {
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
             ));
         }
-        self.ensure_contribution_step(claim).await?;
+        if program.is_none() {
+            self.ensure_contribution_step(claim).await?;
+        }
         let _admission = self
             .inner
             .submission_admission
@@ -64,7 +67,7 @@ impl AgentKernel {
             .await?;
         let (live, step_id) = {
             let state = lock_state(&self.inner);
-            let turn = self.validate_contribution_claim(&state, claim)?;
+            let turn = self.validate_contribution_claim(&state, claim, program)?;
             let step_id = turn.current_step.clone().ok_or_else(|| {
                 TurnError::Invalid("contribution capture requires an open Step".into())
             })?;
@@ -84,7 +87,7 @@ impl AgentKernel {
                 "contribution capture lost its flushed prefix".into(),
             ));
         }
-        self.validate_contribution_claim(&lock_state(&self.inner), claim)?;
+        self.validate_contribution_claim(&lock_state(&self.inner), claim, program)?;
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
@@ -119,7 +122,7 @@ impl AgentKernel {
     async fn ensure_contribution_step(&self, claim: &TurnClaim) -> TurnResult<()> {
         let next = {
             let state = lock_state(&self.inner);
-            let turn = self.validate_contribution_claim(&state, claim)?;
+            let turn = self.validate_contribution_claim(&state, claim, None)?;
             if turn.current_step.is_some() {
                 return Ok(());
             }
@@ -156,6 +159,7 @@ impl AgentKernel {
         &self,
         state: &'a KernelState,
         claim: &TurnClaim,
+        program: Option<&EffectId>,
     ) -> TurnResult<&'a TurnControl> {
         let turn = self.validate_claim(state, claim)?;
         if turn.cancel_requested || turn.terminal.is_some() || turn.budget_exhausted.is_some() {
@@ -163,7 +167,25 @@ impl AgentKernel {
                 "contribution capture follows cancellation or the Turn ending boundary".into(),
             ));
         }
-        turn_state::ensure_no_active_effect(turn)?;
+        if let Some(parent) = program {
+            if turn.effects.len() != 1
+                || !matches!(
+                    turn.effects.get(parent),
+                    Some(ActiveEffect::Tool {
+                        started: true,
+                        program_role: rsi_tools_protocol::ToolProgramRole::Coordinator,
+                        origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
+                        ..
+                    })
+                )
+            {
+                return Err(TurnError::Invalid(
+                    "program policy snapshot requires its sole started coordinator".into(),
+                ));
+            }
+        } else {
+            turn_state::ensure_no_active_effect(turn)?;
+        }
         let consumed = turn
             .elapsed
             .consumed(turn.accepted_at_ms, self.inner.clock.now_ms());

@@ -1,4 +1,6 @@
 use super::*;
+use rsi_agent_session_protocol::ToolOrigin;
+use rsi_tools_protocol::ToolProgramRole;
 
 pub(super) fn apply_recovered_fact(
     turns: &mut BTreeMap<TurnId, TurnControl>,
@@ -350,15 +352,27 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             identity,
             name,
             arguments,
+            origin,
+            program_role,
             ..
-        } => {
-            ensure_no_active_effect(turn)?;
-            turn.tool_source
-                .as_mut()
-                .ok_or_else(|| TurnError::Invalid("ToolRejected has no Conversation source".into()))
-                .map(Arc::make_mut)?
-                .reject(identity.call_id(), name, arguments)?;
-        }
+        } => match origin {
+            ToolOrigin::Model { effect_id } => {
+                ensure_no_active_effect(turn)?;
+                turn.tool_source
+                    .as_mut()
+                    .ok_or_else(|| {
+                        TurnError::Invalid("ToolRejected has no Conversation source".into())
+                    })
+                    .map(Arc::make_mut)?
+                    .reject(effect_id, identity.call_id(), name, arguments)?;
+            }
+            ToolOrigin::Program {
+                parent_effect_id,
+                ordinal,
+            } => {
+                admit_program_origin(turn, parent_effect_id, *ordinal, *program_role, false)?;
+            }
+        },
         SessionFactBody::ToolCallsSuperseded {
             source_model_effect_id,
             ..
@@ -374,46 +388,66 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
         }
         SessionFactBody::ToolIntent {
             effect_id,
-            source_model_effect_id,
+            origin,
+            program_role,
             identity,
             name,
             arguments,
             parallel_safe,
             ..
         } => {
-            if !turn.effects.is_empty()
-                && (!parallel_safe
-                    || turn.effects.values().any(|effect| {
-                        !matches!(
-                            effect,
-                            ActiveEffect::Tool {
-                                parallel_safe: true,
-                                ..
-                            }
-                        )
-                    }))
-            {
-                return Err(TurnError::Invalid(
-                    "overlapping Tool intents require parallel-safe definitions".into(),
-                ));
-            }
-            let source_selection = turn
-                .tool_source
-                .as_mut()
-                .ok_or_else(|| TurnError::Invalid("ToolIntent has no Conversation source".into()))
-                .map(Arc::make_mut)?
-                .consume(source_model_effect_id, identity.call_id(), name, arguments)?;
+            let source_selection = match origin {
+                ToolOrigin::Model { effect_id: source } => {
+                    if !turn.effects.is_empty()
+                        && (!parallel_safe
+                            || turn.effects.values().any(|effect| {
+                                !matches!(
+                                    effect,
+                                    ActiveEffect::Tool {
+                                        parallel_safe: true,
+                                        origin: ToolOrigin::Model { .. },
+                                        ..
+                                    }
+                                )
+                            }))
+                    {
+                        return Err(TurnError::Invalid(
+                            "overlapping Tool intents require parallel-safe definitions".into(),
+                        ));
+                    }
+                    turn.tool_source
+                        .as_mut()
+                        .ok_or_else(|| {
+                            TurnError::Invalid("ToolIntent has no Conversation source".into())
+                        })
+                        .map(Arc::make_mut)?
+                        .consume(source, identity.call_id(), name, arguments)?
+                }
+                ToolOrigin::Program {
+                    parent_effect_id,
+                    ordinal,
+                } => admit_program_origin(
+                    turn,
+                    parent_effect_id,
+                    *ordinal,
+                    *program_role,
+                    *parallel_safe,
+                )?,
+            };
             if turn
                 .effects
                 .insert(
                     effect_id.clone(),
                     ActiveEffect::Tool {
                         name: name.clone(),
-                        source_selection,
+                        source_selection: Arc::new(source_selection),
                         effect_id: effect_id.clone(),
                         identity: identity.clone(),
                         started: false,
                         parallel_safe: *parallel_safe,
+                        origin: origin.clone(),
+                        program_role: *program_role,
+                        next_program_ordinal: 1,
                     },
                 )
                 .is_some()
@@ -447,6 +481,9 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
                 started: true,
                 ..
             }) if current == effect_id && current_identity == identity => {
+                if turn.effects.values().any(|effect| matches!(effect, ActiveEffect::Tool { origin: ToolOrigin::Program { parent_effect_id, .. }, .. } if parent_effect_id == effect_id)) {
+                    return Err(TurnError::Invalid("coordinator result precedes nested Tool settlement".into()));
+                }
                 turn.effects.remove(effect_id);
             }
             _ => return Err(TurnError::Invalid("Tool result has no exact start".into())),
@@ -454,6 +491,52 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
         _ => unreachable!("caller selected a Tool Fact"),
     }
     Ok(())
+}
+
+fn admit_program_origin(
+    turn: &mut TurnControl,
+    parent: &EffectId,
+    ordinal: u32,
+    role: ToolProgramRole,
+    parallel_safe: bool,
+) -> TurnResult<rsi_agent_session_protocol::ModelSelection> {
+    if role != ToolProgramRole::Callable
+        || turn.effects.len() > rsi_agent_session_protocol::MAXIMUM_PROGRAM_OUTSTANDING_CALLS
+    {
+        return Err(TurnError::Invalid(
+            "program Tool eligibility or active-call capacity violated".into(),
+        ));
+    }
+    for (id, effect) in &turn.effects {
+        if id != parent
+            && (!parallel_safe
+                || !matches!(effect, ActiveEffect::Tool { parallel_safe: true, origin: ToolOrigin::Program { parent_effect_id, .. }, .. } if parent_effect_id == parent))
+        {
+            return Err(TurnError::Invalid(
+                "program Tool overlap violates its scheduling declaration".into(),
+            ));
+        }
+    }
+    let Some(ActiveEffect::Tool {
+        started: true,
+        program_role: ToolProgramRole::Coordinator,
+        origin: ToolOrigin::Model { .. },
+        next_program_ordinal,
+        source_selection,
+        ..
+    }) = turn.effects.get_mut(parent)
+    else {
+        return Err(TurnError::Invalid(
+            "program call lacks its exact started coordinator".into(),
+        ));
+    };
+    if ordinal != *next_program_ordinal {
+        return Err(TurnError::Invalid(
+            "program call ordinal was reused or skipped".into(),
+        ));
+    }
+    *next_program_ordinal = ordinal.checked_add(1).ok_or(TurnError::Capacity)?;
+    Ok(source_selection.as_ref().clone())
 }
 
 pub(super) fn ensure_no_active_effect(turn: &TurnControl) -> TurnResult<()> {
@@ -705,6 +788,7 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
         initial_messages: turn.initial_messages.clone(),
         claim_composition: turn.claim_composition.clone(),
+        program_roles: turn.program_roles.clone(),
         conclusion: turn.conclusion.clone(),
         tool_source: turn.tool_source.clone(),
         seen_model_effects: turn.seen_model_effects.clone(),

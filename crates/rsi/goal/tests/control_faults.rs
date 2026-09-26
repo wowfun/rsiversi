@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use rsi_agent_goal::{GoalAction, RoundSettlement};
 use rsi_agent_session_protocol::{
-    CommandRevision, ContinuationInput, ContinuationProvenance, DomainRequestId, MessageId,
-    SessionCommandInvocation, SessionCommandReceipt, SessionId,
+    CommandRevision, ContinuationInput, DomainRequestId, MessageId, SessionCommandInvocation,
+    SessionCommandReceipt, SessionId,
 };
 use rsi_agent_turn_protocol::{
     ContinuationBinding, ContinuationLease, DomainMutationReceipt, MessageReceipt,
@@ -45,6 +45,9 @@ impl LostCommand {
 }
 #[async_trait]
 impl GoalSession for LostCommand {
+    async fn wait_idle(&self, _: &ContinuationLease, _: CancellationToken) -> GoalResult<()> {
+        Err(GoalError::Unavailable)
+    }
     fn session_id(&self) -> &SessionId {
         &self.id
     }
@@ -87,6 +90,14 @@ impl GoalSession for LostCommand {
     async fn retain_for_settlement(&self, _: ContinuationBinding) -> GoalResult<ContinuationLease> {
         panic!("unknown create has no settlement authority")
     }
+    async fn reserve_initial(
+        &self,
+        _: &ContinuationLease,
+        _: SessionCommandInvocation,
+        _: ContinuationInput,
+    ) -> GoalResult<MessageReceipt> {
+        Err(GoalError::Unavailable)
+    }
     async fn internal_command(
         &self,
         _: &ContinuationLease,
@@ -101,14 +112,6 @@ impl GoalSession for LostCommand {
         _: &DomainRequestId,
     ) -> GoalResult<Option<DomainMutationReceipt>> {
         panic!("unknown create has no reservation")
-    }
-    async fn submit(
-        &self,
-        _: &ContinuationLease,
-        _: ContinuationInput,
-        _: ContinuationProvenance,
-    ) -> GoalResult<MessageReceipt> {
-        panic!("unknown create cannot submit")
     }
     async fn message_status(&self, _: &MessageId) -> GoalResult<Option<MessageReceipt>> {
         panic!("unknown create has no message")

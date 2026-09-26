@@ -38,3 +38,7 @@ Background
 commands have no command timeout and require live
 turn-scoped Jobs authority. Activation fails closed outside Linux until the
 Process family provides equivalent native settlement semantics there.
+
+Bash is Local-program Callable. An internal call preserves ordinary approval,
+Sandbox policy, Turn Jobs ownership and process settlement; program dispatch
+does not grant a separate background Jobs lifetime.

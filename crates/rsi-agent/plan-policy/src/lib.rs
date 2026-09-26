@@ -20,22 +20,32 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-const DOMAIN: &str = "rsi.plan-policy";
+mod review;
+use review::{REVIEW_DOMAIN, ReviewState};
+
+/// Durable Plan-mode policy identity, shared by consumers of its generation guard.
+pub const PLAN_POLICY_DOMAIN: &str = "rsi.plan-policy";
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 struct Config {
+    review_tools: bool,
     allow_tools: Vec<String>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
+            review_tools: true,
             allow_tools: vec![
                 "ask_user".into(),
                 "directory_list".into(),
                 "file_read".into(),
                 "output_read".into(),
+                "plan_write".into(),
+                "request_plan_execution".into(),
                 "todo_write".into(),
+                "workflow_read".into(),
+                "workflow_cancel".into(),
             ],
         }
     }
@@ -63,6 +73,11 @@ impl Config {
                 ));
             }
         }
+        if !config.review_tools {
+            config
+                .allow_tools
+                .retain(|name| name != review::WRITE && name != review::REQUEST);
+        }
         config.allow_tools.sort();
         Ok(config)
     }
@@ -75,12 +90,15 @@ pub struct PlanPolicyFactory;
 #[derive(Debug)]
 struct PlanPolicy {
     state: DomainHandle<bool>,
+    review: DomainHandle<ReviewState>,
     allowed: Vec<String>,
+    review_tools: bool,
 }
 #[derive(Serialize)]
 struct View<'a> {
     enabled: bool,
     allow_tools: &'a [String],
+    review: ReviewState,
 }
 impl PlanPolicy {
     fn current<'a>(
@@ -89,7 +107,7 @@ impl PlanPolicy {
     ) -> ContributionResult<(&'a DomainStateView, bool)> {
         let view = domains
             .iter()
-            .find(|view| view.snapshot.identity().id() == DOMAIN)
+            .find(|view| view.snapshot.identity().id() == PLAN_POLICY_DOMAIN)
             .ok_or_else(|| ContributionError::Invalid("plan state is missing".into()))?;
         Ok((view, self.state.decode(&view.snapshot).map_err(invalid)?))
     }
@@ -140,7 +158,12 @@ impl ContextContributor for PlanPolicy {
         let (_, enabled) = self.current(&context.domains)?;
         let text = if enabled {
             format!(
-                "Plan mode is enabled. Explore and present a concrete plan for the user to review before execution. Only these Tools are allowed: {}. Existing sandbox and approval requirements still apply. The user can disable plan mode with /plan off.",
+                "Plan mode is enabled. {} Only these Tools are allowed: {}. Existing sandbox and approval requirements still apply. The user can disable plan mode with /plan off.",
+                if self.review_tools {
+                    "Explore, save a concrete plan with plan_write, then use request_plan_execution for the human review before execution."
+                } else {
+                    "Explore and present a concrete plan to the user before execution."
+                },
                 self.allowed.join(", ")
             )
         } else {
@@ -165,7 +188,10 @@ impl ToolPolicy for PlanPolicy {
         }
         let (_, enabled) = self.current(&context.domains)?;
         Ok(
-            if !enabled || self.allowed.iter().any(|name| name == request.name) {
+            if !enabled
+                || (!matches!(request.name, "run_code" | "run_workflow")
+                    && self.allowed.iter().any(|name| name == request.name))
+            {
                 ToolPolicyDecision::Abstain
             } else {
                 ToolPolicyDecision::Deny {
@@ -192,6 +218,7 @@ impl SessionProjection for PlanPolicy {
         ProjectionValue::encode(&View {
             enabled,
             allow_tools: &self.allowed,
+            review: self.review_current(context.domains())?.1,
         })
         .map_err(invalid)
     }
@@ -206,14 +233,23 @@ impl PluginFactory for PlanPolicyFactory {
         let bytes = serde_json::to_vec(&normalized)
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?
             .len();
-        Ok(PreparedActivation::with_state(normalized, config, bytes)
+        let review_tools = config.review_tools;
+        let prepared = PreparedActivation::with_state(normalized, config, bytes)
             .requiring_local::<DomainRegistrarContract>()
-            .requiring_local::<ContributionRegistrarContract>())
+            .requiring_local::<ContributionRegistrarContract>()
+            .requiring_local::<rsi_tools_protocol::ToolRegistrarContract>();
+        Ok(if review_tools {
+            prepared
+                .requiring_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
+                .requiring_local::<rsi_user_questions_protocol::UserQuestionsContract>()
+        } else {
+            prepared
+        })
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config: Config = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN, 1).expect("static domain"),
+            DomainIdentity::new(PLAN_POLICY_DOMAIN, 1).expect("static domain"),
             &false,
             |_| Ok(()),
         )
@@ -222,9 +258,20 @@ impl PluginFactory for PlanPolicyFactory {
         let (state, domain_lease) = definition
             .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let (review, review_lease) = DomainDefinition::new(
+            DomainIdentity::new(REVIEW_DOMAIN, 1).expect("static domain"),
+            &ReviewState::default(),
+            ReviewState::validate,
+        )
+        .map_err(|e| MetaError::Activation(e.to_string()))?
+        .with_fork_policy(rsi_agent_composition_protocol::DomainForkPolicy::ResetToInitial)
+        .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
+        .map_err(|e| MetaError::Activation(e.to_string()))?;
         let callback = Arc::new(PlanPolicy {
             state,
+            review,
             allowed: config.allow_tools,
+            review_tools: config.review_tools,
         });
         let command_id =
             ContributionId::new("rsi.plan-policy.command").expect("static contribution");
@@ -236,6 +283,10 @@ impl PluginFactory for PlanPolicyFactory {
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let registrations = [
+            (
+                ContributionId::new("rsi.plan-policy.settle").expect("static contribution"),
+                ContributionKind::ToolSettlement(callback.clone()),
+            ),
             (
                 command_id,
                 ContributionKind::Command(SessionCommandRegistration::new(
@@ -253,7 +304,7 @@ impl PluginFactory for PlanPolicyFactory {
             ),
             (
                 ContributionId::new("rsi.plan-policy.view").expect("static contribution"),
-                ContributionKind::Projection(callback),
+                ContributionKind::Projection(callback.clone()),
             ),
         ];
         let registrar = plan.local::<ContributionRegistrarContract>()?;
@@ -265,15 +316,57 @@ impl PluginFactory for PlanPolicyFactory {
                     .map_err(|error| MetaError::Activation(error.to_string()))?,
             );
         }
+        let tool_lease = if config.review_tools {
+            let tool_lease = register_review_tools(&plan, &callback)?;
+            Some(tool_lease)
+        } else {
+            None
+        };
         plan.defer(
             "withdraw plan policy",
             Box::new(move || {
                 Box::pin(async move {
+                    if let Some(lease) = tool_lease {
+                        lease.retire().map_err(|e| e.to_string())?;
+                    }
                     drop(leases);
+                    drop(review_lease);
                     drop(domain_lease);
                     Ok(())
                 })
             }),
         )
     }
+}
+
+fn register_review_tools(
+    plan: &ActivationPlan,
+    callback: &Arc<PlanPolicy>,
+) -> rsi_meta::Result<rsi_tools_protocol::ToolBatchLease> {
+    let turns = plan.local::<rsi_agent_turn_protocol::TurnExecutionContract>()?;
+    let questions = plan.local::<rsi_user_questions_protocol::UserQuestionsContract>()?;
+    let tools = review::definitions()
+        .map_err(|e| MetaError::Activation(e.to_string()))?
+        .into_iter()
+        .map(|(definition, write)| rsi_tools_protocol::ToolRegistration {
+            definition,
+            output: None,
+            timeout: if write {
+                rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 }
+            } else {
+                rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+            },
+            executor: Arc::new(review::PlanTool {
+                policy: callback.clone(),
+                turns: turns.clone(),
+                questions: questions.clone(),
+                write,
+            }),
+        })
+        .collect();
+    let tool_lease = plan
+        .local::<rsi_tools_protocol::ToolRegistrarContract>()?
+        .register_batch(tools)
+        .map_err(|e| MetaError::Activation(e.to_string()))?;
+    Ok(tool_lease)
 }

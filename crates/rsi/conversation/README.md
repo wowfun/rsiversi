@@ -121,3 +121,7 @@ fixed watermarks, cache admission and tree membership belong to Session.
 
 Metrics content events validate their open request identity and advance only the
 Fact cursor; they do not clone completed request metadata or cost totals.
+
+Tool metadata retains the recorded Model or Program origin. Program calls are
+labeled explicitly in shared titles; loading only a result never invents its
+origin. Bounded provenance bytes participate in retained-memory accounting.

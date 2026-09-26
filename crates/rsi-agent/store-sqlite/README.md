@@ -92,6 +92,9 @@ are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not
 multiply Header reads. Activation guards require this proof even when
 the guarded Session is outside the write set.
+The lineage index includes a bounded execution-owner projection, compared with the
+canonical Header during first-access and offline validation. Warm subtree reads
+decode only that projection, without rereading each descendant Header.
 Subtree reads and transactional quiescence guards require that same proof for
 every previously unvalidated member. A foreground subtree snapshot with a
 missing proof is discarded and collected again on the validation connection;
@@ -205,7 +208,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 23 admits version 2 selected-reference envelopes and the current mandatory Agent-preset
+The exact schema version 26 admits version 2 selected-reference envelopes and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

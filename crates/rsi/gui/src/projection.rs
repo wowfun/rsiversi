@@ -643,7 +643,11 @@ mod tests {
                 10,
                 1,
                 SessionFactBody::ToolIntent {
-                    source_model_effect_id: EffectId::new("source-model").unwrap(),
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                        effect_id: EffectId::new("source-model").unwrap(),
+                    },
+
+                    program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
                     identity: identity.clone(),

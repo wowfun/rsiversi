@@ -141,6 +141,9 @@ pub struct ToolSettlementContext<'a> {
 /// Pure typed state proposals committed atomically with one `ToolResult`.
 #[derive(Debug, Default)]
 pub struct ToolSettlement {
+    /// Requires an uncancelled Turn when Kernel admits the atomic mutation.
+    /// Ordinary effect settlement may otherwise publish after cancellation.
+    pub require_uncancelled_turn: bool,
     /// Atomic typed domain replacements.
     pub domains: Vec<ValidatedDomainProposal>,
     /// Optional request to conclude after committing this exact result.

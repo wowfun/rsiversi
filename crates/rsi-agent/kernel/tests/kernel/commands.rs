@@ -496,6 +496,7 @@ async fn concurrent_callbacks_hold_no_submission_lock_and_loser_does_not_retry()
 #[tokio::test(start_paused = true)]
 async fn command_capacity_precedes_callback_and_shutdown_cancels_precommit_work() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), true).await;
+    let lease = continuation::arm(&fixture).await;
     let mut tasks = Vec::new();
     for index in 0..64 {
         let input = fixture.invocation(&format!("request-{index}"), true).await;
@@ -521,6 +522,28 @@ async fn command_capacity_precedes_callback_and_shutdown_cancels_precommit_work(
             .await,
         Err(TurnError::Capacity)
     ));
+    let mut settlement = fixture.invocation("continuation-overflow", false).await;
+    settlement.command = ContributionId::new("fixture.settle").unwrap();
+    assert_eq!(
+        rsi_agent_turn_protocol::SessionContinuations::execute(
+            &fixture.kernel,
+            &lease,
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            settlement,
+            None,
+        )
+        .await
+        .unwrap_err(),
+        TurnError::Capacity
+    );
+    assert!(
+        lease.is_armed(),
+        "precommit capacity rejection must retain continuation authority"
+    );
     assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 64);
     fixture.kernel.shutdown(fixture.workers).await.unwrap();
     for task in tasks {

@@ -161,6 +161,24 @@ struct EmptyTools;
 
 #[async_trait]
 impl ToolRuntime for EmptyTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definition(name)
+            .map(|definition| definition.program_role())
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition.program_role() != rsi_tools_protocol::ToolProgramRole::Unavailable
+            })
+            .map(|definition| (definition.name().to_owned(), definition.program_role()))
+            .collect()
+    }
+    fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        None
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }
@@ -1888,6 +1906,7 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
                 .answer_question(
                     "q",
                     QuestionAnswer {
+                        review: None,
                         answers: vec!["answer".into()]
                     }
                 )

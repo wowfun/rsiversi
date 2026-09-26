@@ -268,7 +268,8 @@ struct PreparedToolEffect {
 }
 
 struct PendingToolEffect {
-    source_model_effect_id: EffectId,
+    origin: rsi_agent_session_protocol::ToolOrigin,
+    program_role: rsi_tools_protocol::ToolProgramRole,
     effect_id: EffectId,
     identity: ToolResultIdentity,
     name: String,
@@ -300,6 +301,7 @@ mod contributions;
 mod driver;
 mod evidence;
 mod execution_support;
+mod program;
 mod tool_settlement;
 
 use execution_support::{
@@ -540,7 +542,10 @@ fn scan_turn(
                 state.pending_model_calls.clear();
             }
             SessionFactBody::ToolRejected {
-                turn_id, identity, ..
+                turn_id,
+                identity,
+                origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
+                ..
             } if turn_id == claim.turn_id() => {
                 state
                     .pending_model_calls
@@ -551,12 +556,15 @@ fn scan_turn(
                 turn_id,
                 effect_id,
                 identity,
+                origin,
                 ..
             } if turn_id == claim.turn_id() => {
-                state.completed_model_without_successor = false;
-                state
-                    .pending_model_calls
-                    .retain(|_, (id, _)| id != identity.call_id());
+                if matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. }) {
+                    state.completed_model_without_successor = false;
+                    state
+                        .pending_model_calls
+                        .retain(|_, (id, _)| id != identity.call_id());
+                }
                 state.effects.push(ResumeEffect::Tool {
                     intent: Arc::clone(fact),
                     effect_id: effect_id.clone(),

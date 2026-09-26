@@ -554,6 +554,7 @@ impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
             .wait_while(lock.lock().unwrap(), |released| !*released)
             .unwrap();
         Ok(PluginStatusPage {
+            last_attempt: None,
             context: rsi_configuration_api::PluginStatusContext::default(),
             desired_revision: "4".into(),
             observed_revision: "7".into(),

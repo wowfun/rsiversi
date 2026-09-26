@@ -7,7 +7,9 @@ Reads neither reconstruct context nor acquire execution authority. The API clien
 validates the echoed identity, page bounds and unavailable state.
 
 Goal control revision and identity conflicts remain typed command conflicts,
-bound to the original request ID, across Session API. A rejected pause/cancel
+bound to the original request ID, across Session API. Live-owner contention
+uses the existing retryable `SessionError::Capacity` admission error so clients can retry without classifying it as
+a backend failure. A rejected pause/cancel
 still revokes live scheduling before its command gate; it does not claim a
 durable phase change or cancellation of the current Turn. The caller can issue
 a new explicit control from a fresh revision after a known rejection. Unknown

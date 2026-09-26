@@ -25,6 +25,7 @@ impl<'a> StageRun<'a> {
         turns: &dyn TurnExecution,
         claim: &TurnClaim,
         stage: ContributionStage,
+        program: Option<&EffectId>,
         cancellation: &'a CancellationToken,
         stop: &'a CancellationToken,
     ) -> std::result::Result<Self, DriveFailure> {
@@ -34,7 +35,7 @@ impl<'a> StageRun<'a> {
         let context = tokio::select! {
             () = stop.cancelled() => return Err(DriveFailure::Stopped),
             () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
-            result = tokio::time::timeout_at(deadline, turns.contribution_context(claim, token.clone())) => {
+            result = tokio::time::timeout_at(deadline, async { match program { Some(parent) => turns.program_policy_context(claim, parent, token.clone()).await, None => turns.contribution_context(claim, token.clone()).await } }) => {
                 result.map_err(|_| failed("contribution.timeout", format!("framework/{stage:?}: snapshot deadline")))?
                     .map_err(turn_failure)?
             }
@@ -65,6 +66,7 @@ impl<'a> StageRun<'a> {
                     turns,
                     claim,
                     ContributionStage::BeforeStep,
+                    None,
                     cancellation,
                     stop,
                 )
@@ -146,7 +148,8 @@ impl Driver {
         if !entries.iter().any(|entry| entry.stage() == stage) {
             return Ok(());
         }
-        let run = StageRun::capture(self.turns.as_ref(), claim, stage, cancellation, stop).await?;
+        let run =
+            StageRun::capture(self.turns.as_ref(), claim, stage, None, cancellation, stop).await?;
         self.run_captured_contributions(claim, composition, fold, run, settled)
             .await
     }
@@ -205,6 +208,8 @@ impl Driver {
                 .commit_domains(
                     claim,
                     rsi_agent_turn_protocol::DomainMutation {
+                        guards: vec![],
+                        require_uncancelled_turn: false,
                         request_id,
                         proposals,
                         facts,
@@ -231,6 +236,7 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         mut request: ToolPolicyRequest<'_>,
+        origin: &rsi_agent_session_protocol::ToolOrigin,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<(bool, Option<ToolRejection>), DriveFailure> {
@@ -239,7 +245,21 @@ impl Driver {
         if !entries.iter().any(|entry| entry.stage() == stage) {
             return Ok((request.require_approval, None));
         }
-        let run = StageRun::capture(self.turns.as_ref(), claim, stage, cancellation, stop).await?;
+        let program = match origin {
+            rsi_agent_session_protocol::ToolOrigin::Program {
+                parent_effect_id, ..
+            } => Some(parent_effect_id),
+            rsi_agent_session_protocol::ToolOrigin::Model { .. } => None,
+        };
+        let run = StageRun::capture(
+            self.turns.as_ref(),
+            claim,
+            stage,
+            program,
+            cancellation,
+            stop,
+        )
+        .await?;
         for entry in entries {
             let ContributionKind::ToolPolicy(callback) = entry.kind() else {
                 continue;

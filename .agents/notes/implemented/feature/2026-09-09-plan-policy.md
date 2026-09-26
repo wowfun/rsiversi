@@ -36,6 +36,9 @@ product requirement. Classifying arbitrary shell command strings as read-only
 would create a second incomplete sandbox. Exact declared Tool names keep policy
 simple and let the authenticated Files capability supply bounded readers later.
 
+The [saved-plan handoff decision](../../implemented/feature/2026-09-24-atomic-plan-handoff.md)
+extends this owner with a second domain and an atomic human decision.
+
 ## Consequences
 
 The plugin is removable or configurable by an Agent preset; it owns no global

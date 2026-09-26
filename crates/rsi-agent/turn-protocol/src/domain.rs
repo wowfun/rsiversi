@@ -3,15 +3,29 @@
 use crate::{Result, TurnError};
 use rsi_agent_composition_protocol::ValidatedDomainProposal;
 use rsi_agent_session_protocol::{
-    AgentControlRecord, AgentControlRecordBody, DomainRequestId, DomainStateCommit,
-    SessionFactBody, SessionId,
+    AgentControlRecord, AgentControlRecordBody, DomainIdentity, DomainRequestId, DomainRevision,
+    DomainStateCommit, SessionFactBody, SessionId,
 };
+
+/// Read-only prerequisite checked under the same Session admission as a domain commit.
+#[derive(Clone, Debug)]
+pub struct DomainReadGuard {
+    /// Exact codec identity of the observed domain.
+    pub domain: DomainIdentity,
+    /// Revision whose state authorized the mutation.
+    pub revision: DomainRevision,
+}
 
 /// One source-free execution request; only Kernel may assign its Turn provenance.
 #[derive(Debug)]
 pub struct DomainMutation {
+    /// Fences cancellation at mutation admission, including exact Tool-result settlement.
+    /// An already committed same-request receipt remains authoritative.
+    pub require_uncancelled_turn: bool,
     /// Stable caller-allocated idempotency identity.
     pub request_id: DomainRequestId,
+    /// Bounded read dependencies. Canonical committed retries precede these checks.
+    pub guards: Vec<DomainReadGuard>,
     /// Complete typed replacements from the exact admitted composition generation.
     pub proposals: Vec<ValidatedDomainProposal>,
     /// Optional ordered generated Facts committed atomically with the replacements.

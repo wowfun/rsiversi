@@ -319,7 +319,7 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 17);
+    assert_eq!(current["format_version"], 18);
     assert!(current.get("workspace_trust").is_none());
     for version in [16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
@@ -1194,4 +1194,83 @@ fn assert_named_spawn_header(child: &SessionHeader) {
             "{path}"
         );
     }
+}
+
+#[test]
+fn entered_program_notice_preserves_mailbox_content_and_envelope_bounds() {
+    let source = ProgramCompletionSource {
+        run_id: ProgramRunId::new("run").unwrap(),
+        generation: "a".repeat(64),
+        terminal_control_seq: 4,
+    };
+    for content in [
+        vec![AgentMessageContent::Text {
+            text: "done".into(),
+        }],
+        vec![
+            AgentMessageContent::Text { text: "a".into() },
+            AgentMessageContent::Text { text: "b".into() },
+        ],
+        vec![AgentMessageContent::Text {
+            text: "x".repeat(8000),
+        }],
+        vec![AgentMessageContent::Text {
+            text: "x".repeat(8193),
+        }],
+    ] {
+        let message = AgentMessage {
+            message_id: MessageId::new("notice").unwrap(),
+            source: AgentMessageSource::Program {
+                source: source.clone(),
+            },
+            content: content.clone(),
+            options: MessageOptions::default(),
+        };
+        let valid = message.validate().is_ok();
+        let entered = SessionFact::new(
+            1,
+            1,
+            SessionFactBody::InputMessageEntered {
+                turn_id: TurnId::new("turn").unwrap(),
+                step_id: StepId::new("step").unwrap(),
+                source: message.entered_source(),
+                content,
+            },
+        );
+        assert_eq!(entered.is_ok(), valid);
+    }
+}
+
+#[test]
+fn model_output_schemas_share_validation_with_stricter_bytes_and_annotations() {
+    use rsi_agent_session_protocol::{MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES, OutputContract};
+    use serde_json::json;
+    for annotation in ["title", "description", "default", "examples"] {
+        let mut annotated = json!({"type":"string"});
+        annotated[annotation] = if annotation == "examples" {
+            json!(["text"])
+        } else {
+            json!("text")
+        };
+        for schema in [
+            json!({"type":"object", annotation:"text"}),
+            json!({"type":"object","properties":{"value":annotated}}),
+            json!({"type":"object","properties":{"value":{"type":"array","items":annotated}}}),
+            json!({"type":"object","properties":{"value":{"oneOf":[annotated,{"type":"null"}]}}}),
+        ] {
+            assert!(OutputContract::from_model_schema(schema).is_err());
+        }
+    }
+    let data_names = json!({"type":"object","properties":{"description":{"type":"string","enum":["title","examples"]}}});
+    assert!(OutputContract::from_model_schema(data_names).is_ok());
+    assert!(OutputContract::new(json!({"type":"object","description":"trusted"})).is_ok());
+    let mut schema = json!({"type":"object","properties":{"value":{"type":"string","const":""}}});
+    let overhead = serde_json::to_vec(&schema).unwrap().len();
+    schema["properties"]["value"]["const"] =
+        json!("a".repeat(MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES - overhead));
+    assert!(OutputContract::from_model_schema(schema.clone()).is_ok());
+    schema["properties"]["value"]["const"] =
+        json!("a".repeat(MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES - overhead + 1));
+    assert!(OutputContract::from_model_schema(schema.clone()).is_err());
+    assert!(OutputContract::new(schema).is_ok());
 }

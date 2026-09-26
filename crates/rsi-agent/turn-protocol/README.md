@@ -1,5 +1,12 @@
 # rsi-agent-turn-protocol
 
+`read_program` observes one run in the exact live caller's Session, including
+complete verified result data and the run control revision. `cancel_program`
+revokes that same Session's live run, without reviving the creator Tool. Neither
+operation grants child or cross-Session control. Model adapters page the complete
+rendered observation within 8 KiB by default (16 KiB maximum) and bind continuation
+offsets to the returned revision; a changed run requires a fresh first page.
+
 `ExecutionObserver` is an optional, explicitly composed effect-interval observer.
 It asynchronously admits an interval bound to the exact claim, then Executor awaits
 its `begin` before entering any effect owner, including Job preparation and
@@ -69,7 +76,9 @@ Local lookup is not a sandbox against linked plugin code; the application-owned
 contribution allowlist and its trusted implementations determine dependencies.
 A bounded live
 lease binds one Session Header, exact composition generation, domain and owner
-identity. Dropping the final lease or revoking it disarms further allocation and
+identity. One retained owner per `(Session, domain)` is allowed, with 64 owners
+per domain and 128 total; owners sharing a Session must share its exact generation.
+Dropping the final lease or revoking it disarms further allocation and
 message admission. Internal settlement may finish with the retained revoked
 lease; it cannot reserve or admit input. Each submitted input binds a canonical
 internal reservation receipt or the exact frozen first-publication baseline,
@@ -78,10 +87,13 @@ claim this provenance. The ready scheduler and claim admission both check the
 live lease and current revision; a cold pending continuation is discarded.
 Pending-only discard never falls through to cancellation of a claimed Turn.
 An explicit pause/cancel after restart may retain an already revoked settlement
-lease. It never grants scheduling authority. Draft arm freezes the first input
-provided by the validated domain owner with the exact baseline snapshot; Kernel
-does not interpret that domain's opaque JSON. Durable reserve binds the complete
-input in canonical continuation command provenance.
+lease. It never grants scheduling authority. Draft arm freezes an uncharged
+baseline. Initial reserve evaluates the domain's pure command on a private
+candidate and publishes its first allocation only with the accepted input;
+Kernel does not interpret that domain's opaque JSON. Durable reserve binds the complete
+input in canonical continuation command provenance and commits its acceptance in
+the same idle transaction. Busy is a retryable deferral that preserves authority
+and budget; the idle wait is advisory and final admission rechecks activity.
 
 `SessionCommands` is an independent Local service published by the same Kernel.
 Listing and execution consume Kernel-issued resume authority, retaining the
@@ -299,3 +311,46 @@ SessionProjections may expose an optional process-local durable activity revisio
 without Store I/O, observer slots or generation retention. It changes after each
 Kernel commit; consumers capture it before reading durable metadata. An unavailable
 or exhausted revision disables caching, and it conveys no authorization.
+
+Fresh continuation creation is uncharged. `reserve_initial` evaluates the pinned
+pure reserve command against a private baseline and atomically publishes its
+Header, allocated state and exact message. An ordinary draft publication never
+publishes a speculative automatic allocation. Command retries reconcile through `execute` or read-only `query`; accepted input
+is observed through `message_status`. No separate input-submission phase exists.
+Current lease revisions never move backwards.
+Eligible owners alternate by their last accepted control position; Busy leaves
+the demand pending without consuming an allocation. Idle waits subscribe to
+current descendants and tree membership before rechecking state.
+
+`ProgramToolCalls` is an executor-injected Local extension for one live coordinator
+Tool. Its catalog contains only Callable definitions from that claim's pin. The
+executor assigns call ordinals and identities, bounds outstanding requests to 16,
+and owns settlement even if a request waiter disappears. It grants neither Agent
+control nor detached authority, and it is never encoded in portable Tool input.
+
+A foreground program policy snapshot names its exact still-started coordinator.
+Kernel permits that read only while the coordinator is the sole active effect;
+ordinary contribution capture retains its no-active-effect requirement. Nested
+PostTool callbacks run in settled source order after coordinator settlement, so
+no context input or callback domain write enters during the active coordinator.
+
+`TurnService::prepare_program` validates an exact started workflow Tool and returns
+an opaque `ProgramRun` owner. Its implementation retains the frozen composition,
+parent horizon and actual Turn permission; serializable descriptors grant no
+execution authority. Preparation reserves live capacity but creates no run record.
+After Jobs admission, `accept` checks the creator again, then `start` records the
+run before opening the external process latch. Detached operations use the owner
+instead of a retired Tool claim. `detach` and creator cancellation serialize on
+one run transition. Child waits read the exact initial-activation receipt and
+return full verified structured output, or a bounded final public reply.
+
+Continuation commands retain their lease after Session busy, precommit capacity
+rejection, or command revision conflict, including settlement commands. Callers
+may retry these typed contention outcomes with fresh state and bounded pacing.
+Other failures revoke the lease; Store and unknown commit outcomes do not authorize
+replay.
+
+Initial Turn input classification follows the exact acceptance message identities
+through paged claim Facts until those inputs enter or the first model intent
+begins. Later steering cannot change this classification. Root-only callers enforce
+lineage separately; automatic-work adapters select allowed continuation domains.

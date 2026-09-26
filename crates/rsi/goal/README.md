@@ -10,8 +10,10 @@ running. Host withdrawal revokes leases, discards pending continuation input,
 cancels and joins drivers. Startup is disarmed; only an explicit successful
 create/resume action may arm after canonical command-receipt reconciliation.
 
-One round reserves by an internal command/CAS, then submits the exact frozen
-message through Kernel continuation admission. Claim uses the existing atomic
+Each round atomically reserves by an internal command/CAS and accepts the exact
+frozen message through idle Kernel admission. Busy preserves the live owner and
+waits for Session changes without charging an allocation. A draft first round
+computes a private candidate baseline and publishes it only with acceptance. Claim uses the existing atomic
 activation/Turn/Step/input path. Neither receipt reads nor uncertain outcomes
 start a new round. A Store failure disarms and retains the original reservation
 identity; the controller does not fabricate a persisted blocked state.
@@ -40,5 +42,5 @@ stays unresolved on Pause with its original identity; explicit Resume can
 reconcile and submit that allocation. Explicit Cancel abandons it without
 provider execution, permitting replacement of the stopped Goal. Outcome reads
 do not fabricate a discard, abandonment or refund.
-A published draft baseline is first bound to an internal reserve receipt, using
-the same allocation, before normal command-provenance admission.
+A draft published by human input still has zero automatic allocations. Its first
+automatic round uses the ordinary durable reserve transaction once idle.

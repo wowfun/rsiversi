@@ -52,3 +52,18 @@ fn process_plans_preserve_wide_os_strings_and_reject_foreign_platform() {
     assert_eq!(decoded.restore().unwrap(), original);
     assert!(OsValue::Unix(vec![0xff]).restore().is_err());
 }
+
+#[test]
+fn program_eligibility_is_local_and_cannot_be_injected_through_definition_wire() {
+    use rsi_tools_protocol::{ToolDefinition, ToolProgramRole};
+    let definition = ToolDefinition::new("read", "read", json!({"type":"object"}))
+        .unwrap()
+        .with_program_role(ToolProgramRole::Callable);
+    let bytes = portable::encode(&definition).unwrap();
+    let decoded: ToolDefinition = portable::decode(&bytes).unwrap();
+    assert_eq!(decoded.program_role(), ToolProgramRole::Unavailable);
+    let mut forged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    forged["program_role"] = json!("callable");
+    assert!(portable::decode::<ToolDefinition>(&portable::encode(&forged).unwrap()).is_err());
+    assert_eq!(portable::VERSION, 2);
+}

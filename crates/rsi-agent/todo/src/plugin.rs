@@ -89,6 +89,7 @@ impl ToolSettlementContributor for Todo {
         }
         let (view, _) = self.current(context.domains)?;
         Ok(ToolSettlement {
+            require_uncancelled_turn: false,
             domains: vec![
                 self.state
                     .propose(view.revision, &args.todos)

@@ -1,0 +1,35 @@
+[package]
+name = "rsi-agent-program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-agent-goal = { path = "../goal" }
+rsi-agent-schedule = { path = "../schedule" }
+rsi-agent-plan-policy = { path = "../plan-policy" }
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-turn-protocol = { path = "../turn-protocol" }
+rsi-jobs = { path = "../../rsi-jobs/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-jobs-local = { path = "../../rsi-jobs/local" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-tools = { path = "../../rsi-tools/core" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

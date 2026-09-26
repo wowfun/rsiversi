@@ -49,6 +49,15 @@ adapter routes an approval answer only after validating the explicit owning
 Session within the caller's durable Agent tree, then dispatches the exact
 (Session, approval identity) tuple.
 
+Program-origin Tool facts instead prove their exact still-started coordinator,
+ordinal and frozen Local eligibility; they cannot forge a model call. Their nested
+execution retains ordinary policy, approval and budget checks. Detached workflow
+authority is a separate Kernel-issued owner with frozen model, permissions and
+parent horizon. The [native program runtime](../program/README.md) uses
+shell-equivalent Sandbox authority, with no JavaScript VM confinement claim.
+Plan-mode changes revoke a captured workflow policy generation, including unknown
+write acknowledgement; a completion notice cannot authorize a successor run.
+
 The session header records redacted configuration facts only. It may contain a
 credential reference but never a resolved secret. Provider error summaries and
 Tool failures are bounded before persistence. Media content remains owned by

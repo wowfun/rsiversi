@@ -42,6 +42,10 @@ fn plugin_input_has_validated_provenance_and_preserves_actual_text() {
 #[test]
 fn rejected_tool_preserves_preparation_and_validates_the_actual_denial() {
     let body = |rejection| SessionFactBody::ToolRejected {
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: TurnId::new("turn").unwrap(),
         effect_id: EffectId::new("effect").unwrap(),
         identity: ToolResultIdentity::new("owner", "invocation", "call", "a".repeat(64)).unwrap(),

@@ -38,3 +38,6 @@ exact path bytes and captured length, with a 160 KiB encoded ceiling. Each metad
 token is released before opening the next file, so one invocation retains at most
 one token while inspecting its declaration. It declares
 current files; it neither snapshots contents nor grants later human access.
+
+`file_read` and `directory_list` opt into Local program calls. Program dispatch
+retains the same sandbox read scope and sealed Tool admission as model calls.

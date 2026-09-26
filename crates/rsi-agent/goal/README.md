@@ -8,25 +8,20 @@ The Host controller owns live continuation authority and aggregate driving.
 A Goal freezes an explicit positive round maximum and the Header's immutable
 five-dimensional TurnBudget. Checked products describe automatic parent-Turn
 allowances, excluding monetary/token accounting and descendant budgets. Round
-reservation increments the allocated count immediately and never refunds it.
-Resume preserves that count. The latest reservation freezes its deterministic
-message identity, complete input and digest; uncertain acknowledgement cannot
-allocate another identity or round.
+reservation and input acceptance commit together, without refunds after acceptance.
+Busy admission changes neither the allocated count nor the live lease. Resume
+preserves that count. Each reservation freezes its deterministic message identity,
+complete input and digest; uncertain acknowledgement cannot allocate a new round.
 
 Application commands create, resume, pause or cancel state. Internal reserve
 and settle commands require continuation dispatch and are absent from ordinary
 command discovery. Their callbacks remain pure proposals under exact domain CAS.
 Reserve rejects an authenticated input differing from its deterministic proposed
-reservation. Cancel may abandon a never-accepted allocation after scheduling is
-revoked and mailbox absence is confirmed under the controller's operation gate.
-Abandonment is a domain settlement, not a mailbox discard or a refund. Draft
-Cancel settles the unpublished allocation directly. Pause retains it for Resume.
-Draft first reservation belongs to the staged baseline; first acceptance
-publishes the Header and baseline together.
-If ordinary input publishes that baseline before its automatic input is admitted,
-internal reserve binds the existing first reservation to a durable continuation
-command receipt. Its round, message identity, input and allocated count stay
-unchanged, including when the round maximum is already allocated.
+reservation. Draft creation allocates zero rounds. The first reserve evaluates a
+private candidate baseline and publishes that allocation, Header and exact input
+in one transaction. Ordinary input publishing the draft leaves its allocation at
+zero; the controller later uses the same idle admission as every durable round.
+
 
 `report_goal` accepts only complete, blocked or pause plus bounded evidence/reason
 text. It cannot create a Goal, increase its cap or arm a driver. The

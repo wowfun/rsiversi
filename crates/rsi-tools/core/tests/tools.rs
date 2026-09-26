@@ -331,6 +331,12 @@ async fn output_catalog_admission_is_atomic_and_withdrawal_releases_its_budget()
     let tools = stage.seal().unwrap();
     drop(second);
     assert_eq!(
+        tools.definition("new"),
+        tools.definitions().into_iter().next()
+    );
+    assert!(tools.definition("old-0").is_none());
+    assert!(tools.definition("must-not-leak").is_none());
+    assert_eq!(
         tools
             .definitions()
             .iter()
@@ -1402,5 +1408,89 @@ async fn output_catalog_admits_the_exact_encoded_limit() {
     drop(lease);
     assert_eq!(tools.output_declarations(), outputs);
     drop(tools);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn program_roles_reject_human_wait_recursion_and_parallel_coordinators() {
+    use rsi_tools_protocol::{ToolProgramRole, ToolScheduling, ToolTimeoutPolicy};
+    let (fiber, provider) = activated().await;
+    let stage = provider.begin_stage().unwrap();
+    for (role, scheduling, timeout) in [
+        (
+            ToolProgramRole::Callable,
+            ToolScheduling::ExclusiveFinal,
+            ToolTimeoutPolicy::HumanInteraction,
+        ),
+        (
+            ToolProgramRole::Callable,
+            ToolScheduling::ExclusiveFinal,
+            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+        ),
+        (
+            ToolProgramRole::Coordinator,
+            ToolScheduling::ParallelSafe,
+            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+        ),
+        (
+            ToolProgramRole::Workflow,
+            ToolScheduling::ParallelSafe,
+            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+        ),
+    ] {
+        assert!(
+            stage
+                .registrar()
+                .register(ToolRegistration {
+                    output: None,
+                    definition: ToolDefinition::new("invalid", "", json!({}))
+                        .unwrap()
+                        .with_program_role(role)
+                        .with_scheduling(scheduling),
+                    timeout,
+                    executor: Arc::new(EchoTool)
+                })
+                .is_err()
+        );
+    }
+    drop(stage);
+    drop(provider);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn role_projections_match_the_sealed_catalog() {
+    use rsi_tools_protocol::ToolProgramRole;
+    let (fiber, provider) = activated().await;
+    let stage = provider.begin_stage().unwrap();
+    let mut leases = vec![];
+    let expected = [
+        ("unavailable", ToolProgramRole::Unavailable),
+        ("callable", ToolProgramRole::Callable),
+        ("coordinator", ToolProgramRole::Coordinator),
+        ("workflow", ToolProgramRole::Workflow),
+    ];
+    for (name, role) in expected {
+        let mut registration = echo_registration(name);
+        registration.definition = registration.definition.with_program_role(role);
+        leases.push(stage.registrar().register(registration).unwrap());
+    }
+    let tools = stage.seal().unwrap();
+    for (name, role) in expected {
+        assert_eq!(tools.program_role(name), Some(role));
+        assert_eq!(tools.definition(name).unwrap().program_role(), role);
+    }
+    assert_eq!(tools.program_role("missing"), None);
+    assert_eq!(
+        tools.program_roles(),
+        expected
+            .into_iter()
+            .filter(|(_, role)| *role != ToolProgramRole::Unavailable)
+            .map(|(name, role)| (name.to_owned(), role))
+            .collect()
+    );
+    drop(leases);
+    drop(tools);
+    drop(provider);
     assert!(fiber.dispose().await.is_clean());
 }

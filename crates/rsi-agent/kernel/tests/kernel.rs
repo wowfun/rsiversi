@@ -105,7 +105,11 @@ struct FactReadRaceStore {
     fact_page_override: Mutex<Option<StoreFactPage>>,
     control_page_override: Mutex<Option<rsi_agent_store_protocol::StoreControlPage>>,
     fail_agent_creation_after_apply: AtomicBool,
+    fail_program_after_apply: AtomicBool,
+    program_records_materialized: AtomicUsize,
+    cas_writes: AtomicUsize,
     fail_domain_after_apply: AtomicBool,
+    reject_quiescent_commit: AtomicBool,
     fail_terminal_after_apply: AtomicBool,
     fail_terminal_lookup_after_apply: AtomicBool,
     terminal_lookup_fails: AtomicBool,
@@ -182,7 +186,11 @@ impl FactReadRaceStore {
             fact_page_override: Mutex::new(None),
             control_page_override: Mutex::new(None),
             fail_agent_creation_after_apply: AtomicBool::new(false),
+            fail_program_after_apply: AtomicBool::new(false),
+            program_records_materialized: AtomicUsize::new(0),
+            cas_writes: AtomicUsize::new(0),
             fail_domain_after_apply: AtomicBool::new(false),
+            reject_quiescent_commit: AtomicBool::new(false),
             fail_terminal_after_apply: AtomicBool::new(false),
             fail_terminal_lookup_after_apply: AtomicBool::new(false),
             terminal_lookup_fails: AtomicBool::new(false),
@@ -422,6 +430,60 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn list_program_notices(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreProgramNoticePage> {
+        self.inner.list_program_notices(after, limit).await
+    }
+
+    async fn read_program_records(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreProgramRecords>>
+    {
+        self.inner.read_program_records(session, run).await
+    }
+    async fn program_run_for_creator(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_session_protocol::ProgramRunId>> {
+        self.inner.program_run_for_creator(session, turn).await
+    }
+    async fn read_program_records_after(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+        after: u64,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreProgramRecords>>
+    {
+        let page = self
+            .inner
+            .read_program_records_after(session, run, after)
+            .await?;
+        self.program_records_materialized.fetch_add(
+            page.as_ref().map_or(0, |page| page.records.len()),
+            Ordering::SeqCst,
+        );
+        Ok(page)
+    }
+    async fn inspect_session(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        self.inner.inspect_session(session_id).await
+    }
+    async fn list_active_program_runs(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreProgramPage> {
+        self.inner.list_active_program_runs(after, limit).await
+    }
+
     async fn read_fact_suffix(
         &self,
         id: &SessionId,
@@ -521,6 +583,11 @@ impl SessionStore for FactReadRaceStore {
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
         let creates_session = commit.sessions.iter().any(|append| append.header.is_some());
+        let program = commit
+            .sessions
+            .iter()
+            .flat_map(|append| &append.controls)
+            .any(|record| matches!(record.body(), AgentControlRecordBody::ProgramRun { .. }));
         let ends_turn = commit
             .sessions
             .iter()
@@ -560,7 +627,20 @@ impl SessionStore for FactReadRaceStore {
             self.agent_commit_before_apply.notify_one();
             self.release_agent_commit_before_apply.notified().await;
         }
+        if let Some(guard) = &commit.quiescent_descendants_of
+            && self.reject_quiescent_commit.swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::SessionNotQuiescent {
+                session: guard.session_id.to_string(),
+            });
+        }
         let result = self.inner.commit_agent(commit).await;
+        if result.is_ok() && program && self.fail_program_after_apply.swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost program acknowledgement".into(),
+            ));
+        }
         if result.is_ok()
             && ends_turn
             && self.fail_terminal_after_apply.swap(false, Ordering::AcqRel)
@@ -998,6 +1078,7 @@ impl SessionStore for FactReadRaceStore {
     }
 
     async fn put_cas(&self, bytes: Arc<[u8]>) -> rsi_agent_store_protocol::Result<CasObjectRef> {
+        self.cas_writes.fetch_add(1, Ordering::SeqCst);
         self.inner.put_cas(bytes).await
     }
 
@@ -1094,6 +1175,26 @@ impl Drop for DropOwner {
 
 #[async_trait]
 impl ToolRuntime for SourceOnlyTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definition(name)
+            .map(|definition| definition.program_role())
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition.program_role() != rsi_tools_protocol::ToolProgramRole::Unavailable
+            })
+            .map(|definition| (definition.name().to_owned(), definition.program_role()))
+            .collect()
+    }
+    fn definition(&self, name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        self.definitions()
+            .into_iter()
+            .find(|definition| definition.name() == name)
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         // These fixtures publish source-bound effects directly; keep the frozen
         // child policy honest even though they never invoke a Tool executor.

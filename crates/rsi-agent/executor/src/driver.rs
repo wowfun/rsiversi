@@ -1046,7 +1046,9 @@ impl Driver {
     ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
         let pending = self
             .prepare_tool_call(
-                source_model_effect_id,
+                &rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: source_model_effect_id.clone(),
+                },
                 claim,
                 composition,
                 fold,
@@ -1061,7 +1063,7 @@ impl Driver {
             .publish_tool_start(claim, composition, fold, pending)
             .await?;
         let identity = prepared.identity.clone();
-        let result = match self
+        let (result, nested_results) = match self
             .start_tool(
                 &prepared.effect_id,
                 prepared.prepared,
@@ -1070,9 +1072,17 @@ impl Driver {
                 claim,
                 job_scope,
                 scheduling,
-                turn_policy.sandbox,
+                turn_policy,
                 cancellation,
                 stop,
+                matches!(
+                    prepared.intent.body(),
+                    SessionFactBody::ToolIntent {
+                        program_role: rsi_tools_protocol::ToolProgramRole::Coordinator,
+                        ..
+                    }
+                )
+                .then_some(&mut *fold),
             )
             .await
         {
@@ -1087,8 +1097,22 @@ impl Driver {
                 return Err(failure);
             }
         };
-        self.publish_tool_result(claim, composition, fold, prepared.intent, result)
-            .await
+        let fact = self
+            .publish_tool_result(claim, composition, fold, prepared.intent, result)
+            .await?;
+        if !nested_results.is_empty() {
+            self.run_contributions(
+                claim,
+                composition,
+                fold,
+                rsi_agent_composition_protocol::ContributionStage::AfterTools,
+                &nested_results,
+                cancellation,
+                stop,
+            )
+            .await?;
+        }
+        Ok(fact)
     }
 
     #[allow(clippy::too_many_arguments)] // The batch shares the exact turn policy and live turn-scoped authorities.
@@ -1108,7 +1132,9 @@ impl Driver {
         for call in calls {
             pending.push(
                 self.prepare_tool_call(
-                    source_model_effect_id,
+                    &rsi_agent_session_protocol::ToolOrigin::Model {
+                        effect_id: source_model_effect_id.clone(),
+                    },
                     claim,
                     composition,
                     fold,
@@ -1138,12 +1164,13 @@ impl Driver {
                     claim,
                     job_scope,
                     ToolScheduling::ParallelSafe,
-                    turn_policy.sandbox,
+                    turn_policy,
                     cancellation,
                     stop,
+                    None,
                 )
                 .await;
-            (effect.intent, identity, result)
+            (effect.intent, identity, result.map(|(result, _)| result))
         }))
         .await;
 
@@ -1184,7 +1211,7 @@ impl Driver {
     #[allow(clippy::too_many_lines)] // Admission preserves producing request proof and exact Tool policy through preparation.
     pub(super) async fn prepare_tool_call(
         &self,
-        source_model_effect_id: &EffectId,
+        origin: &rsi_agent_session_protocol::ToolOrigin,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
@@ -1196,6 +1223,10 @@ impl Driver {
     ) -> std::result::Result<PendingToolEffect, DriveFailure> {
         let (effect_id, arguments) = prepare_tool_effect(&call).map_err(|failure| *failure)?;
         let name = call.name;
+        let program_role = composition
+            .tools()
+            .program_role(&name)
+            .unwrap_or(rsi_tools_protocol::ToolProgramRole::Unavailable);
         let prepared = composition
             .tools()
             .prepare(
@@ -1219,6 +1250,7 @@ impl Driver {
                     sandbox: turn_policy.sandbox,
                     require_approval: turn_policy.require_approval,
                 },
+                origin,
                 cancellation,
                 stop,
             )
@@ -1229,6 +1261,8 @@ impl Driver {
                     claim,
                     fold,
                     vec![SessionFactBody::ToolRejected {
+                        origin: origin.clone(),
+                        program_role,
                         turn_id: claim.turn_id().clone(),
                         effect_id,
                         identity,
@@ -1262,6 +1296,8 @@ impl Driver {
                         claim,
                         fold,
                         vec![SessionFactBody::ToolRejected {
+                            origin: origin.clone(),
+                            program_role,
                             turn_id: claim.turn_id().clone(),
                             effect_id,
                             identity,
@@ -1284,7 +1320,8 @@ impl Driver {
             None
         };
         Ok(PendingToolEffect {
-            source_model_effect_id: source_model_effect_id.clone(),
+            origin: origin.clone(),
+            program_role,
             effect_id,
             identity,
             name,
@@ -1303,7 +1340,8 @@ impl Driver {
         pending: PendingToolEffect,
     ) -> std::result::Result<PreparedToolEffect, DriveFailure> {
         let PendingToolEffect {
-            source_model_effect_id,
+            origin,
+            program_role,
             effect_id,
             identity,
             name,
@@ -1317,7 +1355,8 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ToolIntent {
-                    source_model_effect_id,
+                    origin,
+                    program_role,
                     turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
@@ -1361,7 +1400,8 @@ impl Driver {
         let mut prepared = Vec::with_capacity(pending.len());
         for effect in pending {
             let PendingToolEffect {
-                source_model_effect_id,
+                origin,
+                program_role,
                 effect_id,
                 identity,
                 name,
@@ -1371,7 +1411,8 @@ impl Driver {
                 prepared: prepared_call,
             } = effect;
             intents.push(SessionFactBody::ToolIntent {
-                source_model_effect_id,
+                origin,
+                program_role,
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
                 identity: identity.clone(),
@@ -1455,6 +1496,8 @@ impl Driver {
                 .commit_domains(
                     claim,
                     rsi_agent_turn_protocol::DomainMutation {
+                        guards: vec![],
+                        require_uncancelled_turn: settlement.require_uncancelled_turn,
                         request_id,
                         proposals: settlement.domains,
                         facts: vec![body],
@@ -1620,7 +1663,7 @@ impl Driver {
     }
 
     #[allow(clippy::too_many_arguments)] // Start binds one prepared effect to its durable identity and exact turn-scoped authorities.
-    pub(super) async fn start_tool(
+    pub(super) async fn start_tool_raw(
         &self,
         effect_id: &EffectId,
         prepared: Box<dyn PreparedToolCall>,
@@ -1632,6 +1675,7 @@ impl Driver {
         sandbox_mode: SandboxMode,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
+        program: Option<rsi_agent_turn_protocol::ProgramToolCalls>,
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let combined = combine_cancellation(cancellation, stop);
         let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
@@ -1644,6 +1688,9 @@ impl Driver {
             extensions = extensions
                 .with(Arc::new(parking))
                 .map_err(|error| fatal(error.to_string()))?;
+        }
+        if let Some(program) = program {
+            extensions = extensions.with(Arc::new(program)).map_err(fatal)?;
         }
         let result = prepared
             .start(ToolStart {
@@ -1920,7 +1967,7 @@ impl Driver {
         Ok(vec![terminal])
     }
 
-    const fn context_limits(&self) -> ContextLimits {
+    pub(super) const fn context_limits(&self) -> ContextLimits {
         ContextLimits {
             max_messages: self.config.max_context_messages,
             max_bytes: self.config.max_context_bytes,

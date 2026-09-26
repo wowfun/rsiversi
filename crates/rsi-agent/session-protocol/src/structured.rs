@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 /// Maximum serialized schema bytes.
 pub const MAXIMUM_OUTPUT_SCHEMA_BYTES: usize = 64 * 1024;
+/// Maximum serialized model-authored schema bytes.
+pub const MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES: usize = 8 * 1024;
 /// Maximum serialized accepted value bytes.
 pub const MAXIMUM_OUTPUT_VALUE_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 preview bytes, before enclosing JSON encoding.
@@ -51,13 +53,22 @@ impl<'de> Deserialize<'de> for OutputContract {
     }
 }
 impl OutputContract {
+    /// Admits model-authored finite schemas with no instruction annotations and at most 8 KiB.
+    pub fn from_model_schema(schema: Value) -> Result<Self> {
+        Self::admit(schema, MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES, false)
+    }
+
     /// Validates the schema before child admission or provider dispatch.
     pub fn new(schema: Value) -> Result<Self> {
-        let encoded = bounded_json(&schema, MAXIMUM_OUTPUT_SCHEMA_BYTES)?;
+        Self::admit(schema, MAXIMUM_OUTPUT_SCHEMA_BYTES, true)
+    }
+
+    fn admit(schema: Value, maximum_bytes: usize, annotations: bool) -> Result<Self> {
+        let encoded = bounded_json(&schema, maximum_bytes)?;
         if schema.get("type").and_then(Value::as_str) != Some("object") {
             return Err(invalid("output schema root must have type object"));
         }
-        validate_schema(&schema, 0, &mut 64)?;
+        validate_schema(&schema, 0, &mut 64, annotations)?;
         jsonschema::draft7::meta::validate(&schema)
             .map_err(|_| invalid("invalid Draft 7 output schema"))?;
         Ok(Self(std::sync::Arc::new(CompiledOutput {
@@ -258,7 +269,37 @@ fn bounded_json(value: &Value, maximum: usize) -> Result<Encoded> {
             .map_err(|_| invalid("output JSON encoding failed"))?,
     })
 }
-fn validate_schema(schema: &Value, depth: usize, branches_left: &mut usize) -> Result<()> {
+fn validate_schema_keyword(key: &str, annotations: bool) -> Result<()> {
+    if !annotations && matches!(key, "title" | "description" | "default" | "examples") {
+        return Err(invalid(
+            "schema annotations are not accepted; put instructions in message",
+        ));
+    }
+    if !matches!(
+        key,
+        "type"
+            | "oneOf"
+            | "properties"
+            | "required"
+            | "additionalProperties"
+            | "items"
+            | "enum"
+            | "const"
+            | "title"
+            | "description"
+            | "default"
+            | "examples"
+    ) {
+        return Err(invalid("unsupported output schema keyword"));
+    }
+    Ok(())
+}
+fn validate_schema(
+    schema: &Value,
+    depth: usize,
+    branches_left: &mut usize,
+    annotations: bool,
+) -> Result<()> {
     if depth > 32 {
         return Err(invalid("output schema nesting exceeds 32"));
     }
@@ -266,23 +307,7 @@ fn validate_schema(schema: &Value, depth: usize, branches_left: &mut usize) -> R
         .as_object()
         .ok_or_else(|| invalid("schema must be an object"))?;
     for key in map.keys() {
-        if !matches!(
-            key.as_str(),
-            "type"
-                | "oneOf"
-                | "properties"
-                | "required"
-                | "additionalProperties"
-                | "items"
-                | "enum"
-                | "const"
-                | "title"
-                | "description"
-                | "default"
-                | "examples"
-        ) {
-            return Err(invalid("unsupported output schema keyword"));
-        }
+        validate_schema_keyword(key, annotations)?;
     }
     for key in ["title", "description"] {
         if map.get(key).is_some_and(|value| !value.is_string()) {
@@ -306,7 +331,7 @@ fn validate_schema(schema: &Value, depth: usize, branches_left: &mut usize) -> R
             .checked_sub(branches.len())
             .ok_or_else(|| invalid("output schema exceeds 64 total oneOf branches"))?;
         for branch in branches {
-            validate_schema(branch, depth + 1, branches_left)?;
+            validate_schema(branch, depth + 1, branches_left, annotations)?;
         }
         return Ok(());
     }
@@ -326,12 +351,12 @@ fn validate_schema(schema: &Value, depth: usize, branches_left: &mut usize) -> R
     }) {
         return Err(invalid("unsupported schema type"));
     }
-    validate_object_constraints(map, kind, depth, branches_left)?;
+    validate_object_constraints(map, kind, depth, branches_left, annotations)?;
     if let Some(items) = map.get("items") {
         if kind != Some("array") {
             return Err(invalid("items requires array type"));
         }
-        validate_schema(items, depth + 1, branches_left)?;
+        validate_schema(items, depth + 1, branches_left, annotations)?;
     }
     if let Some(values) = map.get("enum") {
         let values = values
@@ -357,6 +382,7 @@ fn validate_object_constraints(
     kind: Option<&str>,
     depth: usize,
     branches_left: &mut usize,
+    annotations: bool,
 ) -> Result<()> {
     if map.keys().any(|key| {
         matches!(
@@ -372,7 +398,7 @@ fn validate_object_constraints(
             .ok_or_else(|| invalid("properties must be an object"))?
             .values()
         {
-            validate_schema(property, depth + 1, branches_left)?;
+            validate_schema(property, depth + 1, branches_left, annotations)?;
         }
     }
     if let Some(required) = map.get("required") {

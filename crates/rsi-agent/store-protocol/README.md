@@ -25,7 +25,7 @@ cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
 
-Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (23). Schema 22
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (26). Schema 25
 and earlier versions are rejected before recovery or writes; there is no implicit
 migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.
@@ -135,7 +135,10 @@ their validation requirements. A backend may cache successful proofs within
 its exclusive writer lifetime; metadata reads neither fill nor touch that cache.
 
 Agent control commits compare both Fact and control watermarks and atomically
-touch at most three sessions. The Store maintains mechanical indexes with
+touch at most three sessions. Within each Session append, capacity and reservation
+checks observe controls in sequence order, including slots released or consumed
+earlier in that append. Program graph counterparts are checked after all paired
+appends are installed. The Store maintains mechanical indexes with
 bounded query and atomic-update surfaces for ready messages, immutable
 parent-child lineage, terminal-prefix digests,
 a byte-bounded prefix plus the exact pending-mailbox count and direct message
@@ -228,3 +231,34 @@ Store mutations preserve that proof within the same Store ownership lifetime.
 without validating history or decoding payloads. Consumers use those cursors for
 CAS; commits and indexed history operations retain their validation obligations.
 `StoreSessionWatermarks` represents both a read snapshot and committed cursors.
+
+ProgramRun controls retain exact per-run descriptor, lifecycle, initial-child
+receipts and cumulative run-record byte accounting. Stores index these controls
+mechanically and compare their canonical replay during validation; they do not
+mint live authority or schedule scripts. Paired parent-run and child mailbox
+appends atomically admit and settle children. A terminal run cannot admit another
+child. Ordinary parent-mailbox reservation accounting excludes run-owned receipts.
+Execution-owned descendant quiescence is distinct from complete tree idleness;
+both guards validate membership and activity in the committing transaction.
+Complete-idleness guards include active Programs in the root and descendants;
+activation-owned guards exclude the root Program and independently owned branches.
+
+Program record reads may select only controls strictly after a retained cursor.
+Each atomic snapshot returns the current mechanical head and all later indexed
+records, bounded by the run's 8 MiB / 4096-record limit. Consumers validate the
+delta against the previously validated head; an empty delta must preserve it.
+
+Program-owned child Headers require atomic Agent commits with their paired parent admission and initial input; ordinary Fact-only creation cannot express this graph.
+Program graph validation runs after every affected atomic append, so paired parent
+and child controls may appear in either write order. It proves child Headers and
+initial messages against parent admissions (new admissions must leave a pending,
+waking NextTurn input), initial claims against exclusive
+Program completion sinks, child receipts against the exact discard or activation
+outcome and complete structured-result binding,
+and notice coordinates against one matching terminal run. The same mechanical
+checks run during SQLite verification; they do not decide execution policy.
+
+`program_run_for_creator` uses the unique Session/creator-Turn index to preflight admission before CAS publication. A second Program for that Turn remains forbidden after the first terminalizes and is rejected as `StoreError::Invalid` without changing durable cursors.
+
+SQLite indexes Program activation counterparts by Session, control kind and exact
+activation identity. Proof lookup does not scan unrelated activation history.

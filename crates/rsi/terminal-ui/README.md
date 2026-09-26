@@ -139,3 +139,6 @@ Entities and escapes map to their original source ranges, while decorations carr
 no source authority. All retained layout allocations count toward cache limits;
 over-budget Markdown or an evicted source prefix falls back to original text.
 Mode changes preserve logical selection and scroll anchors.
+
+Program Tool cards are labeled as program calls and retain their source facts.
+They do not acquire a synthetic provider-request block or model timing label.

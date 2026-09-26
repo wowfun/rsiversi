@@ -12,9 +12,11 @@ their API failure category. Clients may show setup without treating data or Stor
 failures as missing configuration.
 
 
-The current Session format is 16. Operations negotiate their own versions:
+The current Session format is 18. Operations negotiate their own versions:
 create v7; attach, recent, draft-snapshot, select-preset and inspect v6; history,
-observe and read-message v5; submit v4. Message-status is v3. Metrics is a read-only v1 operation returning a
+observe and read-message v5; submit v4. Message-status is v3. Interactions, questions
+and answer-question are v2 for typed closed reviews; older closed decoders are not
+compatible. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.
 Evidence is a read-only v1 operation: one exact request section, at most 256 KiB
 decoded source per page and a 2 MiB encoded response ceiling. Clients revalidate

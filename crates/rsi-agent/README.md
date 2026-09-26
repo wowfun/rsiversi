@@ -19,7 +19,10 @@ Kernel alone turns complete snapshots into durable input Facts. Agent Tools owns
 the six model-facing subagent controls as thin adapters over the process-local
 Turn service and receives caller authority only from an exact live claim.
 The [Goal domain](goal/README.md) owns pure task allocation and report state;
-the standard Host owns its driver through Kernel continuation admission. The
+the [Schedule domain](schedule/README.md) owns finite reminder state. The standard
+Host drives each through independent Kernel continuation admission. The opt-in
+[Program runtime](program/README.md) executes Node through Process and Jobs;
+Kernel owns durable workflow authority and recovery. The
 [product architecture](docs/architecture.md) defines that ownership and the
 claim-bound, read-only Jobs port.
 

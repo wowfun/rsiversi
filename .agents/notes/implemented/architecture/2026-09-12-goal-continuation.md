@@ -46,6 +46,10 @@ cancel an already claimed Turn, so pending-only discard is a separate operation.
 A global money or subagent-tree budget needs accounting outside this milestone's
 parent-Turn cap.
 
+The [independent automatic-work decision](../../implemented/architecture/2026-09-24-independent-automatic-work.md)
+revises the registry and reserve/accept boundaries while preserving report and
+restart authority.
+
 ## Consequences
 
 Ordinary input may publish a staged Goal before its first automatic input wins

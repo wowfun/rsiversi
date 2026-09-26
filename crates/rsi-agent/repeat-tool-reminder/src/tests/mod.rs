@@ -89,8 +89,11 @@ impl Fixture {
         )
         .unwrap();
         self.append(SessionFactBody::ToolIntent {
-            source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model")
-                .unwrap(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+            },
+
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id: self.context.turn_id.clone(),
             effect_id: effect_id.clone(),
             identity: identity.clone(),

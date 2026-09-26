@@ -585,6 +585,14 @@ async fn child_attach_restores_parent_draft_and_explicit_send_resumes_only_child
         *state.arguments.lock().unwrap() = Some(
             serde_json::json!({"task_name":"inspect-child","message":"Child navigation evidence","fork_turns":"none"}),
         );
+        let child_entered = Arc::new(Notify::new());
+        let release_child = Arc::new(Notify::new());
+        *state.request_gate.lock().unwrap() = Some(RequestGate {
+            // The child has no forked history; parent requests retain this input.
+            matches: |request| !request.to_string().contains("Create a child task"),
+            entered: child_entered.clone(),
+            release: release_child.clone(),
+        });
         let fixture = CliFixture::new(&endpoint);
         if remote {
             fixture.assert_success(&["host", "start", "--profile", "fixture"]);
@@ -602,7 +610,15 @@ async fn child_attach_restores_parent_draft_and_explicit_send_resumes_only_child
             .unwrap();
         state.release.notify_one();
         terminal.until("hello from daemon").await;
+        tokio::time::timeout(Duration::from_secs(20), child_entered.notified())
+            .await
+            .unwrap();
+        // Freeze the parent's terminal before the child replies. Otherwise completion
+        // may enter its Tool follow-up Step, legitimately using three requests.
+        parent_idle(&mut terminal, "parent terminal before child reply").await;
+        release_child.notify_one();
         terminal.until("Completion from").await;
+        parent_idle(&mut terminal, "parent completed the child notice").await;
         // Reading the tree's idle phase confirms both ordinary tool follow-ups settled.
         terminal.send(b"parent draft retained");
         terminal.until("parent draft retained").await;
@@ -668,4 +684,15 @@ async fn child_attach_restores_parent_draft_and_explicit_send_resumes_only_child
         }
         provider.abort();
     }
+}
+
+async fn parent_idle(terminal: &mut TerminalClient, label: &str) {
+    terminal
+        .until_screen(label, |screen| {
+            screen.lines().rev().nth(1).is_some_and(|footer| {
+                footer.contains("fixture-model")
+                    && !footer.chars().any(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧".contains(ch))
+            })
+        })
+        .await;
 }

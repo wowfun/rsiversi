@@ -1,3 +1,4 @@
+import { cleanupAll } from './cleanup.mjs';
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import http from "node:http";
@@ -149,10 +150,12 @@ export async function startService({ binary, assets, report, configure, onReques
   async function close() {
     let failed;
     try { await stopProcess(); } catch (error) { failed = error; }
-    await writeFile(join(report, "service.stderr.log"), stderr);
-    await provider.close();
-    await rm(temporary, { recursive: true, force: true });
-    if (failed) throw failed;
+    await cleanupAll(
+      () => { if (failed) throw failed; },
+      () => writeFile(join(report, "service.stderr.log"), stderr),
+      () => provider.close(),
+      () => rm(temporary, { recursive: true, force: true }),
+    );
   }
   try {
     await mkdir(workspace); await mkdir(env.HOME);

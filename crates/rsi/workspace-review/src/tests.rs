@@ -12,6 +12,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 fn command(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("/usr/bin/git")
         .current_dir(root)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

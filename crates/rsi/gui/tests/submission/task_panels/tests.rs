@@ -143,7 +143,7 @@ async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying(
     let model = detail(&app).to_string();
     assert!(model.contains("Current driving") && model.contains("Armed"));
     assert!(model.contains("Durable phase") && model.contains("Active"));
-    assert!(model.contains("Allocated rounds") && model.contains("1 / 3"));
+    assert!(model.contains("Allocated rounds") && model.contains("0 / 3"));
     backend.task_panels.unknown.store(false, Ordering::SeqCst);
     app.command(&open(&app, "goal")).await.unwrap();
     app.command(&crate::ui::button(&detail(&app), Some("Pause after current round")).to_string())
@@ -151,7 +151,7 @@ async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying(
         .unwrap();
     until(|| detail(&app).to_string().contains("Paused")).await;
     assert!(detail(&app).to_string().contains("Disarmed"));
-    assert!(detail(&app).to_string().contains("1 / 3"));
+    assert!(detail(&app).to_string().contains("0 / 3"));
     assert!(backend.cancel.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(
@@ -228,6 +228,7 @@ async fn goal_rejection_survives_disarmed_then_delayed_settlement_projection() {
                 true,
             )
             .unwrap();
+        state.goal.as_mut().unwrap().reserve().unwrap();
         state
             .apply(GoalAction::Pause { id: goal_id }, budget, true)
             .unwrap();

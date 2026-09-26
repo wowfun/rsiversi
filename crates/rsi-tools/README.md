@@ -9,7 +9,7 @@ admission and retained results.
 Contributors register only into an unpublished catalog stage. Registration is
 atomic by batch and reversible while the stage is open. Sealing consumes the
 stage and returns one immutable Tool Runtime: definitions, preparation, start,
-query, wait, and commit then observe the same exact-name authority snapshot.
+exact-name definition lookup, query, wait, and commit then observe the same exact-name authority snapshot.
 Late registration is rejected rather than changing a published Agent
 generation. Registration leases can withdraw only from an open stage; dropping
 or retiring one after sealing cannot mutate the published catalog or its calls.
@@ -35,3 +35,7 @@ Every prepared invocation carries an orchestrator-owned invocation identity in
 addition to the model-produced call ID. Retained results are keyed by the Tool
 catalog generation, invocation identity, call ID, and canonical request
 digest, so equal provider call IDs in independent Agent turns cannot alias.
+
+Program-role lookup and enumeration project only names and roles from the same
+immutable catalog as definition lookup and preparation; they do not clone schema
+payloads. Scoped catalogs filter these projections by the same delegated names.

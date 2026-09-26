@@ -21,6 +21,7 @@ struct Host {
     reads: AtomicUsize,
     closes: AtomicUsize,
     answers: AtomicUsize,
+    busy_answers: AtomicUsize,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -63,6 +64,7 @@ impl Host {
             reads: AtomicUsize::new(0),
             closes: AtomicUsize::new(0),
             answers: AtomicUsize::new(0),
+            busy_answers: AtomicUsize::new(0),
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         })
@@ -104,6 +106,15 @@ impl ExternalConversations for Host {
     }
     async fn answer(&self, _: &ConversationId, _: u64, _: &str, _: &str) -> Result<()> {
         self.answers.fetch_add(1, Ordering::SeqCst);
+        if self
+            .busy_answers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Error::Busy);
+        }
         self.view.lock().unwrap().permissions.clear();
         Ok(())
     }
@@ -300,4 +311,25 @@ async fn idle_reads_back_off_and_detach_does_not_wait_for_an_unsettled_control()
     assert_eq!(wait.await, Err(Error::Unknown));
     assert_eq!(host.sends.load(Ordering::SeqCst), 1);
     assert_eq!(host.closes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn busy_answer_retains_connection_and_exact_choice_for_explicit_retry() {
+    let host = Host::new();
+    host.busy_answers.store(1, Ordering::SeqCst);
+    let controller = attach(host.clone()).await;
+    let answer = || ExternalCommand::Answer {
+        generation: "1".into(),
+        permission: "exact".into(),
+        option: "once".into(),
+    };
+    assert_eq!(controller.command(answer()).await, Err(Error::Busy));
+    let view = controller.view();
+    assert!(!view.busy);
+    assert!(view.observed.connected);
+    assert_eq!(view.observed.permissions.len(), 1);
+    controller.command(answer()).await.unwrap();
+    assert!(controller.view().observed.permissions.is_empty());
+    assert_eq!(host.answers.load(Ordering::SeqCst), 2);
+    controller.retire().await;
 }

@@ -48,6 +48,7 @@ fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation(
     };
     *identity = ToolResultIdentity::new("owner", "second", "missing-1", "b".repeat(64)).unwrap();
     *effect_id = EffectId::new("second").unwrap();
+    bodies.extend(tool_lifecycle(&second));
     bodies.push(second);
     append(&mut state, &mut history, bodies);
     let unpruned = wire(&state);
@@ -415,6 +416,38 @@ fn replay_rejects_a_model_event_with_a_purpose_differing_from_its_intent() {
     assert!(matches!(result, Err(ContextError::Invalid(_))));
 }
 
+fn tool_lifecycle(result: &SessionFactBody) -> [SessionFactBody; 2] {
+    let SessionFactBody::ToolResult {
+        turn_id,
+        effect_id,
+        identity,
+        ..
+    } = result
+    else {
+        panic!("Tool result fixture")
+    };
+    [
+        SessionFactBody::ToolIntent {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            identity: identity.clone(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: EffectId::new("tool-model").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
+            name: "lookup".into(),
+            arguments: json!({}),
+            approval: None,
+            parallel_safe: false,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            identity: identity.clone(),
+        },
+    ]
+}
+
 fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
     let turn = TurnId::new("interrupted").unwrap();
     let effect = EffectId::new("tool-model").unwrap();
@@ -469,7 +502,7 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
         },
     });
     if let Some(index) = result_index {
-        bodies.push(SessionFactBody::ToolResult {
+        let result = SessionFactBody::ToolResult {
             turn_id: turn.clone(),
             effect_id: EffectId::new("tool-result").unwrap(),
             identity: ToolResultIdentity::new(
@@ -481,7 +514,9 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
             .unwrap(),
             result: ToolResult::new(json!({"result": "partial result"}), vec![], false).unwrap(),
             conclusion: None,
-        });
+        };
+        bodies.extend(tool_lifecycle(&result));
+        bodies.push(result);
     }
     bodies
 }
@@ -959,6 +994,68 @@ fn only_finished_installs_and_summary_usage_does_not_retrigger_pressure() {
     let mut replayed = cursor();
     replayed.ingest(ContextPage::Canonical(&history)).unwrap();
     assert_eq!(wire(&replayed), compacted);
+}
+
+#[test]
+fn active_turn_summary_keeps_its_frozen_source_prefix_as_summary_facts_advance() {
+    let mut state = cursor();
+    let mut facts = Vec::new();
+    append(
+        &mut state,
+        &mut facts,
+        vec![accepted("active", "protected task")],
+    );
+    for effect in ["earlier", "middle", "tail"] {
+        append(
+            &mut state,
+            &mut facts,
+            model_bodies(
+                "active",
+                effect,
+                ModelPurpose::Conversation,
+                &format!("{effect} evidence ").repeat(10000),
+                None,
+                FinishReason::Stop,
+            ),
+        );
+    }
+    let frozen = plan(&state);
+    assert!(
+        frozen
+            .sources
+            .iter()
+            .any(|source| source.turn.as_str() == "active")
+    );
+    let through = frozen
+        .sources
+        .iter()
+        .find(|source| source.turn.as_str() == "active")
+        .unwrap()
+        .through_seq;
+    assert_eq!(through, facts.last().unwrap().seq());
+    let original = wire(&state);
+    let mut summary = model_bodies(
+        "active",
+        "summary",
+        ModelPurpose::ContextCompaction(Box::new(frozen)),
+        "Earlier evidence retained.",
+        None,
+        FinishReason::Stop,
+    );
+    let finished = summary.pop().unwrap();
+    append(&mut state, &mut facts, summary);
+    assert!(facts.last().unwrap().seq() > through);
+    assert_eq!(
+        wire(&state),
+        original,
+        "summary Facts advance the source without changing the input view"
+    );
+    append(&mut state, &mut facts, vec![finished]);
+    assert!(state.summary_installed(&EffectId::new("summary").unwrap()));
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&replay), wire(&state));
+    assert!(wire(&state).contains("protected task"));
 }
 
 #[test]
@@ -1619,7 +1716,10 @@ fn terminal_started_call_reports_unknown_outcome_without_fabricating_a_result_fa
             turn_id: turn_id.clone(),
             effect_id: effect_id.clone(),
             identity: identity.clone(),
-            source_model_effect_id: EffectId::new("tool-model").unwrap(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: EffectId::new("tool-model").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             name: "lookup".into(),
             arguments: json!({}),
             approval: None,
@@ -1890,7 +1990,10 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
             bodies.push(SessionFactBody::ToolIntent {
                 turn_id: turn.clone(),
                 effect_id: effect.clone(),
-                source_model_effect_id: EffectId::new("tool-model").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("tool-model").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: identity.clone(),
                 name: "lookup".into(),
                 arguments: json!({}),
@@ -1908,6 +2011,10 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
         append(&mut state, &mut history, bodies);
         let body = if case == "late-denial" {
             SessionFactBody::ToolRejected {
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: rsi_agent_session_protocol::EffectId::new("tool-model").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 turn_id: turn,
                 effect_id: effect,
                 identity,
@@ -1980,4 +2087,151 @@ fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() 
                 .any(|part| matches!(part, MessageContent::ToolCall(_)))
         }));
     }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One history proves nested provenance across partial summary remapping, checkpoint and replay."
+)]
+fn program_provenance_survives_compaction_remap_checkpoint_and_canonical_replay() {
+    use rsi_agent_session_protocol::ToolOrigin;
+    use rsi_tools_protocol::ToolProgramRole;
+    let mut state = cursor();
+    let mut history = vec![];
+    let turn = TurnId::new("interrupted").unwrap();
+    let mut bodies = partial_tool_batch(None);
+    if let SessionFactBody::TurnAccepted { text, .. } = &mut bodies[0] {
+        *text = "Prior program instructions. ".repeat(500);
+    }
+    let parent = EffectId::new("program-parent").unwrap();
+    let identity =
+        ToolResultIdentity::new("owner", "program-parent", "missing-0", "b".repeat(64)).unwrap();
+    bodies.extend([
+        SessionFactBody::ToolIntent {
+            turn_id: turn.clone(),
+            effect_id: parent.clone(),
+            origin: ToolOrigin::Model {
+                effect_id: EffectId::new("tool-model").unwrap(),
+            },
+            program_role: ToolProgramRole::Coordinator,
+            identity: identity.clone(),
+            name: "lookup".into(),
+            arguments: json!({}),
+            approval: None,
+            parallel_safe: false,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: turn.clone(),
+            effect_id: parent.clone(),
+            identity: identity.clone(),
+        },
+    ]);
+    let internal = EffectId::new("internal").unwrap();
+    let nested =
+        ToolResultIdentity::new("owner", "internal", "internal-call", "c".repeat(64)).unwrap();
+    bodies.extend([
+        SessionFactBody::ToolIntent {
+            turn_id: turn.clone(),
+            effect_id: internal.clone(),
+            origin: ToolOrigin::Program {
+                parent_effect_id: parent.clone(),
+                ordinal: 1,
+            },
+            program_role: ToolProgramRole::Callable,
+            identity: nested.clone(),
+            name: "file_read".into(),
+            arguments: json!({}),
+            approval: None,
+            parallel_safe: true,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: turn.clone(),
+            effect_id: internal.clone(),
+            identity: nested.clone(),
+        },
+        SessionFactBody::ToolResult {
+            turn_id: turn.clone(),
+            effect_id: internal,
+            identity: nested,
+            result: ToolResult::new(json!({"internal":"HIDDEN_INTERNAL_VALUE"}), vec![], false)
+                .unwrap(),
+            conclusion: None,
+        },
+        SessionFactBody::ToolResult {
+            turn_id: turn.clone(),
+            effect_id: parent,
+            identity,
+            result: ToolResult::new(json!({"curated":"CURATED_RESULT"}), vec![], false).unwrap(),
+            conclusion: None,
+        },
+        SessionFactBody::ToolCallsSuperseded {
+            turn_id: turn.clone(),
+            source_model_effect_id: EffectId::new("tool-model").unwrap(),
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+            result: None,
+        },
+        accepted("current", "continue"),
+    ]);
+    append(&mut state, &mut history, bodies);
+    append(
+        &mut state,
+        &mut history,
+        model_bodies(
+            "current",
+            "tail",
+            ModelPurpose::Conversation,
+            &"tail ".repeat(15000),
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let plan = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::ProviderContextLimit),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let request = serde_json::to_string(plan.request.messages()).unwrap();
+    assert!(wire(&state).contains("CURATED_RESULT"));
+    assert_eq!(plan.plan.selections[0].first, 0);
+    assert_eq!(
+        plan.plan.selections[0].count, 1,
+        "the protected Tool batch is retained and must be remapped"
+    );
+    assert!(!request.contains("HIDDEN_INTERNAL_VALUE"));
+    append(
+        &mut state,
+        &mut history,
+        model_bodies(
+            "current",
+            "program-summary",
+            ModelPurpose::ContextCompaction(Box::new(plan.plan)),
+            "Curated program result retained.",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(state.summary_installed(&EffectId::new("program-summary").unwrap()));
+    assert_eq!(
+        wire(&state),
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap())
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&history)).unwrap();
+    assert_eq!(wire(&state), wire(&replay));
+    assert!(wire(&state).contains("CURATED_RESULT"));
+    assert!(!wire(&state).contains("HIDDEN_INTERNAL_VALUE"));
+    assert!(history.iter().any(|fact| {
+        serde_json::to_string(fact.as_ref())
+            .unwrap()
+            .contains("HIDDEN_INTERNAL_VALUE")
+    }));
 }

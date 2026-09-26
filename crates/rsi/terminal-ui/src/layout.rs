@@ -273,7 +273,10 @@ mod tests {
                         turn_id: turn_id.clone(),
                         effect_id: effect_id.clone(),
                         identity: identity.clone(),
-                        source_model_effect_id: EffectId::new("model").unwrap(),
+                        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                            effect_id: EffectId::new("model").unwrap(),
+                        },
+                        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                         name: "bash".into(),
                         arguments: serde_json::json!({"command":command}),
                         approval: None,

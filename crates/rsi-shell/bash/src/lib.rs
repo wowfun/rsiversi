@@ -345,7 +345,7 @@ mod linux {
                     "required":["command"],
                     "additionalProperties":false
                 }),
-            )?,
+            )?.with_program_role(rsi_tools_protocol::ToolProgramRole::Callable),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
                 timeout_ms: BASH_TOOL_TIMEOUT_MS,
             },

@@ -75,7 +75,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 16 is accepted; all other formats are unsupported. The
+format 18 is accepted; all other formats are unsupported. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 
@@ -115,7 +115,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 17), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 18), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
@@ -245,3 +245,12 @@ restrictions. A child never inherits its parent's spawn receipt or rereads the
 definition during restore. Kernel owns fresh resolution versus exact retry.
 Headers without a named spawn omit this optional field, preserving their canonical
 encoding and existing fingerprint.
+
+ToolIntent records an explicit `ToolOrigin`: Model binds the completed provider
+effect, while Program binds an exact enclosing coordinator Tool effect and a
+positive call ordinal. It also records the sealed Tool's program role for cold
+validation. A program-origin intent must be Callable. Model-source supersession
+remains specific to Conversation calls and cannot supersede program calls.
+
+Program entered-input Facts obey the same single-text and complete 8 KiB encoded
+notice bound as their mailbox message; entering a Step cannot broaden content.

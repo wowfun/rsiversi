@@ -65,6 +65,8 @@ mod profile_leaves;
 mod repeat_reminder;
 #[path = "session_service/request_evidence.rs"]
 mod request_evidence;
+#[path = "session_service/schedule.rs"]
+mod schedule;
 #[path = "session_service/session_api.rs"]
 mod session_api;
 #[path = "session_service/standard_api.rs"]
@@ -315,15 +317,21 @@ async fn run_message_to_terminal(
     handle: &Arc<dyn rsi_session_protocol::SessionHandle>,
     message_id: &str,
 ) {
+    run_message_with_text_to_terminal(handle, message_id, "inspect workspace context").await;
+}
+
+async fn run_message_with_text_to_terminal(
+    handle: &Arc<dyn rsi_session_protocol::SessionHandle>,
+    message_id: &str,
+    text: &str,
+) {
     let message_id = MessageId::new(message_id).unwrap();
     let receipt = handle
         .submit(SubmitInput {
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
-            content: vec![SessionInput::Text {
-                text: "inspect workspace context".into(),
-            }],
+            content: vec![SessionInput::Text { text: text.into() }],
             model: None,
             sandbox: None,
         })

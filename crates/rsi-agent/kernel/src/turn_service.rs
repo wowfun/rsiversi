@@ -51,6 +51,26 @@ impl TurnService for AgentKernel {
     }
 
     #[allow(clippy::too_many_lines)] // Spawn validates and commits one indivisible child Header, lineage, and first mailbox message.
+    async fn prepare_program(
+        &self,
+        request: rsi_agent_turn_protocol::PrepareProgram,
+    ) -> TurnResult<Arc<dyn rsi_agent_turn_protocol::ProgramRun>> {
+        self.prepare_program_run(request).await
+    }
+    async fn read_program(
+        &self,
+        caller: &AgentCallerAuthority,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramSnapshot> {
+        self.read_program_snapshot(caller, run).await
+    }
+    async fn cancel_program(
+        &self,
+        caller: &AgentCallerAuthority,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> TurnResult<()> {
+        self.cancel_program_owned(caller, run).await
+    }
     async fn spawn_agent(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         let cancellation = request.cancellation.clone();
         if cancellation.is_cancelled() {
@@ -67,7 +87,7 @@ impl TurnService for AgentKernel {
         &self,
         caller: &AgentCallerAuthority,
         locator: &rsi_agent_session_protocol::AgentResultLocator,
-    ) -> TurnResult<serde_json::Value> {
+    ) -> TurnResult<rsi_agent_turn_protocol::AgentResult> {
         self.read_structured_result(caller, locator).await
     }
 
@@ -220,7 +240,7 @@ impl TurnService for AgentKernel {
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
         if matches!(
             request.message.source,
-            AgentMessageSource::Continuation { .. }
+            AgentMessageSource::Continuation { .. } | AgentMessageSource::Program { .. }
         ) {
             return Err(TurnError::Invalid(
                 "continuation input requires its live admission service".into(),
@@ -309,6 +329,19 @@ impl TurnService for AgentKernel {
             return Err(TurnError::Invalid(
                 "unclaimed-message cancellation does not accept a free-form reason".into(),
             ));
+        }
+        let header = read_validated_header_bounded(&self.inner, session_id)
+            .await
+            .map_err(turn_store_error)?;
+        if let Some(result) = self
+            .cancel_program_message(
+                &header,
+                &message_id,
+                rsi_agent_session_protocol::ProgramOutcome::Cancelled,
+            )
+            .await?
+        {
+            return Ok(result);
         }
         let admission = self.inner.submission_admission.acquire(session_id).await?;
         self.fence_pending_terminal(session_id).await?;
@@ -1089,6 +1122,20 @@ impl AgentKernel {
                 "next-Step message requires its owning active Turn".into(),
             ));
         }
+        if let AgentMessageSource::Program { source } = &entry.message.source
+            && !self
+                .program_notice_claim_allowed(&session_id, source)
+                .await?
+        {
+            self.discard_continuation_admitted(
+                &session_id,
+                &scan,
+                &entry,
+                MessageDiscardReason::ProgramInterrupted,
+            )
+            .await?;
+            return Err(TurnError::StaleClaim);
+        }
         if let AgentMessageSource::Continuation { source } = &entry.message.source {
             let ordinary_pending = scan.pending.iter().any(|pending| {
                 pending.target == MessageTarget::NextTurn
@@ -1172,7 +1219,13 @@ impl AgentKernel {
             .last()
             .expect("message claim always creates Facts")
             .seq();
-        let parent_activation = if let Some(parent_session_id) = &parent_session_id {
+        let program_append = self
+            .program_child_claim_append(&header, &request.message_id, &request.activation_id)
+            .await?;
+        let program_sink = program_append.is_some();
+        let parent_activation = if let Some(parent_session_id) = &parent_session_id
+            && !program_sink
+        {
             self.fence_pending_terminal(parent_session_id).await?;
             let active = self
                 .inner
@@ -1237,7 +1290,9 @@ impl AgentKernel {
                 },
             ),
         ];
-        if let Some(parent_session_id) = &parent_session_id {
+        if let Some(parent_session_id) = &parent_session_id
+            && !program_sink
+        {
             controls.push(AgentControlRecord::new(
                 scan.durable_control_seq
                     .checked_add(3)
@@ -1255,6 +1310,27 @@ impl AgentKernel {
                 },
             ));
         }
+        if program_sink {
+            let Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
+                run_id,
+                ordinal,
+                ..
+            }) = header.execution_owner()
+            else {
+                unreachable!("program sink requires immutable owner")
+            };
+            controls.push(AgentControlRecord::new(
+                scan.durable_control_seq
+                    .checked_add(3)
+                    .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
+                timestamp_ms,
+                AgentControlRecordBody::ProgramCompletionReserved {
+                    activation_id: request.activation_id.clone(),
+                    run_id: run_id.clone(),
+                    ordinal: *ordinal,
+                },
+            ));
+        }
         let controls = controls
             .into_iter()
             .collect::<rsi_agent_session_protocol::Result<Vec<_>>>()
@@ -1264,20 +1340,24 @@ impl AgentKernel {
         }
         let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
         let _parts = self.inner.resume_issuer.consume(request.session)?;
+        let mut sessions = vec![AtomicSessionAppend {
+            session_id: session_id.clone(),
+            expected_fact_seq,
+            expected_control_seq: scan.durable_control_seq,
+            header: None,
+            facts: facts.clone(),
+            controls,
+        }];
+        if let Some(parent) = program_append {
+            sessions.push(parent);
+        }
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admissions = admissions;
             kernel
                 .inner
                 .commit_agent(AtomicAgentCommit {
-                    sessions: vec![AtomicSessionAppend {
-                        session_id: session_id.clone(),
-                        expected_fact_seq,
-                        expected_control_seq: scan.durable_control_seq,
-                        header: None,
-                        facts: facts.clone(),
-                        controls,
-                    }],
+                    sessions,
                     required_active_activations: parent_activation
                         .map(|activation| AgentActivationGuard {
                             session_id: parent_session_id

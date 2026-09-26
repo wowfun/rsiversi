@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v8_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -126,16 +126,16 @@ fn full_builder_preserves_v8_payload_and_v6_envelope_without_a_third_full_copy()
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // The v8 fold explicitly carries Tool outcome provenance; the generic
-    // v6 envelope and Session 17 binding stay unchanged.
+    // The v10 fold carries complete model Tool identity alongside Program provenance; the generic
+    // v6 outer envelope is unchanged; Session 18 changes its header binding.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v8\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v10\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 8);
+    assert_eq!(decoded["version"], 10);
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
     assert!(
         decoded["turns"]
@@ -146,7 +146,7 @@ fn full_builder_preserves_v8_payload_and_v6_envelope_without_a_third_full_copy()
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "1bab1152d57d9f24066a5cb853fe9b3f4da7ad1312040a0bc1c5f6d2af2002fe"
+        "4c2c2e6d2ce5f717122a1fd0371547dbe86b3a8fee1a1f197c2efbb32528dd4b"
     );
     assert!(
         additional < 3 * bytes.len(),
@@ -154,6 +154,7 @@ fn full_builder_preserves_v8_payload_and_v6_envelope_without_a_third_full_copy()
     );
     state.restore(&bytes).unwrap();
     assert_planning_allocations(&state, bytes.len());
+    assert_installation_allocations(&mut state);
 }
 
 fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usize) {
@@ -164,16 +165,7 @@ fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usiz
         .plan_compaction(
             &rsi_ai_protocol::LanguageRequestOptions::default(),
             &ModelRef::new("fixture", "model").unwrap(),
-            &rsi_ai_protocol::LanguageProfile::new(
-                128_000,
-                4096,
-                8192,
-                rsi_ai_protocol::ToolDialect::Responses,
-                true,
-                rsi_ai_protocol::ImageToolResultCapability::No,
-                vec![],
-            )
-            .unwrap(),
+            &profile(),
             Some(CompactionTrigger::ProviderContextLimit),
             false,
         )
@@ -189,4 +181,135 @@ fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usiz
         allocated < 3 * checkpoint_bytes,
         "planning repeatedly copied retained history: {allocated}"
     );
+}
+
+fn assert_installation_allocations(state: &mut ModelContextState) {
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
+    let turn = TurnId::new("install-probe").unwrap();
+    let effect = EffectId::new("install-summary").unwrap();
+    let mut sequence = 49_u64;
+    let mut ingest = |state: &mut ModelContextState, body| {
+        let fact = Arc::new(SessionFact::new(sequence, 1, body).unwrap());
+        sequence += 1;
+        state.ingest(ContextPage::Canonical(&[fact])).unwrap();
+    };
+    ingest(
+        state,
+        SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
+            turn_id: turn.clone(),
+            text: "current".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    );
+    let planned = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("fixture", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::ProviderContextLimit),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    ingest(
+        state,
+        SessionFactBody::ModelIntent {
+            evidence: RequestEvidence::Unavailable {
+                reason: EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
+            turn_id: turn.clone(),
+            effect_id: effect.clone(),
+            purpose: ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            snapshot: summary_snapshot(),
+        },
+    );
+    ingest(
+        state,
+        SessionFactBody::ModelStarted {
+            turn_id: turn.clone(),
+            effect_id: effect.clone(),
+        },
+    );
+    for event in [
+        LanguageEvent::ContentStarted {
+            index: 0,
+            content: ContentStart::Text,
+        },
+        LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("brief factual summary".into()),
+        },
+        LanguageEvent::ContentFinished { index: 0 },
+    ] {
+        ingest(
+            state,
+            SessionFactBody::ModelEvent {
+                purpose: ModelEventPurpose::ContextCompaction,
+                turn_id: turn.clone(),
+                effect_id: effect.clone(),
+                event,
+            },
+        );
+    }
+    let allocated_before = ALLOCATED.load(Ordering::Relaxed);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    ingest(
+        state,
+        SessionFactBody::ModelEvent {
+            purpose: ModelEventPurpose::ContextCompaction,
+            turn_id: turn,
+            effect_id: effect.clone(),
+            event: LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: None,
+            },
+        },
+    );
+    let allocated = ALLOCATED.load(Ordering::Relaxed) - allocated_before;
+    let additional = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+    assert!(state.summary_installed(&effect));
+    println!("installation allocated_bytes={allocated} peak_additional_bytes={additional}");
+    // An untouched payload alone is > 700 KiB. Metadata and selected-turn
+    // replacements must not clone even one of those retained message bodies.
+    assert!(
+        allocated < 512 * 1024,
+        "installation copied unaffected payloads: {allocated}"
+    );
+}
+
+fn summary_snapshot() -> rsi_ai_protocol::PreparedCallSnapshot {
+    use rsi_ai_protocol::{AiCapability, PreparedCallSnapshot, RetryPolicy};
+    PreparedCallSnapshot {
+        language_settings: None,
+        call_id: "summary".into(),
+        deployment_id: "fixture".into(),
+        provider_family: "fixture".into(),
+        capability: AiCapability::Language,
+        model: "model".into(),
+        protocol: "test".into(),
+        transport: "memory".into(),
+        endpoint_fingerprint: "fixture".into(),
+        config_generation: 1,
+        credential_source: None,
+        retry_policy: RetryPolicy::default(),
+        request_sha256: "a".repeat(64),
+    }
+}
+
+fn profile() -> rsi_ai_protocol::LanguageProfile {
+    rsi_ai_protocol::LanguageProfile::new(
+        128_000,
+        4096,
+        8192,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap()
 }

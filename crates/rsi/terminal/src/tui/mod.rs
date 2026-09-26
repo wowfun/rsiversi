@@ -206,6 +206,18 @@ enum WorkKind {
     Submit,
     Cancel,
 }
+struct ExportCharge(Arc<std::sync::atomic::AtomicUsize>);
+impl ExportCharge {
+    fn new(count: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(count.clone())
+    }
+}
+impl Drop for ExportCharge {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
 struct Work {
     generation: u64,
     view_revision: u64,
@@ -291,6 +303,7 @@ struct Client {
     state: State,
     generation: u64,
     tasks: FuturesUnordered<Task>,
+    exports: Arc<std::sync::atomic::AtomicUsize>,
     owned: BTreeSet<MessageId>,
     submission: Submission,
     command: Arc<rsi_client::CommandSubmission>,
@@ -424,6 +437,7 @@ impl Client {
             ),
             generation: 0,
             tasks: FuturesUnordered::new(),
+            exports: Arc::default(),
             owned: BTreeSet::new(),
             submission: Submission::default(),
             command: Arc::default(),
@@ -457,6 +471,9 @@ impl Client {
         }
         client
     }
+    fn pending_requests(&self) -> usize {
+        self.tasks.len() + self.exports.load(std::sync::atomic::Ordering::Acquire)
+    }
     fn spawn(&mut self, task: impl std::future::Future<Output = Result<Update>> + Send + 'static) {
         self.spawn_as(WorkKind::Read, task);
     }
@@ -485,7 +502,7 @@ impl Client {
             WorkKind::Submit => 10,
             WorkKind::Read | WorkKind::Detail | WorkKind::Inspect | WorkKind::History => 8,
         };
-        if self.tasks.len() >= limit {
+        if self.pending_requests() >= limit {
             self.state
                 .notice("Client request queue is busy; input retained");
             return false;
@@ -506,7 +523,7 @@ impl Client {
     }
 
     fn inspect(&mut self) {
-        if self.inspecting || self.tasks.len() >= 8 {
+        if self.inspecting || self.pending_requests() >= 8 {
             return;
         }
         self.inspecting = true;
@@ -519,7 +536,7 @@ impl Client {
     }
 
     fn refresh_metrics(&mut self) {
-        if self.metrics_loading || self.tasks.len() >= 8 {
+        if self.metrics_loading || self.pending_requests() >= 8 {
             return;
         }
         self.metrics_loading = true;
@@ -528,7 +545,7 @@ impl Client {
     }
 
     fn history(&mut self, manual: bool) {
-        if self.history.loading || self.tasks.len() >= 8 {
+        if self.history.loading || self.pending_requests() >= 8 {
             return;
         }
         if manual {
@@ -857,7 +874,7 @@ impl Client {
     }
 
     fn copy(&mut self, view: &render::View) {
-        if self.tasks.len() >= 8 {
+        if self.pending_requests() >= 8 {
             self.state.notice("Copy queue is busy");
             return;
         }
@@ -918,7 +935,7 @@ impl Client {
     #[allow(clippy::too_many_lines)] // Exhaustive controller actions share the same attachment and outcome guards.
     fn action(&mut self, action: Action) -> bool {
         self.state.clear_info();
-        if self.tasks.len() >= 8 && !matches!(action, Action::Exit | Action::Retry) {
+        if self.pending_requests() >= 8 && !matches!(action, Action::Exit | Action::Retry) {
             self.state
                 .notice("Client requests are busy; try again shortly");
             return false;
@@ -1545,7 +1562,7 @@ impl Client {
     }
 
     fn answer(&mut self) {
-        if self.tasks.len() >= 8 {
+        if self.pending_requests() >= 8 {
             self.state
                 .notice("Client requests are busy; answer draft retained");
             return;
@@ -1564,6 +1581,18 @@ impl Client {
             return;
         }
         let raw = answer.editor.text().to_owned();
+        let review_reply = if answer.request.review.is_some() {
+            match rsi_user_questions_protocol::QuestionAnswer::select_review(&answer.request, &raw)
+            {
+                Ok(reply) => Some(reply),
+                Err(problem) => {
+                    self.state.notice(problem.to_string());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let question = &answer.request.questions[answer.answers.len()];
         let text = raw
             .trim()
@@ -1580,9 +1609,11 @@ impl Client {
         answer.scroll = 0;
         let _ = answer.editor.take();
         if answer.answers.len() == answer.request.questions.len() {
-            let reply = rsi_user_questions_protocol::QuestionAnswer {
-                answers: answer.answers.clone(),
-            };
+            let reply =
+                review_reply.unwrap_or_else(|| rsi_user_questions_protocol::QuestionAnswer {
+                    review: None,
+                    answers: answer.answers.clone(),
+                });
             if let Err(problem) = reply.validate_for(&answer.request) {
                 answer.answers.pop();
                 self.state.notice(problem.to_string());
@@ -1672,9 +1703,15 @@ async fn run_inner(
         Ok(Some(attached)) => attached,
         outcome => {
             stopped.cancel();
+            let cleanup = close_rendering(
+                terminal.close(),
+                presentation.close(),
+                async { Vec::new() },
+                crate::work::diagnostic,
+            )
+            .await;
             external.shutdown().await;
             profiles.shutdown().await;
-            let cleanup = close_rendering(terminal.close(), presentation.close()).await;
             return outcome.map(|_| ()).and(cleanup);
         }
     };
@@ -1749,6 +1786,7 @@ async fn run_inner(
     let mut dirty = true;
     let mut recovery = render::Recovery::default();
     let mut navigation_active = (external.active, profiles.active);
+    let mut exports = FuturesUnordered::new();
     let result: Result<()> = async {
         loop {
             client.enforce_fold_budget();
@@ -1770,8 +1808,13 @@ async fn run_inner(
             if let Some(command) = client.setup_command.take() {
                 match command { setup::Command::Export(options) => {
                     let handle = client.handle.clone();
-                    client.state.info("Exporting session…");
-                    client.spawn(async move { let path = crate::export::save(handle, options).await.map_err(error)?; Ok(Update::Notice(format!("Exported {}", path.display()))) });
+                    if client.pending_requests() >= 8 { client.state.notice("Client request queue is busy; try /export again shortly"); }
+                    else {
+                        client.state.info("Exporting session…");
+                        let session = client.state.header.session_id().clone();
+                        let save = crate::export::start(&application_work, handle, options, stopped.child_token(), ExportCharge::new(&client.exports));
+                        exports.push(async move { (session, save.await) });
+                    }
                 }, setup::Command::History(conversation,query) => client.search_history(conversation,query), setup::Command::Profiles => profiles.open(), setup::Command::ExternalOpen(id) => external.open_conversation(id), setup::Command::Attention => external.open_attention(), setup::Command::External => external.open(), setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
                 dirty = true;
             }
@@ -1790,6 +1833,13 @@ async fn run_inner(
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
+                Some((session, result)) = exports.next() => {
+                    match result {
+                        Ok(path) => client.state.info(format!("Exported {} ({session})", path.display())),
+                        Err(problem) => client.state.notice(format!("Export {session}: {problem}")),
+                    }
+                    dirty = true;
+                },
                 () = external.next() => {dirty=true;},
                 () = profiles.next() => {dirty=true;},
                 () = setup.next() => { if !setup.active {client.state.notice(setup.notice());} dirty = true; },
@@ -2105,7 +2155,7 @@ async fn run_inner(
                     let now_ms = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(u64::MAX);
                     dirty |= client.state.tick_activity(now_ms);
                     client.poll_preview(tokio::time::Instant::now());
-                    if client.cancellation_queued && !client.cancelling && client.tasks.len() < 12 { client.cancel(); }
+                    if client.cancellation_queued && !client.cancelling && client.pending_requests() < 12 { client.cancel(); }
                     if terminal.failed() { return Err(error("Terminal writer stopped")); }
                     let (width,height) = terminal::size();
                     if dimensions != (width,height) { dimensions=(width,height); dirty=true; }
@@ -2132,29 +2182,51 @@ async fn run_inner(
         Ok(())
     }.await;
     stopped.cancel();
-    external.shutdown().await;
-    profiles.shutdown().await;
     rendering_stop.cancel();
     rendering.take();
+    let presentation_cleanup = close_rendering(
+        terminal.close(),
+        presentation.close(),
+        exports.collect::<Vec<_>>(),
+        crate::work::diagnostic,
+    )
+    .await;
+    external.shutdown().await;
+    profiles.shutdown().await;
     client.tasks.clear();
     let cleanup = match observer {
         Some(observer) => observer.stop().await,
         None => Ok(()),
     };
     let shell_cleanup = surfaces.close().await;
-    let presentation_cleanup = close_rendering(terminal.close(), presentation.close()).await;
     result
         .and(cleanup)
         .and(shell_cleanup)
         .and(presentation_cleanup)
 }
 
-async fn close_rendering(
+async fn close_rendering<R: std::future::Future<Output = std::io::Result<()>>>(
     output: impl std::future::Future<Output = std::io::Result<()>>,
     presentation: impl std::future::Future<Output = crate::Result<()>>,
+    exports: impl std::future::Future<
+        Output = Vec<(
+            SessionId,
+            std::result::Result<PathBuf, crate::export::Error>,
+        )>,
+    >,
+    report: impl FnOnce(Vec<String>) -> R,
 ) -> crate::Result<()> {
     let output = output.await.map_err(error);
     let presentation = presentation.await;
+    let messages = exports
+        .await
+        .into_iter()
+        .map(|(session, result)| match result {
+            Ok(path) => format!("Exported {} ({session})", path.display()),
+            Err(problem) => format!("Export {session}: {problem}"),
+        })
+        .collect();
+    let _reported = report(messages).await;
     output.and(presentation)
 }
 

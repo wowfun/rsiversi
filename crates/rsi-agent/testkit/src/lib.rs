@@ -67,6 +67,10 @@ struct MemorySession {
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,
     controls: Vec<AgentControlRecord>,
+    programs: BTreeMap<
+        rsi_agent_session_protocol::ProgramRunId,
+        (rsi_agent_store_protocol::StoreProgramHead, Vec<u64>),
+    >,
     last_settled_control_seq: u64,
     control_prefix_digest: [u8; 32],
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
@@ -147,11 +151,12 @@ impl MemoryStore {
 mod contribution;
 mod domain_contract;
 mod memory_store;
+mod program_graph;
 mod store_contract;
 
 pub use contribution::activate_contribution_owner;
 pub use domain_contract::assert_domain_store_contract;
-pub use store_contract::assert_mechanical_store_contract;
+pub use store_contract::{assert_mechanical_store_contract, assert_program_store_contract};
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.
 #[derive(Clone, Debug)]

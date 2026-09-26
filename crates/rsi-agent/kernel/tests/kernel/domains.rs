@@ -114,6 +114,23 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
                 .cancel(run.claim.session_id(), run.claim.turn_id(), None)
                 .await
                 .unwrap();
+            let mut guarded = run.mutation("cancelled-review", 1, true, vec![result.clone()]);
+            guarded.require_uncancelled_turn = true;
+            assert!(matches!(
+                run.kernel.commit_domains(&run.claim, guarded).await,
+                Err(TurnError::StaleClaim)
+            ));
+            assert!(
+                run.kernel
+                    .domain_request(
+                        run.claim.session_id(),
+                        &rsi_agent_session_protocol::DomainRequestId::new("cancelled-review")
+                            .unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 run.kernel
                     .tool_settlement_domains(&run.claim, caller.tool_effect_id().unwrap())
@@ -282,6 +299,8 @@ async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() 
         SessionFactBody::StepStarted { .. }
     ));
     let mutation = rsi_agent_turn_protocol::DomainMutation {
+        guards: vec![],
+        require_uncancelled_turn: false,
         request_id: rsi_agent_session_protocol::DomainRequestId::new("after-snapshot").unwrap(),
         proposals: vec![run.handle.propose(DomainRevision::new(1), &true).unwrap()],
         facts: vec![SessionFactBody::InputMessageEntered {
@@ -383,6 +402,8 @@ impl DomainRun {
         facts: Vec<SessionFactBody>,
     ) -> rsi_agent_turn_protocol::DomainMutation {
         rsi_agent_turn_protocol::DomainMutation {
+            guards: vec![],
+            require_uncancelled_turn: false,
             request_id: rsi_agent_session_protocol::DomainRequestId::new(request).unwrap(),
             proposals: vec![
                 self.handle
@@ -1071,6 +1092,8 @@ async fn sqlite_domain_execution_reopens_with_a_new_codec_generation_and_exact_r
         .commit_domains(
             &claim,
             rsi_agent_turn_protocol::DomainMutation {
+                guards: vec![],
+                require_uncancelled_turn: false,
                 request_id: rsi_agent_session_protocol::DomainRequestId::new("sql-cold-update")
                     .unwrap(),
                 proposals: vec![handle.propose(DomainRevision::new(2), &false).unwrap()],
@@ -1740,7 +1763,10 @@ async fn ending_waits_for_the_admitted_structured_conclusion() {
         SessionFactBody::ToolIntent {
             turn_id: claim.turn_id().clone(),
             effect_id: effect.clone(),
-            source_model_effect_id: EffectId::new("source-model").unwrap(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: EffectId::new("source-model").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             identity: identity.clone(),
             name: "report_result".into(),
             arguments: serde_json::json!({}),
@@ -1773,6 +1799,8 @@ async fn ending_waits_for_the_admitted_structured_conclusion() {
         }),
     };
     let mutation = rsi_agent_turn_protocol::DomainMutation {
+        guards: vec![],
+        require_uncancelled_turn: false,
         request_id: rsi_agent_session_protocol::DomainRequestId::new("conclusion").unwrap(),
         proposals: vec![domain.propose(DomainRevision::new(1), &true).unwrap()],
         facts: vec![result.clone()],
@@ -1800,4 +1828,146 @@ async fn ending_waits_for_the_admitted_structured_conclusion() {
         "{terminal:?}"
     );
     kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn started_tool_domain_mutations_reconcile_receipts_and_reject_retired_authority() {
+    for mode in ["before", "after", "unknown", "retired", "cancelled"] {
+        let memory = Arc::new(MemoryStore::new());
+        let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let caller = control_tool_caller(&run.kernel, &run.claim).await;
+        let mutation = || run.mutation("started-tool-mutation", 1, true, vec![]);
+        assert!(
+            run.kernel
+                .commit_tool_domains(
+                    &caller,
+                    run.mutation("forged-facts", 1, true, vec![run.step("forged")])
+                )
+                .await
+                .is_err()
+        );
+        if mode == "before" {
+            memory.fail_next_appends(1);
+        }
+        if matches!(mode, "after" | "unknown") {
+            store.fail_domain_after_apply.store(true, Ordering::Release);
+        }
+        if mode == "unknown" {
+            store
+                .fail_domain_lookup_after_apply
+                .store(true, Ordering::Release);
+        }
+        if mode == "retired" {
+            run.kernel
+                .publish(
+                    &run.claim,
+                    vec![SessionFactBody::ToolResult {
+                        turn_id: run.claim.turn_id().clone(),
+                        effect_id: caller.tool_effect_id().unwrap().clone(),
+                        identity: ToolResultIdentity::new(
+                            "fixture",
+                            "fixture-control-tool",
+                            "fixture-call",
+                            "a".repeat(64),
+                        )
+                        .unwrap(),
+                        result: rsi_tools_protocol::ToolResult::new(
+                            serde_json::json!({}),
+                            vec![],
+                            false,
+                        )
+                        .unwrap(),
+                        conclusion: None,
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+        if mode == "cancelled" {
+            run.kernel
+                .cancel(run.claim.session_id(), run.claim.turn_id(), None)
+                .await
+                .unwrap();
+        }
+        let result = run.kernel.commit_tool_domains(&caller, mutation()).await;
+        if mode == "after" {
+            assert!(result.is_ok(), "{result:?}");
+        } else if mode == "unknown" {
+            assert!(
+                matches!(result, Err(TurnError::DomainOutcomeUnknown { .. })),
+                "{result:?}"
+            );
+        } else {
+            assert!(result.is_err(), "{mode}: {result:?}");
+        }
+        store.domain_lookup_fails.store(false, Ordering::Release);
+        let receipt = run
+            .kernel
+            .domain_request(run.claim.session_id(), &mutation().request_id)
+            .await
+            .unwrap();
+        assert_eq!(receipt.is_some(), matches!(mode, "after" | "unknown"));
+        let view = memory
+            .read_domain_states(run.claim.session_id(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            run.handle.decode(&view.states[0].snapshot).unwrap(),
+            receipt.is_some()
+        );
+        if mode == "unknown" {
+            drop(run.lease);
+            assert!(run.kernel.shutdown(run.workers).await.is_err());
+        } else {
+            run.stop().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn domain_read_guards_reject_stale_authority_but_preserve_committed_receipts() {
+    use rsi_agent_turn_protocol::DomainReadGuard;
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let domains = run
+        .kernel
+        .domain_states(run.claim.session_id())
+        .await
+        .unwrap();
+    let domain = domains[0].snapshot.identity().clone();
+    run.kernel
+        .commit_domains(&run.claim, run.mutation("advance-policy", 1, true, vec![]))
+        .await
+        .unwrap();
+    let before = store.read_watermarks(run.claim.session_id()).await.unwrap();
+    let mutation = |revision| {
+        let mut mutation = run.mutation("guarded", 2, false, vec![]);
+        mutation.guards = vec![DomainReadGuard {
+            domain: domain.clone(),
+            revision: DomainRevision::new(revision),
+        }];
+        mutation
+    };
+    assert!(matches!(
+        run.kernel.commit_domains(&run.claim, mutation(1)).await,
+        Err(TurnError::DomainRevisionConflict { .. })
+    ));
+    assert_eq!(
+        store.read_watermarks(run.claim.session_id()).await.unwrap(),
+        before
+    );
+    let receipt = run
+        .kernel
+        .commit_domains(&run.claim, mutation(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        run.kernel
+            .commit_domains(&run.claim, mutation(1))
+            .await
+            .unwrap(),
+        receipt
+    );
+    run.stop().await;
 }

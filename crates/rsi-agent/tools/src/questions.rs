@@ -91,6 +91,7 @@ impl ToolExecutor for AskUser {
         let mut entropy = [0_u8; 16];
         getrandom::fill(&mut entropy).map_err(|error| ToolError::Execution(error.to_string()))?;
         let request = QuestionRequest {
+            review: None,
             id: format!("question-{:032x}", u128::from_le_bytes(entropy)),
             session_id: caller.session_id().to_string(),
             turn_id: caller.turn_id().to_string(),

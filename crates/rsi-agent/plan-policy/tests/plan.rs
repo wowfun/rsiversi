@@ -29,6 +29,74 @@ use rsi_sandbox::SandboxMode;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+struct NoQuestions;
+#[async_trait::async_trait]
+impl rsi_user_questions_protocol::UserQuestions for NoQuestions {
+    async fn ask(
+        &self,
+        _: rsi_user_questions_protocol::QuestionRequest,
+        _: CancellationToken,
+    ) -> rsi_user_questions_protocol::Result<rsi_user_questions_protocol::QuestionAnswer> {
+        Err(rsi_user_questions_protocol::QuestionError::Cancelled)
+    }
+    async fn pending(
+        &self,
+        _: &str,
+    ) -> rsi_user_questions_protocol::Result<Vec<rsi_user_questions_protocol::QuestionRequest>>
+    {
+        Ok(vec![])
+    }
+    async fn pending_for_sessions(
+        &self,
+        _: &[String],
+    ) -> rsi_user_questions_protocol::Result<Vec<rsi_user_questions_protocol::QuestionRequest>>
+    {
+        Ok(vec![])
+    }
+    fn watch_pending(
+        &self,
+        _: &[String],
+    ) -> rsi_user_questions_protocol::Result<rsi_user_questions_protocol::PendingChanges> {
+        Err(rsi_user_questions_protocol::QuestionError::Cancelled)
+    }
+    async fn answer(
+        &self,
+        _: &str,
+        _: &str,
+        _: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> rsi_user_questions_protocol::Result<bool> {
+        Ok(false)
+    }
+}
+#[derive(Debug)]
+struct QuestionsFactory;
+#[async_trait::async_trait]
+impl PluginFactory for QuestionsFactory {
+    fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        Ok(rsi_meta::PreparedActivation::with_state(
+            ConfigValue::Null,
+            (),
+            0,
+        ))
+    }
+    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<rsi_user_questions_protocol::UserQuestionsContract>(Arc::new(
+                NoQuestions,
+            ))?;
+        plan.defer(
+            "questions",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
+}
 struct Fixture {
     temp: tempfile::TempDir,
     runtime: Runtime,
@@ -44,11 +112,23 @@ fn linked(id: &str, factory: impl PluginFactory) -> ResolvedFactory {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_review_tools(true).await
+    }
+    async fn with_review_tools(review_tools: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let presets_root = temp.path().join("presets");
         let preset = presets_root.join("fixture");
         std::fs::create_dir_all(&preset).unwrap();
         std::fs::write(preset.join("agent.profile.toml"), "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"fixture.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"plan\"\nplugin = \"fixture.plan\"\n").unwrap();
+        if !review_tools {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(preset.join("agent.profile.toml"))
+                .unwrap()
+                .write_all(b"[steps.config]\nreview_tools = false\n")
+                .unwrap();
+        }
         for name in ["config", "state", "cache"] {
             std::fs::create_dir_all(temp.path().join(name)).unwrap();
         }
@@ -82,11 +162,17 @@ impl Fixture {
         let runtime = Runtime::default();
         for factory in [
             linked("fixture.tools", rsi_tools::ToolsFactory),
+            linked("fixture.questions", QuestionsFactory),
+            linked(
+                "fixture.store",
+                rsi_agent_testkit::MemoryStoreFactory::new(Arc::new(MemoryStore::new())),
+            ),
             linked("fixture.root", AgentGenerationRootFactory),
             linked(
                 "fixture.composition",
                 AgentCompositionFactory::new(presets, contributions, ScopeRoot::new(16).unwrap()),
             ),
+            linked("fixture.kernel", rsi_agent_kernel::KernelFactory),
         ] {
             runtime
                 .root()
@@ -187,10 +273,10 @@ async fn view(draft: &AgentSessionDraft) -> serde_json::Value {
 async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_reset() {
     let fixture = Fixture::new().await;
     let mut draft = fixture.draft().await;
-    assert_eq!(draft.composition().contributions().entries().len(), 4);
+    assert_eq!(draft.composition().contributions().entries().len(), 5);
     assert_eq!(
         view(&draft).await,
-        serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read","todo_write"]})
+        serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read","plan_write","request_plan_execution","todo_write","workflow_cancel","workflow_read"],"review":{"plan":null,"last_review":null}})
     );
     for (id, argument, expected) in [
         ("on", "on", true),
@@ -224,7 +310,12 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One draft-to-Kernel policy flow with all constraint assertions.
 async fn actual_draft_state_enters_kernel_and_policy_only_adds_constraints() {
-    let fixture = Fixture::new().await;
+    check_actual_draft(true).await;
+    check_actual_draft(false).await;
+}
+#[allow(clippy::too_many_lines)] // Both configurations cross draft, Kernel context, and command boundaries.
+async fn check_actual_draft(review_tools: bool) {
+    let fixture = Fixture::with_review_tools(review_tools).await;
     let mut draft = fixture.draft().await;
     command(&mut draft, "enable", "on").await;
     let pin = draft.composition().clone();
@@ -255,7 +346,7 @@ async fn actual_draft_state_enters_kernel_and_policy_only_adds_constraints() {
         .await
         .unwrap();
     assert_eq!(context.domains[0].snapshot.state().value(), &true);
-    assert_enabled_plan(&pin, &context).await;
+    assert_enabled_plan(&pin, &context, review_tools).await;
     let snapshot = kernel
         .projection_snapshot(fixture.header().session_id())
         .await
@@ -346,6 +437,7 @@ fn pinned_policy(
 async fn assert_enabled_plan(
     pin: &rsi_agent_composition_protocol::AgentCompositionPin,
     context: &rsi_agent_composition_protocol::ContributionContext,
+    review_tools: bool,
 ) {
     let identity =
         rsi_tools_protocol::ToolResultIdentity::new("owner", "invocation", "call", "a".repeat(64))
@@ -360,6 +452,10 @@ async fn assert_enabled_plan(
         ("bash", true),
         ("output_read_more", true),
         ("apply_patch", true),
+        ("run_code", true),
+        ("run_workflow", true),
+        ("plan_write", !review_tools),
+        ("request_plan_execution", !review_tools),
     ] {
         let request = ToolPolicyRequest {
             identity: &identity,
@@ -395,6 +491,23 @@ async fn assert_enabled_plan(
         .unwrap();
     assert_eq!(output.inputs.len(), 1);
     assert!(output.domains.is_empty());
+    let mut batch = rsi_agent_composition_protocol::ContributionBatch::default();
+    batch
+        .append(
+            &rsi_agent_session_protocol::ContributionId::new("fixture.context").unwrap(),
+            &context.turn_id,
+            &context.step_id,
+            output,
+        )
+        .unwrap();
+    let text = serde_json::to_string(&batch.into_parts().0).unwrap();
+    for name in ["plan_write", "request_plan_execution"] {
+        assert_eq!(
+            text.contains(name),
+            review_tools,
+            "context must name only registered review Tools"
+        );
+    }
 }
 
 #[test]

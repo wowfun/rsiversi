@@ -24,6 +24,24 @@ struct EmptyTools;
 
 #[async_trait]
 impl ToolRuntime for EmptyTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definition(name)
+            .map(|definition| definition.program_role())
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition.program_role() != rsi_tools_protocol::ToolProgramRole::Unavailable
+            })
+            .map(|definition| (definition.name().to_owned(), definition.program_role()))
+            .collect()
+    }
+    fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        None
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }
@@ -286,4 +304,58 @@ async fn owned_preset_preparation_cannot_overwrite_a_later_selection_or_another_
         Err(rsi_agent_composition_protocol::DraftCommandError::WrongDraft)
     ));
     assert_eq!(other.header().agent_preset_id().as_str(), "alpha");
+}
+
+#[tokio::test]
+async fn exact_name_lookup_observes_reporting_and_delegation_authority() {
+    use rsi_agent_session_protocol::{
+        DelegationPolicy, DelegationRole, OutputContract, REPORT_RESULT_TOOL,
+    };
+    let composition = FakeComposition {
+        failures: Mutex::default(),
+        domains: rsi_agent_composition_protocol::DomainCatalog::default(),
+    };
+    let base = composition
+        .pin(&AgentPresetId::new("alpha").unwrap(), None)
+        .await
+        .unwrap();
+    let contract = OutputContract::new(serde_json::json!({"type":"object"})).unwrap();
+    let reporting = base
+        .clone()
+        .with_output_contract("owner", contract.clone())
+        .unwrap();
+    assert!(base.tools().definition(REPORT_RESULT_TOOL).is_none());
+    assert_eq!(base.tools().program_role(REPORT_RESULT_TOOL), None);
+    assert_eq!(
+        reporting.tools().program_role(REPORT_RESULT_TOOL),
+        Some(rsi_tools_protocol::ToolProgramRole::Unavailable)
+    );
+    assert!(reporting.tools().program_roles().is_empty());
+    assert_eq!(
+        reporting.tools().definition(REPORT_RESULT_TOOL),
+        reporting.tools().definitions().into_iter().next()
+    );
+    assert!(reporting.tools().definition("missing").is_none());
+    assert!(
+        reporting
+            .clone()
+            .with_output_contract("duplicate", contract)
+            .is_err()
+    );
+    let policy = DelegationPolicy::freeze(
+        Some(&DelegationRole {
+            name: "restricted".into(),
+            persona: None,
+            allow: Some(BTreeSet::new()),
+            deny: BTreeSet::new(),
+        }),
+        [REPORT_RESULT_TOOL.into()].into_iter().collect(),
+        None,
+    )
+    .unwrap();
+    let restricted = reporting.clone().for_delegation(Some(&policy));
+    assert!(restricted.tools().definition(REPORT_RESULT_TOOL).is_none());
+    assert_eq!(restricted.tools().program_role(REPORT_RESULT_TOOL), None);
+    assert!(restricted.tools().program_roles().is_empty());
+    assert!(reporting.tools().definition(REPORT_RESULT_TOOL).is_some());
 }

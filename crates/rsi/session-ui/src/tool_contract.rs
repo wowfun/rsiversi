@@ -195,7 +195,10 @@ mod tests {
             SessionFactBody::ToolIntent {
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("effect").unwrap(),
-                source_model_effect_id: EffectId::new("model").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("model").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
                     .unwrap(),
                 name: "echo".into(),

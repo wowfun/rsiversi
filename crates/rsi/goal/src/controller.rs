@@ -7,7 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use rsi_agent_goal::{GoalAction, GoalPhase};
-use rsi_agent_session_protocol::{CommandRevision, DomainRequestId, SessionId};
+use rsi_agent_session_protocol::{DomainRequestId, SessionId};
 use rsi_agent_turn_protocol::{
     ContinuationBinding, ContinuationLease, MessageState, SessionContinuationsContract,
     TurnServiceContract,
@@ -532,13 +532,6 @@ fn binding(
         owner: goal.id.clone(),
         revision: snapshot.domain.revision,
         snapshot_sha256: snapshot.domain.snapshot.sha256().map_err(invalid)?,
-        initial_input: if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
-            goal.reservation
-                .as_ref()
-                .map(|reservation| reservation.input(&goal.id))
-        } else {
-            None
-        },
     })
 }
 fn invalid(error: impl std::fmt::Display) -> GoalError {

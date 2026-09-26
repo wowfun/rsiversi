@@ -114,6 +114,7 @@ fn facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<SessionFact>
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Full replay fixture includes correlated Tool intent, start, and result Facts.
 fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
     let turn = TurnId::new("turn-1").unwrap();
     let effect = EffectId::new("model-1").unwrap();
@@ -179,6 +180,24 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
                 reason: FinishReason::ToolCalls,
                 replay: None,
             },
+        },
+        SessionFactBody::ToolIntent {
+            turn_id: turn.clone(),
+            effect_id: EffectId::new("tool-1").unwrap(),
+            identity: tool_identity.clone(),
+            origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: EffectId::new("model-1").unwrap(),
+            },
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
+            name: "lookup".into(),
+            arguments: json!({}),
+            approval: None,
+            parallel_safe: false,
+        },
+        SessionFactBody::ToolStarted {
+            turn_id: turn.clone(),
+            effect_id: EffectId::new("tool-1").unwrap(),
+            identity: tool_identity.clone(),
         },
         SessionFactBody::ToolResult {
             turn_id: turn,

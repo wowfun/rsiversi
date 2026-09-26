@@ -2,24 +2,26 @@ use super::*;
 use rsi_agent_session_protocol::{CommandArguments, DomainRequestId, SessionCommandInvocation};
 use rsi_session_protocol::SessionHandle;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 #[path = "../../../../../fixtures/rsi/addon-workbench/addon.rs"]
 mod workbench;
 
+type Responses = VecDeque<Option<(&'static str, Value)>>;
+
 #[derive(Default)]
 struct Provider {
     requests: Mutex<Vec<Value>>,
-    calls: Mutex<VecDeque<Option<(&'static str, Value)>>>,
+    calls: Mutex<BTreeMap<String, Responses>>,
 }
 async fn respond(State(provider): State<Arc<Provider>>, Json(request): Json<Value>) -> Response {
+    let call = next_call(&provider, &request);
     let call_id = {
         let mut requests = provider.requests.lock().unwrap();
         requests.push(request);
         format!("workbench-call-{}", requests.len())
     };
-    let call = provider.calls.lock().unwrap().pop_front().flatten();
     let Some((name, arguments)) = call else {
         return chat().await;
     };
@@ -32,6 +34,27 @@ async fn respond(State(provider): State<Arc<Provider>>, Json(request): Json<Valu
             "data: {call}\n\ndata: {finish}\n\ndata: [DONE]\n\n"
         )))
         .unwrap()
+}
+fn next_call(provider: &Provider, request: &Value) -> Option<(&'static str, Value)> {
+    let content = &request["messages"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")?["content"];
+    let text = content
+        .as_str()
+        .or_else(|| content.as_array()?.first()?["text"].as_str())?;
+    let key = text.strip_prefix("workbench request: ")?;
+    provider
+        .calls
+        .lock()
+        .unwrap()
+        .get_mut(key)?
+        .pop_front()
+        .flatten()
+}
+async fn run_workbench_message(handle: &Arc<dyn SessionHandle>, id: &str) {
+    run_message_with_text_to_terminal(handle, id, &format!("workbench request: {id}")).await;
 }
 async fn set_plan(handle: &Arc<dyn SessionHandle>, argument: &str, request: &str) {
     let commands = handle.commands().await.unwrap();
@@ -90,11 +113,17 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
         .unwrap()
 }
 async fn echo(provider: &Provider, handle: &Arc<dyn SessionHandle>, id: &str, label: &str) {
-    provider.calls.lock().unwrap().extend([
-        Some(("fixture_echo", json!({"input":"public-addon"}))),
-        None,
-    ]);
-    run_message_to_terminal(handle, id).await;
+    provider
+        .calls
+        .lock()
+        .unwrap()
+        .entry(id.into())
+        .or_default()
+        .extend([
+            Some(("fixture_echo", json!({"input":"public-addon"}))),
+            None,
+        ]);
+    run_workbench_message(handle, id).await;
     let history = handle.history_before(None, 128).await.unwrap();
     let result = history
         .facts
@@ -110,7 +139,7 @@ async fn echo(provider: &Provider, handle: &Arc<dyn SessionHandle>, id: &str, la
         result.body()
     );
     assert!(
-        provider.calls.lock().unwrap().is_empty(),
+        provider.calls.lock().unwrap()[id].is_empty(),
         "echo {id} ended before provider followup: {:?}",
         history.facts
     );
@@ -144,10 +173,12 @@ async fn independent_addon_owns_draft_state_policy_generations_and_cold_recovery
         .calls
         .lock()
         .unwrap()
+        .entry("held-a".into())
+        .or_default()
         .push_back(Some(("fixture_echo", json!({"hold":true}))));
     let held = old.clone();
     let waiter = tokio::spawn(async move {
-        run_message_to_terminal(&held, "held-a").await;
+        run_workbench_message(&held, "held-a").await;
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -235,8 +266,10 @@ async fn prepare_durable_state(
         .calls
         .lock()
         .unwrap()
+        .entry("denied".into())
+        .or_default()
         .push_back(Some(("fixture_echo", json!({}))));
-    run_message_to_terminal(&old, "denied").await;
+    run_workbench_message(&old, "denied").await;
     assert!(
         provider.requests.lock().unwrap()[0]
             .to_string()
@@ -326,11 +359,17 @@ async fn fork_completed_state(
     parent: &Arc<dyn SessionHandle>,
 ) -> SessionId {
     set_plan(parent, "on", "idle-on-after-completed-turn").await;
-    provider.calls.lock().unwrap().push_back(Some((
-        "spawn_agent",
-        json!({"task_name":"workbench-child","message":"child acceptance","fork_turns":"all"}),
-    )));
-    run_message_to_terminal(parent, "fork-workbench").await;
+    provider
+        .calls
+        .lock()
+        .unwrap()
+        .entry("fork-workbench".into())
+        .or_default()
+        .push_back(Some((
+            "spawn_agent",
+            json!({"task_name":"workbench-child","message":"child acceptance","fork_turns":"all"}),
+        )));
+    run_workbench_message(parent, "fork-workbench").await;
     let children = parent.inspect().await.unwrap().tree.descendants;
     assert_eq!(children.len(), 1);
     let id = children[0].status.session_id.clone();
@@ -402,4 +441,27 @@ async fn check_settings(running: &RunningRsi) {
         .await
         .unwrap();
     assert_eq!(new.value["note"], "public settings");
+}
+
+#[test]
+fn unrelated_child_and_completion_requests_cannot_consume_a_scheduled_echo() {
+    let provider = Provider::default();
+    provider.calls.lock().unwrap().insert(
+        "cold-b".into(),
+        VecDeque::from([Some(("fixture_echo", json!({}))), None]),
+    );
+    let request =
+        |text: &str| json!({"messages":[{"role":"user","content":[{"type":"text","text":text}]}]});
+    for text in ["child acceptance", "Subagent activation completed."] {
+        assert!(next_call(&provider, &request(text)).is_none());
+    }
+    assert_eq!(provider.calls.lock().unwrap()["cold-b"].len(), 2);
+    assert_eq!(
+        next_call(&provider, &request("workbench request: cold-b"))
+            .unwrap()
+            .0,
+        "fixture_echo"
+    );
+    assert!(next_call(&provider, &request("workbench request: cold-b")).is_none());
+    assert!(provider.calls.lock().unwrap()["cold-b"].is_empty());
 }

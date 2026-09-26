@@ -41,7 +41,8 @@ impl PluginFactory for OutputReadToolFactory {
                 "limit":{"type":"integer","minimum":1,"maximum":MAXIMUM_OUTPUT_READ_BYTES}
             },"required":["id"],"additionalProperties":false}))
             .map_err(|error| MetaError::Activation(error.to_string()))?
-            .with_scheduling(ToolScheduling::ParallelSafe);
+            .with_scheduling(ToolScheduling::ParallelSafe)
+            .with_program_role(rsi_tools_protocol::ToolProgramRole::Callable);
         let lease = plan
             .local::<ToolRegistrarContract>()?
             .register_batch(vec![ToolRegistration {

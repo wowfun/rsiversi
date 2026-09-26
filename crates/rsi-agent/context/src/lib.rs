@@ -45,9 +45,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 8;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v8\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v8\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 10;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v10\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v10\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1306,6 +1306,7 @@ fn input_message(
         }
         InputMessageSource::Human { .. }
         | InputMessageSource::Continuation { .. }
+        | InputMessageSource::Program { .. }
         | InputMessageSource::Agent { .. }
         | InputMessageSource::Completion { .. }
         | InputMessageSource::UserSkillInvocation { .. } => {

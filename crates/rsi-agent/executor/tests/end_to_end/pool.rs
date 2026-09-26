@@ -616,6 +616,24 @@ pub(super) struct PanicCommitTools {
 
 #[async_trait]
 impl ToolRuntime for PanicCommitTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definition(name)
+            .map(|definition| definition.program_role())
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition.program_role() != rsi_tools_protocol::ToolProgramRole::Unavailable
+            })
+            .map(|definition| (definition.name().to_owned(), definition.program_role()))
+            .collect()
+    }
+    fn definition(&self, name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        self.inner.definition(name)
+    }
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.inner.definitions()
     }

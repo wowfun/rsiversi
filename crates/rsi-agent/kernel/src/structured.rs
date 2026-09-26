@@ -128,7 +128,7 @@ impl AgentKernel {
         &self,
         caller: &AgentCallerAuthority,
         locator: &rsi_agent_session_protocol::AgentResultLocator,
-    ) -> TurnResult<serde_json::Value> {
+    ) -> TurnResult<rsi_agent_turn_protocol::AgentResult> {
         self.validate_agent_caller(caller)?;
         if locator.fact_seq == 0 {
             return Err(TurnError::Invalid(
@@ -147,7 +147,12 @@ impl AgentKernel {
             ));
         }
         let message_id = completion_message_id(&locator.child_session_id, &locator.activation_id)?;
-        let reference = {
+        let reference = if matches!(
+            header.execution_owner(),
+            Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun { .. })
+        ) {
+            self.program_result_reference(&header, locator).await?
+        } else {
             let (selected, _permit, _lease) = store_reads::read(
                 &self.inner,
                 caller.session_id(),
@@ -183,6 +188,18 @@ impl AgentKernel {
             }
             reference
         };
+        let result = self
+            .verify_structured_result(&header, locator, reference)
+            .await?;
+        self.validate_agent_caller(caller)?;
+        Ok(result)
+    }
+    pub(super) async fn verify_structured_result(
+        &self,
+        header: &SessionHeader,
+        locator: &rsi_agent_session_protocol::AgentResultLocator,
+        reference: AgentResultRef,
+    ) -> TurnResult<rsi_agent_turn_protocol::AgentResult> {
         let page = read_facts_bounded(
             &self.inner,
             &locator.child_session_id,
@@ -221,7 +238,9 @@ impl AgentKernel {
                 "result Fact disagrees with its frozen contract or Completion".into(),
             ));
         }
-        self.validate_agent_caller(caller)?;
-        Ok(result.value.clone())
+        Ok(rsi_agent_turn_protocol::AgentResult {
+            reference,
+            value: result.value.clone(),
+        })
     }
 }

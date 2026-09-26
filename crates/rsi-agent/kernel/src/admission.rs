@@ -27,7 +27,10 @@ impl AgentKernel {
         }
     }
 
-    async fn cancel_open_descendant_turns(&self, session_id: &SessionId) -> TurnResult<()> {
+    pub(super) async fn cancel_open_descendant_turns(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<()> {
         let mut cursor = 0;
         let mut horizon = None;
         let mut failure = None;
@@ -84,7 +87,19 @@ impl AgentKernel {
         };
         let proposed_outcome = &effective;
         if !matches!(proposed_outcome, TurnOutcome::Completed) {
-            let descendants = descendant_session_ids(&self.inner.store, claim.session_id()).await?;
+            let snapshot = self
+                .inner
+                .store
+                .read_agent_subtree_snapshot(claim.session_id())
+                .await
+                .map_err(turn_store_error)?;
+            snapshot.validate().map_err(turn_store_error)?;
+            let descendants = snapshot
+                .descendants
+                .iter()
+                .filter(|child| snapshot.activation_owns(child))
+                .map(|child| child.status.session_id.clone())
+                .collect::<Vec<_>>();
             let cancellations = descendants.iter().map(|child_session_id| async move {
                 let result = self.cancel_open_descendant_turns(child_session_id).await;
                 (child_session_id.clone(), result)
@@ -230,7 +245,7 @@ impl AgentKernel {
             controls: settled_controls,
         }];
         if let Some(parent_session_id) = &parent_session_id {
-            sessions.push(
+            sessions.extend(
                 self.completion_append(
                     (claim.session_id(), reply),
                     &activation_id,
@@ -254,7 +269,11 @@ impl AgentKernel {
                         session_id: claim.session_id().clone(),
                         activation_id: activation_id.clone(),
                     }],
-                    quiescent_descendants_of: Some(claim.session_id().clone()),
+                    quiescent_descendants_of: Some(
+                        rsi_agent_store_protocol::AgentQuiescenceGuard::activation(
+                            claim.session_id().clone(),
+                        ),
+                    ),
                 })
                 .await?;
             let settled = match settlement {
@@ -327,8 +346,19 @@ impl AgentKernel {
         outcome: &TurnOutcome,
         result: Option<rsi_agent_session_protocol::AgentResultRef>,
         timestamp_ms: u64,
-    ) -> TurnResult<AtomicSessionAppend> {
+    ) -> TurnResult<Option<AtomicSessionAppend>> {
         let (child_session_id, reply) = child;
+        let header = read_validated_header_bounded(&self.inner, child_session_id)
+            .await
+            .map_err(turn_store_error)?;
+        match self
+            .program_completion_append(&header, activation_id, outcome, result.as_ref())
+            .await?
+        {
+            program::CompletionRoute::Append(append) => return Ok(Some(*append)),
+            program::CompletionRoute::Interrupted => return Ok(None),
+            program::CompletionRoute::NotOwned => {}
+        }
         let mut completion_text = completion_message(outcome);
         if let Some(result) = &result {
             write!(
@@ -421,14 +451,14 @@ impl AgentKernel {
             },
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        Ok(AtomicSessionAppend {
+        Ok(Some(AtomicSessionAppend {
             session_id: parent_session_id.clone(),
             expected_fact_seq,
             expected_control_seq: mailbox.durable_control_seq,
             header: None,
             facts: Vec::new(),
             controls: vec![control],
-        })
+        }))
     }
 
     pub(super) fn install_committed_terminal(
@@ -519,11 +549,16 @@ impl AgentKernel {
                     .await
                     .map_err(turn_store_error)?;
                 subtree.validate().map_err(turn_store_error)?;
-                if subtree.descendants.iter().any(|child| {
-                    child.status.has_open_turn
-                        || child.status.has_active_activation
-                        || child.status.has_waking_message
-                }) {
+                if subtree
+                    .descendants
+                    .iter()
+                    .filter(|child| subtree.activation_owns(child))
+                    .any(|child| {
+                        child.status.has_open_turn
+                            || child.status.has_active_activation
+                            || child.status.has_waking_message
+                    })
+                {
                     return Ok(());
                 }
                 let turn_id = active.turn_id.clone().ok_or_else(|| {
@@ -600,7 +635,7 @@ impl AgentKernel {
                     controls,
                 }];
                 if let Some(parent_session_id) = &parent_session_id {
-                    sessions.push(
+                    sessions.extend(
                         self.completion_append(
                             (&session_id, reply),
                             &active.activation_id,
@@ -620,7 +655,11 @@ impl AgentKernel {
                             session_id: session_id.clone(),
                             activation_id: active.activation_id,
                         }],
-                        quiescent_descendants_of: Some(session_id.clone()),
+                        quiescent_descendants_of: Some(
+                            rsi_agent_store_protocol::AgentQuiescenceGuard::activation(
+                                session_id.clone(),
+                            ),
+                        ),
                     })
                     .await?;
                 match result {

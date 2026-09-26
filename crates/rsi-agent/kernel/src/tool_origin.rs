@@ -259,11 +259,12 @@ impl ToolSource {
 
     pub(super) fn reject(
         &mut self,
+        source: &EffectId,
         id: &str,
         name: &str,
         arguments: &serde_json::Value,
     ) -> TurnResult<()> {
-        self.consume_call(&self.effect_id.clone(), id, name, arguments)
+        self.consume_call(source, id, name, arguments)
     }
 
     pub(super) fn consume(
@@ -315,7 +316,7 @@ pub(super) fn validate_caller(turn: &TurnControl, caller: &AgentCallerAuthority)
                 started: true,
                 source_selection,
                 ..
-            }) if Some(source_selection) == caller.source_selection() => {}
+            }) if Some(source_selection.as_ref()) == caller.source_selection() => {}
             _ => return Err(TurnError::StaleClaim),
         }
     }
@@ -457,10 +458,20 @@ pub(super) mod tests {
         );
         let mut rejected = original.clone();
         rejected
-            .reject("first", "read", &serde_json::json!({}))
+            .reject(
+                &EffectId::new("source-model").unwrap(),
+                "first",
+                "read",
+                &serde_json::json!({}),
+            )
             .unwrap();
         rejected
-            .reject("second", "read", &serde_json::json!({}))
+            .reject(
+                &EffectId::new("source-model").unwrap(),
+                "second",
+                "read",
+                &serde_json::json!({}),
+            )
             .unwrap();
         assert!(rejected.pending_source().is_none());
         assert!(rejected.supersede(&effect).is_err());
@@ -472,7 +483,12 @@ pub(super) mod tests {
         Arc::make_mut(remaining.calls.get_mut(&1).unwrap()).arguments = Arguments::Complete(None);
         assert!(
             remaining
-                .reject("second", "read", &serde_json::json!({}))
+                .reject(
+                    &EffectId::new("source-model").unwrap(),
+                    "second",
+                    "read",
+                    &serde_json::json!({})
+                )
                 .is_err(),
             "invalid JSON cannot establish a different typed rejection identity"
         );
@@ -502,12 +518,22 @@ pub(super) mod tests {
                 .is_err()
         );
         source
-            .reject("call", "read", &serde_json::json!({}))
+            .reject(
+                &EffectId::new("source-model").unwrap(),
+                "call",
+                "read",
+                &serde_json::json!({}),
+            )
             .unwrap();
         assert!(source.pending_source().is_none());
         assert!(
             source
-                .reject("call", "read", &serde_json::json!({}))
+                .reject(
+                    &EffectId::new("source-model").unwrap(),
+                    "call",
+                    "read",
+                    &serde_json::json!({})
+                )
                 .is_err()
         );
     }

@@ -6,8 +6,8 @@ use crate::{
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::AgentCompositionPin;
 use rsi_agent_session_protocol::{
-    ContinuationInput, ContinuationProvenance, ContinuationSource, DomainIdentity, DomainRequestId,
-    DomainRevision, MessageId, SessionCommandInvocation, SessionHeader, SessionId,
+    ContinuationInput, ContinuationSource, DomainIdentity, DomainRequestId, DomainRevision,
+    MessageId, SessionCommandInvocation, SessionHeader, SessionId,
 };
 use rsi_meta_contract::LocalContract;
 use std::{
@@ -27,9 +27,6 @@ pub struct ContinuationBinding {
     pub revision: DomainRevision,
     /// Digest of the complete current snapshot, checked at arm admission.
     pub snapshot_sha256: String,
-    /// Exact first allocation validated by the domain owner when arming a draft.
-    /// Durable controllers reserve through canonical internal command receipts.
-    pub initial_input: Option<ContinuationInput>,
 }
 
 /// Cloneable live authority. The Kernel retains only a weak reference.
@@ -49,9 +46,22 @@ struct LiveContinuation {
 struct LeaseState {
     revision: DomainRevision,
     source: Option<ContinuationSource>,
+    requested: bool,
+    last_admitted: u64,
+}
+
+impl Drop for LiveContinuation {
+    fn drop(&mut self) {
+        self.revoked.cancel();
+    }
 }
 
 impl ContinuationLease {
+    /// Observes revocation or last-owner release without keeping authority alive.
+    #[doc(hidden)]
+    pub fn disarmed_token(&self) -> CancellationToken {
+        self.0.revoked.clone()
+    }
     /// Synchronously stops future scheduling; retained settlement remains possible.
     pub fn revoke(&self) {
         self.0.revoked.cancel();
@@ -59,6 +69,10 @@ impl ContinuationLease {
     /// Whether explicit live scheduling authority remains available.
     pub fn is_armed(&self) -> bool {
         !self.0.revoked.is_cancelled()
+    }
+    /// Waits until this live authority is explicitly revoked.
+    pub async fn disarmed(&self) {
+        self.0.revoked.cancelled().await;
     }
     /// Immutable owning Session.
     pub fn session_id(&self) -> &SessionId {
@@ -75,6 +89,16 @@ impl ContinuationLease {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .revision
+    }
+    /// Current scheduling demand and last admitted control position, for Kernel fairness.
+    #[doc(hidden)]
+    pub fn demand(&self) -> Option<u64> {
+        let state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (self.is_armed() && state.requested).then_some(state.last_admitted)
     }
     /// Non-owning registry entry; it cannot keep abandoned execution armed.
     #[doc(hidden)]
@@ -148,6 +172,8 @@ impl ContinuationIssuer {
             state: Mutex::new(LeaseState {
                 revision,
                 source: None,
+                requested: false,
+                last_admitted: 0,
             }),
             revoked: CancellationToken::new(),
         }))
@@ -167,24 +193,50 @@ impl ContinuationIssuer {
     /// Advances the guarded state only after canonical command reconciliation.
     pub fn set_revision(&self, lease: &ContinuationLease, revision: DomainRevision) -> Result<()> {
         self.inspect(lease)?;
+        let mut state = lease
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if revision.get() > state.revision.get() {
+            state.revision = revision;
+        }
+        Ok(())
+    }
+    /// Announces eligible work without allocating or admitting an input.
+    pub fn request_round(&self, lease: &ContinuationLease) -> Result<()> {
+        self.inspect(lease)?;
+        if !lease.is_armed() {
+            return Err(TurnError::ContinuationDisarmed);
+        }
         lease
             .0
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .revision = revision;
+            .requested = true;
         Ok(())
     }
-    /// Binds one exact verified reservation before its mailbox commit can become ready.
+    /// Records service only after canonical acceptance; no busy attempt consumes a turn.
+    pub fn admitted_round(&self, lease: &ContinuationLease, control_seq: u64) -> Result<()> {
+        self.inspect(lease)?;
+        let mut state = lease
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.requested = false;
+        state.last_admitted = state.last_admitted.max(control_seq);
+        Ok(())
+    }
+    /// Records an admitted reservation, including settlement after overlapping revocation.
+    /// Recording never rearms a revoked lease; `guards` still requires live authority.
     pub fn guard_source(
         &self,
         lease: &ContinuationLease,
         source: ContinuationSource,
     ) -> Result<()> {
         self.inspect(lease)?;
-        if !lease.is_armed() {
-            return Err(TurnError::ContinuationDisarmed);
-        }
         lease
             .0
             .state
@@ -211,7 +263,25 @@ pub trait SessionContinuations: fmt::Debug + Send + Sync + 'static {
         session: SubmitSession,
         binding: ContinuationBinding,
     ) -> Result<ContinuationLease>;
+    /// Waits for advisory subtree idleness without charging or reserving work.
+    /// Runs a pure reserve callback against a private draft baseline, then commits
+    /// that baseline and exact first message together. Failure leaves the draft intact.
+    async fn reserve_initial(
+        &self,
+        lease: &ContinuationLease,
+        session: rsi_agent_composition_protocol::PreparedFreshSession,
+        invocation: SessionCommandInvocation,
+        input: ContinuationInput,
+    ) -> Result<MessageReceipt>;
+    /// Final reservation admission always rechecks under its Session gate.
+    async fn wait_idle(
+        &self,
+        lease: &ContinuationLease,
+        cancellation: CancellationToken,
+    ) -> Result<()>;
     /// Executes a pure internal command, preserving normal CAS and receipt reconciliation.
+    /// A reservation commits its exact message atomically while idle. Busy does
+    /// not revoke the lease or charge a round.
     /// A revoked retained lease may settle, but may not reserve another input.
     async fn execute(
         &self,
@@ -226,14 +296,6 @@ pub trait SessionContinuations: fmt::Debug + Send + Sync + 'static {
         lease: &ContinuationLease,
         request_id: &DomainRequestId,
     ) -> Result<Option<DomainMutationReceipt>>;
-    /// Accepts the exact reserved input after receipt/baseline and live-revision checks.
-    async fn submit(
-        &self,
-        lease: &ContinuationLease,
-        session: SubmitSession,
-        input: ContinuationInput,
-        provenance: ContinuationProvenance,
-    ) -> Result<MessageReceipt>;
     /// Discards only an unclaimed automatic input owned by this lease.
     /// An existing claimed Turn is returned unchanged and is never cancelled here.
     async fn discard_if_pending(

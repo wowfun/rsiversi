@@ -37,7 +37,17 @@ impl TurnExecution for AgentKernel {
         claim: &TurnClaim,
         cancellation: CancellationToken,
     ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
-        self.capture_contribution_context(claim, cancellation).await
+        self.capture_contribution_context(claim, cancellation, None)
+            .await
+    }
+    async fn program_policy_context(
+        &self,
+        claim: &TurnClaim,
+        parent: &EffectId,
+        cancellation: CancellationToken,
+    ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
+        self.capture_contribution_context(claim, cancellation, Some(parent))
+            .await
     }
     async fn park_human_wait(
         &self,
@@ -220,6 +230,7 @@ impl TurnExecution for AgentKernel {
                 )
                 .map_err(turn_composition_error)?;
         }
+        let program_roles = composition.tools().program_roles();
         let mut state = lock_state(&self.inner);
         self.validate_claim(&state, claim)?;
         let turn = state
@@ -228,6 +239,9 @@ impl TurnExecution for AgentKernel {
             .and_then(|session| session.turns.get_mut(claim.turn_id()))
             .ok_or(TurnError::StaleClaim)?;
         // A concurrent reader may have installed the one retained reporting runtime.
+        if turn.claim_composition.is_none() {
+            turn.program_roles = Arc::new(program_roles);
+        }
         Ok(turn.claim_composition.get_or_insert(composition).clone())
     }
 
@@ -254,9 +268,11 @@ impl TurnExecution for AgentKernel {
                 "Tool caller requires an exact started Tool effect".into(),
             ));
         };
-        self.inner
-            .claim_issuer
-            .tool_caller(claim, effect_id.clone(), source_selection.clone())
+        self.inner.claim_issuer.tool_caller(
+            claim,
+            effect_id.clone(),
+            source_selection.as_ref().clone(),
+        )
     }
 
     async fn tool_settlement_domains(
@@ -802,7 +818,21 @@ impl TurnExecution for AgentKernel {
         claim: &TurnClaim,
         mutation: rsi_agent_turn_protocol::DomainMutation,
     ) -> TurnResult<rsi_agent_turn_protocol::DomainMutationReceipt> {
-        self.commit_turn_domains(claim, mutation).await
+        self.commit_turn_domains(claim, mutation, None).await
+    }
+
+    async fn commit_tool_domains(
+        &self,
+        caller: &AgentCallerAuthority,
+        mutation: rsi_agent_turn_protocol::DomainMutation,
+    ) -> TurnResult<rsi_agent_turn_protocol::DomainMutationReceipt> {
+        if !mutation.facts.is_empty() {
+            return Err(TurnError::Invalid(
+                "started-Tool domain mutations cannot append executor Facts".into(),
+            ));
+        }
+        self.commit_turn_domains(caller.claim(), mutation, Some(caller))
+            .await
     }
 
     async fn publish(
@@ -974,6 +1004,7 @@ pub(super) fn stage_execution_facts(
             ));
         }
         let body = canonicalize_terminal(body, turn.cancel_requested);
+        validate_program_role(&turn, &body)?;
         validate_tool_admission(claim.header(), &turn, &body)?;
         super::structured::validate_conclusion(claim.header(), &turn, &body)?;
         apply_executor_body(&mut turn, &body)?;
@@ -1156,6 +1187,22 @@ pub(super) fn validate_tool_admission(
     {
         return Err(TurnError::Invalid(
             "ToolIntent is outside the frozen delegation policy".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_program_role(turn: &TurnControl, body: &SessionFactBody) -> TurnResult<()> {
+    if let SessionFactBody::ToolIntent {
+        name, program_role, ..
+    }
+    | SessionFactBody::ToolRejected {
+        name, program_role, ..
+    } = body
+        && turn.program_roles.get(name).copied().unwrap_or_default() != *program_role
+    {
+        return Err(TurnError::Invalid(
+            "Tool program role disagrees with the frozen Local catalog".into(),
         ));
     }
     Ok(())

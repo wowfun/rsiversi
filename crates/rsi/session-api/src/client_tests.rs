@@ -469,6 +469,7 @@ async fn observation_checks_each_cursor_and_retains_decoded_payload_after_wire_r
 async fn interactions_reject_foreign_questions_and_release_bytes_only_after_last_snapshot() {
     let (remote, client, handle) = fixture().await;
     let question = rsi_user_questions_protocol::QuestionRequest {
+        review: None,
         id: "question".into(),
         session_id: "session".into(),
         turn_id: "turn".into(),
@@ -515,11 +516,16 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
             has_open_turn: false,
             has_active_activation: false,
             has_waking_message: false,
+            has_active_program: false,
         };
         let descendants = (1..=255)
             .map(|index| {
                 let task_name = format!("child-{index:03}");
                 StoreAgentDescendantStatus {
+                    execution_owner: rsi_agent_session_protocol::ExecutionOwner::TurnActivation {
+                        session_id: header().session_id().clone(),
+                        turn_id: rsi_agent_session_protocol::TurnId::new("parent-turn").unwrap(),
+                    },
                     status: status(SessionId::new(&task_name).unwrap()),
                     parent_session_id: header().session_id().clone(),
                     path: rsi_agent_session_protocol::AgentPath::new(vec![index]).unwrap(),

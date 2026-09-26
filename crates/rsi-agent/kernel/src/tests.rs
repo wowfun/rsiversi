@@ -3,7 +3,11 @@ use super::*;
 
 fn tool_intent(turn_id: &TurnId, suffix: &str, parallel_safe: bool) -> SessionFactBody {
     SessionFactBody::ToolIntent {
-        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        },
+
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: turn_id.clone(),
         effect_id: EffectId::new(format!("effect-{suffix}")).unwrap(),
         identity: rsi_tools_protocol::ToolResultIdentity::new(

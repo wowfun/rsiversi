@@ -71,6 +71,7 @@ impl Driver {
                             format!("{}: {}", entry.id(), bounded(&error.to_string())),
                         )
                     })?;
+            settlement.require_uncancelled_turn |= additions.require_uncancelled_turn;
             if settlement
                 .domains
                 .len()

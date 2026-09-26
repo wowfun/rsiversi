@@ -110,6 +110,10 @@ impl AgentKernel {
                 KernelError::Invariant("session enumeration made no progress".into())
             })?);
         }
+        let mut program_generation = [0u8; 32];
+        getrandom::fill(&mut program_generation).map_err(|error| {
+            KernelError::Invariant(format!("program generation entropy unavailable: {error}"))
+        })?;
         let kernel = Self {
             inner: Arc::new(KernelInner {
                 tasks: TaskTracker::new(),
@@ -137,6 +141,8 @@ impl AgentKernel {
                 commands: commands::CommandRequests::default(),
                 continuation_issuer: rsi_agent_turn_protocol::ContinuationIssuer::default(),
                 continuations: Mutex::new(BTreeMap::new()),
+                programs: Mutex::new(BTreeMap::new()),
+                program_generation: format!("{:x}", Sha256::digest(program_generation)),
                 projection_admission: Arc::new(Semaphore::new(projection::MAXIMUM_CAPTURES)),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
@@ -157,7 +163,15 @@ impl AgentKernel {
                 store_read_admission: Arc::new(Semaphore::new(limits.maximum_store_read_bytes)),
             }),
         };
+        kernel
+            .discard_old_program_notices()
+            .await
+            .map_err(kernel_turn_error)?;
         kernel.reconcile_waiting_activations().await?;
+        kernel
+            .recover_program_runs()
+            .await
+            .map_err(kernel_turn_error)?;
         Ok(kernel)
     }
 
@@ -187,6 +201,16 @@ impl AgentKernel {
             .filter_map(rsi_agent_turn_protocol::WeakContinuationLease::upgrade)
         {
             lease.revoke();
+        }
+        for run in self
+            .inner
+            .programs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(Weak::upgrade)
+        {
+            rsi_agent_turn_protocol::ProgramRun::cancellation(run.as_ref()).cancel();
         }
         self.inner.submission_admission.close();
         self.inner.stop_settlement.cancel();
@@ -876,14 +900,35 @@ impl AgentKernel {
         &self,
         header: &SessionHeader,
     ) -> TurnResult<AgentCompositionPin> {
+        if let Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
+            session_id,
+            run_id,
+            ..
+        }) = header.execution_owner()
+        {
+            let run = self
+                .inner
+                .programs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session_id)
+                .and_then(Weak::upgrade);
+            if let Some(run) = run
+                && run.run_id() == run_id
+            {
+                return Ok(run.pinned_composition());
+            }
+        }
         let continuation = self
             .inner
             .continuations
             .lock()
             .expect("continuation registry poisoned")
-            .get(header.session_id())
-            .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade);
-        if let Some(lease) = continuation.filter(|lease| lease.binding().initial_input.is_some()) {
+            .iter()
+            .filter(|((session, _), _)| session == header.session_id())
+            .filter_map(|(_, lease)| lease.upgrade())
+            .find(|lease| lease.binding().revision.get() == 0);
+        if let Some(lease) = continuation {
             let (retained_header, composition) = self.inner.continuation_issuer.inspect(&lease)?;
             if retained_header != header {
                 return Err(TurnError::ContinuationDisarmed);

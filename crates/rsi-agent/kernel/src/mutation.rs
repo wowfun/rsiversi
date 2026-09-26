@@ -283,6 +283,45 @@ impl Drop for AgentMutationLease {
 }
 
 impl AgentKernel {
+    pub(crate) async fn drain_cancelled_session_mutations(&self, id: &SessionId) {
+        let gates = {
+            let state = lock_state(&self.inner);
+            state
+                .sessions
+                .get(id)
+                .into_iter()
+                .flat_map(|session| session.turns.values())
+                .filter(|turn| turn.cancellation.is_cancelled())
+                .filter_map(|turn| turn.claim.as_ref().map(|owner| owner.mutations.clone()))
+                .collect::<Vec<_>>()
+        };
+        for gate in gates {
+            loop {
+                let changed = gate.drained.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if gate.lock().active == 0 {
+                    break;
+                }
+                changed.await;
+            }
+        }
+    }
+
+    pub(crate) fn cancelled_session_has_sources(&self, id: &SessionId) -> bool {
+        let state = lock_state(&self.inner);
+        state.sessions.get(id).is_some_and(|session| {
+            session.turns.values().any(|turn| {
+                turn.terminal.is_none()
+                    && (!turn.cancellation.is_cancelled()
+                        || turn
+                            .claim
+                            .as_ref()
+                            .is_some_and(|owner| owner.mutations.lock().active != 0))
+            })
+        })
+    }
+
     pub(super) fn admit_wait_mutation(
         &self,
         caller: &AgentCallerAuthority,

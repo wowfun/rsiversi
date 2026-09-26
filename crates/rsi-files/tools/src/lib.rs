@@ -66,7 +66,7 @@ fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolR
             "maximum":{"type":"integer","minimum":1,"maximum":maximum}
         }, "not":{"required":["path","path_hex"]}, "additionalProperties":false});
         if kind == FileKind::File { schema["anyOf"] = json!([{"required":["path"]},{"required":["path_hex"]}]); }
-        Ok(ToolRegistration { output: None, definition: ToolDefinition::new(name, description, schema)?.with_scheduling(ToolScheduling::ParallelSafe), timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 }, executor: Arc::new(ReadTool { files: files.clone(), kind }) })
+        Ok(ToolRegistration { output: None, definition: ToolDefinition::new(name, description, schema)?.with_scheduling(ToolScheduling::ParallelSafe).with_program_role(rsi_tools_protocol::ToolProgramRole::Callable), timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 }, executor: Arc::new(ReadTool { files: files.clone(), kind }) })
     }).collect::<rsi_tools_protocol::Result<Vec<_>>>()?;
     entries.push(present::registration(files.clone())?);
     Ok(entries)

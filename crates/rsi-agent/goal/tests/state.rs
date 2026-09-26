@@ -23,6 +23,11 @@ fn create(max_rounds: u64, draft: bool) -> GoalState {
         .unwrap();
     state
 }
+fn reserved(rounds: u64) -> GoalState {
+    let mut state = create(rounds, true);
+    state.goal.as_mut().unwrap().reserve().unwrap();
+    state
+}
 fn terminal(outcome: RoundOutcome) -> RoundSettlement {
     RoundSettlement::Turn {
         turn_id: TurnId::new("source").unwrap(),
@@ -31,9 +36,10 @@ fn terminal(outcome: RoundOutcome) -> RoundSettlement {
 }
 
 #[test]
-fn cancelling_an_unpublished_allocation_allows_replacement_without_execution_or_refund() {
+fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
     let mut state = create(1, true);
-    let original = state.goal.as_ref().unwrap().reservation.clone().unwrap();
+    assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
+    assert!(state.goal.as_ref().unwrap().reservation.is_none());
     state
         .apply(
             GoalAction::Cancel { id: id("task") },
@@ -41,25 +47,8 @@ fn cancelling_an_unpublished_allocation_allows_replacement_without_execution_or_
             true,
         )
         .unwrap();
-    let goal = state.goal.as_ref().unwrap();
-    assert_eq!(goal.allocated_rounds, 1);
-    assert_eq!(
-        goal.reservation.as_ref().unwrap().message_id,
-        original.message_id
-    );
-    assert_eq!(
-        goal.reservation.as_ref().unwrap().settlement,
-        Some(RoundSettlement::Abandoned)
-    );
-    assert!(
-        state
-            .apply(
-                GoalAction::Resume { id: id("task") },
-                &TurnBudget::default(),
-                true
-            )
-            .is_err()
-    );
+    assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
+    assert!(state.goal.as_ref().unwrap().reservation.is_none());
     state
         .apply(
             GoalAction::Create {
@@ -88,10 +77,10 @@ fn report(state: &mut GoalState, kind: GoalReportKind) {
 }
 
 #[test]
-fn allocation_is_frozen_before_acceptance_and_cannot_refund_or_double_allocate() {
+fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     let mut state = create(2, true);
     let goal = state.goal.as_mut().unwrap();
-    assert_eq!(goal.allocated_rounds, 1);
+    assert_eq!(goal.allocated_rounds, 0);
     goal.reserve().unwrap();
     let reservation = goal.reservation.clone().unwrap();
     assert!(goal.reserve().is_err());
@@ -142,25 +131,23 @@ fn allocation_is_frozen_before_acceptance_and_cannot_refund_or_double_allocate()
 }
 
 #[test]
-fn binding_published_baseline_preserves_the_exhausted_first_allocation() {
-    let mut state = create(1, true);
-    let goal = state.goal.as_mut().unwrap();
-    let original = goal.reservation.clone().unwrap();
-    goal.phase = GoalPhase::Paused;
-    assert!(goal.reserve().is_err());
-    assert_eq!(goal.reservation.as_ref(), Some(&original));
-    goal.phase = GoalPhase::Active;
-    goal.reserve().unwrap();
-    let bound = goal.reservation.clone().unwrap();
-    assert_eq!(bound.input(&goal.id), original.input(&goal.id));
-    assert_eq!(goal.allocated_rounds, 1);
-    assert_eq!(
-        bound.request_id,
-        Some(rsi_agent_goal::round_request_id(&goal.id, 1, "reserve").unwrap())
-    );
-    assert!(goal.reserve().is_err());
-    assert_eq!(goal.reservation.as_ref(), Some(&bound));
-    state.validate().unwrap();
+fn draft_and_durable_creation_allocate_nothing_until_reservation() {
+    for draft in [false, true] {
+        let mut state = create(1, draft);
+        let goal = state.goal.as_mut().unwrap();
+        assert_eq!(goal.allocated_rounds, 0);
+        assert!(goal.reservation.is_none());
+        goal.phase = GoalPhase::Paused;
+        assert!(goal.reserve().is_err());
+        assert_eq!(goal.allocated_rounds, 0);
+        goal.phase = GoalPhase::Active;
+        goal.reserve().unwrap();
+        let original = goal.reservation.clone().unwrap();
+        assert_eq!(goal.allocated_rounds, 1);
+        assert!(goal.reserve().is_err());
+        assert_eq!(goal.reservation.as_ref(), Some(&original));
+        state.validate().unwrap();
+    }
 }
 
 #[test]
@@ -171,7 +158,7 @@ fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
         RoundOutcome::Interrupted,
         RoundOutcome::BudgetExceeded,
     ] {
-        let mut state = create(2, true);
+        let mut state = reserved(2);
         report(&mut state, GoalReportKind::Complete);
         let goal = state.goal.as_mut().unwrap();
         assert_eq!(goal.phase, GoalPhase::Active);
@@ -186,7 +173,7 @@ fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
 
 #[test]
 fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
-    let mut state = create(2, true);
+    let mut state = reserved(2);
     report(&mut state, GoalReportKind::Complete);
     let goal = state.goal.as_mut().unwrap();
     let message = goal.reservation.as_ref().unwrap().message_id.clone();
@@ -209,7 +196,7 @@ fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
             .is_err()
     );
 
-    let mut state = create(2, true);
+    let mut state = reserved(2);
     report(&mut state, GoalReportKind::Complete);
     let goal = state.goal.as_mut().unwrap();
     let message = goal.reservation.as_ref().unwrap().message_id.clone();
@@ -231,7 +218,7 @@ fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
 
 #[test]
 fn resume_preserves_frozen_budget_and_pause_survives_no_report_success() {
-    let mut state = create(3, true);
+    let mut state = reserved(3);
     let original = state.goal.as_ref().unwrap().turn_budget.clone();
     let tiny = TurnBudget::new(1, 1, 1, 1, 1).unwrap();
     state
@@ -284,7 +271,7 @@ fn all_five_allowance_dimensions_are_checked_and_zero_is_rejected() {
 
 #[test]
 fn codec_rejects_tampered_reservation_and_unverified_complete_state() {
-    let state = create(2, true);
+    let state = reserved(2);
     for change in [
         "message_id",
         "input",

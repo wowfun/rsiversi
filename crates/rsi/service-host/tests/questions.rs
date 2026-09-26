@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 fn request(id: &str) -> QuestionRequest {
     QuestionRequest {
+        review: None,
         id: id.into(),
         session_id: "root".into(),
         turn_id: "turn".into(),
@@ -18,6 +19,7 @@ fn request(id: &str) -> QuestionRequest {
 }
 fn answer(text: &str) -> QuestionAnswer {
     QuestionAnswer {
+        review: None,
         answers: vec![text.into()],
     }
 }
@@ -98,6 +100,7 @@ async fn same_host_reconnect_replays_exact_request_and_receipts_are_idempotent()
                 "root",
                 "question",
                 QuestionAnswer {
+                    review: None,
                     answers: vec!["a".into(), "b".into()]
                 }
             )

@@ -451,6 +451,7 @@ impl SessionHandle for Backend {
                     has_open_turn: self.task_panels.jobs_active(),
                     has_active_activation: self.task_panels.jobs_active(),
                     has_waking_message: false,
+                    has_active_program: false,
                 },
                 descendants: self.tree.lock().unwrap().clone(),
             },

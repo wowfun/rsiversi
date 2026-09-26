@@ -1651,3 +1651,6 @@ mod structured;
 
 #[path = "end_to_end/observation.rs"]
 mod observation;
+
+#[path = "end_to_end/program.rs"]
+mod program;

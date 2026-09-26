@@ -67,8 +67,10 @@ so legacy raw projection no longer retains an orphan as partial evidence. Batch
 registration and settlement follow successful message admission. A failed Fact
 body makes the cursor non-checkpointable because assembler consumption is not a
 rollback transaction; callers discard an errored cursor and rebuild from Facts.
-The same coordinate transform remaps messages, outcome batches, instructions and
-the last human input after a summary.
+A shared coordinate transform avoids divergent pruning of messages and their
+protected references. Sparse replacement ownership avoids copying retained history
+merely to measure it; the [context contract](../../../../crates/rsi-agent/context/README.md)
+owns installation order and invariants.
 
 Instruction protection follows the entered source contract. A replacement or
 tombstone supersedes the same source's prior baseline, and a complete skill

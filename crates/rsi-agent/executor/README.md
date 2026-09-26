@@ -252,3 +252,20 @@ bounded retry pacing and cannot publish a terminal context failure.
 Resume scanning accepts Tool supersession only for the latest Conversation model
 source with a ToolCalls finish and unconsumed, completed calls. A Stop, empty
 response, already consumed batch or repeated marker cannot reopen model work.
+
+Foreground program dispatch uses the claim's exact sealed Tool catalog. Only
+Local Callable definitions are eligible; recursive coordinators, Agent controls,
+human interaction and Portable tools are unavailable. Each internal call runs
+through the existing policy, approval, durable start, retained result and domain
+settlement path with explicit Program provenance. Executor supplies a bounded
+process-local dispatch extension; model arguments cannot construct it.
+
+A foreground Program coordinator borrows the current Turn Context cursor for
+nested Tool preparation and settlement. It does not open another cursor or replay
+from sequence zero; parallel ordinary Tools never share a mutable cursor.
+
+When a foreground coordinator completes with an internal call already started,
+the executor settles that call under its original timeout and cancellation before
+publishing the coordinator result. Coordinator completion alone does not cancel
+the nested effect or the Turn. Queued calls that have not started receive a closed
+dispatcher; actual Turn cancellation and Host stop remain authoritative.

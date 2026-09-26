@@ -633,3 +633,13 @@ provider lazily starts one read-only server per admitted workspace; its service
 UI is consumed through the existing authenticated Service extensions entry.
 Independent launchers may register the same public factories under their own
 addon namespace and verify generation replacement with the public addon testkit.
+
+The standard read-only `output_read` contribution permits Local program calls
+with the same bounded cache identity and paging contract as model invocation.
+
+Native program execution is opt-in. A Host Profile can activate
+`rsi.agent.program.runtime` with an absolute `node` executable and an explicit
+`environment` array of name/value pairs. A selected Agent preset must separately
+enable its `program` step (`rsi.agent.program.tools`). Standard presets leave it
+disabled; neither ordinary startup nor ACP requires Node. The runtime and Tool
+contracts belong to [Agent Program](../../rsi-agent/program/README.md).

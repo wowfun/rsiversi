@@ -15,6 +15,22 @@ pub const MAX_TEXT: usize = 4 * 1024 * 1024;
 pub const MAX_METADATA: usize = 8 * 1024 * 1024;
 pub const WINDOW: usize = 256 * 1024;
 
+fn tool_model_request(fact: &SessionFact) -> Option<String> {
+    if let SessionFactBody::ToolIntent {
+        turn_id,
+        origin:
+            rsi_agent_session_protocol::ToolOrigin::Model {
+                effect_id: source_model_effect_id,
+            },
+        ..
+    } = fact.body()
+    {
+        Some(request_key(turn_id, source_model_effect_id))
+    } else {
+        None
+    }
+}
+
 fn request_key(
     turn: &rsi_agent_session_protocol::TurnId,
     effect: &rsi_agent_session_protocol::EffectId,
@@ -164,6 +180,14 @@ pub(crate) fn tool_title(tool: &ToolState, interrupted: bool) -> String {
             ToolPhase::Settled(_) => format!("Failed to {} {subject}", prepared.to_lowercase()),
             ToolPhase::Rejected => format!("Rejected: {} {subject}", prepared.to_lowercase()),
         }
+    };
+    let title = if matches!(
+        tool.origin,
+        Some(rsi_agent_session_protocol::ToolOrigin::Program { .. })
+    ) {
+        format!("Program · {title}")
+    } else {
+        title
     };
     if !tool.intent_present && tool.phase != ToolPhase::Rejected {
         format!("{title} (intent not loaded)")
@@ -790,7 +814,7 @@ impl Transcript {
         }
         | SessionFactBody::ToolIntent {
             turn_id: turn,
-            source_model_effect_id: effect,
+            origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: effect },
             ..
         }
         | SessionFactBody::ImageOutput {
@@ -878,17 +902,12 @@ impl Transcript {
     }
 
     fn project_tool(&mut self, fact: &SessionFact) {
-        if let SessionFactBody::ToolIntent {
-            turn_id,
-            source_model_effect_id,
-            ..
-        } = fact.body()
+        let model_request = tool_model_request(fact);
+        if let Some(key) = &model_request
+            && let Some(metadata) = self.blocks.iter_mut().find(|block| &block.key == key)
         {
-            let key = request_key(turn_id, source_model_effect_id);
-            if let Some(metadata) = self.blocks.iter_mut().find(|block| block.key == key) {
-                metadata.concise = true;
-                metadata.completed = false;
-            }
+            metadata.concise = true;
+            metadata.completed = false;
         }
         let key = BlockIdentity::tool(fact).expect("Tool Fact").key();
         let index = self.block_index(key.clone(), "Tool", Role::Tool, fact.seq());
@@ -901,13 +920,8 @@ impl Transcript {
             SessionFactBody::ToolResult { .. } => block.clock.ended = Some(fact.timestamp_ms()),
             _ => {}
         }
-        if let SessionFactBody::ToolIntent {
-            turn_id,
-            source_model_effect_id,
-            ..
-        } = fact.body()
-        {
-            block.request_key = Some(request_key(turn_id, source_model_effect_id));
+        if let Some(model_request) = model_request {
+            block.request_key = Some(model_request);
         }
         let tool = if let Some(tool) = &mut block.tool {
             tool.observe(fact);
@@ -1358,6 +1372,11 @@ mod tests {
                 1,
                 1,
                 SessionFactBody::ToolRejected {
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                        effect_id: rsi_agent_session_protocol::EffectId::new("source-model")
+                            .unwrap(),
+                    },
+                    program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
                     identity,
@@ -1618,7 +1637,10 @@ mod tests {
             SessionFactBody::ToolIntent {
                 turn_id: turn.clone(),
                 effect_id: EffectId::new("tool").unwrap(),
-                source_model_effect_id: source.clone(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: source.clone(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: rsi_tools_protocol::ToolResultIdentity::new(
                     "owner",
                     "invoke",
@@ -1722,7 +1744,11 @@ mod tests {
             4,
             1,
             SessionFactBody::ToolIntent {
-                source_model_effect_id: EffectId::new("source-model").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("source-model").unwrap(),
+                },
+
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 turn_id: turn_id.clone(),
                 effect_id: effect_id.clone(),
                 identity: identity.clone(),

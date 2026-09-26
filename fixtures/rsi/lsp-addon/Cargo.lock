@@ -600,6 +600,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "cssparser"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2"
+dependencies = [
+ "cssparser-macros",
+ "dtoa-short",
+ "itoa",
+ "phf 0.13.1",
+ "smallvec",
+]
+
+[[package]]
+name = "cssparser-macros"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,6 +766,21 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
+name = "dtoa-short"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
+dependencies = [
+ "dtoa",
+]
 
 [[package]]
 name = "dyn-clone"
@@ -2302,7 +2340,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
- "phf_macros",
+ "phf_macros 0.11.3",
  "phf_shared 0.11.3",
 ]
 
@@ -2312,6 +2350,7 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
+ "phf_macros 0.13.1",
  "phf_shared 0.13.1",
  "serde",
 ]
@@ -2364,6 +2403,19 @@ checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
 dependencies = [
  "phf_generator 0.11.3",
  "phf_shared 0.11.3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
+dependencies = [
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2942,8 +2994,10 @@ dependencies = [
  "rsi-agent-model-selection",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
+ "rsi-agent-program",
  "rsi-agent-references",
  "rsi-agent-repeat-tool-reminder",
+ "rsi-agent-schedule",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
@@ -3018,6 +3072,7 @@ dependencies = [
  "rsi-retrieval",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-schedule",
  "rsi-serve",
  "rsi-service-host",
  "rsi-service-ui",
@@ -3302,6 +3357,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -3338,12 +3394,16 @@ name = "rsi-agent-plan-policy"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
+ "rsi-user-questions-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tokio-util",
 ]
 
@@ -3363,6 +3423,27 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "rsi-agent-program"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-goal",
+ "rsi-agent-plan-policy",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-jobs",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3395,6 +3476,22 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-schedule"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
  "serde",
@@ -3482,8 +3579,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-agent-workspace-context",
  "rsi-ai-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
@@ -3491,6 +3590,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3526,6 +3626,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
  "rsi-files-native-fs",
  "rsi-meta",
  "rsi-meta-contract",
@@ -4762,6 +4863,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-schedule"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-serve"
 version = "0.0.1"
 dependencies = [
@@ -4849,6 +4965,7 @@ dependencies = [
  "rsi-process",
  "rsi-pty-protocol",
  "rsi-sandbox",
+ "rsi-session-export",
  "rsi-session-protocol",
  "rsi-user-questions-protocol",
  "rsi-workspace-protocol",
@@ -4883,6 +5000,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-session-export"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "futures-util",
+ "hex",
+ "rsi-agent-context",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-ai-protocol",
+ "rsi-session-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-session-files"
 version = "0.0.1"
 dependencies = [
@@ -4905,7 +5042,12 @@ name = "rsi-session-files-ui"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "cssparser",
  "futures-util",
+ "html5ever",
+ "percent-encoding",
+ "pulldown-cmark",
  "rsi-agent-session-protocol",
  "rsi-client",
  "rsi-conversation",
@@ -4928,6 +5070,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "hex",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -4944,6 +5087,7 @@ dependencies = [
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio-util",
 ]
@@ -5140,6 +5284,7 @@ dependencies = [
  "rsi-process",
  "rsi-sandbox",
  "rsi-service-ui",
+ "rsi-session-export",
  "rsi-session-files",
  "rsi-session-files-ui",
  "rsi-session-protocol",

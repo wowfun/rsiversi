@@ -842,7 +842,7 @@ async fn missing_subtree_session_is_corruption() {
         .unwrap();
     store.inner.connections.writer.lock().unwrap().execute_batch(
         "PRAGMA foreign_keys=OFF;
-         INSERT INTO agent_nodes VALUES ('missing-session', 'orphan-root', 'orphan-root', '[1]', 'child');
+         INSERT INTO agent_nodes VALUES ('missing-session', 'orphan-root', 'orphan-root', '[1]', 'child', '{}');
          PRAGMA foreign_keys=ON;"
     ).unwrap();
     assert!(matches!(
@@ -1007,7 +1007,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
                         controls: Vec::new()
                     }],
                     required_active_activations: Vec::new(),
-                    quiescent_descendants_of: Some(parent.session_id().clone()),
+                    quiescent_descendants_of: Some((parent.session_id().clone()).into()),
                 })
                 .await,
             Err(StoreError::Corrupt(_))
@@ -1027,26 +1027,19 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
 async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    for id in ["subtree-root", "subtree-child"] {
+    let parent = test_header("subtree-root");
+    for header in [parent.clone(), test_child_header(&parent, "subtree-child")] {
         store
             .append(AppendBatch {
-                session_id: SessionId::new(id).unwrap(),
+                session_id: header.session_id().clone(),
                 expected_seq: 0,
-                header: Some(test_header(id)),
+                header: Some(header),
                 facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
     }
     let id = SessionId::new("subtree-root").unwrap();
-    // Fault injection deliberately bypasses the Header-derived lineage writer.
-    {
-        let writer = store.inner.connections.writer.lock().unwrap();
-        writer.execute(
-            "INSERT INTO agent_nodes VALUES ('subtree-child', 'subtree-root', 'subtree-root', '[1]', 'child')",
-            [],
-        ).unwrap();
-    }
     assert_eq!(
         store
             .read_agent_subtree_snapshot(&id)
@@ -1060,6 +1053,7 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
         ("task_name", "x".repeat(257)),
         ("task_name", "invalid name".into()),
         ("path_json", " ".repeat(4096)),
+        ("execution_owner_json", " ".repeat(4097)),
     ] {
         let original: String = {
             let writer = store.inner.connections.writer.lock().unwrap();
@@ -1095,7 +1089,7 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
             .unwrap();
     }
     store.inner.connections.writer.lock().unwrap().execute(
-        "INSERT INTO agent_nodes VALUES ('subtree-root', 'subtree-root', 'subtree-child', '[2]', 'root')",
+        "INSERT INTO agent_nodes VALUES ('subtree-root', 'subtree-root', 'subtree-child', '[2]', 'root', '{}')",
         [],
     ).unwrap();
     assert!(matches!(
@@ -1671,7 +1665,7 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
                             controls: vec![],
                         }],
                         required_active_activations: vec![],
-                        quiescent_descendants_of: Some(candidate),
+                        quiescent_descendants_of: Some((candidate).into()),
                     })
                     .await
                     .map(|_| ()),
@@ -1746,7 +1740,7 @@ async fn quiescence_checks_children_created_by_the_same_commit_without_caching_r
                 },
             ],
             required_active_activations: vec![],
-            quiescent_descendants_of: Some(parent.session_id().clone()),
+            quiescent_descendants_of: Some((parent.session_id().clone()).into()),
         })
         .await;
     assert!(
@@ -2165,4 +2159,59 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
         before,
         "warm measurement must never revalidate the session"
     );
+}
+
+#[path = "tests/program.rs"]
+mod program;
+
+#[tokio::test]
+async fn warm_subtree_reads_no_full_headers_and_cold_owner_corruption_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = test_header("owner-projection-root");
+    let child = test_child_header(&parent, "owner-projection-child");
+    for header in [parent.clone(), child.clone()] {
+        store
+            .append(AppendBatch {
+                session_id: header.session_id().clone(),
+                expected_seq: 0,
+                header: Some(header),
+                facts: vec![test_fact(1).into()],
+            })
+            .await
+            .unwrap();
+    }
+    let id = parent.session_id().clone();
+    store.read_agent_subtree_snapshot(&id).await.unwrap();
+    let owner = store.inner.clone();
+    let reads = store
+        .with_validation(move |connection| {
+            validation::HEADER_READS.set(0);
+            let tree = owner.read_validated_agent_subtree(connection, &id)?;
+            assert_eq!(
+                tree.descendants[0].execution_owner,
+                child.execution_owner().unwrap().clone()
+            );
+            Ok(validation::HEADER_READS.get())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        reads, 0,
+        "warm subtree must decode only bounded owner projections"
+    );
+    drop(store);
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection.execute("UPDATE agent_nodes SET execution_owner_json=json_set(execution_owner_json,'$.turn_id','forged')", []).unwrap();
+    drop(connection);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        store.read_agent_subtree_snapshot(parent.session_id()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(store);
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(_))
+    ));
 }

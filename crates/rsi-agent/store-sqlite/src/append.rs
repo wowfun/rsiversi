@@ -38,13 +38,26 @@ pub(super) fn validate_sqlite_activation_guards(
 
 pub(super) fn validate_sqlite_quiescence_guard(
     transaction: &Transaction<'_>,
-    root: Option<&SessionId>,
+    root: Option<&rsi_agent_store_protocol::AgentQuiescenceGuard>,
 ) -> Result<Option<StoreAgentSubtreeSnapshot>> {
     if let Some(root) = root {
-        let snapshot = super::session_store::read_agent_subtree(transaction, root)?;
-        for descendant in &snapshot.descendants {
+        let snapshot = super::session_store::read_agent_subtree(transaction, &root.session_id)?;
+        if !root.activation_owned_only && snapshot.session.has_active_program {
+            return Err(StoreError::SessionNotQuiescent {
+                session: root.session_id.to_string(),
+            });
+        }
+        for descendant in snapshot
+            .descendants
+            .iter()
+            .filter(|child| !root.activation_owned_only || snapshot.activation_owns(child))
+        {
             let status = &descendant.status;
-            if status.has_active_activation || status.has_open_turn || status.has_waking_message {
+            if status.has_active_activation
+                || status.has_open_turn
+                || status.has_waking_message
+                || status.has_active_program
+            {
                 return Err(StoreError::SessionNotQuiescent {
                     session: status.session_id.to_string(),
                 });
@@ -259,6 +272,7 @@ pub(super) struct ControlIndexer<'a, 'connection> {
 }
 
 impl ControlIndexer<'_, '_> {
+    #[allow(clippy::too_many_lines)] // One transaction projects the closed set of control records into mechanical indexes.
     fn insert(&self) -> Result<()> {
         self.transaction
             .execute(
@@ -271,6 +285,21 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::ProgramCompletionReserved {
+                activation_id,
+                run_id,
+                ordinal,
+            } => {
+                let (header, _) = read_session_header_row(self.transaction, self.session_id)?;
+                rsi_agent_store_protocol::validate_program_completion_sink(
+                    &header, run_id, *ordinal,
+                )?;
+                let changed=self.transaction.execute("UPDATE active_activations SET completion_to_program=1 WHERE session_id=?1 AND activation_id=?2 AND completion_reserved_bytes IS NULL AND completion_to_program=0",params![self.session_id.as_str(),activation_id.as_str()]).map_err(sql_error)?;
+                ensure_changed(changed, "program sink is already reserved or mismatched")
+            }
+            AgentControlRecordBody::ProgramRun { .. } => {
+                super::program::insert(self.transaction, self.session_id, self.record)
+            }
             AgentControlRecordBody::DomainStateCommitted { commit } => super::domain::insert(
                 self.transaction,
                 self.session_id,
@@ -408,8 +437,7 @@ impl ControlIndexer<'_, '_> {
         let reservations = self
             .transaction
             .query_row(
-                "SELECT COUNT(*) FROM active_activations
-                 WHERE parent_session_id = ?1 AND completion_reserved_bytes IS NOT NULL",
+                "SELECT (SELECT COUNT(*) FROM active_activations WHERE parent_session_id = ?1 AND completion_reserved_bytes IS NOT NULL) + (SELECT COUNT(*) FROM program_runs WHERE session_id=?1 AND terminal=0)",
                 [self.session_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )
@@ -706,7 +734,7 @@ impl ControlIndexer<'_, '_> {
                      WHERE session_id = ?1 AND state = 'pending') +
                     (SELECT COUNT(*) FROM active_activations
                      WHERE parent_session_id = ?1
-                       AND completion_reserved_bytes IS NOT NULL)",
+                       AND completion_reserved_bytes IS NOT NULL) + (SELECT COUNT(*) FROM program_runs WHERE session_id=?1 AND terminal=0)",
                 [parent_session_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )
@@ -725,7 +753,7 @@ impl ControlIndexer<'_, '_> {
                 "UPDATE active_activations SET completion_reserved_bytes = ?1
                  WHERE session_id = ?2 AND activation_id = ?3
                    AND parent_session_id = ?4
-                   AND completion_reserved_bytes IS NULL",
+                   AND completion_reserved_bytes IS NULL AND completion_to_program=0",
                 params![
                     sqlite_u64("completion reservation bytes", maximum_bytes)?,
                     self.session_id.as_str(),
@@ -747,7 +775,7 @@ impl ControlIndexer<'_, '_> {
                 "DELETE FROM active_activations
                  WHERE session_id = ?1 AND activation_id = ?2
                    AND (parent_session_id IS NULL
-                        OR completion_reserved_bytes IS NOT NULL)",
+                        OR completion_reserved_bytes IS NOT NULL OR completion_to_program=1)",
                 params![self.session_id.as_str(), activation_id.as_str()],
             )
             .map_err(sql_error)?;
@@ -820,6 +848,7 @@ pub(super) const fn message_delivery_name(
 pub(super) const fn message_source_name(source: &AgentMessageSource) -> &'static str {
     use rsi_agent_session_protocol::AgentMessageSourceKind;
     match source.kind() {
+        AgentMessageSourceKind::Program => "program",
         AgentMessageSourceKind::Continuation => "continuation",
         AgentMessageSourceKind::Human => "human",
         AgentMessageSourceKind::Agent => "agent",
@@ -923,6 +952,7 @@ pub(super) fn decode_ready_message(
 ) -> Result<StoreReadyMessage> {
     use rsi_agent_session_protocol::AgentMessageSourceKind;
     let source_kind = match row.5.as_slice() {
+        b"program" => AgentMessageSourceKind::Program,
         b"human" => AgentMessageSourceKind::Human,
         b"agent" => AgentMessageSourceKind::Agent,
         b"completion" => AgentMessageSourceKind::Completion,
@@ -1069,14 +1099,15 @@ pub(super) fn insert_agent_node(
     transaction
         .execute(
             "INSERT INTO agent_nodes
-                (session_id, root_session_id, parent_session_id, path_json, task_name)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                (session_id, root_session_id, parent_session_id, path_json, task_name, execution_owner_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 header.session_id().as_str(),
                 origin.root_session_id.as_str(),
                 origin.parent_session_id.as_str(),
                 path_json,
                 &origin.task_name,
+                encode_json("execution owner", &header.execution_owner().ok_or_else(|| StoreError::Invalid("child execution owner is absent".into()))?)?,
             ],
         )
         .map(|_| ())

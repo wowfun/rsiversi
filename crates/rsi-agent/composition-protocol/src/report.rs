@@ -30,11 +30,7 @@ impl ReportTools {
         owner: &str,
         contract: OutputContract,
     ) -> super::Result<Self> {
-        if inner
-            .definitions()
-            .iter()
-            .any(|tool| tool.name() == REPORT_RESULT_TOOL)
-        {
+        if inner.program_role(REPORT_RESULT_TOOL).is_some() {
             return Err(super::AgentCompositionError::InvalidInput(
                 "reserved report_result name is already registered".into(),
             ));
@@ -95,6 +91,25 @@ impl PreparedToolCall for PreparedReport {
 }
 #[async_trait]
 impl ToolRuntime for ReportTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        if name == REPORT_RESULT_TOOL {
+            Some(self.report.definition.program_role())
+        } else {
+            self.inner.program_role(name)
+        }
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.inner.program_roles()
+    }
+    fn definition(&self, name: &str) -> Option<ToolDefinition> {
+        if name == REPORT_RESULT_TOOL {
+            Some(self.report.definition.clone())
+        } else {
+            self.inner.definition(name)
+        }
+    }
     fn output_declarations(
         &self,
     ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {

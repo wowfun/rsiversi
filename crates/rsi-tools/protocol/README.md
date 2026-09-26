@@ -14,6 +14,13 @@ value survives the canonical `serde_json::Value` representation. Serializable
 calls and execution policies revalidate those invariants during
 deserialization rather than relying on a later runtime consumer.
 
+`bounded_json_fragment_page` owns UTF-8 fragment selection under a 1–16 KiB
+complete presentation budget, including the caller's label and encoded envelope.
+Callers retain exact-result/revision authentication and envelope metadata; the
+helper rejects out-of-range cursors, oversized metadata and zero-progress pages.
+It returns ordinary canonical Tool JSON plus ordered text, without changing the
+consumer's wire fields.
+
 It contains no registry implementation, policy, approval, durable logging,
 provider wire, or plugin lifecycle. Tool start carries the exact sandbox
 planner and an optional typed Jobs scope supplied by the orchestrator; these
@@ -131,3 +138,10 @@ its declaration, and renders model content from the same result. It has no UI
 dependency. Portable imports validate successful foreign values before returning
 them to the Tool runtime. Consumers replaying persisted output must obtain the
 declaration from their saved composition baseline, never a replacement catalog.
+
+Program eligibility is a sealed Local definition property, independent of model
+schema and scheduling. Unavailable is the default and the only decoded/Portable
+value. Callable permits the Agent executor to dispatch an internal program call;
+Coordinator permits the outer program to request such calls. This metadata is
+never a model-authored field, and it does not extend the Portable ABI. Policy,
+approval, durable provenance and run ownership remain Agent responsibilities.

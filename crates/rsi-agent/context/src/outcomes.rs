@@ -1,7 +1,8 @@
 //! Provider-only completion of durably superseded or terminal Tool batches.
 use crate::{ContextError, ContextFold, Result, rejected_tool_message, tool_message};
-use rsi_agent_session_protocol::{CompactionSelection, EffectId, SessionFactBody, TurnId};
+use rsi_agent_session_protocol::{EffectId, SessionFactBody, ToolOrigin, TurnId};
 use rsi_ai_protocol::{Message, MessageContent, MessageRole};
+use rsi_tools_protocol::{ToolProgramRole, ToolResultIdentity};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap};
 
@@ -18,9 +19,25 @@ pub(super) struct Batch {
 #[serde(deny_unknown_fields)]
 pub(super) struct Call {
     pub effect: Option<EffectId>,
+    pub identity: Option<ToolResultIdentity>,
     pub started: bool,
     pub settled: bool,
     pub superseded: bool,
+    pub program: Option<ProgramCalls>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProgramCalls {
+    last_ordinal: u32,
+    active: BTreeMap<EffectId, ProgramCall>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgramCall {
+    ordinal: u32,
+    identity: ToolResultIdentity,
+    started: bool,
 }
 
 fn invalid() -> ContextError {
@@ -62,6 +79,34 @@ pub(super) fn validate(batches: &Batches, messages: &[Message]) -> Result<()> {
             return Err(invalid());
         }
         for (id, call) in &batch.calls {
+            if call.effect.is_some() != call.identity.is_some()
+                || call
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.call_id() != id)
+            {
+                return Err(invalid());
+            }
+            if let Some(program) = &call.program {
+                if call.effect.is_none()
+                    || program.active.len()
+                        > rsi_agent_session_protocol::MAXIMUM_PROGRAM_OUTSTANDING_CALLS
+                    || (!program.active.is_empty()
+                        && (!call.started || call.settled || call.superseded))
+                {
+                    return Err(invalid());
+                }
+                let mut ordinals = std::collections::BTreeSet::new();
+                for (effect, nested) in &program.active {
+                    if nested.ordinal == 0
+                        || !ordinals.insert(nested.ordinal)
+                        || nested.ordinal > program.last_ordinal
+                        || !effects.insert(effect)
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
             if !calls.insert(id) {
                 return Err(invalid());
             }
@@ -214,17 +259,10 @@ fn visit_view<'a>(
     Ok(())
 }
 
-pub(super) fn retained(
-    batches: &Batches,
-    turn: &TurnId,
-    selections: &[CompactionSelection],
-) -> Batches {
+pub(super) fn retained(batches: &Batches, remap: &crate::compaction::TurnRemap) -> Batches {
     batches
         .iter()
-        .filter_map(|(index, batch)| {
-            crate::compaction::retained_index(selections, turn, *index)
-                .map(|index| (index, batch.clone()))
-        })
+        .filter_map(|(index, batch)| remap.get(*index).map(|index| (index, batch.clone())))
         .collect()
 }
 
@@ -277,8 +315,135 @@ impl ContextFold {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Program intent, rejection, start and result share one provenance transition table."
+    )]
+    fn apply_program_outcome(&mut self, body: &SessionFactBody) -> Result<bool> {
+        match body {
+            SessionFactBody::ToolIntent {
+                turn_id,
+                effect_id,
+                origin:
+                    ToolOrigin::Program {
+                        parent_effect_id,
+                        ordinal,
+                    },
+                program_role,
+                identity,
+                ..
+            }
+            | SessionFactBody::ToolRejected {
+                turn_id,
+                effect_id,
+                origin:
+                    ToolOrigin::Program {
+                        parent_effect_id,
+                        ordinal,
+                    },
+                program_role,
+                identity,
+                ..
+            } => {
+                let parent = self
+                    .turn_mut(turn_id)?
+                    .batches
+                    .values_mut()
+                    .flat_map(|batch| batch.calls.values_mut())
+                    .find(|call| call.effect.as_ref() == Some(parent_effect_id))
+                    .ok_or_else(invalid)?;
+                if !parent.started
+                    || parent.settled
+                    || parent.superseded
+                    || *program_role != ToolProgramRole::Callable
+                {
+                    return Err(invalid());
+                }
+                let program = parent.program.as_mut().ok_or_else(invalid)?;
+                if program.last_ordinal.checked_add(1) != Some(*ordinal)
+                    || program.active.len()
+                        >= rsi_agent_session_protocol::MAXIMUM_PROGRAM_OUTSTANDING_CALLS
+                    || program.active.contains_key(effect_id)
+                {
+                    return Err(invalid());
+                }
+                program.last_ordinal = *ordinal;
+                if matches!(body, SessionFactBody::ToolIntent { .. }) {
+                    program.active.insert(
+                        effect_id.clone(),
+                        ProgramCall {
+                            ordinal: *ordinal,
+                            identity: identity.clone(),
+                            started: false,
+                        },
+                    );
+                }
+                Ok(true)
+            }
+            SessionFactBody::ToolStarted {
+                turn_id,
+                effect_id,
+                identity,
+            }
+            | SessionFactBody::ToolResult {
+                turn_id,
+                effect_id,
+                identity,
+                ..
+            } => {
+                let calls = &mut self.turn_mut(turn_id)?.batches;
+                if let Some(program) = calls
+                    .values_mut()
+                    .flat_map(|batch| batch.calls.values_mut())
+                    .filter_map(|call| call.program.as_mut())
+                    .find(|program| program.active.contains_key(effect_id))
+                {
+                    let nested = program.active.get_mut(effect_id).ok_or_else(invalid)?;
+                    if &nested.identity != identity {
+                        return Err(invalid());
+                    }
+                    if matches!(body, SessionFactBody::ToolStarted { .. }) {
+                        if nested.started {
+                            return Err(invalid());
+                        }
+                        nested.started = true;
+                    } else {
+                        if !nested.started {
+                            return Err(invalid());
+                        }
+                        program.active.remove(effect_id);
+                    }
+                    return Ok(true);
+                }
+                if matches!(body, SessionFactBody::ToolResult { .. })
+                    && calls
+                        .values()
+                        .flat_map(|batch| batch.calls.values())
+                        .any(|call| {
+                            call.effect.as_ref() == Some(effect_id)
+                                && call
+                                    .program
+                                    .as_ref()
+                                    .is_some_and(|program| !program.active.is_empty())
+                        })
+                {
+                    return Err(invalid());
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Model Tool outcomes share one exact source and ordered settlement transition table."
+    )]
     pub(super) fn apply_tool_outcome(&mut self, body: &SessionFactBody) -> Result<()> {
         self.require_live_turn(body.turn_id())?;
+        if self.apply_program_outcome(body)? {
+            return Ok(());
+        }
         match body {
             SessionFactBody::ToolCallsSuperseded {
                 turn_id,
@@ -311,9 +476,13 @@ impl ContextFold {
             }
             SessionFactBody::ToolIntent {
                 turn_id,
-                source_model_effect_id,
+                origin:
+                    ToolOrigin::Model {
+                        effect_id: source_model_effect_id,
+                    },
                 effect_id,
                 identity,
+                program_role,
                 ..
             } => {
                 let call = self
@@ -329,6 +498,9 @@ impl ContextFold {
                     ));
                 }
                 call.effect = Some(effect_id.clone());
+                call.identity = Some(identity.clone());
+                call.program =
+                    (*program_role == ToolProgramRole::Coordinator).then(ProgramCalls::default);
             }
             SessionFactBody::ToolStarted {
                 turn_id,
@@ -342,7 +514,11 @@ impl ContextFold {
                     .filter_map(|batch| batch.calls.get_mut(identity.call_id()))
                     .find(|call| call.effect.as_ref() == Some(effect_id))
                     .ok_or_else(|| ContextError::Invalid("Tool start has no intent".into()))?;
-                if call.started || call.settled || call.superseded {
+                if call.identity.as_ref() != Some(identity)
+                    || call.started
+                    || call.settled
+                    || call.superseded
+                {
                     return Err(ContextError::Invalid("Tool call cannot start again".into()));
                 }
                 call.started = true;
@@ -351,8 +527,14 @@ impl ContextFold {
                 turn_id,
                 identity,
                 rejection,
+                origin: ToolOrigin::Model { effect_id: source },
                 ..
             } => {
+                if !self.turn_mut(turn_id)?.batches.values().any(|batch| {
+                    &batch.source == source && batch.calls.contains_key(identity.call_id())
+                }) {
+                    return Err(invalid());
+                }
                 let message = rejected_tool_message(identity.call_id(), rejection)?;
                 self.settle_tool_call(turn_id, identity.call_id(), None, message)?;
             }
@@ -363,6 +545,18 @@ impl ContextFold {
                 effect_id,
                 ..
             } => {
+                let exact = self
+                    .turn_mut(turn_id)?
+                    .batches
+                    .values()
+                    .filter_map(|batch| batch.calls.get(identity.call_id()))
+                    .any(|call| {
+                        call.effect.as_ref() == Some(effect_id)
+                            && call.identity.as_ref() == Some(identity)
+                    });
+                if !exact {
+                    return Err(invalid());
+                }
                 let message = tool_message(identity.call_id(), result)?;
                 self.settle_tool_call(turn_id, identity.call_id(), Some(effect_id), message)?;
             }
@@ -403,6 +597,175 @@ mod tests {
         fold.insert_turn(&turn, Message::user_text("work").unwrap())
             .unwrap();
         (fold, turn)
+    }
+
+    fn model_call() -> (ContextFold, TurnId, EffectId, ToolResultIdentity) {
+        let (mut fold, turn) = fold();
+        let message = Message::assistant(vec![MessageContent::ToolCall(ToolCall {
+            id: "call".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+            kind: ToolCallKind::Function,
+        })])
+        .unwrap();
+        let model = EffectId::new("model").unwrap();
+        let batch = prepare_batch(&Batches::new(), 1, &model, &message)
+            .unwrap()
+            .unwrap();
+        fold.push_turn_message(&turn, message).unwrap();
+        fold.turn_mut(&turn).unwrap().batches.insert(1, batch);
+        let effect = EffectId::new("tool").unwrap();
+        let identity =
+            ToolResultIdentity::new("owner", "invocation", "call", "a".repeat(64)).unwrap();
+        fold.apply_tool_outcome(&SessionFactBody::ToolIntent {
+            turn_id: turn.clone(),
+            effect_id: effect.clone(),
+            origin: ToolOrigin::Model { effect_id: model },
+            program_role: ToolProgramRole::Coordinator,
+            identity: identity.clone(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            approval: None,
+            parallel_safe: false,
+        })
+        .unwrap();
+        fold.through_seq = 1;
+        (fold, turn, effect, identity)
+    }
+
+    #[test]
+    fn model_tool_identity_is_exact_before_and_after_checkpoint() {
+        for field in ["owner_id", "invocation_id", "request_sha256"] {
+            let (mut fold, turn, effect, identity) = model_call();
+            let mut forged = serde_json::to_value(&identity).unwrap();
+            forged[field] = serde_json::json!(if field == "request_sha256" {
+                "b".repeat(64)
+            } else {
+                "different".into()
+            });
+            let forged: ToolResultIdentity = serde_json::from_value(forged).unwrap();
+            let start = |identity| SessionFactBody::ToolStarted {
+                turn_id: turn.clone(),
+                effect_id: effect.clone(),
+                identity,
+            };
+            assert!(fold.apply_tool_outcome(&start(forged.clone())).is_err());
+            fold.apply_tool_outcome(&start(identity.clone())).unwrap();
+            let bytes = fold.checkpoint_bytes().unwrap();
+            let mut restored = ContextFold::from_checkpoint(
+                fold.header.clone(),
+                crate::ContextLimits::default(),
+                &bytes,
+            )
+            .unwrap();
+            let result = |identity| SessionFactBody::ToolResult {
+                turn_id: turn.clone(),
+                effect_id: effect.clone(),
+                identity,
+                result: rsi_tools_protocol::ToolResult::new(serde_json::json!({}), vec![], false)
+                    .unwrap(),
+                conclusion: None,
+            };
+            assert!(restored.apply_tool_outcome(&result(forged)).is_err());
+            restored.apply_tool_outcome(&result(identity)).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_turn_rejects_nested_program_transitions_without_mutating_provenance() {
+        for stop in 0..3 {
+            let (mut fold, turn, parent, identity) = model_call();
+            fold.apply_tool_outcome(&SessionFactBody::ToolStarted {
+                turn_id: turn.clone(),
+                effect_id: parent.clone(),
+                identity: identity.clone(),
+            })
+            .unwrap();
+            let effect = EffectId::new("nested").unwrap();
+            let transitions = [
+                SessionFactBody::ToolIntent {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    origin: ToolOrigin::Program {
+                        parent_effect_id: parent,
+                        ordinal: 1,
+                    },
+                    program_role: ToolProgramRole::Callable,
+                    identity: identity.clone(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                    approval: None,
+                    parallel_safe: false,
+                },
+                SessionFactBody::ToolStarted {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    identity: identity.clone(),
+                },
+                SessionFactBody::ToolResult {
+                    turn_id: turn.clone(),
+                    effect_id: effect,
+                    identity,
+                    result: rsi_tools_protocol::ToolResult::new(
+                        serde_json::json!({}),
+                        vec![],
+                        false,
+                    )
+                    .unwrap(),
+                    conclusion: None,
+                },
+            ];
+            for body in &transitions[..stop] {
+                fold.apply_tool_outcome(body).unwrap();
+            }
+            fold.turn_mut(&turn).unwrap().terminal = true;
+            let before = serde_json::to_value(&fold.turn_mut(&turn).unwrap().batches).unwrap();
+            assert!(fold.apply_tool_outcome(&transitions[stop]).is_err());
+            assert_eq!(
+                serde_json::to_value(&fold.turn_mut(&turn).unwrap().batches).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_rejects_duplicate_active_program_ordinals() {
+        let (mut fold, turn, _, identity) = model_call();
+        let call = fold
+            .turn_mut(&turn)
+            .unwrap()
+            .batches
+            .get_mut(&1)
+            .unwrap()
+            .calls
+            .get_mut("call")
+            .unwrap();
+        call.started = true;
+        call.program = Some(ProgramCalls {
+            last_ordinal: 2,
+            active: ["a", "b"]
+                .into_iter()
+                .map(|effect| {
+                    (
+                        EffectId::new(effect).unwrap(),
+                        ProgramCall {
+                            ordinal: 1,
+                            identity: identity.clone(),
+                            started: false,
+                        },
+                    )
+                })
+                .collect(),
+        });
+        let bytes = fold.checkpoint_bytes().unwrap();
+        assert!(
+            ContextFold::from_checkpoint(
+                fold.header.clone(),
+                crate::ContextLimits::default(),
+                &bytes
+            )
+            .is_err()
+        );
     }
 
     fn full(fold: &mut ContextFold, turn: &TurnId) {

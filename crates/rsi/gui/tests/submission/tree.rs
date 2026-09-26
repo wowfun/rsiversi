@@ -100,6 +100,10 @@ fn add_child(
         .unwrap()
         .insert(id.clone(), backend.clone());
     root.tree.lock().unwrap().push(StoreAgentDescendantStatus {
+        execution_owner: rsi_agent_session_protocol::ExecutionOwner::TurnActivation {
+            session_id: parent.clone(),
+            turn_id: rsi_agent_session_protocol::TurnId::new("parent-turn").unwrap(),
+        },
         status: StoreAgentSessionStatus {
             last_settled_control_seq: 0,
             session_id: id,
@@ -107,6 +111,7 @@ fn add_child(
             has_open_turn: false,
             has_active_activation: false,
             has_waking_message: false,
+            has_active_program: false,
         },
         parent_session_id: parent,
         path: AgentPath::new(path).unwrap(),

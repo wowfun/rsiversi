@@ -8,3 +8,13 @@ path = "../standard/agent.profile.toml"
 kind = "patch"
 target = "questions"
 enabled = false
+
+[[steps]]
+kind = "patch"
+target = "plan-policy"
+config = { review_tools = false }
+
+[[steps]]
+kind = "patch"
+target = "schedule"
+enabled = false

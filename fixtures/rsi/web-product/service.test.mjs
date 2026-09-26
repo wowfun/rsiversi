@@ -39,7 +39,8 @@ test("startup preserves its bad readiness reply when child cleanup also fails", 
       assert(error instanceof AggregateError);
       assert(error.cause instanceof SyntaxError, "original invalid readiness reply must remain inspectable");
       assert.equal(error.errors[0], error.cause);
-      assert.match(String(error.errors[1]), /Service cleanup failed.*SIGTERM/);
+      assert(error.errors[1] instanceof AggregateError);
+      assert.match(String(error.errors[1].errors[0]), /Service cleanup failed.*SIGTERM/);
       return true;
     });
   } finally {

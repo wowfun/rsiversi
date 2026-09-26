@@ -400,14 +400,15 @@ fn insert_agent_node_without_admission(database: &Path, header: &SessionHeader) 
     connection
         .execute(
             "INSERT INTO agent_nodes
-                 (session_id, root_session_id, parent_session_id, path_json, task_name)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (session_id, root_session_id, parent_session_id, path_json, task_name, execution_owner_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 session_id.as_str(),
                 origin.root_session_id.as_str(),
                 origin.parent_session_id.as_str(),
                 serde_json::to_string(&origin.path).unwrap(),
                 &origin.task_name,
+                serde_json::to_string(header.execution_owner().unwrap()).unwrap(),
             ],
         )
         .unwrap();

@@ -135,7 +135,44 @@ impl KernelInner {
                     .clone()
             })
             .collect::<Vec<_>>();
-        let result = self.store.commit_agent(commit).await;
+        let domain_changes = commit
+            .sessions
+            .iter()
+            .flat_map(|append| {
+                append
+                    .controls
+                    .iter()
+                    .flat_map(|record| match record.body() {
+                        AgentControlRecordBody::DomainStateCommitted { commit } => commit
+                            .updates()
+                            .iter()
+                            .map(|update| {
+                                (
+                                    append.session_id.clone(),
+                                    update.snapshot().identity().id().to_owned(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let program_proof = commit
+            .sessions
+            .iter()
+            .flat_map(|append| &append.controls)
+            .any(|record| matches!(record.body(), AgentControlRecordBody::ProgramRun { .. }))
+            .then(|| commit.clone());
+        let mut result = self.store.commit_agent(commit).await;
+        if matches!(&result, Err(StoreError::Io(_)))
+            && let Some(proof) = &program_proof
+            && let Ok(Some(receipt)) = self.reconcile_program_commit(proof).await
+        {
+            result = Ok(receipt);
+        }
+        if result.is_ok() || matches!(&result, Err(rsi_agent_store_protocol::StoreError::Io(_))) {
+            self.revoke_program_guards(&domain_changes);
+        }
         if let Ok(committed) = &result {
             for watermark in &committed.sessions {
                 self.session_changes.committed(&watermark.session_id);

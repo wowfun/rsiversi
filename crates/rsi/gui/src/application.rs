@@ -204,6 +204,8 @@ pub(crate) enum Command {
         generation: String,
         id: String,
         answers: Vec<String>,
+        #[serde(default)]
+        review: Option<rsi_user_questions_protocol::ReviewAnswer>,
     },
     Approve {
         pane: crate::SurfaceId,

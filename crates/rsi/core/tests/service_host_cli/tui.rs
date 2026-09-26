@@ -1359,3 +1359,48 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
     terminal.finish().await;
     provider.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_closed_plan_review_uses_explicit_actions_and_typed_feedback() {
+    let (endpoint, requests, task) = super::plan_review::provider().await;
+    let fixture = CliFixture::new(&endpoint);
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-plan-review"]);
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"/plan on\r");
+    terminal.absent("/plan").await;
+    inspect_plan_projection(&mut terminal, true, "Draft").await;
+    terminal.send(b"Save and review a plan\r");
+    terminal.until("1 questions").await;
+    terminal.send(b"/attention\r");
+    terminal.select_menu("Answer question").await;
+    terminal.until("Review plan").await;
+    terminal.until("3. Decline and end turn").await;
+    terminal.capture();
+    terminal.resize(PtySize {
+        cols: 42,
+        rows: 24,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    terminal.until("Choice number [feedback]").await;
+    terminal.until("2. Request changes").await;
+    terminal.capture();
+    terminal.send(b"1 checked in TUI\r");
+    terminal.until("PLAN_REVIEW_DONE").await;
+    terminal.capture();
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[2]["messages"]
+            .to_string()
+            .contains("checked in TUI")
+    );
+    assert!(
+        requests[2]["messages"]
+            .to_string()
+            .contains("Plan mode is disabled")
+    );
+    task.abort();
+}

@@ -14,6 +14,27 @@ pub(super) struct ScopedTools {
 }
 #[async_trait]
 impl ToolRuntime for ScopedTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.allowed
+            .contains(name)
+            .then(|| self.inner.program_role(name))
+            .flatten()
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.inner
+            .program_roles()
+            .into_iter()
+            .filter(|(name, _)| self.allowed.contains(name))
+            .collect()
+    }
+    fn definition(&self, name: &str) -> Option<ToolDefinition> {
+        self.allowed
+            .contains(name)
+            .then(|| self.inner.definition(name))
+            .flatten()
+    }
     fn output_declarations(
         &self,
     ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {

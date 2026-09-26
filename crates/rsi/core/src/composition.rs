@@ -233,12 +233,20 @@ fn standard_agent_addon(
         Arc::new(rsi_files_tools::FilesToolsFactory),
     )?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
+    register(
+        "rsi.agent.program.tools",
+        Arc::new(rsi_agent_program::ProgramToolsFactory),
+    )?;
     register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
     register(
         MODEL_SELECTION_FACTORY,
         Arc::new(rsi_agent_model_selection::ModelSelectionFactory),
     )?;
     register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))?;
+    register(
+        "rsi.agent.schedule",
+        Arc::new(rsi_agent_schedule::ScheduleFactory),
+    )?;
     register(
         CONTEXT_BUILDER_FACTORY,
         Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
@@ -1495,6 +1503,11 @@ impl StandardComposition {
             "rsi.standard.session",
             vec![
                 ProfileEntry::new("rsi-goal-controller", GOAL_CONTROLLER_FACTORY, Value::Null),
+                ProfileEntry::new(
+                    "rsi-schedule-controller",
+                    "rsi.schedule.controller",
+                    Value::Null,
+                ),
                 ProfileEntry::new("rsi-session", SESSION_FACTORY, Value::Null),
             ],
         ))?;
@@ -1647,6 +1660,12 @@ fn register_factories(
     )?;
     register(
         builder,
+        "rsi.schedule.controller",
+        UpdateMode::RestartRequired,
+        rsi_schedule::ScheduleControllerFactory::default(),
+    )?;
+    register(
+        builder,
         GOAL_CONTROLLER_FACTORY,
         UpdateMode::RestartRequired,
         rsi_goal::GoalControllerFactory,
@@ -1656,6 +1675,12 @@ fn register_factories(
         APPROVAL_BROKER_FACTORY,
         UpdateMode::RestartRequired,
         rsi_service_host::ApprovalBrokerFactory,
+    )?;
+    register(
+        builder,
+        "rsi.agent.program.runtime",
+        UpdateMode::RestartRequired,
+        rsi_agent_program::ProgramRuntimeFactory,
     )?;
     register_runtime_factories(builder, coding_tools, agent_composition)?;
     register_agent_ai_factories(builder, agent_store_factory)
@@ -1984,6 +2009,8 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_agent_turn_protocol::TurnJobsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionContinuationsContract>()?;
     builder.register_local_contract::<rsi_goal::GoalControllerContract>()?;
+    builder.register_local_contract::<rsi_agent_schedule::ScheduleControllerContract>()?;
+    builder.register_local_contract::<rsi_agent_program::ProgramRuntimeContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionCommandsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionProjectionsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionResourcesContract>()?;
@@ -2504,6 +2531,7 @@ mod tests {
                 MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
+                "rsi.agent.schedule",
                 REPEAT_REMINDER_FACTORY,
                 OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
@@ -2537,6 +2565,7 @@ mod tests {
                 MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
+                "rsi.agent.schedule",
                 REPEAT_REMINDER_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,

@@ -90,6 +90,7 @@ def provider_reply(body):
 
 
 def delegation(script, button, fill, until, screenshot, workspace, report):
+    native_session = script('return document.querySelector(".pane-session").title')
     before = (workspace / 'new-count').read_text()
     fill('textarea[aria-label="Main message"]', 'Please start an external delegation')
     button('Send ↗')
@@ -113,6 +114,6 @@ def delegation(script, button, fill, until, screenshot, workspace, report):
         except ProcessLookupError:
             continue
         raise AssertionError('delegated peer was not reaped')
-    script('document.querySelector("#workspaces .nav-item").click();return true')
-    until(lambda: script(r'return !!document.querySelector("textarea[aria-label=\"Main message\"]")'))
-    (report / 'delegation.json').write_text(json.dumps({'same_conversation':True,'one_start':True,'reaped':True}))
+    script('const session=[...document.querySelectorAll("#sessions .session-row button")].find(e=>e.title===arguments[0]);if(!session)throw new Error("Original native Session is absent");session.click();return true', [native_session])
+    until(lambda: script(r'return document.querySelector(".pane-session")?.title===arguments[0]&&!!document.querySelector("textarea[aria-label=\"Main message\"]")', [native_session]))
+    (report / 'delegation.json').write_text(json.dumps({'same_conversation':True,'one_start':True,'reaped':True,'returned_native_session':native_session}))

@@ -1226,10 +1226,7 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        tool_names.contains(&"read_agent_result"),
-        read_structured_results
-    );
+    assert!(tool_names.contains(&"read_agent_result"));
     tool_names.retain(|name| *name != "read_agent_result");
     tool_names.sort_unstable();
     assert_eq!(
@@ -1250,9 +1247,15 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
             "job_output",
             "list_agents",
             "output_read",
+            "plan_write",
             "present",
             "reference_read",
             "report_goal",
+            "request_plan_execution",
+            "schedule_create",
+            "schedule_delete",
+            "schedule_list",
+            "schedule_resume",
             "send_message",
             "skill_read",
             "spawn_agent",
@@ -1908,6 +1911,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             std::slice::from_ref(&request)
         );
         let answer = rsi_user_questions_protocol::QuestionAnswer {
+            review: None,
             answers: vec!["my free answer".into()],
         };
         assert!(
@@ -1922,6 +1926,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
                 .answer_question(
                     &request.id,
                     rsi_user_questions_protocol::QuestionAnswer {
+                        review: None,
                         answers: vec!["conflict".into()]
                     }
                 )

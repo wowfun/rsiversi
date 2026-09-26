@@ -19,7 +19,9 @@ fn facts() -> Vec<SessionFact> {
         rsi_tools_protocol::ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
             .unwrap();
     vec![SessionFact::new(8, 1, SessionFactBody::ToolIntent {
-        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap() },
+
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: turn_id.clone(), effect_id: effect_id.clone(), identity: identity.clone(), name: "apply_patch".into(), arguments: json!({"patch":"unused"}), approval: None, parallel_safe: false,
     }).unwrap(), SessionFact::new(9, 1, SessionFactBody::ToolResult {
         turn_id, effect_id, identity, result: rsi_tools_protocol::ToolResult::new(json!({"large":"unrelated".repeat(32_000),

@@ -15,6 +15,26 @@ struct LineWork {
     interrupt: tokio::sync::Notify,
     handled: tokio::sync::Notify,
     submissions: CancellationToken,
+    export: std::sync::Mutex<Option<CancellationToken>>,
+}
+
+impl LineWork {
+    async fn exporting<T, F: std::future::Future<Output = T>>(
+        &self,
+        stop: CancellationToken,
+        save: impl FnOnce() -> F,
+    ) -> T {
+        *self.export.lock().expect("line export") = Some(stop);
+        let _active = ActiveExport(self);
+        save().await
+    }
+}
+
+struct ActiveExport<'a>(&'a LineWork);
+impl Drop for ActiveExport<'_> {
+    fn drop(&mut self) {
+        self.0.export.lock().expect("line export").take();
+    }
 }
 
 async fn interruptible(
@@ -30,6 +50,11 @@ async fn interruptible(
         tokio::select! { biased;
             signal = signals.next() => {
                 signal.ok_or_else(|| session_error("terminal interrupt source stopped"))?.map_err(session_error)?;
+                if let Some(stop) = work.export.lock().expect("line export").as_ref() {
+                    stop.cancel();
+                    grace = None;
+                    continue;
+                }
                 if grace.is_some() { return Ok(true); }
                 work.interrupt.notify_one();
                 grace = Some(tokio::time::Instant::now() + Duration::from_secs(1));
@@ -368,11 +393,16 @@ impl AnswerDraft {
         notice(
             renderer,
             "answer_prompt",
-            json!({"request_id":self.request.id,"index":self.answers.len()+1,"question":question}),
+            json!({"request_id":self.request.id,"index":self.answers.len()+1,"question":question,"review":self.request.review}),
         )
         .await
     }
     fn push(&mut self, line: String) -> Result<()> {
+        if self.request.review.is_some() {
+            QuestionAnswer::select_review(&self.request, &line).map_err(session_error)?;
+            self.answers.push(line);
+            return Ok(());
+        }
         let question = self
             .request
             .questions
@@ -404,10 +434,21 @@ pub(crate) async fn run_session_application(
     context: rsi_meta::Context,
 ) -> u8 {
     if command.export.is_some() {
-        return tokio::select! {
-            () = work.stop.cancelled() => 130,
-            _ = tokio::signal::ctrl_c() => 130,
-            result = crate::export::run_cli(application.as_ref(), &command) => match result { Ok(()) => 0, Err(error) => report_error(&error) },
+        let stop = work.stop.child_token();
+        let export = crate::export::run_cli(application, command, &work, stop.clone());
+        tokio::pin!(export);
+        let result = tokio::select! {
+            () = work.stop.cancelled() => { stop.cancel(); export.await },
+            _ = tokio::signal::ctrl_c() => { stop.cancel(); export.await },
+            result = &mut export => result,
+        };
+        return match result {
+            Ok(()) => 0,
+            Err(crate::export::Error::Cancelled) => 130,
+            Err(crate::export::Error::Failed(error)) => {
+                let _ = crate::work::diagnostic(vec![format!("Export failed: {error}")]).await;
+                1
+            }
         };
     }
     let (renderer, receiver) = tokio::sync::mpsc::channel(CLI_RENDER_CHANNEL_CAPACITY);
@@ -567,8 +608,13 @@ async fn run(
                         }
                         "export" => {
                             let command = rsi_client::parse_export_arguments(arguments).map_err(session_error)?;
-                            let path = crate::export::save(handle.clone(), command).await?;
-                            notice(renderer, "export", json!({"path":path})).await?;
+                            let stop = work.application.stop.child_token();
+                            let result = work.exporting(stop.clone(), || crate::export::start(&work.application, handle.clone(), command, stop, ())).await;
+                            match result {
+                                Ok(path) => notice(renderer, "export", json!({"path":path})).await?,
+                                Err(crate::export::Error::Cancelled) => notice(renderer, "export_cancelled", json!({"message":"Export cancelled"})).await?,
+                                Err(crate::export::Error::Failed(error)) => return Err(error),
+                            }
                         }
                         "history" => {
                             if arguments.is_empty() && history_exhausted {
@@ -627,7 +673,10 @@ async fn run(
                     answer.push(text)?;
                     if answer.answers.len() == answer.request.questions.len() {
                         let answer = draft.take().expect("complete answer draft");
-                        let accepted = handle.answer_question(&answer.request.id, QuestionAnswer { answers: answer.answers }).await.map_err(session_error)?;
+                        let reply = if answer.request.review.is_some() {
+                            QuestionAnswer::select_review(&answer.request, &answer.answers[0]).map_err(session_error)?
+                        } else { QuestionAnswer { review: None, answers: answer.answers } };
+                        let accepted = handle.answer_question(&answer.request.id, reply).await.map_err(session_error)?;
                         notice(renderer, "question_answer", json!({"id":answer.request.id,"accepted":accepted,"durability":"live_receipt"})).await?;
                     } else { answer.prompt(renderer).await?; }
                     return Ok(false);
@@ -764,6 +813,69 @@ mod tests {
     use super::*;
     use crate::tests::UnknownThenAcceptedHandle;
     use std::sync::atomic::Ordering;
+    #[tokio::test(start_paused = true)]
+    async fn export_interrupt_waits_for_real_result_without_agent_cancel_or_grace() {
+        let work = LineWork::default();
+        let stop = CancellationToken::new();
+        *work.export.lock().unwrap() = Some(stop.clone());
+        let _active = ActiveExport(&work);
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let signals = futures_util::stream::poll_fn(move |cx| receive.poll_recv(cx));
+        let (complete, finish) = tokio::sync::oneshot::channel();
+        let mut operation = Box::pin(interruptible(
+            &work,
+            async {
+                finish.await.unwrap();
+                Ok(())
+            },
+            signals,
+        ));
+        assert!(futures_util::poll!(&mut operation).is_pending());
+        for _ in 0..2 {
+            send.send(Ok(())).unwrap();
+            assert!(futures_util::poll!(&mut operation).is_pending());
+            assert!(stop.is_cancelled());
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(futures_util::poll!(&mut operation).is_pending());
+        }
+        assert!(futures_util::poll!(Box::pin(work.interrupt.notified())).is_pending());
+        complete.send(()).unwrap();
+        assert!(!operation.await.unwrap());
+    }
+    #[tokio::test]
+    async fn export_installs_cancellation_before_starting_persistence() {
+        let work = LineWork::default();
+        let stop = CancellationToken::new();
+        work.exporting(stop.clone(), || {
+            work.export.lock().unwrap().as_ref().unwrap().cancel();
+            assert!(stop.is_cancelled());
+            async {}
+        })
+        .await;
+        assert!(work.export.lock().unwrap().is_none());
+        assert!(futures_util::poll!(Box::pin(work.interrupt.notified())).is_pending());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn settled_export_renderer_backpressure_uses_normal_interrupt_grace() {
+        let work = LineWork::default();
+        let (renderer, _unread) = tokio::sync::mpsc::channel(1);
+        notice(&renderer, "full", json!({})).await.unwrap();
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let signals = futures_util::stream::poll_fn(move |cx| receive.poll_recv(cx));
+        let mut operation = Box::pin(interruptible(
+            &work,
+            async {
+                work.exporting(CancellationToken::new(), || async {}).await;
+                notice(&renderer, "export", json!({"path":"saved.json"})).await
+            },
+            signals,
+        ));
+        assert!(futures_util::poll!(&mut operation).is_pending());
+        send.send(Ok(())).unwrap();
+        assert!(futures_util::poll!(&mut operation).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(operation.await.unwrap());
+    }
     #[tokio::test]
     async fn interrupts_stop_busy_waits_and_a_second_signal_interrupts_idle_cancellation() {
         for idle in [false, true] {
@@ -822,6 +934,7 @@ mod tests {
                     session_id: header.session_id().clone(),
                     durable_control_seq: 3,
                     has_waking_message: false,
+                    has_active_program: false,
                     has_open_turn: false,
                     has_active_activation: false,
                 },
@@ -1026,6 +1139,7 @@ mod tests {
     async fn answer_draft_rejects_empty_input_without_consuming_the_question() {
         let mut draft = AnswerDraft {
             request: QuestionRequest {
+                review: None,
                 id: "request".into(),
                 session_id: "session".into(),
                 turn_id: "turn".into(),

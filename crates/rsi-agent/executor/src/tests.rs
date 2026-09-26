@@ -1203,6 +1203,24 @@ struct EmptyTools;
 
 #[async_trait]
 impl rsi_tools_protocol::ToolRuntime for EmptyTools {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definition(name)
+            .map(|definition| definition.program_role())
+    }
+    fn program_roles(
+        &self,
+    ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition.program_role() != rsi_tools_protocol::ToolProgramRole::Unavailable
+            })
+            .map(|definition| (definition.name().to_owned(), definition.program_role()))
+            .collect()
+    }
+    fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        None
+    }
     fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
         Vec::new()
     }
@@ -1317,7 +1335,10 @@ fn supersession_requires_outstanding_completed_conversation_calls() {
                 SessionFactBody::ToolIntent {
                     turn_id: claim.turn_id().clone(),
                     effect_id: EffectId::new("tool").unwrap(),
-                    source_model_effect_id: source.clone(),
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                        effect_id: source.clone(),
+                    },
+                    program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                     identity: ToolResultIdentity::new(
                         "owner",
                         "invocation",

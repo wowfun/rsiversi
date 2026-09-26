@@ -135,6 +135,11 @@ pub(super) fn user_indexes(connection: &Connection) -> Result<BTreeSet<String>> 
 
 pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) -> Result<u64> {
     let (header, durable_seq) = read_session_header_row(connection, session_id)?;
+    rsi_agent_store_protocol::validate_program_header(
+        &super::program_graph::Graph(connection),
+        &header,
+    )
+    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
 
     let (fact_count, maximum_sequence) = connection
         .query_row(
@@ -177,9 +182,15 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
     }
 
     validate_turn_index(connection, session_id)?;
+    validate_session_lineage(connection, &header)?;
+    validate_agent_indexes(connection, &header)
+}
+
+fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> Result<()> {
+    let session_id = header.session_id();
     let node = connection
         .query_row(
-            "SELECT root_session_id, parent_session_id, path_json, task_name
+            "SELECT root_session_id, parent_session_id, path_json, task_name, execution_owner_json
              FROM agent_nodes WHERE session_id = ?1",
             [session_id.as_str()],
             |row| {
@@ -192,6 +203,7 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
                         rsi_agent_session_protocol::AgentPath::MAXIMUM_JSON_BYTES,
                     )?,
                     bounded_text(row, 3, 256)?,
+                    bounded_text(row, 4, super::MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES)?,
                 ))
             },
         )
@@ -199,12 +211,16 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
         .map_err(sql_error)?;
     match (header.fork_origin(), node) {
         (None, None) => {}
-        (Some(origin), Some((root, parent, path, task_name)))
+        (Some(origin), Some((root, parent, path, task_name, owner)))
             if root == origin.root_session_id.as_str()
                 && parent == origin.parent_session_id.as_str()
                 && decode_json::<rsi_agent_session_protocol::AgentPath>("Agent path", &path)?
                     == origin.path
-                && task_name == origin.task_name => {}
+                && task_name == origin.task_name
+                && Some(&decode_json::<rsi_agent_session_protocol::ExecutionOwner>(
+                    "execution owner",
+                    &owner,
+                )?) == header.execution_owner() => {}
         _ => {
             return Err(StoreError::Corrupt(
                 "Agent node index disagrees with immutable Header lineage".into(),
@@ -236,7 +252,7 @@ pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) 
             "active activation parent disagrees with Header lineage".into(),
         ));
     }
-    validate_agent_indexes(connection, &header)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -606,7 +622,9 @@ impl MailboxProjection {
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
         if let AgentControlRecordBody::MessageClaimed { message_id, .. }
         | AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -702,6 +720,28 @@ impl ActivationProjection {
         let session_id = header.session_id().clone();
         let Self { expected } = self;
         match record.body() {
+            AgentControlRecordBody::ProgramCompletionReserved {
+                activation_id,
+                run_id,
+                ordinal,
+            } => {
+                rsi_agent_store_protocol::validate_program_completion_sink(
+                    header, run_id, *ordinal,
+                )?;
+                let active = expected
+                    .get_mut(&session_id)
+                    .ok_or_else(|| StoreError::Corrupt("program sink has no activation".into()))?;
+                if active.activation_id != *activation_id
+                    || active.completion_reserved_bytes.is_some()
+                    || active.completion_to_program
+                {
+                    return Err(StoreError::Corrupt(
+                        "program sink is already reserved or mismatched".into(),
+                    ));
+                }
+                active.completion_to_program = true;
+            }
+
             AgentControlRecordBody::ActivationStarted {
                 activation_id,
                 parent_session_id,
@@ -724,6 +764,7 @@ impl ActivationProjection {
                             turn_id: None,
                             phase: StoreActivationPhase::Running,
                             completion_reserved_bytes: None,
+                            completion_to_program: false,
                         },
                     )
                     .is_some()
@@ -777,6 +818,7 @@ impl ActivationProjection {
                 if active.activation_id != *activation_id
                     || active.parent_session_id.as_ref() != Some(parent_session_id)
                     || active.completion_reserved_bytes.is_some()
+                    || active.completion_to_program
                 {
                     return Err(StoreError::Corrupt(
                         "canonical reservation disagrees with active activation".into(),
@@ -854,7 +896,8 @@ impl ActivationProjection {
             | AgentControlRecordBody::MessagePromoted { .. }
             | AgentControlRecordBody::MessageDiscarded { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. } => {}
         }
         Ok(())
     }
@@ -865,7 +908,7 @@ impl ActivationProjection {
         let mut statement = connection
             .prepare(
                 "SELECT session_id, activation_id, parent_session_id, turn_id, phase,
-                    completion_reserved_bytes
+                    completion_reserved_bytes, completion_to_program
              FROM active_activations WHERE session_id = ?1",
             )
             .map_err(sql_error)?;
@@ -878,6 +921,7 @@ impl ActivationProjection {
                     optional_text(row, 3, 256)?,
                     bounded_text(row, 4, 32)?,
                     row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             })
             .map_err(sql_error)?;
@@ -909,6 +953,7 @@ impl ActivationProjection {
                     .transpose()
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                 phase,
+                completion_to_program: row.6,
                 completion_reserved_bytes: row
                     .5
                     .map(|value| decode_u64("completion reservation", value))
@@ -1185,7 +1230,9 @@ impl ReadyProjection {
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
         Ok(())
     }
@@ -1246,6 +1293,7 @@ pub(super) fn validate_agent_indexes(
     let mut ready = ReadyProjection::default();
     let mut activation = ActivationProjection::default();
     let mut domains = super::domain::Projection::default();
+    let mut programs = super::program::Projection::default();
     let mut decoded = 0_u64;
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
@@ -1285,6 +1333,14 @@ pub(super) fn validate_agent_indexes(
         if validate_terminal_control(connection, selected, &record, digest)? {
             terminals += 1;
         }
+        if rsi_agent_store_protocol::needs_program_graph(record.body()) {
+            rsi_agent_store_protocol::validate_program_graph(
+                &super::program_graph::Graph(connection),
+                selected,
+                &record,
+            )
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        }
         mailbox.apply(connection, header, &record)?;
         if matches!(
             record.body(),
@@ -1295,6 +1351,7 @@ pub(super) fn validate_agent_indexes(
         ready.apply(selected.as_str(), &record)?;
         activation.apply(header, &record)?;
         domains.apply(connection, selected, &record)?;
+        programs.apply(connection, selected, &record)?;
     }
     let (indexed_terminals, indexed_settlement) = connection
         .query_row(
@@ -1318,6 +1375,7 @@ pub(super) fn validate_agent_indexes(
     ready.finish(connection, selected)?;
     activation.finish(connection, selected)?;
     domains.finish(connection, selected)?;
+    programs.finish(connection, selected)?;
     Ok(decoded)
 }
 

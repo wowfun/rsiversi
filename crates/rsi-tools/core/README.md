@@ -83,3 +83,7 @@ fences. Retiring the bridge or its Portable provider closes that capability's
 admission. Standard product generation pins must therefore retain the native
 provider and bridge together with their catalog; replacement must not retire a
 scope still pinned by an old Session.
+
+Registration rejects Callable definitions with human-interaction timeouts or
+exclusive-final scheduling, and requires Coordinators to be exclusive. Local
+program roles never propagate through the Portable definition adapter.

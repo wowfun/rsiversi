@@ -26,7 +26,7 @@ pub struct Goal {
     pub max_rounds: u64,
     /// Exact immutable Header budget shared by those rounds.
     pub turn_budget: TurnBudget,
-    /// Allocations charged before message acceptance, without refunds.
+    /// Allocations charged atomically with message acceptance, without refunds.
     pub allocated_rounds: u64,
     /// Durable task phase; independent of live execution authorization.
     pub phase: GoalPhase,
@@ -240,7 +240,7 @@ impl GoalState {
         Ok(())
     }
 
-    /// Pure explicit action. Draft create stages its first allocation in the baseline.
+    /// Pure explicit action. Creation never allocates an automatic round.
     ///
     /// # Errors
     /// Rejects stale identities, invalid creation, completed resume or exhausted allocation.
@@ -263,7 +263,7 @@ impl GoalState {
                 }) {
                     return Err("settle and stop the previous Goal before replacing it".into());
                 }
-                let mut goal = Goal {
+                let goal = Goal {
                     id,
                     objective,
                     constraints,
@@ -276,12 +276,6 @@ impl GoalState {
                     report: None,
                 };
                 goal.validate()?;
-                if draft {
-                    goal.reserve()?;
-                    if let Some(reservation) = &mut goal.reservation {
-                        reservation.request_id = None;
-                    }
-                }
                 self.goal = Some(goal);
             }
             GoalAction::Resume { id } => {
@@ -370,20 +364,11 @@ impl Goal {
             .is_some_and(|reservation| reservation.settlement.is_none())
     }
 
-    /// Binds an unadmitted draft baseline, or allocates the next charged round.
+    /// Proposes the next allocation for atomic publication with its input.
     ///
     /// # Errors
     /// Rejects stopped, already bound unresolved, exhausted or invalid Goal state.
     pub fn reserve(&mut self) -> Result<(), String> {
-        if self.phase == GoalPhase::Active
-            && let Some(reservation) = &mut self.reservation
-            && reservation.settlement.is_none()
-            && reservation.request_id.is_none()
-        {
-            reservation.request_id =
-                Some(round_request_id(&self.id, reservation.round, "reserve")?);
-            return self.validate();
-        }
         if self.phase != GoalPhase::Active
             || self.unsettled()
             || self.allocated_rounds >= self.max_rounds

@@ -6,6 +6,7 @@
 
 mod definitions;
 mod questions;
+mod structured;
 pub use questions::QuestionToolsFactory;
 
 use async_trait::async_trait;
@@ -196,7 +197,7 @@ fn registrations(
             "read_agent_result",
             "Read the exact structured result identified by a child's successful Completion. Never infer the latest result.",
             json!({
-                "type":"object", "properties": {"child_session_id":{"type":"string"},"activation_id":{"type":"string"},"turn_id":{"type":"string"},"fact_seq":{"type":"integer","minimum":1}},
+                "type":"object", "properties": {"child_session_id":{"type":"string"},"activation_id":{"type":"string"},"turn_id":{"type":"string"},"fact_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"maximum":{"type":"integer","minimum":1024,"maximum":16384}},
                 "required":["child_session_id","activation_id","turn_id","fact_seq"],"additionalProperties":false
             }),
             30_000,
@@ -210,6 +211,7 @@ fn registrations(
                 "properties":{
                     "task_name":{"type":"string","minLength":1,"maxLength":MAXIMUM_AGENT_IDENTIFIER_BYTES},
                     "message":{"type":"string","minLength":1},
+                    "output_schema":{"type":"object","description":"Optional initial result schema, at most 8 KiB; no schema annotations. Does not grant child permissions."},
                     "fork_turns":{"type":"string","minLength":1,"maxLength":20},
                     "model":{"type":"object","properties":{"deployment":{"type":"string"},"model":{"type":"string"}},"required":["deployment","model"],"additionalProperties":false,"description":"Explicit child route. Resets inherited effort unless reasoning_effort is supplied."},
                     "reasoning_effort":{"type":"string","minLength":1,"maxLength":32,"description":"Adapter-declared effort; requires an explicit model."}
@@ -322,6 +324,10 @@ impl NativeExecutor {
         caller: &AgentCallerAuthority,
     ) -> rsi_tools_protocol::Result<ToolResult> {
         let arguments: SpawnArguments = parse(arguments)?;
+        let output_contract = arguments
+            .output_schema
+            .map(structured::contract)
+            .transpose()?;
         let role = arguments
             .role
             .as_ref()
@@ -357,7 +363,7 @@ impl NativeExecutor {
         match self
             .turns
             .spawn_agent(SpawnAgentRequest {
-                output_contract: None,
+                output_contract,
                 role,
                 model: arguments.model,
                 reasoning_effort: arguments.reasoning_effort,
@@ -586,13 +592,14 @@ impl ToolExecutor for NativeExecutor {
         };
         match self.kind {
             NativeTool::ReadResult => {
-                let locator = parse(arguments)?;
+                let arguments: structured::ReadArguments = parse(arguments)?;
+                let locator = arguments.locator()?;
                 match self
                     .turns
                     .read_agent_result(caller.as_ref(), &locator)
                     .await
                 {
-                    Ok(value) => tool_ok(value, "Structured child result".into()),
+                    Ok(value) => structured::page(&value, &arguments),
                     Err(error) => tool_error("result_unavailable", error.to_string()),
                 }
             }
@@ -610,6 +617,7 @@ impl ToolExecutor for NativeExecutor {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArguments {
+    output_schema: Option<Value>,
     role: Option<String>,
     model: Option<rsi_ai_protocol::ModelRef>,
     reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,

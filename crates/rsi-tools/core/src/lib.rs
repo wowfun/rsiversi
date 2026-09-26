@@ -490,6 +490,26 @@ fn withdraw_batch(state: &Weak<StageState>, members: &[BatchMember]) {
 
 #[async_trait]
 impl ToolRuntime for Registry {
+    fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        self.definitions
+            .get(name)
+            .map(|entry| entry.definition.definition.program_role())
+    }
+    fn program_roles(&self) -> BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        self.definitions
+            .iter()
+            .filter_map(|(name, entry)| {
+                let role = entry.definition.definition.program_role();
+                (role != rsi_tools_protocol::ToolProgramRole::Unavailable)
+                    .then(|| (name.clone(), role))
+            })
+            .collect()
+    }
+    fn definition(&self, name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        self.definitions
+            .get(name)
+            .map(|entry| entry.definition.definition.clone())
+    }
     fn output_declarations(&self) -> BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {
         self.definitions
             .iter()
@@ -806,6 +826,31 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
 
 fn validate_definition(definition: &ToolRegistration) -> Result<()> {
     definition.definition.validate()?;
+    match definition.definition.program_role() {
+        rsi_tools_protocol::ToolProgramRole::Callable
+            if definition.definition.scheduling()
+                == rsi_tools_protocol::ToolScheduling::ExclusiveFinal
+                || matches!(
+                    definition.timeout,
+                    rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+                ) =>
+        {
+            return Err(ToolError::InvalidInput(
+                "program Callable Tools cannot require human-interaction scheduling".into(),
+            ));
+        }
+        rsi_tools_protocol::ToolProgramRole::Coordinator
+        | rsi_tools_protocol::ToolProgramRole::Workflow
+            if definition.definition.scheduling()
+                != rsi_tools_protocol::ToolScheduling::Exclusive =>
+        {
+            return Err(ToolError::InvalidInput(
+                "program coordinators and workflow creators must be exclusive".into(),
+            ));
+        }
+        _ => {}
+    }
+
     if definition.timeout == rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
         && definition.definition.scheduling() != rsi_tools_protocol::ToolScheduling::ExclusiveFinal
     {

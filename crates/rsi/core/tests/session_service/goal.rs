@@ -42,7 +42,7 @@ async fn state(handle: &Arc<dyn SessionHandle>) -> GoalState {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancel_abandons_unaccepted_draft_or_published_allocation_without_provider_spend() {
+async fn cancel_uncharged_draft_or_published_goal_without_provider_spend() {
     use rsi_agent_session_protocol::{CommandArguments, ContributionId, SessionCommandInvocation};
     for published in [false, true] {
         let (endpoint, requests, provider) = capturing_provider().await;
@@ -80,11 +80,8 @@ async fn cancel_abandons_unaccepted_draft_or_published_allocation_without_provid
         )
         .await;
         let goal = state(&handle).await.goal.unwrap();
-        assert_eq!(goal.allocated_rounds, 1);
-        assert_eq!(
-            goal.reservation.unwrap().settlement,
-            Some(rsi_agent_goal::RoundSettlement::Abandoned)
-        );
+        assert_eq!(goal.allocated_rounds, 0);
+        assert!(goal.reservation.is_none());
         assert!(!handle.goal_status().await.unwrap().armed);
         handle
             .execute_command(SessionCommandInvocation {
@@ -126,7 +123,7 @@ async fn start(handle: &Arc<dyn SessionHandle>, rounds: u64) -> rsi_goal::GoalCo
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ordinary_draft_publication_then_restart_resume_reuses_first_goal_allocation() {
+async fn ordinary_draft_publication_then_restart_resume_allocates_first_goal_round() {
     use rsi_agent_session_protocol::{CommandArguments, ContributionId, SessionCommandInvocation};
     let (endpoint, requests, provider) = capturing_provider().await;
     let fixture = fixture(&endpoint);
@@ -154,13 +151,11 @@ async fn ordinary_draft_publication_then_restart_resume_reuses_first_goal_alloca
         })
         .await
         .unwrap();
-    let original = state(&handle).await.goal.unwrap().reservation.unwrap();
-    assert!(original.request_id.is_none());
+    assert_eq!(state(&handle).await.goal.unwrap().allocated_rounds, 0);
+    assert!(state(&handle).await.goal.unwrap().reservation.is_none());
     run_message_to_terminal(&handle, "human-first").await;
-    assert_eq!(
-        state(&handle).await.goal.unwrap().reservation.as_ref(),
-        Some(&original)
-    );
+    assert_eq!(state(&handle).await.goal.unwrap().allocated_rounds, 0);
+    assert!(state(&handle).await.goal.unwrap().reservation.is_none());
     drop(handle);
     assert!(running.shutdown().await.is_clean());
     let restarted = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
@@ -187,8 +182,7 @@ async fn ordinary_draft_publication_then_restart_resume_reuses_first_goal_alloca
     assert_eq!(goal.allocated_rounds, 1);
     assert_eq!(goal.phase, GoalPhase::Blocked);
     let settled = goal.reservation.unwrap();
-    assert_eq!(settled.message_id, original.message_id);
-    assert_eq!(settled.input(&goal.id), original.input(&goal.id));
+    assert_eq!(settled.round, 1);
     assert!(settled.request_id.is_some() && settled.settlement.is_some());
     assert_eq!(requests.lock().unwrap().len(), 2);
     assert!(restarted.shutdown().await.is_clean());
@@ -653,6 +647,47 @@ async fn failed_source_turn_overrides_model_completion_claim() {
             ..
         })
     ));
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn human_turn_defers_first_goal_allocation_without_disarming() {
+    let (fixture, gate, provider) = gated().await;
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "human-before-goal").await;
+    let human = tokio::spawn({
+        let handle = handle.clone();
+        async move { run_message_to_terminal(&handle, "human-first").await }
+    });
+    entered(&gate).await;
+    start(&handle, 1).await;
+    let mut updates = handle.observe_goal().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let live = updates.next().await.unwrap().unwrap();
+            if live.stage == GoalDriverStage::Waiting {
+                assert!(live.armed);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.allocated_rounds, 0);
+    assert!(goal.reservation.is_none());
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    gate.release.notify_one();
+    human.await.unwrap();
+    entered(&gate).await;
+    assert_eq!(state(&handle).await.goal.unwrap().allocated_rounds, 1);
+    gate.release.notify_one();
+    assert_eq!(stopped(&handle).await.stage, GoalDriverStage::Disarmed);
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop((updates, handle));
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }

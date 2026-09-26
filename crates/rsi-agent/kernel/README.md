@@ -1,5 +1,37 @@
 # rsi-agent-kernel
 
+Program retirement revokes the live process token before Kernel admission closes.
+If shutdown prevents terminal publication, startup records interruption instead of
+replaying Node or unclaimed program work. Cancellation and startup discard pending
+non-human messages in the run's owned descendant branches, including ordinary
+grandchildren; independently submitted human messages remain human intent.
+Live cancellation closes source admission, waits for retained source mutations,
+and rescans until no automatic pending input or uncancelled source remains. A
+descendant admitted during cancellation is included before cancellation returns.
+Startup interruption retires outstanding initial receipt coordinates even when
+an independent human message keeps a descendant activation waiting. Later
+settlement of that exact initial activation neither changes the terminal run
+ledger nor publishes a parent completion. New human activations retain ordinary
+completion routing. Live run settlement still joins every child receipt. Interactive cancellation has
+a bounded wait, but owned finalization retains responsibility beyond that deadline
+until admitted child mutations and receipts settle. Cancellation arriving while
+waiting for receipts also drains children before terminal publication. Receipt
+waits mark the notification revision before reading durable state and retain a
+five-second fallback read. A
+policy-domain write whose acknowledgement is lost also revokes the run: unknown
+publication cannot preserve executable authority under an older policy revision.
+If the last live run owner is lost before terminalization, its process token is
+cancelled. Durable history cannot recreate the Jobs handle or frozen execution
+authority: control reports `StaleClaim`, and startup recovery interrupts the run
+and repairs its children. Normal cancellation requires the retained live owner.
+Program preparation retains script bytes in its bounded live owner. It publishes
+CAS only after creator, policy, capacity and Jobs admission, including the durable one-run-per-creator-Turn check; terminal result CAS
+is published only after the terminal gate has selected a successful outcome.
+Program transaction I/O errors are reconciled against the exact canonical Header,
+Fact and control coordinates before acknowledging success. Reconciliation reads
+retain Store-read admission; an unavailable or different prefix remains an error
+and never causes the effect or transaction to be replayed.
+
 Evidence reference admission retains at most 1,024 original digest descriptors
 per Kernel, keyed by Session and Fact sequence. Cache misses read the immutable
 original through the Store protocol resolver. Recovery uses a separate bounded
@@ -18,10 +50,16 @@ does not construct a Jobs authority, read output, report, wait or kill a job.
 Claim replacement or retirement invalidates the source; restart has no sources.
 The returned view follows the [shared Jobs contract](../../rsi/session-protocol/README.md).
 
-Continuation admission owns a separate sealed live authority bound to Session
-and composition. Internal command receipts freeze exact reservation data and
-domain revision before accepting the matching NextTurn message. Reservation
-and acceptance are separate durable operations; mailbox claim keeps its existing
+Continuation admission owns a separate sealed live authority bound to Session,
+domain and composition. The registry admits one retained owner per
+`(Session, domain)`, at most 64 per domain and 128 in total. Different domains in
+one Session must retain the same Header and composition generation. This allows
+independent Goal and Schedule owners without granting concurrent Session Turns. Internal command receipts freeze exact reservation data and
+domain revision. Durable reservation commands atomically commit their domain
+update and matching NextTurn message while the complete Session subtree is idle.
+Pre-commit contention, including capacity rejection, neither commits nor revokes
+the lease. Waiting for another owner observes revocation and last-owner release
+without retaining that owner. Mailbox claim keeps its existing
 atomic activation/Turn/Step/input commit. Ordinary submission rejects fabricated
 Continuation sources. Ordinary waking acceptance atomically discards pending
 automatic input, and claim rechecks live authority, domain revision and priority.
@@ -74,7 +112,9 @@ Turn domain mutations accept exact-generation validated proposals and optional
 Facts as one request. Kernel assigns the claimed Turn as their source, flushes
 the preceding speculative suffix, validates the entire candidate state and
 budget, and commits both streams atomically under retained source and Session
-admission. Generated-record limits charge generated Facts and Turn domain
+admission. Read-only domain revision guards are checked under that same admission
+without writing the guarded domains. An existing canonical receipt precedes those
+checks and remains authoritative. Generated-record limits charge generated Facts and Turn domain
 controls using their complete canonical envelope bytes. A receipt binds the
 source, replacements and accompanying Fact bodies; same-ID changes conflict.
 An exact single ToolResult may accompany settlement proposals after cancellation
@@ -456,3 +496,57 @@ Safe-boundary mailbox entry returns zero for ending, cancelled or budget-exhaust
 Turns even after their last Step closes. Terminal settlement promotes pending
 completion notifications and bound Human Steer messages; explicit NextStep
 messages remain non-waking for a future Step.
+
+Program-origin Tool calls are children of one still-started Coordinator effect.
+Their monotonically admitted ordinals cannot be reused. Admission validates the
+recorded program role against the same frozen Local catalog. The coordinator may
+overlap its own nested calls; nested calls still obey their declared scheduling,
+and the outer result cannot settle while any nested effect remains open. Each
+internal call retains ordinary policy, approval and Turn budget accounting.
+Program provenance never authorizes a detached run using a retired Turn claim.
+
+Detached programs have an execution owner independent of their immutable fork
+lineage. A ProgramRun captures its creator's exact started Tool, completed-parent
+Fact/control horizon, model/effort and resolved permission policy before admission.
+The creator must carry the pinned `Workflow` role; its Tool name grants no
+authority, and the foreground `Coordinator` role cannot create detached work.
+Its generation-owned live lease survives creator Tool/Turn retirement; an old
+Tool claim is never reused. Only a human-root Turn or a finite Goal/Schedule
+continuation can start one run per Turn. Program completion cannot start another.
+One run per Session and eight per Host are admitted; there is no total run timer.
+
+Child identities derive from (owning Session, run ID, positive ordinal), with at
+most 128 initial child admissions. Run-owned initial completions settle into an
+exclusive durable run receipt and do not reserve or enter the ordinary 64-message
+parent mailbox. Result readers require that exact receipt. Creator activation
+quiescence excludes run-owned branches, while automatic Session idleness includes
+active runs and every branch. The existing three-running/256-session tree bounds
+continue to apply.
+
+Run lifecycle controls are canonical. Their mechanical Store index keeps exact
+per-run state and receipt coordinates. Run records have an 8 MiB allowance with
+reserved terminal capacity; script/result bytes and progress are bounded at their
+owners. The normal admission allowance cannot consume the reserved close path.
+Node preparation and Jobs admission precede durable run acceptance; only an
+acknowledged acceptance and unchanged generation may open the process start latch.
+Foreground observation defaults to 30 seconds and cannot exceed 60 seconds, then
+atomically detaches. Background mode detaches before opening the start latch.
+Cancellation and detachment race through the same run mutation admission.
+Restart marks accepted unfinished runs interrupted, discards their unclaimed
+initial children and pending notices, and never replays Node or provider I/O.
+
+Each live Program retains one compact state fold and mechanical head behind a
+serialized refresh lock. Unchanged reads share the immutable fold; applying a
+new suffix copies it only while an earlier reader still retains that version.
+Readers consume only new indexed controls under process-wide Store-read byte
+admission, then compare the recomputed head before publishing the refreshed fold.
+Progress records are not retained in the fold. Cold reads replay a bounded run; recovery can revisit it after committing child
+or activation settlement. No cache survives its live owner or grants authority.
+
+Kernel retains at most eight live Program owners process-wide, with at most one
+unfinished run per Session. This bounds frozen composition, script and Jobs owners.
+
+Program child preparation derives direct-child segments and tree capacity from
+one validated subtree snapshot. Cancellation drains admitted source mutations and
+rechecks membership until stable, reusing each snapshot for cancellation and pending
+input retirement; it cannot freeze membership before concurrent source work drains.

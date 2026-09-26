@@ -25,7 +25,10 @@ fn shell_command_source_is_raw_bounded_and_variant_checked() {
             SessionFactBody::ToolIntent {
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("tool").unwrap(),
-                source_model_effect_id: EffectId::new("model").unwrap(),
+                origin: rsi_agent_session_protocol::ToolOrigin::Model {
+                    effect_id: EffectId::new("model").unwrap(),
+                },
+                program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
                 identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
                     .unwrap(),
                 name: name.into(),
@@ -533,8 +536,9 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     let effect = EffectId::new("tool").unwrap();
     check_fields(
         SessionFactBody::ToolIntent {
-            source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model")
-                .unwrap(),
+            origin: model_tool_origin(),
+
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             identity: identity.clone(),
@@ -550,6 +554,8 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     );
     check_fields(
         SessionFactBody::ToolRejected {
+            origin: model_tool_origin(),
+            program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             identity: identity.clone(),
@@ -621,4 +627,10 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
         },
         &[(FactField::ModelSnapshot, "image")],
     );
+}
+
+fn model_tool_origin() -> rsi_agent_session_protocol::ToolOrigin {
+    rsi_agent_session_protocol::ToolOrigin::Model {
+        effect_id: EffectId::new("source-model").unwrap(),
+    }
 }

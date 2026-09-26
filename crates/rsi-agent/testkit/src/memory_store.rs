@@ -19,6 +19,163 @@ use super::{
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn list_program_notices(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramNoticePage> {
+        use rsi_agent_store_protocol::{StoreProgramNotice, StoreProgramNoticePage};
+        validate_session_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut notices = state
+            .agent_messages
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(entry.state, StoreAgentMessageState::Pending)
+                    && matches!(
+                        entry.message.source,
+                        rsi_agent_session_protocol::AgentMessageSource::Program { .. }
+                    )
+            })
+            .map(|((session_id, message_id), _)| StoreProgramNotice {
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+            })
+            .filter(|key| after.is_none_or(|after| key > after))
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = notices.len() > limit;
+        notices.truncate(limit);
+        Ok(StoreProgramNoticePage { notices, has_more })
+    }
+    async fn program_run_for_creator(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+    ) -> Result<Option<rsi_agent_session_protocol::ProgramRunId>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session)
+            .ok_or_else(|| StoreError::NotFound(session.to_string()))?;
+        Ok(session
+            .programs
+            .values()
+            .find(|(head, _)| &head.creator_turn_id == turn)
+            .map(|(head, _)| head.run_id.clone()))
+    }
+    async fn read_program_records(
+        &self,
+        session_id: &SessionId,
+        run_id: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<Option<rsi_agent_store_protocol::StoreProgramRecords>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let Some((head, positions)) = session.programs.get(run_id) else {
+            return Ok(None);
+        };
+        let records = positions
+            .iter()
+            .map(|seq| {
+                let index = usize::try_from(*seq - 1).map_err(|_| {
+                    StoreError::Corrupt("program index exceeds address space".into())
+                })?;
+                session
+                    .controls
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| StoreError::Corrupt("program record index is absent".into()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let page = rsi_agent_store_protocol::StoreProgramRecords {
+            head: head.clone(),
+            records,
+        };
+        page.validate(session_id, run_id)?;
+        Ok(Some(page))
+    }
+    async fn read_program_records_after(
+        &self,
+        session_id: &SessionId,
+        run_id: &rsi_agent_session_protocol::ProgramRunId,
+        after: u64,
+    ) -> Result<Option<rsi_agent_store_protocol::StoreProgramRecords>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let Some((head, positions)) = session.programs.get(run_id) else {
+            return Ok(None);
+        };
+        let records = positions[positions.partition_point(|seq| *seq <= after)..]
+            .iter()
+            .map(|seq| {
+                let index = usize::try_from(*seq - 1).map_err(|_| {
+                    StoreError::Corrupt("program index exceeds address space".into())
+                })?;
+                session
+                    .controls
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| StoreError::Corrupt("program record index is absent".into()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let page = rsi_agent_store_protocol::StoreProgramRecords {
+            head: head.clone(),
+            records,
+        };
+        if after == 0 {
+            page.validate(session_id, run_id)?;
+        }
+        Ok(Some(page))
+    }
+    async fn list_active_program_runs(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramPage> {
+        use rsi_agent_store_protocol::{StoreProgramCursor, StoreProgramPage};
+        validate_session_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut runs = state
+            .sessions
+            .iter()
+            .flat_map(|(id, session)| {
+                session
+                    .programs
+                    .iter()
+                    .filter(|(_, (head, _))| !head.terminal)
+                    .map(|(run, _)| StoreProgramCursor {
+                        session_id: id.clone(),
+                        run_id: run.clone(),
+                    })
+            })
+            .filter(|key| after.is_none_or(|after| key > after))
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = runs.len() > limit;
+        runs.truncate(limit);
+        Ok(StoreProgramPage { runs, has_more })
+    }
     async fn read_fact_window(
         &self,
         session_id: &SessionId,
@@ -211,6 +368,7 @@ impl SessionStore for MemoryStore {
                     fact_prefix_digest,
                     checkpoint: None,
                     controls: Vec::new(),
+                    programs: BTreeMap::new(),
                     last_settled_control_seq: 0,
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
                     domain_versions: BTreeMap::new(),
@@ -233,10 +391,12 @@ impl SessionStore for MemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         validate_memory_activation_guards(&state, &commit)?;
         let mut candidate = state.clone();
+        let graph = rsi_agent_store_protocol::ProgramGraphChecks::capture(&commit.sessions);
         let mut watermarks = Vec::with_capacity(commit.sessions.len());
         for append in commit.sessions {
             watermarks.push(apply_atomic_memory_append(&mut candidate, append)?);
         }
+        graph.validate(&super::program_graph::Graph(&candidate))?;
         validate_memory_quiescence_guard(&candidate, commit.quiescent_descendants_of.as_ref())?;
         *state = candidate;
         Ok(AtomicAgentCommitResult {
@@ -1210,17 +1370,11 @@ impl SessionStore for MemoryStore {
     }
 
     async fn completion_reservation_count(&self, parent_session_id: &SessionId) -> Result<usize> {
-        Ok(self
+        let state = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active_activations
-            .values()
-            .filter(|activation| {
-                activation.parent_session_id.as_ref() == Some(parent_session_id)
-                    && activation.completion_reserved_bytes.is_some()
-            })
-            .count())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(memory_completion_reservations(&state, parent_session_id))
     }
 
     async fn list_waiting_activations(
@@ -1463,14 +1617,6 @@ fn apply_atomic_memory_append(
         session.fact_prefix_digest = fact_digest;
         session.controls.extend(append.controls.clone());
         session.control_prefix_digest = control_digest;
-        apply_message_updates(
-            state,
-            &session_id,
-            minimum_entered_fact_seq,
-            &append.controls,
-        )?;
-        apply_ready_updates(state, &session_id, &append.controls)?;
-        apply_activation_updates(state, &session_id, &append.controls)?;
     } else {
         let header = append
             .header
@@ -1508,6 +1654,7 @@ fn apply_atomic_memory_append(
                 fact_prefix_digest: fact_digest,
                 checkpoint: None,
                 controls: append.controls.clone(),
+                programs: BTreeMap::new(),
                 last_settled_control_seq: 0,
                 control_prefix_digest: control_digest,
                 domain_versions: BTreeMap::new(),
@@ -1515,14 +1662,13 @@ fn apply_atomic_memory_append(
                 domain_usage: BTreeMap::new(),
             },
         );
-        apply_message_updates(
-            state,
-            &session_id,
-            minimum_entered_fact_seq,
-            &append.controls,
-        )?;
-        apply_ready_updates(state, &session_id, &append.controls)?;
-        apply_activation_updates(state, &session_id, &append.controls)?;
+    }
+    for record in &append.controls {
+        let controls = std::slice::from_ref(record);
+        apply_program_updates(state, &session_id, controls)?;
+        apply_message_updates(state, &session_id, minimum_entered_fact_seq, controls)?;
+        apply_ready_updates(state, &session_id, controls)?;
+        apply_activation_updates(state, &session_id, controls)?;
     }
     let session = state
         .sessions
@@ -1561,6 +1707,67 @@ fn apply_atomic_memory_append(
         durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
     })
+}
+
+fn apply_program_updates(
+    state: &mut MemoryState,
+    session_id: &SessionId,
+    controls: &[AgentControlRecord],
+) -> Result<()> {
+    let occupied = state
+        .agent_messages
+        .iter()
+        .filter(|((id, _), entry)| {
+            id == session_id && matches!(entry.state, StoreAgentMessageState::Pending)
+        })
+        .count()
+        + state
+            .active_activations
+            .values()
+            .filter(|active| {
+                active.parent_session_id.as_ref() == Some(session_id)
+                    && active.completion_reserved_bytes.is_some()
+            })
+            .count();
+    let session = state
+        .sessions
+        .get_mut(session_id)
+        .expect("program update Session");
+    for record in controls {
+        if let AgentControlRecordBody::ProgramRun { run_id, event } = record.body() {
+            if matches!(
+                event,
+                rsi_agent_session_protocol::ProgramRunEvent::Accepted { .. }
+            ) && occupied >= rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
+            {
+                return Err(StoreError::Invalid(
+                    "program completion notice has no reserved mailbox slot".into(),
+                ));
+            }
+            let previous = session.programs.get(run_id).map(|(head, _)| head);
+            let head = rsi_agent_store_protocol::program_head_after(session_id, previous, record)?;
+            if matches!(
+                event,
+                rsi_agent_session_protocol::ProgramRunEvent::Accepted { .. }
+            ) && session
+                .programs
+                .values()
+                .any(|(old, _)| !old.terminal || old.creator_turn_id == head.creator_turn_id)
+            {
+                return Err(StoreError::Invalid(
+                    "program acceptance repeats a creator Turn or overlaps an unfinished run"
+                        .into(),
+                ));
+            }
+            let entry = session
+                .programs
+                .entry(run_id.clone())
+                .or_insert_with(|| (head.clone(), Vec::new()));
+            entry.0 = head;
+            entry.1.push(record.seq());
+        }
+    }
+    Ok(())
 }
 
 fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Result<()> {
@@ -1656,14 +1863,7 @@ fn apply_message_updates(
                             && matches!(entry.state, StoreAgentMessageState::Pending)
                     })
                     .count();
-                let reservations = state
-                    .active_activations
-                    .values()
-                    .filter(|activation| {
-                        activation.parent_session_id.as_ref() == Some(session_id)
-                            && activation.completion_reserved_bytes.is_some()
-                    })
-                    .count();
+                let reservations = memory_completion_reservations(state, session_id);
                 if pending.saturating_add(reservations)
                     >= rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
                 {
@@ -1789,7 +1989,9 @@ fn apply_message_updates(
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
     }
     Ok(())
@@ -1813,11 +2015,28 @@ fn validate_memory_activation_guards(
     Ok(())
 }
 
-fn validate_memory_quiescence_guard(state: &MemoryState, root: Option<&SessionId>) -> Result<()> {
+fn validate_memory_quiescence_guard(
+    state: &MemoryState,
+    root: Option<&rsi_agent_store_protocol::AgentQuiescenceGuard>,
+) -> Result<()> {
     if let Some(root) = root {
-        for descendant in memory_agent_subtree(state, root)?.descendants {
-            let status = descendant.status;
-            if status.has_active_activation || status.has_open_turn || status.has_waking_message {
+        let snapshot = memory_agent_subtree(state, &root.session_id)?;
+        if !root.activation_owned_only && snapshot.session.has_active_program {
+            return Err(StoreError::SessionNotQuiescent {
+                session: root.session_id.to_string(),
+            });
+        }
+        for descendant in snapshot
+            .descendants
+            .iter()
+            .filter(|child| !root.activation_owned_only || snapshot.activation_owns(child))
+        {
+            let status = &descendant.status;
+            if status.has_active_activation
+                || status.has_open_turn
+                || status.has_waking_message
+                || status.has_active_program
+            {
                 return Err(StoreError::SessionNotQuiescent {
                     session: status.session_id.to_string(),
                 });
@@ -1835,6 +2054,31 @@ fn apply_activation_updates(
 ) -> Result<()> {
     for record in controls {
         match record.body() {
+            AgentControlRecordBody::ProgramCompletionReserved {
+                activation_id,
+                run_id,
+                ordinal,
+            } => {
+                rsi_agent_store_protocol::validate_program_completion_sink(
+                    &state.sessions[session_id].header,
+                    run_id,
+                    *ordinal,
+                )?;
+                let active = state
+                    .active_activations
+                    .get_mut(session_id)
+                    .ok_or_else(|| StoreError::Corrupt("program sink has no activation".into()))?;
+                if active.activation_id != *activation_id
+                    || active.completion_reserved_bytes.is_some()
+                    || active.completion_to_program
+                {
+                    return Err(StoreError::Invalid(
+                        "program sink is already reserved or mismatched".into(),
+                    ));
+                }
+                active.completion_to_program = true;
+            }
+
             AgentControlRecordBody::ActivationStarted {
                 activation_id,
                 parent_session_id,
@@ -1865,6 +2109,7 @@ fn apply_activation_updates(
                         turn_id: None,
                         phase: StoreActivationPhase::Running,
                         completion_reserved_bytes: None,
+                        completion_to_program: false,
                     },
                 );
             }
@@ -1897,14 +2142,7 @@ fn apply_activation_updates(
                             && matches!(entry.state, StoreAgentMessageState::Pending)
                     })
                     .count();
-                let reservations = state
-                    .active_activations
-                    .values()
-                    .filter(|candidate| {
-                        candidate.parent_session_id.as_ref() == Some(parent_session_id)
-                            && candidate.completion_reserved_bytes.is_some()
-                    })
-                    .count();
+                let reservations = memory_completion_reservations(state, parent_session_id);
                 if pending.saturating_add(reservations)
                     >= rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
                 {
@@ -1923,6 +2161,7 @@ fn apply_activation_updates(
                 if &activation.activation_id != activation_id
                     || activation.parent_session_id.as_ref() != Some(parent_session_id)
                     || activation.completion_reserved_bytes.is_some()
+                    || activation.completion_to_program
                 {
                     return Err(StoreError::Corrupt(
                         "completion reservation disagrees with its active child".into(),
@@ -1960,6 +2199,7 @@ fn apply_activation_updates(
                 if &activation.activation_id != activation_id
                     || activation.parent_session_id.is_some()
                         && activation.completion_reserved_bytes.is_none()
+                        && !activation.completion_to_program
                 {
                     return Err(StoreError::Corrupt(
                         "activation settlement disagrees with its active reservation".into(),
@@ -2032,7 +2272,8 @@ fn apply_activation_updates(
             | AgentControlRecordBody::MessagePromoted { .. }
             | AgentControlRecordBody::MessageDiscarded { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. } => {}
         }
     }
     Ok(())
@@ -2126,7 +2367,9 @@ fn apply_ready_updates(
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
-            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
+            | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
     }
     Ok(())
@@ -2205,6 +2448,7 @@ fn memory_agent_subtree(
                 .values()
                 .any(|turn| turn.terminal_seq.is_none()),
             has_active_activation: state.active_activations.contains_key(id),
+            has_active_program: session.programs.values().any(|(head, _)| !head.terminal),
             has_waking_message: state
                 .ready_keys
                 .keys()
@@ -2229,6 +2473,11 @@ fn memory_agent_subtree(
             }
             pending.push(id.clone());
             descendants.push(StoreAgentDescendantStatus {
+                execution_owner: state.sessions[id]
+                    .header
+                    .execution_owner()
+                    .cloned()
+                    .ok_or_else(|| StoreError::Corrupt("child execution owner is absent".into()))?,
                 status: status(id)?,
                 parent_session_id: parent.clone(),
                 path: child.path.clone(),
@@ -2243,4 +2492,22 @@ fn memory_agent_subtree(
     };
     snapshot.validate()?;
     Ok(snapshot)
+}
+
+fn memory_completion_reservations(state: &MemoryState, parent: &SessionId) -> usize {
+    state
+        .active_activations
+        .values()
+        .filter(|active| {
+            active.parent_session_id.as_ref() == Some(parent)
+                && active.completion_reserved_bytes.is_some()
+        })
+        .count()
+        + state.sessions.get(parent).map_or(0, |session| {
+            session
+                .programs
+                .values()
+                .filter(|(head, _)| !head.terminal)
+                .count()
+        })
 }

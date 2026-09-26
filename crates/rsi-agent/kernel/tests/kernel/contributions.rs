@@ -16,6 +16,10 @@ fn plugin_input(turn: &TurnId) -> SessionFactBody {
 
 fn rejection(turn: &TurnId) -> SessionFactBody {
     SessionFactBody::ToolRejected {
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: turn.clone(),
         effect_id: EffectId::new("tool").unwrap(),
         identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),
@@ -57,7 +61,11 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
         .published();
     assert_eq!(entered.len(), 2);
     let intent = SessionFactBody::ToolIntent {
-        source_model_effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
+        },
+
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: submitted.turn_id.clone(),
         effect_id: EffectId::new("tool").unwrap(),
         identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),

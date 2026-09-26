@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod program;
+pub use program::*;
 mod compaction;
 mod structured;
 pub use structured::*;
@@ -75,7 +77,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 17;
+pub const SESSION_FORMAT_VERSION: u32 = 18;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -175,6 +177,7 @@ macro_rules! string_identity {
 string_identity!(SessionId, "session");
 string_identity!(TurnId, "turn");
 string_identity!(EffectId, "effect");
+string_identity!(ProgramRunId, "program run");
 string_identity!(MessageId, "message");
 string_identity!(ActivationId, "activation");
 string_identity!(StepId, "step");
@@ -404,6 +407,8 @@ pub enum AgentMessageContent {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum AgentMessageSource {
+    /// Kernel-issued, generation-bound program completion notification.
+    Program { source: ProgramCompletionSource },
     /// Direct application/user input.
     Human,
     /// Kernel-authenticated automatic input; serialized provenance is not a live lease.
@@ -421,6 +426,8 @@ pub enum AgentMessageSource {
 /// Authority-neutral, in-process classification of an accepted message source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentMessageSourceKind {
+    /// Bounded `ProgramRun` terminal notice.
+    Program,
     /// Direct application/user input.
     Human,
     /// Kernel-authenticated automatic input.
@@ -435,6 +442,7 @@ impl AgentMessageSource {
     /// Classifies provenance without materializing its payload or granting authority.
     pub const fn kind(&self) -> AgentMessageSourceKind {
         match self {
+            Self::Program { .. } => AgentMessageSourceKind::Program,
             Self::Human => AgentMessageSourceKind::Human,
             Self::Continuation { .. } => AgentMessageSourceKind::Continuation,
             Self::Agent { .. } => AgentMessageSourceKind::Agent,
@@ -541,6 +549,10 @@ impl AgentMessage {
     /// Projects this message's identity and provenance into its model-visible input Fact.
     pub fn entered_source(&self) -> InputMessageSource {
         match &self.source {
+            AgentMessageSource::Program { source } => InputMessageSource::Program {
+                message_id: self.message_id.clone(),
+                source: source.clone(),
+            },
             AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
                 message_id: self.message_id.clone(),
                 source: source.clone(),
@@ -567,6 +579,18 @@ impl AgentMessage {
 
     /// Revalidates content, route, and byte bounds at admission.
     pub fn validate(&self) -> Result<()> {
+        if let AgentMessageSource::Program { source } = &self.source {
+            source.validate()?;
+            if self.options != MessageOptions::default()
+                || !matches!(self.content.as_slice(), [AgentMessageContent::Text { .. }])
+            {
+                return Err(SessionError::Invalid(
+                    "program notice requires one bounded text and no overrides".into(),
+                ));
+            }
+            bounded_compact_json_len(self, 8192)
+                .map_err(|_| SessionError::Invalid("program notice exceeds 8 KiB".into()))?;
+        }
         if let AgentMessageSource::Continuation { source } = &self.source {
             source.validate()?;
             let [AgentMessageContent::Text { text }] = self.content.as_slice() else {
@@ -683,6 +707,8 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDiscardReason {
+    /// Program completion authority belonged to an earlier process generation.
+    ProgramInterrupted,
     /// Caller cancelled the message before claim.
     Cancelled,
     /// Ordinary waking input took priority over pending automatic input.
@@ -696,6 +722,11 @@ pub enum MessageDiscardReason {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum InputMessageSource {
+    /// One typed `ProgramRun` completion, never authority to create a successor.
+    Program {
+        message_id: MessageId,
+        source: ProgramCompletionSource,
+    },
     /// Direct user/application input.
     Human { message_id: MessageId },
     /// Automatic input admitted through a live continuation lease.
@@ -736,6 +767,7 @@ pub enum InputMessageSource {
 impl InputMessageSource {
     fn validate(&self) -> Result<()> {
         match self {
+            Self::Program { source, .. } => source.validate(),
             Self::Continuation { source, .. } => source.validate(),
             Self::AgentInstructions { source, sha256, .. } => {
                 validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)?;
@@ -818,6 +850,11 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// Kernel-owned program lifecycle, separate from creator activation lifetime.
+    ProgramRun {
+        run_id: ProgramRunId,
+        event: ProgramRunEvent,
+    },
     /// One complete domain mutation request, including its durable receipt identity.
     DomainStateCommitted { commit: DomainStateCommit },
     /// Kernel-owned correlation committed with one terminal Fact. This record is
@@ -880,6 +917,12 @@ pub enum AgentControlRecordBody {
         step_id: StepId,
         cause: WaitResumeCause,
     },
+    /// Exact initial child completion is routed exclusively to its immutable Program owner.
+    ProgramCompletionReserved {
+        activation_id: ActivationId,
+        run_id: ProgramRunId,
+        ordinal: u32,
+    },
     /// Parent mailbox capacity is reserved for an eventual child completion.
     CompletionReserved {
         activation_id: ActivationId,
@@ -890,8 +933,19 @@ pub enum AgentControlRecordBody {
 
 impl AgentControlRecordBody {
     /// Revalidates bounded values independent of Store state.
+    #[allow(clippy::too_many_lines)] // One closed control enum validates each owning payload at this boundary.
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::ProgramRun { run_id, event } => event.validate(run_id),
+            Self::ProgramCompletionReserved { ordinal, .. } => {
+                if *ordinal == 0 || *ordinal > MAXIMUM_PROGRAM_CHILDREN {
+                    Err(SessionError::Invalid(
+                        "program completion ordinal is out of bounds".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
             Self::TurnBoundaryRecorded {
                 terminal_fact_seq, ..
             } => {
@@ -1424,6 +1478,17 @@ impl FrozenAgentSettings {
         Ok(())
     }
 
+    /// Freezes the actual authenticated invoking Turn's permission for a new child.
+    pub fn with_execution_policy(
+        mut self,
+        sandbox: SandboxMode,
+        require_approval: bool,
+    ) -> Result<Self> {
+        self.sandbox = sandbox;
+        self.require_approval = require_approval;
+        self.validate()?;
+        Ok(self)
+    }
     /// Returns the exact Agent-settings identity.
     pub fn settings_id(&self) -> &str {
         &self.settings_id
@@ -1498,6 +1563,8 @@ pub struct SessionHeader {
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
     fork_origin: Option<ForkOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_owner: Option<ExecutionOwner>,
     delegation_policy: Option<DelegationPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     spawn_role: Option<SpawnRoleRecord>,
@@ -1518,6 +1585,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
             fork_origin: Option<serde_json::Value>,
+            execution_owner: Option<serde_json::Value>,
             delegation_policy: Option<serde_json::Value>,
             spawn_role: Option<serde_json::Value>,
             initial_output: Option<serde_json::Value>,
@@ -1549,6 +1617,11 @@ impl<'de> Deserialize<'de> for SessionHeader {
             settings: decode_header_field(wire.settings, "settings")?,
             fork_origin: wire
                 .fork_origin
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
+            execution_owner: wire
+                .execution_owner
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(serde::de::Error::custom)?,
@@ -1605,6 +1678,7 @@ impl SessionHeader {
             agent_preset_id,
             settings,
             fork_origin: None,
+            execution_owner: None,
             delegation_policy: None,
             spawn_role: None,
             initial_output: None,
@@ -1648,6 +1722,36 @@ impl SessionHeader {
             if origin.parent_session_id == self.session_id {
                 return Err(SessionError::Invalid(
                     "forked session cannot name itself as its parent".into(),
+                ));
+            }
+        }
+        match (&self.fork_origin, &self.execution_owner) {
+            (None, None) => {}
+            (Some(origin), Some(owner)) => {
+                owner.validate()?;
+                let parent = match owner {
+                    ExecutionOwner::TurnActivation {
+                        session_id,
+                        turn_id,
+                    } => {
+                        if turn_id != &origin.invoking_turn_id {
+                            return Err(SessionError::Invalid(
+                                "activation owner differs from creator Turn".into(),
+                            ));
+                        }
+                        session_id
+                    }
+                    ExecutionOwner::ProgramRun { session_id, .. } => session_id,
+                };
+                if parent != &origin.parent_session_id {
+                    return Err(SessionError::Invalid(
+                        "execution owner differs from lineage parent".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(SessionError::Invalid(
+                    "child Header requires explicit execution ownership".into(),
                 ));
             }
         }
@@ -1702,6 +1806,18 @@ impl SessionHeader {
         &self.settings
     }
 
+    /// Freezes actual creation authority before a child Header is persisted.
+    pub fn with_execution_policy(
+        mut self,
+        sandbox: SandboxMode,
+        require_approval: bool,
+    ) -> Result<Self> {
+        self.settings = self
+            .settings
+            .with_execution_policy(sandbox, require_approval)?;
+        self.validate()?;
+        Ok(self)
+    }
     /// Adds one immutable fork lineage to a not-yet-durable child Header.
     pub fn with_fork_origin(mut self, origin: ForkOrigin) -> Result<Self> {
         if self.fork_origin.is_some() {
@@ -1709,6 +1825,10 @@ impl SessionHeader {
                 "session Header already contains fork lineage".into(),
             ));
         }
+        self.execution_owner = Some(ExecutionOwner::TurnActivation {
+            session_id: origin.parent_session_id.clone(),
+            turn_id: origin.invoking_turn_id.clone(),
+        });
         self.fork_origin = Some(origin);
         self.validate()?;
         Ok(self)
@@ -1769,6 +1889,17 @@ impl SessionHeader {
         self.delegation_policy = policy;
         self.validate()?;
         Ok(self)
+    }
+
+    /// Replaces the default activation owner before a child Header becomes durable.
+    pub fn with_execution_owner(mut self, owner: ExecutionOwner) -> Result<Self> {
+        self.execution_owner = Some(owner);
+        self.validate()?;
+        Ok(self)
+    }
+    /// Returns execution lifetime independently of immutable inherited history.
+    pub const fn execution_owner(&self) -> Option<&ExecutionOwner> {
+        self.execution_owner.as_ref()
     }
 
     /// Returns the optional immutable fork lineage.
@@ -2058,8 +2189,10 @@ pub enum SessionFactBody {
         turn_id: TurnId,
         /// Exact effect identity.
         effect_id: EffectId,
-        /// Completed Conversation model effect that produced this exact call.
-        source_model_effect_id: EffectId,
+        /// Exact model or enclosing program origin.
+        origin: ToolOrigin,
+        /// Frozen Local catalog declaration authenticated before publication.
+        program_role: rsi_tools_protocol::ToolProgramRole,
         /// Exact retained-result identity.
         identity: ToolResultIdentity,
         /// Exact registered Tool name.
@@ -2085,6 +2218,10 @@ pub enum SessionFactBody {
     ToolRejected {
         /// Exact target turn.
         turn_id: TurnId,
+        /// Exact producer, including rejected internal program calls.
+        origin: ToolOrigin,
+        /// Frozen Local dispatch declaration.
+        program_role: rsi_tools_protocol::ToolProgramRole,
         /// Exact prepared effect identity, never started by this record.
         effect_id: EffectId,
         /// Prepared identity preserves the model call and pinned Tool generation.
@@ -2242,15 +2379,25 @@ impl SessionFactBody {
                 name,
                 arguments,
                 approval,
+                origin,
+                program_role,
+                effect_id,
                 ..
-            } => validate_tool_intent(identity, name, arguments, approval.as_ref()),
+            } => {
+                origin.validate_for(effect_id, *program_role)?;
+                validate_tool_intent(identity, name, arguments, approval.as_ref())
+            }
             Self::ToolRejected {
                 identity,
                 name,
                 arguments,
                 rejection,
+                origin,
+                program_role,
+                effect_id,
                 ..
             } => {
+                origin.validate_for(effect_id, *program_role)?;
                 validate_tool_intent(identity, name, arguments, None)?;
                 rejection.validate()
             }
@@ -2409,6 +2556,21 @@ fn validate_entered_message(
     content: &[AgentMessageContent],
 ) -> Result<()> {
     source.validate()?;
+    if let InputMessageSource::Program { message_id, source } = source {
+        // Bound the copy before rebuilding the exact mailbox envelope so both
+        // durable boundaries share one authority-neutral notice validator.
+        bounded_compact_json_len(content, 8192)
+            .map_err(|_| SessionError::Invalid("program notice exceeds 8 KiB".into()))?;
+        AgentMessage {
+            message_id: message_id.clone(),
+            source: AgentMessageSource::Program {
+                source: source.clone(),
+            },
+            content: content.to_vec(),
+            options: MessageOptions::default(),
+        }
+        .validate()?;
+    }
     if !matches!(source, InputMessageSource::Human { .. })
         && content
             .iter()
@@ -2437,7 +2599,9 @@ fn validate_entered_message(
     }
     let text_limit = if matches!(
         source,
-        InputMessageSource::Agent { .. } | InputMessageSource::Completion { .. }
+        InputMessageSource::Agent { .. }
+            | InputMessageSource::Completion { .. }
+            | InputMessageSource::Program { .. }
     ) {
         MAXIMUM_AGENT_MESSAGE_BYTES
     } else {
@@ -2465,6 +2629,24 @@ fn validate_tool_intent(
         }
     }
     Ok(())
+}
+
+/// Durable proof of the producer of one Tool call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolOrigin {
+    /// One exact call produced by a completed Conversation response.
+    Model {
+        /// Producing model effect.
+        effect_id: EffectId,
+    },
+    /// An internal call owned by a still-started coordinator Tool.
+    Program {
+        /// Enclosing coordinator effect, independent of provider call IDs.
+        parent_effect_id: EffectId,
+        /// Positive monotonic admission ordinal within this coordinator.
+        ordinal: u32,
+    },
 }
 
 /// One sequenced append-only session Fact.
@@ -2828,4 +3010,26 @@ fn validate_effort_override(
         ));
     }
     Ok(())
+}
+
+impl ToolOrigin {
+    fn validate_for(
+        &self,
+        effect_id: &EffectId,
+        role: rsi_tools_protocol::ToolProgramRole,
+    ) -> Result<()> {
+        if let Self::Program {
+            parent_effect_id,
+            ordinal,
+        } = self
+            && (*ordinal == 0
+                || parent_effect_id == effect_id
+                || role != rsi_tools_protocol::ToolProgramRole::Callable)
+        {
+            return Err(SessionError::Invalid(
+                "invalid program Tool origin or role".into(),
+            ));
+        }
+        Ok(())
+    }
 }

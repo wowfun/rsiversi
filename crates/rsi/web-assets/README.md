@@ -11,6 +11,10 @@ underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must
 be index.html and is also served at `/`.
 
+The native `check_bundle` example accepts one absolute bundle directory and admits
+the default bundle through this provider in an isolated Host, reports retained
+bytes, then shuts it down. Build callers use it instead of copying admission policy.
+
 The application frame policy permits the two preview documents and the `/downloads/`
 Service Worker navigation prefix. Firefox also checks the synthetic navigation
 against the exact `/download-worker.js` source, which is explicitly permitted. Download responses are owned by the client worker,

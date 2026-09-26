@@ -90,7 +90,10 @@ async fn structured_result(tool_name: &str) {
     publish(SessionFactBody::ToolIntent {
         turn_id: claim.turn_id().clone(),
         effect_id: effect.clone(),
-        source_model_effect_id: EffectId::new("source-model").unwrap(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: EffectId::new("source-model").unwrap(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         identity: identity.clone(),
         name: tool_name.into(),
         arguments: serde_json::json!({}),
@@ -181,7 +184,8 @@ async fn structured_result(tool_name: &str) {
         )
         .await
         .expect("exact Completion read must release Store admission before reading its result Fact")
-        .unwrap(),
+        .unwrap()
+        .value,
         serde_json::json!({})
     );
     let mut wrong = locator.clone();
@@ -259,7 +263,8 @@ async fn structured_result(tool_name: &str) {
         )
         .await
         .expect("exact Completion read must release Store admission before reading its result Fact")
-        .unwrap(),
+        .unwrap()
+        .value,
         serde_json::json!({}),
         "a later activation cannot replace the exact old result"
     );

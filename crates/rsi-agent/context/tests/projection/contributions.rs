@@ -71,6 +71,10 @@ fn contribution_history() -> Vec<SessionFact> {
         }),
     );
     bodies.push(SessionFactBody::ToolRejected {
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: model.clone(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
         turn_id: turn,
         effect_id: EffectId::new("tool").unwrap(),
         identity: ToolResultIdentity::new("owner", "tool", "call", "a".repeat(64)).unwrap(),

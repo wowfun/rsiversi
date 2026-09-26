@@ -1,6 +1,8 @@
 //! Live Host continuation admission over ordinary command and mailbox transactions.
 
 use super::*;
+
+mod initial;
 use rsi_agent_composition_protocol::{ContinuationCommand, ContributionKind};
 use rsi_agent_session_protocol::MessageDelivery;
 use rsi_agent_session_protocol::{
@@ -108,6 +110,90 @@ impl SessionContinuations for AgentKernel {
             .await
     }
 
+    async fn reserve_initial(
+        &self,
+        lease: &ContinuationLease,
+        session: PreparedFreshSession,
+        invocation: SessionCommandInvocation,
+        input: ContinuationInput,
+    ) -> TurnResult<MessageReceipt> {
+        let result = self
+            .reserve_initial_continuation(lease, session, invocation, input)
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| !error.is_continuation_contention())
+        {
+            lease.revoke();
+        }
+        result
+    }
+
+    async fn wait_idle(
+        &self,
+        lease: &ContinuationLease,
+        cancellation: CancellationToken,
+    ) -> TurnResult<()> {
+        let (header, composition) = self.inner.continuation_issuer.inspect(lease)?;
+        let root = agent_root_and_path(header).0;
+        loop {
+            self.validate_continuation(lease, header, composition, true)?;
+            // Subscribe to membership before the subtree read and to every current
+            // descendant before the idle recheck. Child completion must wake a parent.
+            let mut changes = vec![
+                self.inner.session_changes.tree(&root),
+                self.inner.session_changes.session(lease.session_id()),
+            ];
+            match self
+                .inner
+                .store
+                .read_agent_subtree_snapshot(lease.session_id())
+                .await
+            {
+                Ok(tree) => {
+                    tree.validate().map_err(turn_store_error)?;
+                    changes.extend(
+                        tree.descendants.iter().map(|child| {
+                            self.inner.session_changes.session(&child.status.session_id)
+                        }),
+                    );
+                }
+                Err(StoreError::NotFound(_)) => {}
+                Err(error) => return Err(turn_store_error(error)),
+            }
+            let peers = self
+                .continuation_peers(lease)
+                .iter()
+                .map(ContinuationLease::disarmed_token)
+                .collect::<Vec<_>>();
+            if self.automatic_turn_selected(lease)
+                && self.automatic_session_idle(lease.session_id()).await?
+            {
+                return Ok(());
+            }
+            let changes = futures_util::future::select_all(
+                changes.iter_mut().map(|change| Box::pin(change.changed())),
+            );
+            let peers = async {
+                if peers.is_empty() {
+                    std::future::pending::<()>().await;
+                } else {
+                    futures_util::future::select_all(
+                        peers.iter().map(|peer| Box::pin(peer.cancelled())),
+                    )
+                    .await;
+                }
+            };
+            tokio::select! {
+                () = cancellation.cancelled() => return Err(TurnError::Cancelled),
+                () = lease.disarmed() => return Err(TurnError::ContinuationDisarmed),
+                () = self.inner.submission_admission.closed.cancelled() => return Err(TurnError::ShuttingDown),
+                _ = changes => {},
+                () = peers => {},
+            }
+        }
+    }
+
     async fn execute(
         &self,
         lease: &ContinuationLease,
@@ -136,7 +222,9 @@ impl SessionContinuations for AgentKernel {
                 Ok(receipt)
             }
             Err(error) => {
-                lease.revoke();
+                if !error.is_continuation_contention() {
+                    lease.revoke();
+                }
                 Err(error)
             }
         }
@@ -154,60 +242,6 @@ impl SessionContinuations for AgentKernel {
             return Err(TurnError::DomainRequestConflict { request_id: request_id.to_string() });
         }
         Ok(receipt)
-    }
-
-    async fn submit(
-        &self,
-        lease: &ContinuationLease,
-        session: SubmitSession,
-        input: ContinuationInput,
-        provenance: ContinuationProvenance,
-    ) -> TurnResult<MessageReceipt> {
-        input
-            .validate()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        provenance
-            .validate()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let admission = self
-            .inner
-            .submission_admission
-            .acquire(session.session_id())
-            .await?;
-        let (header, composition) = self.continuation_session(&session)?;
-        self.validate_continuation(lease, header, composition, true)?;
-        if input.owner != lease.binding().owner {
-            return Err(TurnError::ContinuationDisarmed);
-        }
-        let reserved_revision = self
-            .verify_reservation(lease, &session, &input, &provenance)
-            .await?;
-        let source = ContinuationSource {
-            domain: lease.binding().domain.clone(),
-            owner: input.owner.clone(),
-            round: input.round,
-            reserved_revision,
-            provenance,
-            text_sha256: input.text_sha256(),
-        };
-        self.inner
-            .continuation_issuer
-            .guard_source(lease, source.clone())?;
-        let request = SubmitMessage {
-            session,
-            delivery: MessageDelivery::NextTurn,
-            message: AgentMessage {
-                message_id: input.message_id,
-                source: AgentMessageSource::Continuation { source },
-                content: vec![AgentMessageContent::Text { text: input.text }],
-                options: MessageOptions::default(),
-            },
-        };
-        let result = self.submit_message_admitted(request, None, admission).await;
-        if result.is_err() {
-            lease.revoke();
-        }
-        result
     }
 
     async fn discard_if_pending(
@@ -264,16 +298,6 @@ impl AgentKernel {
             .acquire(session.session_id())
             .await?;
         let (header, composition) = self.continuation_session(&session)?;
-        if let Some(input) = &binding.initial_input {
-            input
-                .validate()
-                .map_err(|error| TurnError::Invalid(error.to_string()))?;
-            if input.owner != binding.owner || input.round != 1 || binding.revision.get() != 0 {
-                return Err(TurnError::Invalid(
-                    "draft continuation allocation binding differs".into(),
-                ));
-            }
-        }
         let states = self.continuation_binding_states(&session, &binding).await?;
         let snapshot = states
             .iter()
@@ -303,15 +327,32 @@ impl AgentKernel {
             .expect("continuation registry poisoned");
         leases.retain(|_, entry| entry.upgrade().is_some());
         if leases
-            .get(header.session_id())
+            .get(&(header.session_id().clone(), binding.domain.id().to_owned()))
             .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade)
             .is_some()
         {
             return Err(TurnError::Invalid(
-                "Session already has a retained continuation owner".into(),
+                "Session domain already has a retained continuation owner".into(),
             ));
         }
-        if leases.len() >= 64 {
+        for ((session_id, _), other) in leases.iter() {
+            if session_id == header.session_id()
+                && let Some(other) = other.upgrade()
+            {
+                let (other_header, other_composition) =
+                    self.inner.continuation_issuer.inspect(&other)?;
+                if other_header != header || !other_composition.same_generation(composition) {
+                    return Err(TurnError::ContinuationDisarmed);
+                }
+            }
+        }
+        if leases.len() >= 128
+            || leases
+                .keys()
+                .filter(|(_, domain)| domain == binding.domain.id())
+                .count()
+                >= 64
+        {
             return Err(TurnError::Capacity);
         }
         let lease =
@@ -321,7 +362,13 @@ impl AgentKernel {
         if !armed {
             lease.revoke();
         }
-        leases.insert(header.session_id().clone(), lease.downgrade());
+        leases.insert(
+            (
+                header.session_id().clone(),
+                lease.binding().domain.id().to_owned(),
+            ),
+            lease.downgrade(),
+        );
         Ok(lease)
     }
 }
@@ -334,9 +381,9 @@ impl AgentKernel {
     ) -> TurnResult<Vec<rsi_agent_session_protocol::DomainSnapshot>> {
         match session {
             SubmitSession::Fresh(prepared) => {
-                if binding.revision.get() != 0 || binding.initial_input.is_none() {
+                if binding.revision.get() != 0 {
                     return Err(TurnError::Invalid(
-                        "draft continuation requires its frozen first allocation".into(),
+                        "draft continuation requires an unpublished domain revision".into(),
                     ));
                 }
                 Ok(prepared.baseline().initial_states())
@@ -394,80 +441,15 @@ impl AgentKernel {
             .continuations
             .lock()
             .expect("continuation registry poisoned")
-            .get(header.session_id())
+            .get(&(
+                header.session_id().clone(),
+                lease.binding().domain.id().to_owned(),
+            ))
             .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade);
         if !current.is_some_and(|current| current.same_lease(lease)) {
             return Err(TurnError::ContinuationDisarmed);
         }
         Ok(())
-    }
-
-    async fn verify_reservation(
-        &self,
-        lease: &ContinuationLease,
-        session: &SubmitSession,
-        input: &ContinuationInput,
-        provenance: &ContinuationProvenance,
-    ) -> TurnResult<DomainRevision> {
-        match provenance {
-            ContinuationProvenance::Baseline { snapshot_sha256 } => {
-                let SubmitSession::Fresh(prepared) = session else {
-                    return Err(TurnError::Invalid(
-                        "baseline input admission requires its frozen draft".into(),
-                    ));
-                };
-                let snapshot = prepared
-                    .baseline()
-                    .initial_states()
-                    .into_iter()
-                    .find(|snapshot| snapshot.identity() == &lease.binding().domain)
-                    .ok_or(TurnError::ContinuationDisarmed)?;
-                if lease.binding().initial_input.as_ref() != Some(input)
-                    || &snapshot
-                        .sha256()
-                        .map_err(|error| TurnError::Invalid(error.to_string()))?
-                        != snapshot_sha256
-                    || snapshot_sha256 != &lease.binding().snapshot_sha256
-                {
-                    return Err(TurnError::ContinuationDisarmed);
-                }
-                self.inner
-                    .continuation_issuer
-                    .set_revision(lease, DomainRevision::new(1))?;
-                Ok(DomainRevision::new(1))
-            }
-            ContinuationProvenance::Command { request_id } => {
-                let receipt = self
-                    .domain_request(session.session_id(), request_id)
-                    .await?
-                    .ok_or(TurnError::ContinuationDisarmed)?;
-                if !matches!(receipt.commit().source(), DomainMutationSource::Continuation { domain, owner, reservation: Some(reserved), .. }
-                    if domain == &lease.binding().domain && owner == &input.owner && reserved == input)
-                {
-                    return Err(TurnError::ContinuationDisarmed);
-                }
-                let [update] = receipt.commit().updates() else {
-                    return Err(TurnError::ContinuationDisarmed);
-                };
-                if update.snapshot().identity() != &lease.binding().domain {
-                    return Err(TurnError::ContinuationDisarmed);
-                }
-                let page = observation::read_domain_states_bounded(
-                    &self.inner,
-                    session.session_id(),
-                    None,
-                )
-                .await
-                .map_err(turn_store_error)?;
-                if !page.states.iter().any(|state| {
-                    state.snapshot.identity() == &lease.binding().domain
-                        && state.head.revision == lease.revision()
-                }) {
-                    return Err(TurnError::ContinuationDisarmed);
-                }
-                Ok(update.revision())
-            }
-        }
     }
 
     pub(super) async fn continuation_claim_allowed(
@@ -481,7 +463,7 @@ impl AgentKernel {
             .continuations
             .lock()
             .expect("continuation registry poisoned")
-            .get(session)
+            .get(&(session.clone(), source.domain.id().to_owned()))
             .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade);
         let Some(lease) = lease.filter(ContinuationLease::is_armed) else {
             return Ok(false);
@@ -580,5 +562,68 @@ impl AgentKernel {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+impl AgentKernel {
+    fn continuation_peers(&self, lease: &ContinuationLease) -> Vec<ContinuationLease> {
+        self.inner
+            .continuations
+            .lock()
+            .expect("continuation registry poisoned")
+            .iter()
+            .filter(|((session, _), _)| session == lease.session_id())
+            .filter_map(|(_, weak)| weak.upgrade())
+            .filter(|other| !other.same_lease(lease) && other.is_armed())
+            .collect()
+    }
+
+    pub(super) fn automatic_turn_selected(&self, lease: &ContinuationLease) -> bool {
+        let own = lease
+            .demand()
+            .map(|stamp| (stamp, lease.binding().domain.id()));
+        let Some(own) = own else {
+            return true;
+        };
+        !self.continuation_peers(lease).iter().any(|other| {
+            other
+                .demand()
+                .is_some_and(|stamp| (stamp, other.binding().domain.id()) < own)
+        })
+    }
+
+    pub(super) async fn automatic_session_idle(&self, session: &SessionId) -> TurnResult<bool> {
+        if lock_state(&self.inner)
+            .sessions
+            .get(session)
+            .is_some_and(|state| state.turns.values().any(|turn| turn.terminal.is_none()))
+        {
+            return Ok(false);
+        }
+        let tree = match self.inner.store.read_agent_subtree_snapshot(session).await {
+            Ok(tree) => tree,
+            Err(StoreError::NotFound(_)) => return Ok(true),
+            Err(error) => return Err(turn_store_error(error)),
+        };
+        tree.validate().map_err(turn_store_error)?;
+        if std::iter::once(&tree.session)
+            .chain(tree.descendants.iter().map(|child| &child.status))
+            .any(|status| {
+                status.has_open_turn
+                    || status.has_active_activation
+                    || status.has_waking_message
+                    || status.has_active_program
+            })
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .inner
+            .store
+            .read_agent_mailbox_summary(session)
+            .await
+            .map_err(turn_store_error)?
+            .pending_count
+            == 0)
     }
 }

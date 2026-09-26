@@ -120,6 +120,12 @@ impl SessionCommand for Command {
                         "continuation input differs from the proposed Goal reservation",
                     ));
                 }
+                if matches!(context.revision, CommandRevision::Draft { .. }) {
+                    goal.reservation
+                        .as_mut()
+                        .expect("reserved above")
+                        .request_id = None;
+                }
             }
             Operation::Settle => {
                 let args: SettleGoal =

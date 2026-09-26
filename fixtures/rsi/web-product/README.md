@@ -265,3 +265,51 @@ errored streaming download pending after the producer is released and the
 application reports failure; the fixture explicitly cancels that browser artifact
 for cleanup. A pending manager result does not establish a completed failed-download
 UI transition. Chromium reports the failed download directly.
+
+`plan-review.mjs` runs in the default verifier and is also a targeted closed-review probe using the actual document,
+Worker, Host and a deterministic provider. With explicit `RSI_WEB_REPORT` and
+`RSI_WEB_ASSETS` it checks literal plan rendering, three explicit choices,
+feedback, narrow containment and the next provider request after atomic approval
+in Chromium and Firefox. It retains the executable hash, screenshots and exact
+mock requests; this does not establish live model or native Desktop behavior.
+
+`plan-live.mjs` is opt-in via `RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL`,
+`RSI_WEB_REPORT` and `RSI_WEB_ASSETS`. It reads only the authorized DeepSeek key,
+uses an isolated Workspace, explicitly approves a harmless computation plan,
+then requires durable successful save/review/spawn/read Tool facts and the actual
+structured result `answer: 42`. Reports distinguish the model and effort from
+mock evidence and record zero mock requests. Cleanup attempts every resource owner,
+including after browser launch/close failure. It recursively sanitizes all regular
+JSON/JSONL/log/text evidence files before reporting any credential match; links
+are excluded. Usage comparisons require nonempty, finite positive token counts.
+
+`schedule-live.mjs` uses the same explicit live environment as `plan-live.mjs`.
+It creates one short one-shot reminder, waits for the actual automatic Turn,
+and verifies the human/automatic provenance and retained allowance through CLI
+history. Browser screenshots inspect ordinary Tool results at wide and narrow
+widths. No repeating work is created, and fixture shutdown owns all live timers.
+
+`program-live.mjs` uses the same explicit live variables to compare four ordinary
+file reads with one `run_code` coordinator over the same files and model. It checks
+Program-origin Facts, curated output and actual provider usage. A paired sample
+reports measured tokens and time; it does not establish a general speedup.
+
+`workflow-live.mjs` additionally requires the opt-in Node runtime in its isolated
+Host and Agent preset. `RSI_WORKFLOW_MODE` selects `background` (default),
+`foreground` (one-second observation followed by detachment), `cancel`, or `plan`.
+The completion scenarios verify two structured children admitted after the creator
+settles, exclusive run receipts, one bounded notice and a successful result read.
+Cancellation scenarios verify explicit control or plan-mode revocation and direct
+Node reaping. All keep real provider evidence, zero mock requests and browser
+screenshots separate from deterministic Kernel and process tests.
+
+`profile-status.mjs` is keyless and targeted to diagnostics. With explicit
+`RSI_WEB_REPORT` and `RSI_WEB_ASSETS`, it introduces a parse failure into an isolated
+watched Host Profile, checks the unchanged desired revision and advanced observed
+revision, then restores the source. Chromium and Firefox verify the redacted last
+attempt, recovery, narrow containment and zero model requests.
+
+The targeted probes share browser setup, receipt connection and Workspace opening
+through `browser-fixture.mjs`. Browser setup closes a partially created owner on
+failure; each probe retains its service/evidence cleanup in `finally`. Program
+and workflow probes share one checked standard-preset transformation.

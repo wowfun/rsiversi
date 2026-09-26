@@ -56,13 +56,22 @@ durably accepted message from steering into starting a new activation.
 `read_agent_result` takes the exact child/activation/Turn/Fact coordinates from a
 successful Completion. The Kernel authenticates the immediate parent, verifies
 that exact durable Completion, and reads and validates that single result Fact.
-It never selects a latest result. The full output schema is programmatic spawn
-input; ordinary model-facing spawn/follow-up arguments cannot supply one.
+It never selects a latest result. `spawn_agent.output_schema` supplies an optional
+initial-activation contract through the existing finite local Draft 7 validator.
+Model-authored schemas are at most 8 KiB and cannot contain schema annotations
+(`title`, `description`, `default`, `examples`); task instructions belong in
+`message`. Property names and enum/const data are not schema annotations. The
+contract neither changes child permissions nor applies to follow-up activations.
 
 `read_agent_result` registration is opt-in with `read_structured_results: true`
-in this contribution's trusted configuration. Enable it only when the embedding
-application supplies initial output contracts through programmatic spawn. The
-standard product leaves it disabled: model-facing spawn cannot select a schema.
+in this contribution's trusted configuration. The standard preset enables it.
+The model reader accepts raw compact-JSON byte `offset` and encoded presentation
+`maximum` (1–16 KiB, default 8 KiB). It returns a UTF-8-safe fragment, exact
+locator, schema/value digests, total bytes and next offset. The complete rendered
+envelope and data label fit that budget, including JSON escaping. Fragments are
+data, not instructions, and only their complete concatenation is a JSON value.
+The trusted Turn-service reader retains the complete validated value and exact
+result reference. UI previews retain their independently owned bounds.
 
 ## Markdown definitions
 

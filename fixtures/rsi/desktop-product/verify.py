@@ -17,6 +17,7 @@ import threading
 import tempfile
 import time
 from tasks import ProviderControl, verify as verify_tasks
+from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
@@ -43,6 +44,7 @@ parser.add_argument('--save-failure', action='store_true')
 parser.add_argument('--startup-close', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
+parser.add_argument('--plan-review', action='store_true')
 parser.add_argument('--terminals', action='store_true')
 parser.add_argument('--external', action='store_true')
 parser.add_argument('--profiles', action='store_true')
@@ -94,7 +96,7 @@ class Provider(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         delta = {'choices': [{'delta': {'role': 'assistant', 'content': 'Desktop conversation verified. 中文输入已收到。'}, 'finish_reason': None}]}
         done = {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12}}
-        delegation = (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
+        delegation = (plan_reply(body) if args.plan_review else None) or (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
         if delegation:
             delta['choices'][0]['delta'] = {'role':'assistant', **delegation}
             done['choices'][0]['finish_reason'] = 'tool_calls'
@@ -318,6 +320,7 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.plan_review: verify_plan_review(script, button, fill, until, screenshot, args.report)
     if args.export: verify_export(script, button, fill, until, screenshot, args.report, requests)
     if args.file_previews:
         verify_previews(script, button, fill, until, screenshot, lambda item: call('POST', root + '/frame', {'id': item}), workspace, args.report)
@@ -387,15 +390,24 @@ try:
     until(lambda: script('return !document.querySelector("dialog[open]")'))
     geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Send ↗"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')
     assert geometry['input'] >= 180 and geometry['overflow'] <= 1 and geometry['sendHit'], geometry
-    script(r'''window.nativeAdmission=null;(async()=>{const cases=[['/_frame',undefined],['/_ack',JSON.stringify({frame_id:'18446744073709551615'})],['/_ack','x'.repeat(1025)],['/_call/command',undefined],['/_frame?'+ 'x'.repeat(2049),undefined]];const results=[];for(const [path,body] of cases){const response=await fetch(path,{method:body===undefined?'GET':'POST',body});results.push({status:response.status,text:await response.text()})}window.nativeAdmission=results})().catch(e=>window.nativeAdmission={error:String(e)});return true''')
-    admission = until(lambda: script('return window.nativeAdmission'))
+    script(r'''window.nativeAdmission=null;window.admissionAck=null;window.admissionFetch=window.fetch;window.fetch=(path,options)=>{if(String(path)==='/_ack'&&!window.admissionAck)return new Promise((resolve,reject)=>{window.admissionAck={frame:JSON.parse(options.body).frame_id,release:async()=>{try{const response=await window.admissionFetch(path,options);window.admissionAck.released={frame:JSON.parse(options.body).frame_id,status:response.status};resolve(response);if(!response.ok)throw Error('held ACK rejected: '+response.status)}catch(error){reject(error);throw error}}}});return window.admissionFetch(path,options)};void window.admissionFetch('/_call/command',{method:'POST',body:JSON.stringify({action:'refresh'})});return true''')
+    held_admission = until(lambda: script('return window.admissionAck?.frame'))
+    script(r'''(async()=>{const results=[];try{const cases=[['/_frame',undefined],['/_ack',JSON.stringify({frame_id:'18446744073709551615'})],['/_ack','x'.repeat(1025)],['/_call/command',undefined],['/_frame?'+ 'x'.repeat(2049),undefined]];for(const [path,body] of cases){const response=await window.admissionFetch(path,{method:body===undefined?'GET':'POST',body});results.push({status:response.status,text:await response.text()})}}finally{window.fetch=window.admissionFetch;await window.admissionAck.release()}window.nativeAdmission={results,released:window.admissionAck.released}})().catch(e=>window.nativeAdmission={error:String(e)});return true''')
+    observed_admission = until(lambda: script('return window.nativeAdmission'))
+    assert 'error' not in observed_admission, observed_admission
+    released_ack = observed_admission['released']
+    assert released_ack['frame'] == held_admission and 200 <= released_ack['status'] < 300, released_ack
+    admission = observed_admission['results']
     assert all(item['status'] == 409 for item in admission), admission
-    for item in admission:
+    admission_expected = [('failed', 'A document acknowledgement is pending'), ('failed', 'Stale document acknowledgement'), ('failed', 'Acknowledgement exceeds its limit'), ('invalid', 'Native inputs require POST'), ('invalid', 'Native request exceeds its limit')]
+    assert len(admission) == len(admission_expected), admission
+    for item, (code, message) in zip(admission, admission_expected):
         failure = json.loads(item['text'])
-        assert isinstance(failure['message'], str) and failure['code'] in ('busy', 'closed', 'invalid', 'failed'), failure
+        assert failure['code'] == code and failure['message'] == message, failure
         assert failure['notAdmitted'] is (failure['code'] != 'failed'), failure
         assert failure['retryable'] is (failure['code'] == 'busy'), failure
     (args.report / 'native-admission.json').write_text(json.dumps(admission, indent=2))
+    (args.report / 'native-admission-frame.json').write_text(json.dumps({'held_ack':held_admission,'released_ack':released_ack}))
     if args.save_failure:
         script(r'''window.fixturePut=IDBObjectStore.prototype.put;IDBObjectStore.prototype.put=function(){throw new DOMException('Injected draft write failure','QuotaExceededError')};return true''')
         fill('textarea[aria-label="Main message"]', 'draft must survive failed close 中文')
