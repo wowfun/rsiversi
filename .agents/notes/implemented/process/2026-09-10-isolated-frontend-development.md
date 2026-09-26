@@ -49,6 +49,12 @@ a development socket would change an unrelated ownership boundary.
 
 ## Consequences
 
+Debug symbol demangling can exceed retained asset capacity even though execution
+code fits. Preserving original symbol names avoids raising the product bound.
+The [Web build](../../../../plugins/rsi/web/README.md) uses native provider admission
+as its oracle because duplicating the file and byte policy would drift; this
+intentionally adds a native preflight build.
+
 The first product build includes linked backends; subsequent native renderer or
 WASM builds have smaller dependency closures. Worker/bootstrap edits need a new
 bundle and restart. Declared watch inputs must track deliberate source changes.

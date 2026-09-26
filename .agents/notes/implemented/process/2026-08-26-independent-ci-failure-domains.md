@@ -75,6 +75,10 @@ Standalone fixtures keep their own lockfiles and targets. Audit enumerates
 Git-tracked lockfiles, fetching advisories for the root and reusing that database
 for the remaining files.
 
+Platform-dependent filesystem and process fixtures cannot establish portable
+behavior merely because their input types compile. Git metadata equality also
+requires deterministic fixture maintenance, not a weaker equality assertion.
+
 Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
