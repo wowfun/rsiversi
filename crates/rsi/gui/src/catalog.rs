@@ -1,5 +1,6 @@
 #[path = "settings.rs"]
 mod settings;
+pub(crate) use settings::PreferenceRefreshDelay;
 
 use crate::application::{Command, GuiApplication, Recent, Result, error};
 

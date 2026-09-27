@@ -18,13 +18,42 @@ const MAXIMUM_COMMAND: usize = 32 * 1024;
 struct Prepare {
     pane: crate::SurfaceId,
     generation: String,
+    #[serde(default)]
     text: String,
+    #[serde(default)]
     images: Vec<MediaRef>,
     #[serde(default)]
     references: Vec<rsi_agent_session_protocol::FrozenReference>,
-    steer: bool,
+    #[serde(default)]
+    action_revision: Option<String>,
+    #[serde(default)]
+    action: Option<crate::panes::composer::Action>,
+    #[serde(default)]
+    queue: Option<QueuePreparation>,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum QueuePreparation {
+    Read {
+        slot_id: rsi_agent_session_protocol::QueueSlotId,
+        expected_message_id: MessageId,
+    },
+    Replace {
+        slot_id: rsi_agent_session_protocol::QueueSlotId,
+        expected_message_id: MessageId,
+        content: Vec<rsi_agent_session_protocol::AgentMessageContent>,
+    },
+    ConvertToSteer {
+        slot_id: rsi_agent_session_protocol::QueueSlotId,
+        expected_message_id: MessageId,
+        expected_turn_id: rsi_agent_session_protocol::TurnId,
+    },
+    Withdraw {
+        slot_id: rsi_agent_session_protocol::QueueSlotId,
+        expected_message_id: MessageId,
+    },
+}
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Restore {
@@ -49,6 +78,9 @@ struct Frozen {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Queue {
+        input: rsi_agent_session_protocol::QueueMutationRequest,
+    },
     Message {
         input: SubmitInput,
     },
@@ -75,9 +107,20 @@ impl Mode {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Settlement {
-    Complete { receipt: String },
-    NotAdmitted { error: String },
-    Unknown { error: String },
+    Complete {
+        receipt: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
+    },
+    Rejected {
+        error: String,
+    },
+    NotAdmitted {
+        error: String,
+    },
+    Unknown {
+        error: String,
+    },
 }
 impl Settlement {
     fn rejected(mode: Mode, reason: impl std::fmt::Display) -> Self {
@@ -104,6 +147,22 @@ fn not_admitted(error: &SessionError) -> bool {
             | SessionError::ShuttingDown
             | SessionError::NotFound(_)
     )
+}
+
+fn queue_rejection(reason: rsi_agent_session_protocol::QueueMutationRejection) -> &'static str {
+    use rsi_agent_session_protocol::QueueMutationRejection as Rejection;
+    match reason {
+        Rejection::MissingSlot => "The queued input no longer exists",
+        Rejection::StaleMessage => "The queued input has changed",
+        Rejection::Claimed => "The agent already claimed this input",
+        Rejection::Discarded => "This input was already discarded",
+        Rejection::NotHuman => "Only your own inputs can be edited",
+        Rejection::IncompatibleOptions => {
+            "This input has options that cannot be used while steering"
+        }
+        Rejection::StaleTurn => "The displayed turn is no longer accepting steering",
+        Rejection::MessageConflict => "The replacement message identity is already in use",
+    }
 }
 
 impl GuiApplication {
@@ -170,6 +229,15 @@ impl GuiApplication {
                 return Err("Submission preparation exceeds 8 MiB".into());
             }
             let input: Prepare = serde_json::from_str(source).map_err(error)?;
+            if input.queue.is_some()
+                && (!input.text.is_empty()
+                    || !input.images.is_empty()
+                    || !input.references.is_empty())
+            {
+                return Err(
+                    "Queue preparation cannot include composer text, images or references".into(),
+                );
+            }
             if input.text.len() > 1024 * 1024
                 || input.images.len() > super::images::MAXIMUM_IMAGES
                 || input.references.len() > rsi_agent_session_protocol::MAXIMUM_MESSAGE_REFERENCES
@@ -184,6 +252,10 @@ impl GuiApplication {
         };
         self.admit(false, None, move |app| async move {
             let attached = app.pane(input.pane)?.attachment(&input.generation)?;
+            if let Some(queue)=input.queue {
+                return app.prepare_queue_submission(&attached,queue).await;
+            }
+
             let header = attached.handle.header().await.map_err(error)?.fingerprint().map_err(error)?;
             let mut command = None;
             if input.images.is_empty() && input.references.is_empty() && let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
@@ -197,6 +269,9 @@ impl GuiApplication {
             let (kind, id, request, maximum) = if let Some(invocation) = command {
                 ("command", invocation.request_id.to_string(), Request::Command { invocation }, MAXIMUM_COMMAND)
             } else {
+                let delivery = app.composer_delivery(input.pane, &input.generation,
+                    input.action_revision.as_deref().ok_or("Missing displayed action revision")?,
+                    input.action.ok_or("Missing displayed delivery action")?)?;
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
                 content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
@@ -206,7 +281,7 @@ impl GuiApplication {
                 let request = SubmitInput {
                     reasoning_effort: None,
                     message_id: id.clone(), content,
-                    delivery: if input.steer { MessageDelivery::Steer } else { MessageDelivery::NextTurn },
+                    delivery,
                     model: None,
                     sandbox: None,
                 };
@@ -247,6 +322,7 @@ impl GuiApplication {
                 return Err("Invalid frozen Header fingerprint".into());
             }
             match &frozen.request {
+                Request::Queue { input } => input.validate().map_err(error)?,
                 Request::Message { input } => {
                     if input.sandbox.is_some()
                         || input.model.is_some()
@@ -328,6 +404,150 @@ impl GuiApplication {
         }
     }
 
+    async fn prepare_queue_submission(
+        &self,
+        attached: &Arc<Attachment>,
+        queue: QueuePreparation,
+    ) -> Result<String> {
+        use rsi_agent_session_protocol::{
+            AgentMessageContent, QueueMutation, QueueMutationRequest, QueueOperationId,
+        };
+        let new_id = || MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error);
+        let (slot_id, expected_message_id, mutation) = match queue {
+            QueuePreparation::Read {
+                slot_id,
+                expected_message_id,
+            } => {
+                let accepted_control_seq = attached
+                    .renderer
+                    .state
+                    .lock()
+                    .expect("GUI queue")
+                    .transcript
+                    .queue
+                    .get(&slot_id)
+                    .filter(|message| message.message_id == expected_message_id)
+                    .map(|message| message.accepted_control_seq)
+                    .ok_or("Queue slot changed; reopen its current version")?;
+                let message = attached
+                    .handle
+                    .read_message(&expected_message_id, accepted_control_seq)
+                    .await
+                    .map_err(error)?;
+                return serde_json::to_string(&serde_json::json!({"slot_id":slot_id,"message_id":message.message_id,"content":message.content})).map_err(error);
+            }
+            QueuePreparation::Replace {
+                slot_id,
+                expected_message_id,
+                content,
+            } => (
+                slot_id,
+                expected_message_id,
+                QueueMutation::Replace {
+                    new_message_id: new_id()?,
+                    content,
+                },
+            ),
+            QueuePreparation::ConvertToSteer {
+                slot_id,
+                expected_message_id,
+                expected_turn_id,
+            } => (
+                slot_id,
+                expected_message_id,
+                QueueMutation::ConvertToSteer {
+                    new_message_id: new_id()?,
+                    expected_turn_id,
+                },
+            ),
+            QueuePreparation::Withdraw {
+                slot_id,
+                expected_message_id,
+            } => (slot_id, expected_message_id, QueueMutation::Withdraw),
+        };
+        let input = QueueMutationRequest {
+            operation_id: QueueOperationId::new(rsi_ui::fresh_identity("queue")?).map_err(error)?,
+            slot_id,
+            expected_message_id,
+            mutation,
+        };
+        input.validate().map_err(error)?;
+        let id = input.operation_id.to_string();
+        let (mut text_bytes, mut images, mut references) = (0, 0, 0);
+        if let QueueMutation::Replace { content, .. } = &input.mutation {
+            for block in content {
+                match block {
+                    AgentMessageContent::Text { text } => text_bytes += text.len(),
+                    AgentMessageContent::Image { .. } => images += 1,
+                    AgentMessageContent::Reference { reference } => {
+                        references += 1;
+                        text_bytes += reference.preview.len();
+                    }
+                }
+            }
+        }
+        let opaque = serde_json::to_string(&Frozen {
+            session: attached.id.clone(),
+            header: attached.header.clone(),
+            request: Request::Queue { input },
+        })
+        .map_err(error)?;
+        if opaque.len() > MAXIMUM_MESSAGE {
+            return Err("Frozen queue mutation exceeds 8 MiB".into());
+        }
+        serde_json::to_string(&serde_json::json!({"kind":"queue","id":id,"opaque":opaque,"text_bytes":text_bytes,"images":images,"references":references})).map_err(error)
+    }
+
+    async fn settle_queue(
+        attached: &Arc<Attachment>,
+        input: rsi_agent_session_protocol::QueueMutationRequest,
+        mode: Mode,
+    ) -> Settlement {
+        let result = if mode == Mode::Dispatch {
+            attached.handle.mutate_queue(input.clone()).await.map(Some)
+        } else {
+            rsi_client::reconcile_queue(
+                attached.handle.as_ref(),
+                input.clone(),
+                mode == Mode::RetryMessage,
+            )
+            .await
+        };
+        match result {
+            Ok(Some(receipt)) => {
+                if let Err(reason) = rsi_client::validate_queue_receipt(&input, &receipt) {
+                    return Settlement::Unknown {
+                        error: error(reason),
+                    };
+                }
+                Settlement::Complete {
+                    notice: match &receipt.outcome {
+                        rsi_agent_session_protocol::QueueMutationOutcome::Rejected {
+                            reason,
+                            ..
+                        } => Some(format!(
+                            "{}. Reopen the current input before editing again.", queue_rejection(*reason)
+                        )),
+                        _ => None,
+                    },
+                    receipt: serde_json::to_string(&receipt).expect("bounded queue receipt"),
+                }
+            }
+            Ok(None) => Settlement::Unknown {
+                error: "Queue operation has no receipt yet; retry the same saved request".into(),
+            },
+            Err(SessionError::QueueOperationConflict) => Settlement::Rejected {
+                error: "This saved queue operation conflicts with an earlier request. Reopen the current input before editing again.".into(),
+            },
+            Err(reason) if mode == Mode::Dispatch && not_admitted(&reason) => {
+                Settlement::rejected(mode, reason)
+            }
+            Err(reason) => Settlement::Unknown {
+                error: error(reason),
+            },
+        }
+    }
+
     async fn settle_submission(
         &self,
         attached: &Arc<Attachment>,
@@ -335,6 +555,7 @@ impl GuiApplication {
         mode: Mode,
     ) -> Settlement {
         let result = match request {
+            Request::Queue { input } => return Self::settle_queue(attached, input, mode).await,
             Request::Message { input } => {
                 let newly_owned = if mode == Mode::Query {
                     false
@@ -418,6 +639,7 @@ impl GuiApplication {
         match result {
             Ok(receipt) => Settlement::Complete {
                 receipt: receipt.to_string(),
+                notice: None,
             },
             Err(reason) if mode == Mode::Dispatch && not_admitted(&reason) => {
                 Settlement::rejected(mode, reason)

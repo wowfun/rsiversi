@@ -119,6 +119,28 @@ where
     }
 }
 
+/// Pure raw-section transformation supplied only by a namespace owner.
+pub trait SettingsMigration: fmt::Debug + Send + Sync + 'static {
+    /// Returns the desired raw section; equal output requires no durable write.
+    fn migrate(&self, raw: Option<&Value>) -> Result<Option<Value>>;
+}
+
+/// Function adapter for [`SettingsMigration`].
+pub struct MigrateWith<F>(pub F);
+impl<F> fmt::Debug for MigrateWith<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MigrateWith(..)")
+    }
+}
+impl<F> SettingsMigration for MigrateWith<F>
+where
+    F: Fn(Option<&Value>) -> Result<Option<Value>> + Send + Sync + 'static,
+{
+    fn migrate(&self, raw: Option<&Value>) -> Result<Option<Value>> {
+        (self.0)(raw)
+    }
+}
+
 /// Immutable namespace registration declaration.
 #[derive(Clone, Debug)]
 pub struct SettingsSpec {
@@ -286,9 +308,17 @@ impl Drop for SettingsLease {
 }
 
 /// Settings namespace registry and resolver.
+#[async_trait]
 pub trait Settings: fmt::Debug + Send + Sync + 'static {
     /// Registers one exact namespace until the returned lease is dropped.
     fn register(&self, spec: SettingsSpec) -> Result<SettingsRegistration>;
+    /// Migrates, validates and persists before publishing a namespace registration.
+    /// Persistence and raw-cache convergence survive cancellation of this waiter.
+    async fn register_migrating(
+        &self,
+        spec: SettingsSpec,
+        migration: Arc<dyn SettingsMigration>,
+    ) -> Result<SettingsRegistration>;
     /// Looks up one active namespace without creating it or transferring its lease.
     /// The returned scope remains fenced to that exact registration generation.
     fn scope(&self, namespace: &str) -> Result<Arc<dyn SettingsScope>>;

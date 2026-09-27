@@ -1,0 +1,29 @@
+[package]
+name = "rsi-directory-picker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rsi-directory-picker-api = { path = "../directory-picker-api" }
+rsi-configuration-access = { path = "../configuration-access" }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+cap-std.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -14,11 +14,11 @@ use rsi_settings_protocol::{
     validate_section, validate_settings_page,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Mutex as AsyncMutex;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Service {
     provider: Arc<dyn SettingsProvider>,
     state: Arc<ServiceState>,
@@ -33,6 +33,7 @@ struct ServiceState {
 #[derive(Debug)]
 struct ServiceInner {
     raw: SettingsDocument,
+    migrations: HashSet<String>,
     next_registration: u64,
     namespaces: HashMap<String, NamespaceState>,
 }
@@ -153,6 +154,40 @@ impl SettingsAccess for Service {
 }
 
 impl Service {
+    async fn migrate_section(
+        &self,
+        spec: &SettingsSpec,
+        migration: &dyn rsi_settings_protocol::SettingsMigration,
+        mut raw: Option<Value>,
+    ) -> Result<Option<Value>> {
+        for attempt in 0..3 {
+            let replacement = migration.migrate(raw.as_ref())?;
+            if let Some(value) = &replacement {
+                validate_section(value)?;
+            }
+            let resolved = resolve(&spec.defaults, &spec.base, replacement.as_ref());
+            validate_section(&resolved)?;
+            spec.validator.validate(&resolved)?;
+            if replacement == raw {
+                return Ok(replacement);
+            }
+            if !self.provider.writable() {
+                return Err(SettingsError::ReadOnly);
+            }
+            match self
+                .provider
+                .compare_and_set(&spec.namespace, raw.as_ref(), replacement.as_ref())
+                .await
+            {
+                Err(SettingsError::ConcurrentDocumentChange) if attempt < 2 => {
+                    raw = self.provider.load().await?.remove(&spec.namespace);
+                }
+                result => return result,
+            }
+        }
+        unreachable!("last CAS attempt returns its result")
+    }
+
     fn resolve_scope(
         &self,
         namespace: &str,
@@ -181,12 +216,91 @@ impl Service {
     }
 }
 
+#[async_trait]
 impl Settings for Service {
     fn scope(&self, namespace: &str) -> Result<Arc<dyn SettingsScope>> {
         self.resolve_scope(namespace, None)
     }
 
+    async fn register_migrating(
+        &self,
+        spec: SettingsSpec,
+        migration: Arc<dyn rsi_settings_protocol::SettingsMigration>,
+    ) -> Result<SettingsRegistration> {
+        validate_spec(&spec)?;
+        let service = self.clone();
+        tokio::spawn(async move {
+            let _write = service.state.write_lock.clone().lock_owned().await;
+            let raw = {
+                let mut state = service
+                    .state
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.namespaces.contains_key(&spec.namespace)
+                    || !state.migrations.insert(spec.namespace.clone())
+                {
+                    return Err(SettingsError::DuplicateNamespace(spec.namespace));
+                }
+                state.raw.get(&spec.namespace).cloned()
+            };
+            let _reservation = MigrationReservation {
+                state: service.state.clone(),
+                namespace: spec.namespace.clone(),
+            };
+            let committed = service
+                .migrate_section(&spec, migration.as_ref(), raw)
+                .await?;
+            {
+                let mut state = service
+                    .state
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match committed {
+                    Some(value) => {
+                        state.raw.insert(spec.namespace.clone(), value);
+                    }
+                    None => {
+                        state.raw.remove(&spec.namespace);
+                    }
+                }
+            }
+            service.register_inner(spec, true)
+        })
+        .await
+        .map_err(|error| SettingsError::Io(format!("Settings migration task failed: {error}")))?
+    }
+
     fn register(&self, spec: SettingsSpec) -> Result<SettingsRegistration> {
+        self.register_inner(spec, false)
+    }
+}
+
+struct MigrationReservation {
+    state: Arc<ServiceState>,
+    namespace: String,
+}
+impl Drop for MigrationReservation {
+    fn drop(&mut self) {
+        self.state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .migrations
+            .remove(&self.namespace);
+    }
+}
+
+fn validate_spec(spec: &SettingsSpec) -> Result<()> {
+    validate_namespace(&spec.namespace)?;
+    validate_section(&spec.defaults)?;
+    validate_section(&spec.base)?;
+    spec.metadata.validate()
+}
+
+impl Service {
+    fn register_inner(&self, spec: SettingsSpec, migrating: bool) -> Result<SettingsRegistration> {
         validate_namespace(&spec.namespace)?;
         validate_section(&spec.defaults)?;
         validate_section(&spec.base)?;
@@ -196,7 +310,9 @@ impl Settings for Service {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.namespaces.contains_key(&spec.namespace) {
+        if state.namespaces.contains_key(&spec.namespace)
+            || (!migrating && state.migrations.contains(&spec.namespace))
+        {
             return Err(SettingsError::DuplicateNamespace(spec.namespace));
         }
         let raw = state.raw.get(&spec.namespace).cloned();
@@ -507,6 +623,7 @@ impl PluginFactory for SettingsFactory {
             state: Arc::new(ServiceState {
                 inner: Mutex::new(ServiceInner {
                     raw,
+                    migrations: HashSet::new(),
                     next_registration: 0,
                     namespaces: HashMap::new(),
                 }),

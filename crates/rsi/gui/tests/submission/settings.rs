@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[derive(Debug)]
 pub(super) struct Fixture {
     blocked: AtomicBool,
+    preference_enabled: AtomicBool,
     active: AtomicUsize,
     calls: AtomicUsize,
     writes: AtomicUsize,
@@ -18,6 +19,7 @@ impl Default for Fixture {
     fn default() -> Self {
         Self {
             blocked: AtomicBool::new(false),
+            preference_enabled: AtomicBool::new(false),
             active: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
@@ -124,7 +126,9 @@ impl SettingsAccess for Fixture {
         })
     }
     async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
-        if namespace == rsi_client_preferences::NAMESPACE {
+        if namespace == rsi_client_preferences::NAMESPACE
+            && !self.preference_enabled.load(Ordering::SeqCst)
+        {
             return Err(SettingsError::UnknownNamespace(namespace.into()));
         }
         self.reading().await;
@@ -242,5 +246,131 @@ async fn closing_settings_cancels_reads_and_registration_changes_stay_in_their_d
             .contains("registration changed")
     );
     assert_eq!(view(&app)["notice"], "");
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn preferences_apply_on_save_refresh_remote_changes_and_retain_valid_values_on_failure() {
+    async fn until(
+        app: &Arc<rsi_gui::GuiApplication>,
+        predicate: impl Fn(&serde_json::Value) -> bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            loop {
+                if predicate(&view(app)) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let (runtime, backend, app) = fixture().await;
+    let settings = &backend.settings;
+    let defaults = serde_json::to_value(rsi_client_preferences::Preferences::default()).unwrap();
+    settings.snapshot.lock().unwrap().value = defaults.clone();
+    settings.preference_enabled.store(true, Ordering::SeqCst);
+    app.command(r#"{"action":"settings_read","namespace":"rsi.client"}"#)
+        .await
+        .unwrap();
+    let ticket = view(&app)["settings"]["ticket"].clone();
+    let mut changed = defaults;
+    changed["appearance"]["theme"] = json!("dark");
+    changed["web"]["submit_key"] = json!("mod_enter");
+    app.command(
+        &json!({"action":"settings_save","ticket":ticket,"text":changed.to_string()}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view(&app)["appearance"]["theme"], "dark");
+    assert_eq!(view(&app)["preferences"]["submit_key"], "mod_enter");
+    settings.snapshot.lock().unwrap().value["appearance"]["theme"] = json!("light");
+    until(&app, |view| view["appearance"]["theme"] == "light").await;
+    settings.snapshot.lock().unwrap().value["appearance"]["content_font_size"] = json!(999);
+    until(&app, |view| view["preference_error"].is_string()).await;
+    assert_eq!(view(&app)["appearance"]["theme"], "light");
+    assert_eq!(view(&app)["appearance"]["content_font_size"], 14);
+    settings.blocked.store(true, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        while settings.active.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let calls = settings.calls.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    assert_eq!(
+        settings.calls.load(Ordering::SeqCst),
+        calls,
+        "no overlapping refresh"
+    );
+    assert!(runtime.shutdown().await.is_clean());
+    assert_eq!(
+        settings.active.load(Ordering::SeqCst),
+        0,
+        "closing cancels the read"
+    );
+}
+
+#[tokio::test]
+async fn composer_actions_require_display_ack_and_reject_changed_preferences_without_mutation() {
+    let (runtime, backend, app) = fixture().await;
+    let frame: serde_json::Value =
+        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let shown = &frame["view"]["composer_actions"]["main"];
+    let request = json!({"pane":"main","generation":frame["view"]["surfaces"]["main"]["generation"],
+        "text":"retained draft","action_revision":shown["revision"],"action":shown["primary"]["id"]}).to_string();
+    assert!(
+        app.prepare_submission(&request)
+            .await
+            .unwrap_err()
+            .contains("refreshed action")
+    );
+    assert!(app.acknowledge_frame("999").is_err());
+    app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
+        .unwrap();
+    assert!(app.prepare_submission(&request).await.is_ok());
+    assert!(
+        backend.requests.lock().unwrap().is_empty(),
+        "preparation is read-only"
+    );
+    let next: serde_json::Value =
+        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    assert_eq!(
+        next["view"]["composer_actions"]["main"]["revision"], shown["revision"],
+        "unrelated frames preserve the action"
+    );
+    backend.settings.snapshot.lock().unwrap().value =
+        serde_json::to_value(rsi_client_preferences::Preferences::default()).unwrap();
+    backend
+        .settings
+        .preference_enabled
+        .store(true, Ordering::SeqCst);
+    app.command(r#"{"action":"settings_read","namespace":"rsi.client"}"#)
+        .await
+        .unwrap();
+    let ticket = view(&app)["settings"]["ticket"].clone();
+    let mut changed = serde_json::to_value(rsi_client_preferences::Preferences::default()).unwrap();
+    changed["web"]["busy_submit"] = json!("steer");
+    app.command(
+        &json!({"action":"settings_save","ticket":ticket,"text":changed.to_string()}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.prepare_submission(&request)
+            .await
+            .unwrap_err()
+            .contains("refreshed action")
+    );
+    let newer: serde_json::Value =
+        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    assert_ne!(
+        newer["view"]["composer_actions"]["main"]["revision"],
+        shown["revision"]
+    );
+    assert!(backend.requests.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
 }

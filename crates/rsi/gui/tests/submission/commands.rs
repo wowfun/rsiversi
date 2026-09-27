@@ -5,6 +5,44 @@ fn view(app: &rsi_gui::GuiApplication) -> serde_json::Value {
     serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap()
 }
 #[tokio::test]
+async fn slash_commands_do_not_require_message_delivery_authority() {
+    let (runtime, backend, app, generation) = admission::fixture().await;
+    for action in [
+        json!({}),
+        json!({"action":"queue","action_revision":"obsolete"}),
+    ] {
+        let mut input = json!({"pane":"main","generation":generation,"text":"/plan on"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(action.as_object().unwrap().clone());
+        let prepared: serde_json::Value =
+            serde_json::from_str(&app.prepare_submission(&input.to_string()).await.unwrap())
+                .unwrap();
+        assert_eq!(prepared["kind"], "command");
+        input["text"] = json!("ordinary message");
+        assert!(app.prepare_submission(&input.to_string()).await.is_err());
+    }
+    assert!(backend.commands.lock().unwrap().is_empty());
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn queue_preparation_rejects_mixed_composer_payload() {
+    let (runtime, backend, app, generation) = admission::fixture().await;
+    let input = json!({"pane":"main","generation":generation,"text":"do not discard",
+        "queue":{"action":"withdraw","slot_id":"original","expected_message_id":"original"}});
+    assert!(
+        app.prepare_submission(&input.to_string())
+            .await
+            .unwrap_err()
+            .contains("composer")
+    );
+    assert!(backend.queue_requests.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+#[tokio::test]
 async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_invocation() {
     let runtime = Runtime::default();
     let root = runtime.root();

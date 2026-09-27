@@ -1,5 +1,7 @@
 #[path = "spans.rs"]
 mod spans;
+#[path = "turns.rs"]
+mod turns;
 
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentMessageContent, InputMessageSource, SessionFact, SessionFactBody,
@@ -21,6 +23,7 @@ const MAX_METADATA: usize = 512 * 1024;
 pub(crate) struct Block {
     pub(crate) revision: std::sync::Arc<()>,
     pub key: String,
+    message_id: Option<rsi_agent_session_protocol::MessageId>,
     pub role: &'static str,
     pub title: String,
     pub text: String,
@@ -123,6 +126,8 @@ impl Block {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Transcript {
+    pub queue: rsi_client::QueueProjection,
+    pub turns: turns::Index,
     pub blocks: VecDeque<Block>,
     pub omitted: bool,
     pub active: Option<TurnId>,
@@ -131,21 +136,24 @@ pub(crate) struct Transcript {
 }
 
 #[derive(Serialize)]
-pub(crate) struct TranscriptView<'a, B> {
+pub(crate) struct TranscriptView<'a, B, T> {
     blocks: B,
+    turns: T,
     omitted: bool,
     active: &'a Option<TurnId>,
     status: &'a str,
 }
 impl Serialize for Transcript {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.view(&self.blocks).serialize(serializer)
+        self.view(&self.blocks, &self.turns.view)
+            .serialize(serializer)
     }
 }
 impl Transcript {
-    pub(crate) fn view<B>(&self, blocks: B) -> TranscriptView<'_, B> {
+    pub(crate) fn view<B, T>(&self, blocks: B, turns: T) -> TranscriptView<'_, B, T> {
         TranscriptView {
             blocks,
+            turns,
             omitted: self.omitted,
             active: &self.active,
             status: &self.status,
@@ -166,6 +174,7 @@ impl Transcript {
             self.blocks.push_back(Block {
                 revision: std::sync::Arc::new(()),
                 key,
+                message_id: None,
                 role,
                 title: short(title, 512).into(),
                 text: String::new(),
@@ -243,7 +252,11 @@ impl Transcript {
                     .sum::<usize>()
                 > MAX_METADATA
         {
-            self.blocks.pop_front();
+            if self.blocks.pop_front().is_none() {
+                // Empty retained allocation must not keep the metadata loop over budget.
+                self.blocks.shrink_to_fit();
+                break;
+            }
             self.omitted = true;
         }
     }
@@ -279,25 +292,64 @@ impl Transcript {
             }
         }
     }
+    fn message_key(&self, id: &rsi_agent_session_protocol::MessageId) -> String {
+        self.blocks
+            .iter()
+            .find(|block| block.message_id.as_ref() == Some(id))
+            .and_then(|block| block.key.rsplit_once(':').map(|(key, _)| key.to_owned()))
+            .unwrap_or_else(|| BlockIdentity::Message { message: id }.key())
+    }
+    fn tag_message(&mut self, key: &str, id: &rsi_agent_session_protocol::MessageId) {
+        for block in &mut self.blocks {
+            if block
+                .key
+                .rsplit_once(':')
+                .is_some_and(|(prefix, _)| prefix == key)
+            {
+                block.message_id = Some(id.clone());
+            }
+        }
+    }
     pub fn observation(&mut self, update: &SessionObservation) {
+        if let SessionObservation::Control { record, .. } = update {
+            self.queue.observe(record);
+        }
         match update {
             SessionObservation::Fact { fact, .. } => self.fact(fact),
             SessionObservation::Control { record, .. } => match record.body() {
+                AgentControlRecordBody::MessageSuccessor {
+                    predecessor_id,
+                    successor_id,
+                    ..
+                } => {
+                    for block in &mut self.blocks {
+                        if block.message_id.as_ref() == Some(predecessor_id) {
+                            block.message_id = Some(successor_id.clone());
+                        }
+                    }
+                }
                 AgentControlRecordBody::MessageAccepted { message, .. } => {
                     let human = matches!(
                         message.source,
                         rsi_agent_session_protocol::AgentMessageSource::Human
                     );
+                    let key = self.message_key(&message.message_id);
+                    self.blocks.retain(|block| {
+                        block.message_id.as_ref() != Some(&message.message_id)
+                            || block
+                                .key
+                                .rsplit_once(':')
+                                .and_then(|(_, index)| index.parse::<usize>().ok())
+                                .is_some_and(|index| index < message.content.len())
+                    });
                     self.message(
-                        &BlockIdentity::Message {
-                            message: &message.message_id,
-                        }
-                        .key(),
+                        &key,
                         if human { "user" } else { "status" },
                         if human { "You" } else { "Agent message" },
                         &message.content,
                         None,
                     );
+                    self.tag_message(&key, &message.message_id);
                 }
                 AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
                     self.add(
@@ -310,6 +362,9 @@ impl Transcript {
                 }
                 _ => {}
             },
+        }
+        if matches!(update, SessionObservation::Control { .. }) {
+            self.turns.retain(&self.blocks, self.active.as_ref());
         }
     }
     fn project_tool(&mut self, fact: &SessionFact) {
@@ -401,6 +456,11 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
     pub fn fact(&mut self, fact: &SessionFact) {
+        self.fact_blocks(fact);
+        self.turns.observe(fact, &self.blocks);
+    }
+    #[allow(clippy::too_many_lines)] // Closed Fact-to-block projection with one shared sequence fence.
+    fn fact_blocks(&mut self, fact: &SessionFact) {
         self.project_request(fact);
         if BlockIdentity::tool(fact).is_some() {
             self.seq = self.seq.max(fact.seq());
@@ -456,13 +516,9 @@ impl Transcript {
                     }
                     _ => return,
                 };
-                self.message(
-                    &BlockIdentity::Message { message: id }.key(),
-                    role,
-                    title,
-                    content,
-                    Some(fact),
-                );
+                let key = self.message_key(id);
+                self.message(&key, role, title, content, Some(fact));
+                self.tag_message(&key, id);
             }
             SessionFactBody::ImageOutput {
                 turn_id,
@@ -622,6 +678,104 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_releases_an_empty_allocation_larger_than_the_metadata_budget() {
+        let mut transcript = Transcript::default();
+        transcript
+            .blocks
+            .reserve(MAX_METADATA / std::mem::size_of::<Block>() + 1);
+        assert!(transcript.blocks.capacity() * std::mem::size_of::<Block>() > MAX_METADATA);
+        transcript.trim();
+        assert!(transcript.blocks.is_empty());
+        assert_eq!(transcript.blocks.capacity(), 0);
+    }
+
+    #[test]
+    fn queue_successor_updates_one_user_block_and_claim_adds_sources_without_duplicates() {
+        use rsi_agent_session_protocol::{
+            AgentControlRecord, AgentMessage, AgentMessageSource, MessageDelivery, MessageId,
+            MessageOptions, MessageTarget, QueueSlot, SessionId, StepId,
+        };
+        let mut transcript = Transcript::default();
+        let original = MessageId::new("original").unwrap();
+        let successor = MessageId::new("successor").unwrap();
+        let session = SessionId::new("session").unwrap();
+        let mut message = AgentMessage {
+            message_id: original.clone(),
+            source: AgentMessageSource::Human,
+            content: vec![
+                AgentMessageContent::Text {
+                    text: "old first".into(),
+                },
+                AgentMessageContent::Text {
+                    text: "old second".into(),
+                },
+            ],
+            options: MessageOptions::default(),
+        };
+        let acceptance = |message| AgentControlRecordBody::MessageAccepted {
+            message,
+            delivery: MessageDelivery::NextTurn,
+            bound_turn_id: None,
+            root_session_id: session.clone(),
+            target: MessageTarget::NextTurn,
+            wake_required: true,
+        };
+        let observe = |transcript: &mut Transcript, seq, body| {
+            let record = AgentControlRecord::new(seq, seq, body).unwrap();
+            let retention = rsi_agent_turn_protocol::ObservationRetention::default();
+            let record = retention
+                .retain_controls(vec![std::sync::Arc::new(record)])
+                .unwrap()
+                .pop()
+                .unwrap();
+            transcript.observation(&SessionObservation::Control {
+                record,
+                durable_control_seq: seq,
+            });
+        };
+        observe(&mut transcript, 1, acceptance(message.clone()));
+        let key = transcript.blocks[0].key.clone();
+        observe(
+            &mut transcript,
+            2,
+            AgentControlRecordBody::MessageSuccessor {
+                predecessor_id: original.clone(),
+                successor_id: successor.clone(),
+                slot: QueueSlot::initial(&original, 1, 1),
+            },
+        );
+        message.message_id = successor.clone();
+        message.content = vec![AgentMessageContent::Text {
+            text: "new content".into(),
+        }];
+        observe(&mut transcript, 3, acceptance(message.clone()));
+        assert_eq!(transcript.blocks.len(), 1);
+        assert_eq!(transcript.blocks[0].key, key);
+        assert_eq!(transcript.blocks[0].text, "new content");
+        let queue = transcript.queue.view(None);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].message.queue_slot.id.as_str(), "original");
+        assert_eq!(queue[0].message.message_id, successor);
+        let fact = SessionFact::new(
+            1,
+            4,
+            SessionFactBody::InputMessageEntered {
+                turn_id: TurnId::new("turn").unwrap(),
+                step_id: StepId::new("step").unwrap(),
+                source: InputMessageSource::Human {
+                    message_id: successor,
+                },
+                content: message.content,
+            },
+        )
+        .unwrap();
+        transcript.fact(&fact);
+        assert_eq!(transcript.blocks.len(), 1);
+        assert_eq!(transcript.blocks[0].key, key);
+        assert_eq!(transcript.blocks[0].sources.len(), 1);
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // Three Tool outcomes share lifecycle, revision, and backfill assertions.

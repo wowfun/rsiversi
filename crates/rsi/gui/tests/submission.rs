@@ -20,6 +20,8 @@ mod images;
 mod inline;
 #[path = "submission/output.rs"]
 mod output;
+#[path = "submission/queue.rs"]
+mod queue;
 #[path = "submission/remote_ui.rs"]
 mod remote_ui;
 #[path = "submission/settings.rs"]
@@ -42,7 +44,12 @@ async fn prepare(
     images: Vec<rsi_media_protocol::MediaRef>,
     steer: bool,
 ) -> serde_json::Value {
-    serde_json::from_str(&app.prepare_submission(&serde_json::json!({"pane":"main","generation":generation,"text":text,"images":images,"steer":steer}).to_string()).await.unwrap()).unwrap()
+    let frame: serde_json::Value =
+        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
+        .unwrap();
+    let revision = &frame["view"]["composer_actions"]["main"]["revision"];
+    serde_json::from_str(&app.prepare_submission(&serde_json::json!({"pane":"main","generation":generation,"text":text,"images":images,"action_revision":revision,"action":if steer {"steer"} else {"queue"}}).to_string()).await.unwrap()).unwrap()
 }
 async fn dispatch(
     app: &Arc<rsi_gui::GuiApplication>,
@@ -92,7 +99,12 @@ struct Backend {
     model_describes: std::sync::atomic::AtomicUsize,
     command_receipt: Mutex<Option<SessionCommandReceipt>>,
     requests: Mutex<Vec<SubmitInput>>,
+    queue_requests: Mutex<Vec<QueueMutationRequest>>,
+    queue_receipts: Mutex<std::collections::BTreeMap<QueueOperationId, QueueMutationReceipt>>,
+    queue_unknown: std::sync::atomic::AtomicBool,
+    queue_conflict: std::sync::atomic::AtomicBool,
     pending_messages: Mutex<Vec<rsi_agent_store_protocol::StorePendingMessage>>,
+    active_turn: Mutex<Option<TurnId>>,
     receipt_sequence: std::sync::atomic::AtomicU64,
     facts: Mutex<Vec<SessionFact>>,
     history_requests: Mutex<Vec<Option<u64>>>,
@@ -104,6 +116,12 @@ struct Backend {
 struct Service(Arc<Backend>);
 #[async_trait]
 impl SessionService for Service {
+    async fn read_header(
+        &self,
+        _: &rsi_agent_session_protocol::SessionId,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        panic!("unexpected durable Header read")
+    }
     async fn create(
         &self,
         r: CreateSession,
@@ -359,6 +377,68 @@ impl SessionHandle for Backend {
             _ => missing(),
         }
     }
+    async fn mutate_queue(
+        &self,
+        request: QueueMutationRequest,
+    ) -> rsi_session_protocol::Result<QueueMutationReceipt> {
+        if self
+            .queue_conflict
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_session_protocol::SessionError::QueueOperationConflict);
+        }
+        if let Some(receipt) = self
+            .queue_receipts
+            .lock()
+            .unwrap()
+            .get(&request.operation_id)
+        {
+            return Ok(receipt.clone());
+        }
+        let outcome = match &request.mutation {
+            QueueMutation::Withdraw => QueueMutationOutcome::Withdrawn,
+            QueueMutation::Replace { new_message_id, .. } => QueueMutationOutcome::Replaced {
+                message_id: new_message_id.clone(),
+                accepted_control_seq: 3,
+            },
+            QueueMutation::ConvertToSteer {
+                new_message_id,
+                expected_turn_id,
+            } => QueueMutationOutcome::Converted {
+                message_id: new_message_id.clone(),
+                accepted_control_seq: 3,
+                bound_turn_id: expected_turn_id.clone(),
+            },
+        };
+        let receipt = QueueMutationReceipt {
+            operation_id: request.operation_id.clone(),
+            request_fingerprint: request.fingerprint().unwrap(),
+            slot_id: request.slot_id.clone(),
+            expected_message_id: request.expected_message_id.clone(),
+            control_seq: 4,
+            outcome,
+        };
+        self.queue_requests.lock().unwrap().push(request.clone());
+        self.queue_receipts
+            .lock()
+            .unwrap()
+            .insert(request.operation_id.clone(), receipt.clone());
+        if self
+            .queue_unknown
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_session_protocol::SessionError::QueueOutcomeUnknown {
+                operation_id: request.operation_id,
+            });
+        }
+        Ok(receipt)
+    }
+    async fn queue_mutation_status(
+        &self,
+        operation: &QueueOperationId,
+    ) -> rsi_session_protocol::Result<Option<QueueMutationReceipt>> {
+        Ok(self.queue_receipts.lock().unwrap().get(operation).cloned())
+    }
     async fn read_message(
         &self,
         _: &MessageId,
@@ -467,7 +547,8 @@ impl SessionHandle for Backend {
             active_turn_id: self
                 .task_panels
                 .jobs_active()
-                .then(|| TurnId::new("jobs-turn").unwrap()),
+                .then(|| TurnId::new("jobs-turn").unwrap())
+                .or_else(|| self.active_turn.lock().unwrap().clone()),
             activation_phase: self
                 .task_panels
                 .jobs_active()

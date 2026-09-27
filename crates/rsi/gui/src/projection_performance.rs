@@ -1,5 +1,5 @@
 //! Opt-in Linux thread-CPU comparison of the actual bounded projection.
-//! Uncached serialization starts from 6bf9809:crates/rsi/web/src/projection.rs,
+//! Uncached serialization starts from 6bf9809:the historical crates/rsi/web/src/projection.rs,
 //! with the current external-conversation field retained on both paths.
 //! Its JSON is asserted identical before timing. This isolates caching, not an old binary.
 use super::*;

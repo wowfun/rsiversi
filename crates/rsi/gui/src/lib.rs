@@ -6,6 +6,7 @@
 mod application;
 mod catalog;
 mod details;
+mod directory;
 mod frames;
 mod markdown;
 mod panes;

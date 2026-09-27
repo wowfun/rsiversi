@@ -40,6 +40,7 @@ struct PaneView {
 #[derive(Debug, Default)]
 pub(crate) struct FrameState {
     pub(crate) id: u64,
+    pub(crate) actions: crate::panes::composer::Actions,
     panes: BTreeMap<crate::SurfaceId, PaneView>,
     sections: Value,
     #[cfg(test)]
@@ -60,13 +61,21 @@ impl FrameState {
             .iter()
             .map(|(key, pane)| (*key, pane.stamp(ui)))
             .collect();
-        self.capture_views(
+        let mut proposed = self.actions.clone();
+        let actions = proposed.project(app)?;
+        let frame = self.capture_views(
             budget,
             base,
             &stamps,
-            || app.sections(),
+            || {
+                let mut sections = app.sections();
+                sections["composer_actions"] = actions;
+                sections
+            },
             |key, previous| surfaces[&key].frame_view(&app.ui, previous),
-        )
+        )?;
+        self.actions = proposed;
+        Ok(frame)
     }
     #[cfg(test)]
     fn capture(
@@ -231,10 +240,37 @@ struct PanePatch<'a> {
 #[derive(serde::Serialize)]
 struct TranscriptPatch<'a> {
     fields: BTreeMap<&'a str, &'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turns: Option<TurnPatch<'a>>,
     upsert: Vec<&'a Value>,
     remove: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     order: Option<Vec<&'a str>>,
+}
+#[derive(serde::Serialize)]
+struct TurnPatch<'a> {
+    revision: &'a Value,
+    upsert: BTreeMap<&'a str, &'a Value>,
+    remove: Vec<&'a str>,
+}
+fn turn_patch<'a>(before: &'a Value, after: &'a Value) -> TurnPatch<'a> {
+    let old = before.get("entries").and_then(Value::as_object);
+    let new = after.get("entries").and_then(Value::as_object);
+    TurnPatch {
+        revision: &after["revision"],
+        upsert: new
+            .into_iter()
+            .flatten()
+            .filter(|(key, value)| old.and_then(|old| old.get(*key)) != Some(*value))
+            .map(|(key, value)| (key.as_str(), value))
+            .collect(),
+        remove: old
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| new.is_none_or(|new| !new.contains_key(*key)))
+            .map(|(key, _)| key.as_str())
+            .collect(),
+    }
 }
 fn fields<'a>(before: &Value, after: &'a Value, excluded: &[&str]) -> BTreeMap<&'a str, &'a Value> {
     after
@@ -262,12 +298,12 @@ fn pane_patch<'a>(
             let new_keys: Vec<_> = new
                 .blocks
                 .iter()
-                .map(frame_view::CachedBlock::key)
+                .map(frame_view::CachedValue::key)
                 .collect();
             let old_keys: Vec<_> = old
                 .blocks
                 .iter()
-                .map(frame_view::CachedBlock::key)
+                .map(frame_view::CachedValue::key)
                 .collect();
             let membership: BTreeSet<_> = new_keys.iter().copied().collect();
             let upsert = new
@@ -282,7 +318,9 @@ fn pane_patch<'a>(
                 .filter(|key| !membership.contains(key))
                 .collect();
             Some(TranscriptPatch {
-                fields: fields(&old.metadata, &new.metadata, &["blocks"]),
+                fields: fields(&old.metadata, &new.metadata, &["blocks", "turns"]),
+                turns: (old.turns != new.turns)
+                    .then(|| turn_patch(&old.turns.value, &new.turns.value)),
                 upsert,
                 remove,
                 order: (old_keys != new_keys).then_some(new_keys),
@@ -290,9 +328,15 @@ fn pane_patch<'a>(
         }
         _ => None,
     };
+    let mut fields = fields(&before.metadata, &after.metadata, &["transcript"]);
+    if after.queue != before.queue
+        && let Some(queue) = &after.queue
+    {
+        fields.insert("queue", queue.content.value.as_ref());
+    }
     PanePatch {
         surface,
-        fields: fields(&before.metadata, &after.metadata, &["transcript"]),
+        fields,
         transcript,
     }
 }

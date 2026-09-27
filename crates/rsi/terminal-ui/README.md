@@ -12,8 +12,10 @@ Session scenes carry a bounded client workspace display label separately from th
 authoritative Session header; pure rendering never reads the environment.
 Application screens carry bounded labels, field visibility, progress, receipts,
 editor display and selection. Completion carries only labels, descriptions and a
-revision, never action authority. The [interaction design](../terminal/docs/tui-design.md) owns visible layout and
-information hierarchy. Hit maps are
+revision, never action authority. The [interaction design](../../../apps/terminal/docs/tui-design.md) owns terminal layout and input; the [product design system](../docs/design-system.md)
+owns shared information hierarchy. The private semantic style module owns palette
+roles and process markers, including distinct success, failure and interruption
+symbols. Hit maps are
 validated and authoritative only with the matching acknowledged frame.
 An application screen has no Session header or transcript source map. Help detail
 sources are at most 8 KiB per page and wrap and scroll within the available body.

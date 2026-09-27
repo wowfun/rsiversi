@@ -116,6 +116,8 @@ pub(crate) enum Command {
     ModelsNext,
     RegisterWorkspace {
         path: String,
+        #[serde(default)]
+        pane: Option<crate::SurfaceId>,
     },
     Open {
         pane: crate::SurfaceId,
@@ -145,6 +147,7 @@ pub(crate) enum Command {
     Cancel {
         pane: crate::SurfaceId,
         generation: String,
+        turn_id: rsi_agent_session_protocol::TurnId,
     },
     History {
         pane: crate::SurfaceId,
@@ -250,6 +253,7 @@ impl Command {
             | Self::Live { pane, .. }
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
+            Self::RegisterWorkspace { pane, .. } => *pane,
             Self::ApplicationUiSurface { .. }
             | Self::ExternalCatalog { .. }
             | Self::UiSurface { .. }
@@ -268,7 +272,6 @@ impl Command {
             | Self::WorkspacesNext
             | Self::SessionsNext
             | Self::ModelsNext
-            | Self::RegisterWorkspace { .. }
             | Self::InspectImage { .. }
             | Self::InspectSource { .. }
             | Self::InspectBlock { .. }
@@ -320,6 +323,8 @@ pub struct GuiApplication {
     pub(crate) external_catalog: Mutex<crate::panes::ExternalCatalog>,
     pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
     pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
+    pub(crate) directory: Option<Arc<rsi_directory_picker_api::Client>>,
+    pub(crate) directory_reads: Mutex<std::collections::BTreeMap<String, CancellationToken>>,
     pub(crate) navigation: Option<Arc<rsi_workbench_ui::NavigationFeature>>,
     pub(crate) ui: Arc<rsi_ui::Ui>,
     pub(crate) application_target: Option<Arc<rsi_ui::UiTarget>>,
@@ -329,7 +334,8 @@ pub struct GuiApplication {
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     pub(crate) settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
-    pub(crate) preferences: rsi_client_preferences::Composer,
+    pub(crate) preferences: Mutex<(rsi_client_preferences::Preferences, Option<String>)>,
+    pub(crate) preference_read: tokio::sync::Mutex<()>,
     pub(crate) media: Option<Arc<dyn rsi_media_protocol::Media>>,
     pub(crate) image_work: Arc<Semaphore>,
     pub(crate) panes: Mutex<std::collections::BTreeMap<crate::SurfaceId, Arc<crate::panes::Pane>>>,
@@ -348,7 +354,7 @@ pub struct GuiApplication {
     pub(crate) tasks: TaskTracker,
     pub(crate) stop: CancellationToken,
     frames: ByteBudget,
-    stream: Mutex<crate::frames::FrameState>,
+    pub(crate) stream: Mutex<crate::frames::FrameState>,
     admission: Mutex<()>,
 }
 impl GuiApplication {
@@ -480,6 +486,7 @@ impl GuiApplication {
     }
     pub(crate) fn sections(&self) -> serde_json::Value {
         let details = self.details.lock().expect("Web details poisoned");
+        let preferences = self.preferences.lock().expect("GUI preferences poisoned");
         serde_json::json!({
             "application_surfaces": self.application_target.as_ref().and_then(|target| self.ui.surfaces(target).ok()).unwrap_or_default(),
             "plugins": self.plugins.as_ref().map(|feature| feature.snapshot()),
@@ -487,7 +494,9 @@ impl GuiApplication {
             "navigation": self.navigation.as_ref().map(|feature| feature.view()),
             "external_catalog": self.external.as_ref().map(|_|self.external_catalog.lock().expect("external catalog").clone()),
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
-            "preferences": self.preferences,
+            "preferences": preferences.0.web,
+            "appearance": preferences.0.appearance,
+            "preference_error": preferences.1,
             "ui_detail": details.ui,
             "remote_ui_catalog": details.remote_catalog,
             "has_remote_ui": self.remote_ui.is_some(),
@@ -522,6 +531,20 @@ impl GuiApplication {
         #[cfg(feature = "test-support")]
         crate::test_support::update(|sample| sample.stream_lock_ns = started.elapsed().as_nanos());
         frame
+    }
+
+    /// Confirms that the document displayed this exact frame successfully.
+    /// Delivery actions cannot be selected until their frame is acknowledged.
+    ///
+    /// # Panics
+    /// Panics if an earlier application panic poisoned its frame state.
+    pub fn acknowledge_frame(&self, id: &str) -> Result<()> {
+        let mut stream = self.stream.lock().expect("GUI frame stream poisoned");
+        if id != stream.id.to_string() || stream.id == 0 {
+            return Err("Stale document acknowledgement".into());
+        }
+        stream.actions.acknowledge();
+        Ok(())
     }
 
     /// Returns the exact latest encoded frame ID for acknowledgement.
@@ -579,7 +602,8 @@ impl GuiApplication {
                     .ok_or("Model setup is unavailable on this connection")?
                     .command(command)
                     .await?;
-                self.refresh(Command::Refresh).await
+                self.refresh(Command::Refresh).await?;
+                Ok(())
             }
             Command::Navigate { command } => {
                 self.navigation
@@ -625,15 +649,25 @@ impl GuiApplication {
             | Command::WorkspacesNext
             | Command::SessionsNext
             | Command::ModelsNext => self.refresh(command).await,
-            Command::RegisterWorkspace { path } => {
+            Command::RegisterWorkspace { path, pane } => {
                 if path.len() > 16 * 1024 {
                     return Err("Workspace path exceeds its limit".into());
                 }
-                self.workspace
+                let workspace = self
+                    .workspace
                     .get_or_create(std::path::Path::new(&path))
                     .await
                     .map_err(error)?;
-                self.refresh(Command::Refresh).await
+                self.refresh(Command::Refresh).await?;
+                if let Some(pane) = pane {
+                    self.pane_command(Command::Create {
+                        pane,
+                        workspace: workspace.id,
+                        reuse: None,
+                    })
+                    .await?;
+                }
+                Ok(())
             }
             Command::SettingsRead { namespace } => self.read_settings(&namespace).await,
             Command::SettingsList => self.list_settings(None).await,
@@ -674,6 +708,7 @@ impl PluginFactory for GuiApplicationFactory {
             .requiring_local::<rsi_ai_protocol::LanguageModelsContract>()
             .requiring_local::<rsi_settings_protocol::SettingsAccessContract>())
     }
+    #[allow(clippy::too_many_lines)] // The application composition and its single shutdown owner stay together.
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (changed, _) = watch::channel(0_u64);
         let settings = plan.local::<rsi_settings_protocol::SettingsAccessContract>()?;
@@ -699,6 +734,10 @@ impl PluginFactory for GuiApplicationFactory {
             setup: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
+            directory_reads: Mutex::default(),
+            directory: plan
+                .context()
+                .lookup_local::<rsi_directory_picker_api::ClientContract>(),
             navigation: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::NavigationFeatureContract>(),
@@ -715,7 +754,8 @@ impl PluginFactory for GuiApplicationFactory {
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
             settings,
-            preferences: preferences.web,
+            preferences: Mutex::new((preferences, None)),
+            preference_read: tokio::sync::Mutex::new(()),
             media: plan
                 .context()
                 .lookup_local::<rsi_media_protocol::MediaContract>(),
@@ -901,6 +941,20 @@ pub(crate) fn surface_program(
 }
 
 fn watch_features(app: &Arc<GuiApplication>) {
+    let watching = app.clone();
+    drop(app.execution.spawn(app.tasks.track_future(async move {
+        let mut delay = crate::catalog::PreferenceRefreshDelay::default();
+        loop {
+            tokio::select! { biased;
+                () = watching.stop.cancelled() => break,
+                () = watching.execution.sleep(delay.duration()) => {}
+            }
+            tokio::select! { biased;
+                () = watching.stop.cancelled() => break,
+                changed = watching.refresh_preferences() => delay.observed(changed)
+            }
+        }
+    })));
     let mut ui_changes = app.ui.membership_changes();
     for changes in [
         app.plugins.as_ref().map(|feature| feature.changes()),

@@ -19,6 +19,8 @@ struct PausingProvider {
     document: Mutex<SettingsDocument>,
     committed: Notify,
     release: Notify,
+    conflicts: std::sync::atomic::AtomicUsize,
+    attempts: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -37,6 +39,15 @@ impl SettingsProvider for PausingProvider {
         expected: Option<&Value>,
         replacement: Option<&Value>,
     ) -> SettingsResult<Option<Value>> {
+        use std::sync::atomic::Ordering;
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .conflicts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(SettingsError::ConcurrentDocumentChange);
+        }
         {
             let mut document = self.document.lock().unwrap();
             if document.get(namespace) != expected {
@@ -603,4 +614,237 @@ async fn descriptions_report_read_only_and_hide_retiring_registrations() {
         }
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn migration_reserves_registration_and_converges_after_waiter_loss() {
+    let runtime = Runtime::default();
+    let provider = Arc::new(PausingProvider::default());
+    runtime
+        .root()
+        .apply(
+            linked(
+                "provider",
+                Arc::new(PausingProviderFactory(provider.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    runtime
+        .root()
+        .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+        .await
+        .unwrap();
+    let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let migrating = registry.clone();
+    let task = tokio::spawn(async move {
+        migrating
+            .register_migrating(
+                spec(),
+                Arc::new(rsi_settings_protocol::MigrateWith(|_: Option<&Value>| {
+                    Ok(Some(json!({"model":"migrated"})))
+                })),
+            )
+            .await
+    });
+    provider.committed.notified().await;
+    assert!(matches!(
+        registry.register(spec()),
+        Err(SettingsError::DuplicateNamespace(_))
+    ));
+    assert!(matches!(
+        registry.scope("agent"),
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    task.abort();
+    let _ = task.await;
+    provider.release.notify_one();
+    let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match registry.register(spec()) {
+                Ok(value) => break value,
+                Err(SettingsError::DuplicateNamespace(_)) => tokio::task::yield_now().await,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(replacement.scope.get().unwrap().value["model"], "migrated");
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn migration_reloads_competing_host_values_without_overwriting_unrelated_scopes() {
+    for already_migrated in [false, true] {
+        let runtime = Runtime::default();
+        let provider = Arc::new(PausingProvider::default());
+        runtime
+            .root()
+            .apply(
+                linked(
+                    "provider",
+                    Arc::new(PausingProviderFactory(provider.clone())),
+                ),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+        runtime
+            .root()
+            .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+            .await
+            .unwrap();
+        let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+        let mut other = spec();
+        other.namespace = "other".into();
+        let other = registry.register(other).unwrap();
+        let before = other.scope.get().unwrap();
+        // Another Host writes after this registry's activation-time load.
+        provider.document.lock().unwrap().insert(
+            "agent".into(),
+            json!({"model":"external","migrated":already_migrated}),
+        );
+        provider
+            .document
+            .lock()
+            .unwrap()
+            .insert("other".into(), json!({"model":"foreign"}));
+        provider.release.notify_one();
+        let registration = registry
+            .register_migrating(
+                spec(),
+                Arc::new(rsi_settings_protocol::MigrateWith(|raw: Option<&Value>| {
+                    let mut value = raw.cloned().unwrap_or_else(|| json!({"model":"default"}));
+                    value["migrated"] = json!(true);
+                    Ok(Some(value))
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registration.scope.get().unwrap().value,
+            json!({"model":"external","migrated":true})
+        );
+        assert_eq!(other.scope.get().unwrap(), before);
+        assert_eq!(
+            provider.document.lock().unwrap()["other"],
+            json!({"model":"foreign"})
+        );
+        assert_eq!(
+            provider.attempts.load(std::sync::atomic::Ordering::SeqCst),
+            if already_migrated { 1 } else { 2 }
+        );
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
+async fn migration_conflict_retry_is_bounded_and_never_publishes_a_partial_namespace() {
+    let runtime = Runtime::default();
+    let provider = Arc::new(PausingProvider::default());
+    provider
+        .conflicts
+        .store(100, std::sync::atomic::Ordering::SeqCst);
+    runtime
+        .root()
+        .apply(
+            linked(
+                "provider",
+                Arc::new(PausingProviderFactory(provider.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    runtime
+        .root()
+        .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+        .await
+        .unwrap();
+    let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let result = registry
+        .register_migrating(
+            spec(),
+            Arc::new(rsi_settings_protocol::MigrateWith(|_: Option<&Value>| {
+                Ok(Some(json!({"model":"migrated"})))
+            })),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(SettingsError::ConcurrentDocumentChange)
+    ));
+    assert_eq!(
+        provider.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+    assert!(matches!(
+        registry.scope("agent"),
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    assert!(provider.document.lock().unwrap().is_empty());
+    registry.register(spec()).unwrap();
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn migration_validates_before_write_and_read_only_never_publishes_partial_state() {
+    let runtime = Runtime::default();
+    let provider = Arc::new(PausingProvider {
+        read_only: true,
+        ..Default::default()
+    });
+    runtime
+        .root()
+        .apply(
+            linked(
+                "provider",
+                Arc::new(PausingProviderFactory(provider.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    runtime
+        .root()
+        .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+        .await
+        .unwrap();
+    let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let bad = registry
+        .register_migrating(
+            spec(),
+            Arc::new(rsi_settings_protocol::MigrateWith(|_: Option<&Value>| {
+                Ok(Some(json!({"model":false})))
+            })),
+        )
+        .await;
+    assert!(matches!(bad, Err(SettingsError::InvalidInput(_))));
+    let readonly = registry
+        .register_migrating(
+            spec(),
+            Arc::new(rsi_settings_protocol::MigrateWith(|_: Option<&Value>| {
+                Ok(Some(json!({"model":"new"})))
+            })),
+        )
+        .await;
+    assert!(matches!(readonly, Err(SettingsError::ReadOnly)));
+    assert!(matches!(
+        registry.scope("agent"),
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    assert!(provider.document.lock().unwrap().is_empty());
+    let unchanged = registry
+        .register_migrating(
+            spec(),
+            Arc::new(rsi_settings_protocol::MigrateWith(|raw: Option<&Value>| {
+                Ok(raw.cloned())
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.scope.get().unwrap().value["model"], "default");
+    assert!(runtime.shutdown().await.is_clean());
 }

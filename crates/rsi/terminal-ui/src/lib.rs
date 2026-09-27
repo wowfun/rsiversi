@@ -8,6 +8,7 @@ mod markdown;
 mod performance;
 pub mod render;
 pub mod scene;
+mod style;
 #[cfg(test)]
 mod test_state;
 pub mod transcript;

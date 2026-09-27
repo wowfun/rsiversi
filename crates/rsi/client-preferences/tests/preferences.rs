@@ -50,12 +50,17 @@ async fn ordinary_preferences_validate_persist_and_retire_without_changing_captu
     let frozen = Preferences::load(access.as_ref()).await.unwrap();
     let before = access.read(NAMESPACE).await.unwrap();
     let description = access.describe(NAMESPACE).await.unwrap();
-    assert_eq!(description.metadata.applies, SettingsApply::Restart);
-    assert!(description.metadata.description.contains("Reconnect Web"));
+    assert_eq!(description.metadata.applies, SettingsApply::Live);
+    assert!(description.metadata.description.contains("apply live"));
     for value in [
         json!({"web":{"enter_submit":"yes"}}),
         json!({"web":{"unknown":true}}),
         json!({"other":false}),
+        json!({"appearance":{"theme":"automatic"}}),
+        json!({"appearance":{"content_font_size":11}}),
+        json!({"appearance":{"content_font_size":18}}),
+        json!({"appearance":{"content_font_size":14.5}}),
+        json!({"appearance":{"content_font_size":"14"}}),
         json!({"tui":{"enter_submit":true}}),
     ] {
         assert!(matches!(
@@ -68,13 +73,21 @@ async fn ordinary_preferences_validate_persist_and_retire_without_changing_captu
         .replace(
             NAMESPACE,
             &before.version(),
-            json!({"web":{"enter_submit":true}}),
+            json!({"web":{"submit_key":"mod_enter","busy_submit":"steer"},"appearance":{"theme":"dark","content_font_size":17}}),
         )
         .await
         .unwrap();
-    assert!(!frozen.web.enter_submit);
+    assert_eq!(
+        frozen.web.submit_key,
+        rsi_client_preferences::SubmitKey::Enter
+    );
     let next = Preferences::load(access.as_ref()).await.unwrap();
-    assert!(next.web.enter_submit);
+    assert_eq!(
+        next.web.submit_key,
+        rsi_client_preferences::SubmitKey::ModEnter
+    );
+    assert_eq!(next.appearance.theme, rsi_client_preferences::Theme::Dark);
+    assert_eq!(next.appearance.content_font_size, 17);
     assert!(matches!(
         access.clear(NAMESPACE, &before.version()).await,
         Err(SettingsError::Conflict { .. })
@@ -108,5 +121,53 @@ async fn malformed_stored_preferences_do_not_publish_a_namespace_owner() {
         access.read(NAMESPACE).await,
         Err(SettingsError::UnknownNamespace(_))
     ));
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn legacy_keys_migrate_once_preserving_appearance_and_new_preferences() {
+    for web in [
+        json!({"enter_submit":true}),
+        json!({"enter_submit":false}),
+        json!({}),
+        json!({"submit_key":"mod_enter","busy_submit":"steer"}),
+    ] {
+        let runtime = setup(
+            json!({"rsi.client":{"web":web,"appearance":{"theme":"dark","content_font_size":16}}}),
+        )
+        .await;
+        let owner = runtime.root().apply(factory(), Value::Null).await.unwrap();
+        assert_eq!(owner.snapshot().state, FiberState::Active);
+        let access = runtime
+            .root()
+            .lookup_local::<SettingsAccessContract>()
+            .unwrap();
+        let first = Preferences::load(access.as_ref()).await.unwrap();
+        assert_eq!(first.appearance.theme, rsi_client_preferences::Theme::Dark);
+        assert_eq!(first.appearance.content_font_size, 16);
+        assert_eq!(
+            first.web.submit_key,
+            if web.get("submit_key").is_some() {
+                rsi_client_preferences::SubmitKey::ModEnter
+            } else {
+                rsi_client_preferences::SubmitKey::Enter
+            }
+        );
+        assert!(owner.dispose().await.is_clean());
+        let next = runtime.root().apply(factory(), Value::Null).await.unwrap();
+        assert_eq!(next.snapshot().state, FiberState::Active);
+        assert_eq!(Preferences::load(access.as_ref()).await.unwrap(), first);
+        assert!(runtime.shutdown().await.is_clean());
+    }
+    let runtime = setup(json!({"rsi.client":{"appearance":{"theme":"light"}}})).await;
+    let owner = runtime.root().apply(factory(), Value::Null).await.unwrap();
+    assert_eq!(owner.snapshot().state, FiberState::Active);
+    let access = runtime
+        .root()
+        .lookup_local::<SettingsAccessContract>()
+        .unwrap();
+    let value = Preferences::load(access.as_ref()).await.unwrap();
+    assert_eq!(value.web, Preferences::default().web);
+    assert_eq!(value.appearance.theme, rsi_client_preferences::Theme::Light);
     assert!(runtime.shutdown().await.is_clean());
 }

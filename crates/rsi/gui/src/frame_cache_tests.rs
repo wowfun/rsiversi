@@ -21,6 +21,65 @@ fn delta(seq: u64, block: u32, text: String) -> SessionFact {
 }
 
 #[test]
+fn queue_frames_reuse_json_until_slots_or_displayed_turn_change() {
+    use rsi_agent_session_protocol::{
+        AgentMessageSourceKind, MessageDelivery, MessageId, MessageTarget, QueueSlot,
+    };
+    use rsi_agent_store_protocol::StorePendingMessage;
+    let id = MessageId::new("queued").unwrap();
+    let entry = StorePendingMessage {
+        queue_slot: QueueSlot::initial(&id, 1, 1),
+        message_id: id,
+        source_kind: AgentMessageSourceKind::Human,
+        has_turn_options: false,
+        delivery: MessageDelivery::NextTurn,
+        target: MessageTarget::NextTurn,
+        permits_promotion: false,
+        bound_turn_id: None,
+        accepted_control_seq: 1,
+    };
+    let mut live = Transcript::default();
+    live.queue.seed(vec![entry.clone()]);
+    let metadata = json!({"queue":null,"transcript":null});
+    let capture = |live: &Transcript, old| {
+        CachedPane::capture_with_queue(metadata.clone(), Some(live), Some(live), old).unwrap()
+    };
+    let first = capture(&live, None);
+    live.fact(&delta(1, 0, "streaming".into()));
+    let second = capture(&live, Some(&first));
+    assert!(Arc::ptr_eq(
+        &first.queue.as_ref().unwrap().content.value,
+        &second.queue.as_ref().unwrap().content.value
+    ));
+    let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &first, &second)).unwrap();
+    assert!(patch["fields"].get("queue").is_none());
+    live.active = Some(TurnId::new("displayed").unwrap());
+    let busy = capture(&live, Some(&second));
+    let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &second, &busy)).unwrap();
+    assert_eq!(patch["fields"]["queue"][0]["convert_turn"], "displayed");
+    assert_eq!(busy.bytes, serde_json::to_vec(&busy).unwrap().len());
+    live.queue.seed(vec![entry.clone()]);
+    let unchanged = capture(&live, Some(&busy));
+    assert!(Arc::ptr_eq(
+        &busy.queue.as_ref().unwrap().content.value,
+        &unchanged.queue.as_ref().unwrap().content.value
+    ));
+    let mut replacement = live.clone();
+    replacement.queue = rsi_client::QueueProjection::default();
+    replacement.queue.seed(vec![entry]);
+    let replaced = capture(&replacement, Some(&busy));
+    assert!(!Arc::ptr_eq(
+        &busy.queue.as_ref().unwrap().content.value,
+        &replaced.queue.as_ref().unwrap().content.value
+    ));
+    live.queue.seed(vec![]);
+    let empty = capture(&live, Some(&busy));
+    let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &busy, &empty)).unwrap();
+    assert_eq!(patch["fields"]["queue"], json!([]));
+    assert_eq!(empty.bytes, serde_json::to_vec(&empty).unwrap().len());
+}
+
+#[test]
 fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_bytes() {
     let mut transcript = Transcript::default();
     for index in 0..128 {
@@ -38,6 +97,7 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
     let metadata = json!({"transcript":null, "registration":"one"});
     let first = CachedPane::capture(metadata.clone(), Some(&transcript), None).unwrap();
     assert_eq!(first.projected_blocks, 128);
+    assert_eq!(first.projected_turns, 1);
     let mut expected = metadata.clone();
     expected["transcript"] = serde_json::to_value(&transcript).unwrap();
     assert_eq!(serde_json::to_value(&first).unwrap(), expected);
@@ -66,6 +126,7 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
         "near-limit changed-pane projection: incremental={incremental_allocations:?}, full={baseline_allocations:?}"
     );
     assert_eq!(second.projected_blocks, 1);
+    assert_eq!(second.projected_turns, 0);
     assert_eq!(second.bytes, serde_json::to_vec(&second).unwrap().len());
     let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &first, &second)).unwrap();
     assert_eq!(patch["transcript"]["upsert"].as_array().unwrap().len(), 1);
@@ -81,6 +142,7 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
     registration["registration"] = json!("two");
     let third = CachedPane::capture(registration, Some(&transcript), Some(&second)).unwrap();
     assert_eq!(third.projected_blocks, 0);
+    assert_eq!(third.projected_turns, 0);
     assert_eq!(third.bytes, serde_json::to_vec(&third).unwrap().len());
     let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &second, &third)).unwrap();
     assert_eq!(patch["fields"], json!({"registration":"two"}));
@@ -189,4 +251,46 @@ fn cached_wire_matches_markdown_after_backfill_reordering_and_eviction() {
     let empty = CachedPane::capture(Value::Null, None, Some(&third)).unwrap();
     assert_eq!(serde_json::to_value(&empty).unwrap(), Value::Null);
     assert_eq!(empty.bytes, 4);
+}
+
+#[test]
+fn turn_patches_preserve_revision_and_disjoint_membership() {
+    let before = json!({"revision":1,"entries":{"stable":{"answer":[]},"changed":{"answer":[]},"evicted":{"answer":[]}}});
+    for after in [
+        before.clone(),
+        json!({"revision":2,"entries":{"stable":{"answer":[]},"changed":{"answer":["text"]},"new":{"answer":[]}}}),
+        json!({"revision":3,"entries":{}}),
+        json!({"revision":4,"entries":before["entries"]}),
+    ] {
+        let patch = serde_json::to_value(turn_patch(&before, &after)).unwrap();
+        assert_eq!(patch["revision"], after["revision"]);
+        let mut reconstructed = before["entries"].as_object().unwrap().clone();
+        for id in patch["remove"].as_array().unwrap() {
+            let id = id.as_str().unwrap();
+            assert!(patch["upsert"].get(id).is_none());
+            reconstructed.remove(id);
+        }
+        for (id, value) in patch["upsert"].as_object().unwrap() {
+            assert_ne!(before["entries"].get(id), Some(value));
+            reconstructed.insert(id.clone(), value.clone());
+        }
+        assert_eq!(Value::Object(reconstructed), after["entries"]);
+    }
+}
+
+#[test]
+fn fresh_index_with_equal_wire_revision_cannot_reuse_another_transcript() {
+    let mut one = Transcript::default();
+    let mut two = Transcript::default();
+    one.fact(&delta(1, 0, "one".into()));
+    two.fact(&delta(1, 1, "two".into()));
+    assert_eq!(one.turns.view.revision, two.turns.view.revision);
+    let metadata = json!({"transcript":null});
+    let first = CachedPane::capture(metadata.clone(), Some(&one), None).unwrap();
+    let second = CachedPane::capture(metadata, Some(&two), Some(&first)).unwrap();
+    assert_eq!(second.projected_turns, 1);
+    assert_eq!(
+        serde_json::to_value(&second).unwrap()["transcript"],
+        serde_json::to_value(&two).unwrap()
+    );
 }

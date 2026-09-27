@@ -37,3 +37,17 @@ sensitive field paths. The complete declaration is limited to 64 KiB. It contain
 no executable validator or raw provider sections. Sensitive markers guide display;
 Settings remains non-secret configuration and never stores credential material.
 The existing safe-Rust validator remains authoritative for all writes.
+
+An owner may register asynchronously with a pure raw-section migration. The
+registry serializes migration with writes, reserves the namespace against other
+registrations, validates the transformed merged value before provider CAS, and
+publishes only after persistence. Failed migration publishes no namespace. A
+provider CAS conflict reloads the current namespace and reruns the pure migration,
+with at most three CAS attempts. Validation runs again on every candidate; other
+errors are not retried. Only the migrating namespace's raw cache is refreshed,
+so unrelated active scopes keep their validated values and revisions. Exhausted
+contention remains an explicit error without publishing a registration. A
+read-only provider rejects a migration requiring a write. Once persistence starts,
+the registry finishes updating its raw cache even if the caller disappears;
+no registration lease survives a dropped result. Namespace owners cannot bypass
+the registry to modify its provider.

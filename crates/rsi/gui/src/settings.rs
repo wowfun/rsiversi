@@ -5,6 +5,31 @@ use crate::{
 use rsi_settings_protocol::{MAXIMUM_SETTINGS_PAGE, validate_namespace};
 
 impl GuiApplication {
+    pub(crate) async fn refresh_preferences(&self) -> bool {
+        let _read = self.preference_read.lock().await;
+        let result = rsi_client_preferences::Preferences::load(self.settings.as_ref()).await;
+        self.apply_preferences(result)
+    }
+    fn apply_preferences(
+        &self,
+        result: rsi_settings_protocol::Result<rsi_client_preferences::Preferences>,
+    ) -> bool {
+        let mut current = self.preferences.lock().expect("GUI preferences poisoned");
+        let next = match result {
+            Ok(value) => (value, None),
+            Err(error) => (
+                current.0,
+                Some(format!("Preferences could not refresh: {error}")),
+            ),
+        };
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        self.changed();
+        true
+    }
+
     pub(crate) async fn list_settings(&self, ticket: Option<&str>) -> Result<()> {
         let (revision, stop, after) = {
             let mut details = self.details.lock().expect("Web details poisoned");
@@ -101,11 +126,17 @@ impl GuiApplication {
             )
         };
         let value = serde_json::from_str(text).map_err(|_| "Settings must contain valid JSON")?;
+        let _read = self.preference_read.lock().await;
         let snapshot = self
             .settings
             .replace(&namespace, &version, value)
             .await
             .map_err(error)?;
+        if namespace == rsi_client_preferences::NAMESPACE {
+            self.apply_preferences(rsi_client_preferences::Preferences::from_value(
+                snapshot.value.clone(),
+            ));
+        }
         let mut details = self.details.lock().expect("Web details poisoned");
         if details
             .editor
@@ -209,5 +240,36 @@ mod tests {
             settings_text(&serde_json::json!({"enabled":true})).unwrap(),
             "{\n  \"enabled\": true\n}"
         );
+    }
+}
+
+/// `SettingsAccess` may be remote and currently has no change stream.
+#[derive(Debug)]
+pub(crate) struct PreferenceRefreshDelay(u64);
+impl Default for PreferenceRefreshDelay {
+    fn default() -> Self {
+        Self(2)
+    }
+}
+impl PreferenceRefreshDelay {
+    pub(crate) fn duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.0)
+    }
+    pub(crate) fn observed(&mut self, changed: bool) {
+        self.0 = if changed { 2 } else { (self.0 * 2).min(16) };
+    }
+}
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    #[test]
+    fn idle_remote_polling_is_bounded_and_changes_restore_responsiveness() {
+        let mut delay = PreferenceRefreshDelay::default();
+        for seconds in [2, 4, 8, 16, 16, 16] {
+            assert_eq!(delay.duration().as_secs(), seconds);
+            delay.observed(false);
+        }
+        delay.observed(true);
+        assert_eq!(delay.duration().as_secs(), 2);
     }
 }

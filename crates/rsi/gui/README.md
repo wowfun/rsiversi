@@ -1,5 +1,38 @@
 # rsi-gui
 
+## Turn presentation
+
+Each loaded transcript window owns a separate, bounded Turn index. Its revision
+and upsert/remove patches reference stable block keys; reclassification never
+changes a block's content revision. Classification is recomputed only for Turns
+whose evidence or ordered window membership changed; text-only deltas reuse the
+existing index without rebuilding classification vectors. The frame baseline
+also shares its serialized Turn value and byte count until that index changes;
+cache identity includes the index lifetime, not only its numeric wire revision. An incomplete window is explicitly partial
+and never hides unknown content. Rust supplies explicit `running` and `foldable`
+flags; document folding never depends on the wording of the status label. Entries disappear with their last loaded block.
+Human steering and continuation, Agent, compaction and terminal boundary rows
+remain in their actual positions.
+Once the start of a Turn leaves the loaded window, its index stays partial for
+that window's lifetime. Later deltas cannot manufacture the missing boundary;
+attachment or return-to-live creates a new index from its newly loaded window.
+
+Streaming text is a visible candidate. Only a completed Turn's latest successful
+non-compaction model response without requested or subsequent Tools supplies an
+answer; only a model Stop is successful without Tool calls. MaxTokens,
+ContentFilter, Cancelled and Failed retain visible content without promoting it
+to an answer or folding the completed Turn’s process. Direct Image output is an
+answer of its own fact type. Missing evidence
+produces a completion row, not an invented answer. Failed, cancelled, interrupted,
+partially failed and budget-exhausted Turns retain content and expanded process.
+
+The device-local detail mode is Compact, Standard (default), Detailed or Verbose.
+Verbose includes the former Trajectory view. Compact collapses successful process
+and summarizes running work; Standard shows the current work and completed
+summaries; Detailed expands running steps; Verbose preserves full chronological
+content. Expansion is bounded to the pane's loaded Turn window. Scroll updates
+preserve the reading anchor unless the reader is following the end.
+
 Native panes expose Export and `/export`, sharing the terminal argument parser.
 Export bypasses model submission and is bound to the pane attachment generation.
 The document pulls one bounded stream item at a time; detach, logout and explicit
@@ -112,7 +145,7 @@ Settings contribution and is captured when the application connects.
 The application imports browser-selected raster files through its composed Media
 capability. One non-queued image operation is admitted per application, at most
 16 MiB source bytes per import. Composer ownership and durable retention belong to the
-[document draft contract](../../../plugins/rsi/web/README.md). Image import returns
+[document draft contract](../../../apps/web/README.md). Image import returns
 one canonical reference to the captured document record; it is durable independently
 of submission and is never automatically replayed after reply loss.
 
@@ -203,10 +236,10 @@ are executed once and later only queried. Generic failures after dispatch remain
 unknown, while pre-dispatch validation or admission rejection is explicit.
 Definitive rejection releases an identity newly tracked for that dispatch. A later
 rejection of an already tracked identity cannot erase an earlier uncertain attempt.
-Cancellation inspects tracked input even before this attachment has observed its
-first durable receipt, then prunes ownership to the authoritative pending set.
-Cancellation targets the active Turn and this
-pane's accepted pending messages. Question and approval actions preserve exact
+Stop carries the Turn identity from the displayed view and the exact attachment
+generation. It cancels only that Turn, even if another Turn starts before delivery;
+it preserves accepted pending messages, in-flight submissions and the editor.
+Question and approval actions preserve exact
 request/owner identities. Settings writes preserve the read scope and revision.
 The single detail view has its own generation: late settings reads and settled
 answers cannot replace or close a newer view. History reads admit one operation
@@ -394,7 +427,55 @@ History search uses the shared history API through the generation-fenced human
 reference bridge. Freeze requests must name the pane's actual target Session;
 source workspace and original evidence are independently checked by their owner.
 
-Closed human reviews display the exact request and explicit action choices.
-Terminal clients accept a choice number followed by optional feedback; Web and
-Desktop send the selected stable action and request binding. Free text cannot
-approve a review. An answer receipt confirms delivery, not durable approval.
+GUI closed reviews show the exact request and send the selected stable action
+and binding through the [question protocol](../../rsi-user-questions/protocol/README.md).
+
+The pending-input view keeps one row per stable queue slot, including non-Human
+sources without editing controls. Rust supplies current identity, delivery,
+editable status and the exact displayed Turn eligible for conversion. Selecting
+one row reads its complete immutable content on demand. Replace edits that
+content while retaining images and references; it does not consume the ordinary
+composer draft. Withdraw is pending-only. Convert to Steer carries the displayed
+Turn identity. The existing frozen submission path also retains queue operation
+envelopes, binds them to the original Session/Header, and resolves unknown replies
+by operation lookup or an identical explicit retry. A reused operation identity
+with a different frozen request is a terminal `rejected` settlement: the document
+clears that queue intent while retaining the composer draft. A stale message is
+instead an admitted domain rejection with a durable receipt and also settles the
+intent. Both show readable reasons; neither offers endless identical retries.
+
+Composer delivery actions are a Rust-owned projection bound to the acknowledged
+pane attachment and an action revision. Preparation identifies that exact action;
+a stale projection is rejected while the document retains its draft. It cannot
+reinterpret a primary click using newly observed busy state. Frozen requests keep
+their original delivery across retries. Direct Steer retains Agent semantics:
+it enters the next available step or queues for a later Turn if the window closes.
+Queue conversion and Stop retain their exact displayed Turn checks.
+Discovered slash commands use their command catalog authority, not a message
+delivery action; stale or absent delivery tickets do not block their preparation.
+Queue preparation accepts only its queue payload. Mixed composer text, images or
+references are rejected rather than silently discarded.
+
+Directory dialogs use the composed shared picker client. Closing a list cancels
+its exact ephemeral read identity; late results cannot replace a later selection.
+A creation is sent once and its outcome remains explicit. Closing the application
+drops read waiters; Host workers still retain their leases until actual I/O exits.
+
+Cross-application preferences refresh starts after two seconds and backs off after
+unchanged reads to four, eight, then sixteen seconds. A changed value or diagnostic
+resets the delay to two seconds. Local saves publish immediately. Since
+`SettingsAccess` has no change stream, each poll can be a remote Settings request;
+idle peer changes can take sixteen seconds plus transport time to appear. Shutdown
+cancels the watcher and an outstanding refresh waiter.
+
+
+Stop admission requires that the exact pane generation and active Turn were
+acknowledged by the document and remain current. A wire-supplied TurnId alone is
+not display evidence. A changed theme or send preference does not invalidate
+Stop; a changed attachment or active Turn does. Rejection sends no cancellation
+to the Session and preserves submitted inputs and the composer draft.
+
+Queue projection caches are bound to the queue lifetime/revision and displayed
+Turn. Unrelated streamed facts reuse the sorted actions, immutable JSON and
+encoded size. Changed slots or Turn bindings invalidate that cache; queue bytes
+remain included in the same pane/frame budget and exact patch comparison.

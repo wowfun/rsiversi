@@ -26,3 +26,14 @@ Discovery omits retiring entries and unregistered provider sections. Listing
 retains only the requested page plus one lookahead name; describing one namespace
 captures its version, defaults, metadata and provider writability under the same
 registry lock. It neither acquires a registration lease nor changes a revision.
+
+An owner may register asynchronously with a pure raw-section migration. The
+registry serializes migration with writes, reserves the namespace against other
+registrations, validates the transformed merged value before provider CAS, and
+publishes only after persistence. Failed migration publishes no namespace. A
+transient CAS conflict follows the protocol's [bounded migration retry](../protocol/README.md)
+and refreshes only the migrating namespace; unrelated published scopes are unchanged. A
+read-only provider rejects a migration requiring a write. Once persistence starts,
+the registry finishes updating its raw cache even if the caller disappears;
+no registration lease survives a dropped result. Namespace owners cannot bypass
+the registry to modify its provider.

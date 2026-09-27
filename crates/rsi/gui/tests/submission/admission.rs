@@ -10,10 +10,18 @@ pub(super) struct HeaderGate {
 }
 
 pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
+    fixture_with_active(None).await
+}
+async fn fixture_with_active(
+    active: Option<TurnId>,
+) -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());
-    backend.unpublished.store(true, Ordering::SeqCst);
+    backend
+        .unpublished
+        .store(active.is_none(), Ordering::SeqCst);
+    *backend.active_turn.lock().unwrap() = active;
     for (id, factory) in [
         (
             "providers",
@@ -199,7 +207,7 @@ async fn global_admission_failure_has_a_structured_unsent_result() {
     let mut waiting = Vec::new();
     for _ in 0..8 {
         waiting.push(app.command(
-            &json!({"action":"cancel","pane":"main","generation":generation}).to_string(),
+            &json!({"action":"cancel","pane":"main","generation":generation,"turn_id":"displayed-turn"}).to_string(),
         ));
     }
     let result = dispatch(&app, &generation, &prepared, "dispatch").await;
@@ -211,7 +219,7 @@ async fn global_admission_failure_has_a_structured_unsent_result() {
 }
 
 #[tokio::test]
-async fn cancel_inspects_a_fresh_attachment_after_an_unknown_submission() {
+async fn stop_targets_displayed_turn_and_preserves_an_unknown_submission() {
     let (runtime, backend, app, generation) = fixture().await;
     let prepared = prepare(&app, &generation, "accepted without a reply", vec![], false).await;
     assert_eq!(
@@ -230,6 +238,9 @@ async fn cancel_inspects_a_fresh_attachment_after_an_unknown_submission() {
         .lock()
         .unwrap()
         .push(rsi_agent_store_protocol::StorePendingMessage {
+            queue_slot: rsi_agent_session_protocol::QueueSlot::initial(&id, 1, 1),
+            source_kind: rsi_agent_session_protocol::AgentMessageSourceKind::Human,
+            has_turn_options: false,
             message_id: id.clone(),
             delivery: MessageDelivery::NextTurn,
             target: MessageTarget::NextTurn,
@@ -238,13 +249,9 @@ async fn cancel_inspects_a_fresh_attachment_after_an_unknown_submission() {
             accepted_control_seq: 1,
         });
     backend.unpublished.store(false, Ordering::SeqCst);
-    app.command(&json!({"action":"cancel","pane":"main","generation":generation}).to_string())
-        .await
-        .unwrap();
-    assert_eq!(
-        *backend.cancel.lock().unwrap(),
-        vec![CancelTarget::Message(id)]
-    );
+    assert!(app.command(&json!({"action":"cancel","pane":"main","generation":generation,"turn_id":"displayed-turn"}).to_string())
+        .await.is_err(), "pending input alone does not establish a displayed active Turn");
+    assert!(backend.cancel.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
 }
 
@@ -338,6 +345,31 @@ async fn crafted_frozen_messages_cannot_change_sandbox_or_delivery_policy() {
         }
     }
     backend.resolution.store(2, Ordering::SeqCst);
+    backend.unpublished.store(false, Ordering::SeqCst);
+    *backend.active_turn.lock().unwrap() = Some(TurnId::new("busy").unwrap());
+    backend.facts.lock().unwrap().push(
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
+                turn_id: TurnId::new("busy").unwrap(),
+                text: "running".into(),
+                model: None,
+                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    );
+    let session = super::sources::view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    let generation = super::sources::view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     for steer in [false, true] {
         let valid = prepare(&app, &generation, "valid", vec![], steer).await;
         assert_eq!(
@@ -406,4 +438,48 @@ async fn terminal_poll_budget_is_independent_bounded_and_drained_on_shutdown() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn stop_requires_an_acknowledged_exact_active_turn() {
+    let turn = TurnId::new("visible-turn").unwrap();
+    let (runtime, backend, app, _) = fixture_with_active(Some(turn.clone())).await;
+    let session = backend
+        .header
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .session_id()
+        .clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    let current: serde_json::Value =
+        serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
+    let generation = current["surfaces"]["main"]["generation"].as_str().unwrap();
+    assert_eq!(
+        current["surfaces"]["main"]["transcript"]["active"],
+        turn.as_str()
+    );
+    let command = |turn_id: &str| {
+        json!({"action":"cancel","pane":"main","generation":generation,"turn_id":turn_id})
+            .to_string()
+    };
+    let frame: serde_json::Value =
+        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    assert!(
+        app.command(&command(turn.as_str())).await.is_err(),
+        "unacknowledged Stop must not reach the backend"
+    );
+    app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
+        .unwrap();
+    assert!(app.command(&command("never-shown")).await.is_err());
+    assert!(backend.cancel.lock().unwrap().is_empty());
+    app.command(&command(turn.as_str())).await.unwrap();
+    assert_eq!(
+        *backend.cancel.lock().unwrap(),
+        vec![CancelTarget::Turn(turn)]
+    );
+    assert!(runtime.shutdown().await.is_clean());
 }

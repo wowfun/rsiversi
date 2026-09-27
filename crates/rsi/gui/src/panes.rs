@@ -1,3 +1,5 @@
+#[path = "composer.rs"]
+pub(crate) mod composer;
 #[path = "export.rs"]
 mod export;
 #[path = "external.rs"]
@@ -240,7 +242,11 @@ impl Pane {
         }
     }
     pub fn view(&self, ui: &rsi_ui::Ui) -> serde_json::Value {
-        self.project(ui, |mut value, transcript| {
+        self.project(ui, |mut value, transcript, live| {
+            if let Some(live) = live {
+                value["queue"] = serde_json::to_value(live.queue.view(live.active.as_ref()))
+                    .expect("bounded queue");
+            }
             if let Some(transcript) = transcript {
                 value["transcript"] = serde_json::to_value(transcript).expect("bounded transcript");
             }
@@ -252,14 +258,14 @@ impl Pane {
         ui: &rsi_ui::Ui,
         previous: Option<&crate::frames::CachedPane>,
     ) -> rsi_api_protocol::Result<crate::frames::CachedPane> {
-        self.project(ui, |metadata, transcript| {
-            crate::frames::CachedPane::capture(metadata, transcript, previous)
+        self.project(ui, |metadata, transcript, live| {
+            crate::frames::CachedPane::capture_with_queue(metadata, transcript, live, previous)
         })
     }
     fn project<T>(
         &self,
         ui: &rsi_ui::Ui,
-        project: impl FnOnce(serde_json::Value, Option<&Transcript>) -> T,
+        project: impl FnOnce(serde_json::Value, Option<&Transcript>, Option<&Transcript>) -> T,
     ) -> T {
         if let Some(current) = self.external.lock().expect("external pane").as_ref() {
             let view = current.controller.view();
@@ -273,11 +279,12 @@ impl Pane {
             return project(
                 serde_json::json!({"kind":"external","generation":current.generation.to_string(),"selection":self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(),"external":view,"external_source":*source,"attention_focus":*current.focus.lock().expect("external attention focus")}),
                 None,
+                None,
             );
         }
         let current = self.current.lock().expect("Web pane poisoned").clone();
         let Some(current) = current else {
-            return project(serde_json::Value::Null, None);
+            return project(serde_json::Value::Null, None, None);
         };
         let pending = current.renderer.pending();
         let state = current
@@ -317,12 +324,14 @@ impl Pane {
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
             "model_command":current.submission.model_command.view(),
+            "queue":null,
             "transcript":null, "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         });
         project(
             metadata,
             Some(state.history.as_ref().unwrap_or(&state.transcript)),
+            Some(&state.transcript),
         )
     }
 }
@@ -675,7 +684,11 @@ impl GuiApplication {
             Command::ModelRefresh { pane, generation } => {
                 self.refresh_model(pane, &generation).await
             }
-            Command::Cancel { pane, generation } => self.cancel(pane, &generation).await,
+            Command::Cancel {
+                pane,
+                generation,
+                turn_id,
+            } => self.cancel(pane, &generation, turn_id).await,
             Command::History { pane, generation } => self.history(pane, &generation).await,
             Command::Live { pane, generation } => {
                 let attachment = self.pane(pane)?.attachment(&generation)?;
@@ -827,6 +840,7 @@ impl GuiApplication {
                 transcript.fact(fact);
             }
             transcript.omitted |= history.has_more;
+            transcript.queue.seed(inspection.pending);
             transcript.active = inspection.active_turn_id;
             let cursor = ObservationCursor {
                 fact_seq: inspection.durable_fact_seq,
@@ -1001,60 +1015,19 @@ impl GuiApplication {
         self.changed();
         Ok(true)
     }
-    async fn cancel(&self, index: crate::SurfaceId, generation: &str) -> Result<()> {
+    async fn cancel(
+        &self,
+        index: crate::SurfaceId,
+        generation: &str,
+        turn_id: rsi_agent_session_protocol::TurnId,
+    ) -> Result<()> {
+        self.displayed_cancel(index, generation, &turn_id)?;
         let attachment = self.pane(index)?.attachment(generation)?;
-        if !attachment
-            .durable
-            .load(std::sync::atomic::Ordering::Acquire)
-            && attachment
-                .submission
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .is_empty()
-        {
-            return Ok(());
-        }
-        let inspection =
-            rsi_client::read_with_capacity_retry(&self.execution, || attachment.handle.inspect())
-                .await
-                .map_err(error)?;
-        let pending = {
-            let mut owned = attachment
-                .submission
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned");
-            owned.retain(|id| {
-                inspection
-                    .pending
-                    .iter()
-                    .any(|pending| &pending.message_id == id)
-            });
-            inspection
-                .pending
-                .iter()
-                .filter(|pending| owned.contains(&pending.message_id))
-                .map(|pending| pending.message_id.clone())
-                .collect::<Vec<_>>()
-        };
-        for id in pending {
-            attachment
-                .handle
-                .cancel(CancelTarget::Message(id), None)
-                .await
-                .map_err(error)?;
-        }
-        if let Some(turn) = inspection.active_turn_id {
-            attachment
-                .handle
-                .cancel(
-                    CancelTarget::Turn(turn),
-                    Some("Web client cancellation".into()),
-                )
-                .await
-                .map_err(error)?;
-        }
+        attachment
+            .handle
+            .cancel(CancelTarget::Turn(turn_id), Some("GUI Stop".into()))
+            .await
+            .map_err(error)?;
         Ok(())
     }
     async fn history(&self, index: crate::SurfaceId, generation: &str) -> Result<()> {

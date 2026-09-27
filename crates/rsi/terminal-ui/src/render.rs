@@ -1,4 +1,6 @@
 //! Bounded visible rows with source positions; wrapping and editing share graphemes.
+use crate::style::{self, user_style};
+pub(crate) use crate::style::{accent, border, choice_style, muted};
 #[path = "footer.rs"]
 mod footer;
 #[path = "layout.rs"]
@@ -11,7 +13,7 @@ pub use layout::LayoutCache;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
 };
@@ -556,7 +558,10 @@ pub fn selected_visible(
 pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -> View {
     cache.set_markdown(state.markdown);
     let area = frame.area();
-    frame.render_widget(Block::new().style(Style::default().bg(Color::Reset)), area);
+    frame.render_widget(
+        Block::new().style(Style::default().bg(style::SURFACE)),
+        area,
+    );
     if area.width < 28 || area.height < 9 {
         frame.render_widget(Paragraph::new("Resize terminal: at least 28 × 9"), area);
         return View::default();
@@ -761,7 +766,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
             if block.role == Role::User && spacer == Spacer::UserTop {
                 frame.render_widget(
                     Paragraph::new("▄".repeat(usize::from(body.width)))
-                        .style(Style::default().fg(Color::Indexed(235))),
+                        .style(Style::default().fg(style::USER_BAND)),
                     Rect::new(body.x, y, body.width, 1),
                 );
             }
@@ -770,7 +775,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
         if row.metadata {
             let label = format!("• {}", block.title);
             frame.render_widget(
-                Paragraph::new(label.clone()).style(Style::default().fg(Color::Indexed(247))),
+                Paragraph::new(label.clone()).style(Style::default().fg(style::METADATA)),
                 Rect::new(
                     body.x,
                     y,
@@ -782,12 +787,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
             );
             continue;
         }
-        let color = match block.role {
-            Role::User | Role::Tool => Color::Gray,
-            Role::Assistant => Color::Reset,
-            Role::Reasoning | Role::Status | Role::Metadata | Role::Notice => Color::DarkGray,
-            Role::Error => Color::LightRed,
-        };
+        let color = style::role_color(block.role);
         if row.hidden > 0 {
             frame.render_widget(
                 Paragraph::new(format!("… {} lines hidden", row.hidden)).style(muted()),
@@ -818,7 +818,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
                 let width =
                     u16::try_from(label.width().min(usize::from(body.width))).unwrap_or(body.width);
                 frame.render_widget(
-                    Paragraph::new(label).style(Style::default().fg(Color::Indexed(247))),
+                    Paragraph::new(label).style(Style::default().fg(style::METADATA)),
                     Rect::new(body.x, y, width, 1),
                 );
                 continue;
@@ -826,16 +826,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
             let (elapsed_ms, running) = block.clock.display(state.activity.as_ref());
             let marker = if running {
                 crate::activity_spinner_frame(elapsed_ms.unwrap_or(0))
-            } else if block.collapsed {
-                "▸"
             } else {
-                "▾"
+                style::process_marker(block.outcome, block.collapsed)
             };
-            let marker_color = match block.outcome {
-                Some(super::transcript::ProcessOutcome::Success) => Color::LightGreen,
-                Some(super::transcript::ProcessOutcome::Failed) => Color::LightRed,
-                Some(super::transcript::ProcessOutcome::Interrupted) | None => color,
-            };
+            let marker_color = style::outcome_color(block.outcome, color);
             let elapsed = elapsed_ms
                 .filter(|ms| *ms >= 1000)
                 .map(crate::elapsed_label);
@@ -928,7 +922,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &State<'_>, cache: &mut LayoutCache) -
                 })
             });
             let style = if highlight {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+                style::selection()
             } else {
                 let styles = &layout.styles;
                 styles
@@ -1071,32 +1065,6 @@ pub(crate) fn editor_rows(text: &str, cursor: usize, width: usize, height: usize
 }
 
 type MarkdownStyles = Vec<(std::ops::Range<usize>, Style)>;
-
-fn user_style() -> Style {
-    Style::default().fg(Color::Gray).bg(Color::Indexed(235))
-}
-
-pub(crate) fn muted() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
-}
-pub(crate) fn accent() -> Style {
-    Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub(crate) fn border() -> Style {
-    Style::default().fg(Color::Indexed(239))
-}
-
-pub(crate) fn choice_style(selected: bool) -> Style {
-    let style = Style::default().fg(Color::Gray).bg(Color::Indexed(235));
-    if selected {
-        style.bg(Color::Indexed(237)).add_modifier(Modifier::BOLD)
-    } else {
-        style
-    }
-}
 
 /// Shared prompt geometry; editing stays with the resident application.
 pub(crate) fn composer(
@@ -1259,6 +1227,7 @@ mod tests {
     use super::*;
     use crate::test_state::{TestState as State, draw};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use rsi_agent_session_protocol::{
         EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
         TurnId,
@@ -1559,7 +1528,7 @@ mod tests {
             .unwrap(),
         );
         let completed = render(&state, None);
-        assert!(completed[0].starts_with("▸ Ran"));
+        assert!(completed[0].starts_with("✓ Ran"));
         assert!(completed[0].ends_with("1s"));
         assert!(!completed[22].contains("1s"));
         for (ms, label) in [
@@ -1597,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_colors_only_the_existing_marker_and_preserves_fold_hits() {
+    fn outcome_symbols_are_distinct_without_color_and_preserve_fold_hits() {
         use super::super::transcript::ProcessOutcome;
         let mut state = state();
         delta(&mut state, 1, "original source");
@@ -1627,7 +1596,16 @@ mod tests {
                         .unwrap()
                         .render(80, 24)
                         .unwrap();
-                    assert_eq!(cells[(0, 0)].symbol(), if collapsed { "▸" } else { "▾" });
+                    assert_eq!(
+                        cells[(0, 0)].symbol(),
+                        match outcome {
+                            Some(ProcessOutcome::Success) => "✓",
+                            Some(ProcessOutcome::Failed) => "×",
+                            Some(ProcessOutcome::Interrupted) => "−",
+                            None if collapsed => "▸",
+                            None => "▾",
+                        }
+                    );
                     assert_eq!(cells[(0, 0)].fg, color);
                     assert_eq!(cells[(2, 0)].fg, normal);
                     assert_eq!(cells[(0, 0)].bg, Color::Reset);
