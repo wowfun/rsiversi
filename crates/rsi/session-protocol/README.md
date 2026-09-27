@@ -281,3 +281,20 @@ transcript acknowledgement. Terminal control has its own bounded operation.
 Input is at most 64 KiB of exact bytes: accepted-prefix receipts permit safe
 continuation even if a native write splits a UTF-8 character. Unknown input
 receipts require querying the original epoch/sequence; they never permit replay.
+
+Queue editing delegates `mutate_queue` and `queue_mutation_status` through the
+Session handle and its authenticated API. The [Turn contract](../../rsi-agent/turn-protocol/README.md#queue-mutation)
+owns pending-only eligibility, exact predecessor/Turn binding and durable retry
+semantics. Session adapters retain the immutable Header and validate reference
+content at their normal owning boundary before dispatch. ACP retains request
+cancellation and does not expose queue editing. The `:steer` command continues to
+submit new input with its existing idle fallback.
+
+`SessionService::read_header` reads one durable Store Header by SessionId without
+attaching, creating a handle, touching activity or loading transcript. Unpublished
+drafts are absent. The authenticated `session/read-header` v1 operation exposes
+the same read and validates the echoed identity; narrowed Session contribution
+clients do not gain this deployment-wide operation.
+
+Every Session transport implements queue mutation and receipt lookup explicitly;
+these are required SessionHandle methods, without a runtime unsupported fallback.

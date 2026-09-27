@@ -116,6 +116,9 @@ pub async fn drive_message(
                             match record.body() {
                                 AgentControlRecordBody::MessageClaimed { message_id: observed, turn_id, entered_fact_seq, .. }
                                     if observed == &message_id => break (turn_id.clone(), *entered_fact_seq),
+                                AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } if predecessor_id==&message_id => {
+                                    return Err(MessageRunError::Discarded {message_id,reason:rsi_agent_session_protocol::MessageDiscardReason::Replaced});
+                                },
                                 AgentControlRecordBody::MessageDiscarded { message_id: observed, reason }
                                     if observed == &message_id => {
                                         if cancellation.is_cancelled() { return Ok(TurnOutcome::Cancelled); }

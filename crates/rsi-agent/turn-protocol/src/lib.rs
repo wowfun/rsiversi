@@ -765,6 +765,28 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             "this Turn service does not support durable messages".into(),
         ))
     }
+    /// Atomically compares and edits one pending Human queue slot.
+    async fn mutate_queue(
+        &self,
+        session: &SessionId,
+        request: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt> {
+        let _ = (session, request);
+        Err(TurnError::Invalid(
+            "this Turn service does not support queue mutations".into(),
+        ))
+    }
+    /// Resolves an unknown mutation reply without allocating another operation identity.
+    async fn queue_mutation_status(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        let _ = (session, operation);
+        Err(TurnError::Invalid(
+            "this Turn service does not support queue mutation lookup".into(),
+        ))
+    }
     /// Atomically makes one pending next-Turn message model-visible.
     async fn claim_message(&self, request: ClaimMessage) -> Result<SubmittedTurn> {
         let _ = request;
@@ -1555,6 +1577,9 @@ pub enum TurnError {
         /// Message identity.
         message: String,
     },
+    /// An existing queue operation identity names a different frozen request.
+    #[error("queue operation identity conflicts with its durable request")]
+    QueueOperationConflict,
     /// A replacement did not name the exact durable predecessor revision.
     #[error("domain {domain} revision conflict: expected {expected:?}, actual {actual:?}")]
     DomainRevisionConflict {

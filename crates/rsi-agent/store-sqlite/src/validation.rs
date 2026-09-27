@@ -504,6 +504,7 @@ impl MailboxProjection {
         connection: &Connection,
         header: &SessionHeader,
         record: &AgentControlRecord,
+        slot: Option<&rsi_agent_session_protocol::QueueSlot>,
     ) -> Result<()> {
         let session_id = header.session_id();
         let Self {
@@ -511,6 +512,25 @@ impl MailboxProjection {
             expected_messages,
         } = self;
         match record.body() {
+            AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } => {
+                let mut predecessor = expected_messages
+                    .remove(&(session_id.clone(), predecessor_id.clone()))
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("queue predecessor is not pending".into())
+                    })?;
+                super::queue::validate_successor(connection, session_id, &predecessor, record)?;
+                predecessor.state = StoreAgentMessageState::Discarded {
+                    reason: MessageDiscardReason::Replaced,
+                    control_seq: record.seq(),
+                };
+                if read_indexed_agent_message(connection, session_id, predecessor_id)?
+                    != predecessor
+                {
+                    return Err(StoreError::Corrupt(
+                        "queue predecessor projection differs".into(),
+                    ));
+                }
+            }
             AgentControlRecordBody::MessageAccepted {
                 message,
                 delivery,
@@ -535,6 +555,7 @@ impl MailboxProjection {
                     .insert(
                         (session_id.clone(), message.message_id.clone()),
                         StoreAgentMessage {
+                            queue_slot: slot.expect("canonical acceptance slot").clone(),
                             delivery: *delivery,
                             bound_turn_id: bound_turn_id.clone(),
                             accepted_timestamp_ms: record.timestamp_ms(),
@@ -615,7 +636,8 @@ impl MailboxProjection {
                     control_seq: record.seq(),
                 };
             }
-            AgentControlRecordBody::ActivationStarted { .. }
+            AgentControlRecordBody::QueueMutationRecorded { .. }
+            | AgentControlRecordBody::ActivationStarted { .. }
             | AgentControlRecordBody::ActivationWaitingForDescendants { .. }
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
@@ -688,7 +710,7 @@ pub(super) fn read_indexed_agent_message(
                     accepted_control_seq, state,
                     length(CAST(state_json AS BLOB)),
                     CASE WHEN length(CAST(state_json AS BLOB)) <= ?4 THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
              FROM agent_messages WHERE session_id = ?1 AND message_id = ?2",
             params![
                 session_id.as_str(),
@@ -897,6 +919,8 @@ impl ActivationProjection {
             | AgentControlRecordBody::MessageDiscarded { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::MessageSuccessor { .. }
+            | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. } => {}
         }
         Ok(())
@@ -1138,7 +1162,13 @@ struct ReadyProjection {
 
 impl ReadyProjection {
     #[allow(clippy::too_many_lines)] // Keep each ordered control transition projection together.
-    fn apply(&mut self, session_id: &str, record: &AgentControlRecord) -> Result<()> {
+    fn apply(
+        &mut self,
+        selected: &SessionId,
+        record: &AgentControlRecord,
+        slot: Option<&rsi_agent_session_protocol::QueueSlot>,
+    ) -> Result<()> {
+        let session_id = selected.as_str();
         let Self {
             expected,
             accepted_roots,
@@ -1152,6 +1182,7 @@ impl ReadyProjection {
                 target,
                 wake_required,
             } => {
+                let slot = slot.expect("canonical acceptance slot");
                 let key = (session_id.to_owned(), message.message_id.to_string());
                 if accepted_roots
                     .insert(
@@ -1159,8 +1190,8 @@ impl ReadyProjection {
                         (
                             root_session_id.to_string(),
                             *delivery,
-                            record.seq(),
-                            record.timestamp_ms(),
+                            slot.control_seq,
+                            slot.timestamp_ms,
                         ),
                     )
                     .is_some()
@@ -1177,8 +1208,8 @@ impl ReadyProjection {
                         key,
                         (
                             root_session_id.to_string(),
-                            record.seq(),
-                            record.timestamp_ms(),
+                            slot.control_seq,
+                            slot.timestamp_ms,
                             message_target_name(*target).into(),
                         ),
                     )
@@ -1217,7 +1248,11 @@ impl ReadyProjection {
                     ));
                 }
             }
-            AgentControlRecordBody::MessageClaimed { message_id, .. }
+            AgentControlRecordBody::MessageSuccessor {
+                predecessor_id: message_id,
+                ..
+            }
+            | AgentControlRecordBody::MessageClaimed { message_id, .. }
             | AgentControlRecordBody::MessageDiscarded { message_id, .. } => {
                 let key = (session_id.to_owned(), message_id.to_string());
                 expected.remove(&key);
@@ -1232,6 +1267,7 @@ impl ReadyProjection {
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
         Ok(())
@@ -1284,6 +1320,7 @@ impl ReadyProjection {
 }
 
 /// Decode each bounded canonical control once and feed all index projections.
+#[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
 pub(super) fn validate_agent_indexes(
     connection: &Connection,
     header: &SessionHeader,
@@ -1297,7 +1334,9 @@ pub(super) fn validate_agent_indexes(
     let mut decoded = 0_u64;
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
+    let mut queue_receipts = 0_usize;
     let mut last_settled_control_seq = 0;
+    let mut successor_link = None;
     let mut statement = connection
         .prepare(
             "SELECT length(CAST(control_json AS BLOB)),
@@ -1341,17 +1380,44 @@ pub(super) fn validate_agent_indexes(
             )
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         }
-        mailbox.apply(connection, header, &record)?;
+        if let AgentControlRecordBody::QueueMutationRecorded { receipt } = record.body() {
+            queue_receipts += 1;
+            if super::queue::receipt_position(connection, selected, &receipt.operation_id)?
+                != Some(record.seq())
+            {
+                return Err(StoreError::Corrupt(
+                    "queue receipt index differs from canonical controls".into(),
+                ));
+            }
+            super::queue::validate_receipt_boundary(connection, selected, &record)?;
+        }
+        let slot = if matches!(
+            record.body(),
+            AgentControlRecordBody::MessageAccepted { .. }
+        ) {
+            Some(super::queue::acceptance_slot_from_link(
+                &record,
+                successor_link.as_ref(),
+            )?)
+        } else {
+            None
+        };
+        mailbox.apply(connection, header, &record, slot.as_ref())?;
         if matches!(
             record.body(),
             AgentControlRecordBody::ActivationSettled { .. }
         ) {
             last_settled_control_seq = record.seq();
         }
-        ready.apply(selected.as_str(), &record)?;
+        ready.apply(selected, &record, slot.as_ref())?;
         activation.apply(header, &record)?;
         domains.apply(connection, selected, &record)?;
         programs.apply(connection, selected, &record)?;
+        successor_link = matches!(
+            record.body(),
+            AgentControlRecordBody::MessageSuccessor { .. }
+        )
+        .then_some(record);
     }
     let (indexed_terminals, indexed_settlement) = connection
         .query_row(
@@ -1369,6 +1435,11 @@ pub(super) fn validate_agent_indexes(
     if terminals != decode_u64("terminal index count", indexed_terminals)? {
         return Err(StoreError::Corrupt(
             "terminal index has no unique canonical control marker".into(),
+        ));
+    }
+    if queue_receipts != super::queue::count(connection, selected)? {
+        return Err(StoreError::Corrupt(
+            "queue receipt index count differs".into(),
         ));
     }
     mailbox.finish(connection, selected)?;

@@ -23,6 +23,7 @@ pub(crate) enum Operation {
     TerminalInput,
     Create,
     Attach,
+    ReadHeader,
     Recent,
     Submit,
     Commands,
@@ -31,6 +32,8 @@ pub(crate) enum Operation {
     DraftSnapshot,
     SelectPreset,
     Image,
+    MutateQueue,
+    QueueMutationStatus,
     MessageStatus,
     ReadMessage,
     Cancel,
@@ -57,13 +60,14 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 41] = [
         Self::Export,
         Self::Terminal,
         Self::TerminalOutput,
         Self::TerminalInput,
         Self::Create,
         Self::Attach,
+        Self::ReadHeader,
         Self::Recent,
         Self::Submit,
         Self::Commands,
@@ -72,6 +76,8 @@ impl Operation {
         Self::DraftSnapshot,
         Self::SelectPreset,
         Self::Image,
+        Self::MutateQueue,
+        Self::QueueMutationStatus,
         Self::MessageStatus,
         Self::ReadMessage,
         Self::Cancel,
@@ -106,6 +112,7 @@ impl Operation {
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
             Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),
             Self::Create => ("create", Data, Mutation, 8192, HEADER_REPLY + 16 * 1024),
+            Self::ReadHeader => ("read-header", Data, Read, 4096, HEADER_REPLY),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
@@ -115,6 +122,8 @@ impl Operation {
             Self::DraftSnapshot => ("draft-snapshot", Data, Read, 8192, HEADER_REPLY + 8192),
             Self::SelectPreset => ("select-preset", Data, Mutation, 8192, HEADER_REPLY + 8192),
             Self::Image => ("image", Data, Mutation, LARGE_REPLY, 16 * 1024),
+            Self::MutateQueue => ("mutate-queue", Data, Mutation, 8 * 1024 * 1024, 8192),
+            Self::QueueMutationStatus => ("queue-mutation-status", Control, Read, 8192, 8192),
             Self::MessageStatus => ("message-status", Control, Read, 8192, 16 * 1024),
             Self::ReadMessage => ("read-message", Data, Read, 8192, OBSERVATION_REPLY),
             Self::Cancel => ("cancel", Control, Mutation, 128 * 1024, 8192),
@@ -157,7 +166,7 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create => 7,
+                    Self::Create | Self::Inspect => 7,
                     Self::Submit => 4,
                     Self::MessageStatus => 3,
                     Self::Jobs
@@ -169,8 +178,8 @@ impl Operation {
                     | Self::Recent
                     | Self::DraftSnapshot
                     | Self::SelectPreset
-                    | Self::Inspect => 6,
-                    Self::History | Self::Observe | Self::ReadMessage => 5,
+                    | Self::Observe => 6,
+                    Self::History | Self::ReadMessage => 5,
                     _ => 1,
                 },
             )
@@ -288,6 +297,10 @@ pub(crate) enum Failure {
         session: SessionId,
         turn: TurnId,
     },
+    QueueOperationConflict {},
+    QueueOutcomeUnknown {
+        operation_id: rsi_agent_session_protocol::QueueOperationId,
+    },
     MessageConflict {
         session: SessionId,
         message: MessageId,
@@ -347,6 +360,10 @@ pub(crate) fn domain<T>(
                     message: MessageId::new(message).map_err(invalid)?,
                 }
             }
+            SessionError::QueueOperationConflict => Failure::QueueOperationConflict {},
+            SessionError::QueueOutcomeUnknown { operation_id } => {
+                Failure::QueueOutcomeUnknown { operation_id }
+            }
             SessionError::Capacity => Failure::Capacity {},
             SessionError::CommandConflict { request_id } => Failure::CommandConflict { request_id },
             SessionError::CommandRevisionConflict { expected, actual } => {
@@ -382,6 +399,10 @@ impl Failure {
                     session: session.to_string(),
                     message: message.to_string(),
                 }
+            }
+            Self::QueueOperationConflict {} => SessionError::QueueOperationConflict,
+            Self::QueueOutcomeUnknown { operation_id } => {
+                SessionError::QueueOutcomeUnknown { operation_id }
             }
             Self::Capacity {} => SessionError::Capacity,
             Self::CommandConflict { request_id } => SessionError::CommandConflict { request_id },

@@ -54,6 +54,7 @@ struct MemoryState {
     fact_read_cursors: Vec<u64>,
     ready_messages: BTreeMap<(SessionId, u64, SessionId, u64), StoreReadyMessage>,
     ready_keys: BTreeMap<(SessionId, MessageId), (SessionId, u64, SessionId, u64)>,
+    queue_slots: BTreeMap<(SessionId, rsi_agent_session_protocol::QueueSlotId), MessageId>,
     agent_messages: BTreeMap<(SessionId, MessageId), StoreAgentMessage>,
     agent_children: BTreeMap<(SessionId, SessionId), StoreAgentChild>,
     active_activations: BTreeMap<SessionId, StoreActiveActivation>,
@@ -74,6 +75,7 @@ struct MemorySession {
     last_settled_control_seq: u64,
     control_prefix_digest: [u8; 32],
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
+    queue_mutations: BTreeMap<rsi_agent_session_protocol::QueueOperationId, u64>,
     domain_requests: BTreeMap<rsi_agent_session_protocol::DomainRequestId, u64>,
     domain_usage: BTreeMap<TurnId, (u64, u64)>,
 }
@@ -156,7 +158,9 @@ mod store_contract;
 
 pub use contribution::activate_contribution_owner;
 pub use domain_contract::assert_domain_store_contract;
-pub use store_contract::{assert_mechanical_store_contract, assert_program_store_contract};
+pub use store_contract::{
+    assert_mechanical_store_contract, assert_program_store_contract, assert_queue_store_contract,
+};
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.
 #[derive(Clone, Debug)]

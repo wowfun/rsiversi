@@ -10,7 +10,12 @@ use std::sync::Arc;
 pub(crate) fn operations(available: &[OperationSpec]) -> Result<Vec<OperationSpec>> {
     Operation::ALL
         .into_iter()
-        .filter(|operation| !matches!(operation, Operation::Create | Operation::Recent))
+        .filter(|operation| {
+            !matches!(
+                operation,
+                Operation::Create | Operation::Recent | Operation::ReadHeader
+            )
+        })
         .map(Operation::spec)
         .map(|operation| {
             if available.contains(&operation) {

@@ -7,10 +7,12 @@ use rsi_client::{MessageEvent, MessageRunError, MessageSink, drive_message};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent injected backend outcomes, not mutually exclusive states.
 pub struct Scenario {
     pub state: MessageState,
     pub message_cancel_accept: bool,
     pub discard: bool,
+    pub replaced: bool,
     pub truncate: bool,
     pub cancellations: Mutex<Vec<CancelTarget>>,
 }
@@ -20,6 +22,7 @@ impl Default for Scenario {
             state: MessageState::Pending,
             message_cancel_accept: false,
             discard: false,
+            replaced: false,
             truncate: false,
             cancellations: Mutex::default(),
         }
@@ -32,7 +35,17 @@ impl Scenario {
     ) -> Vec<rsi_session_protocol::Result<SessionObservation>> {
         let retention = ObservationRetention::default();
         if cursor.fact_seq == 0 {
-            let body = if self.discard {
+            let body = if self.replaced {
+                AgentControlRecordBody::MessageSuccessor {
+                    predecessor_id: MessageId::new("message").unwrap(),
+                    successor_id: MessageId::new("successor").unwrap(),
+                    slot: rsi_agent_session_protocol::QueueSlot::initial(
+                        &MessageId::new("message").unwrap(),
+                        1,
+                        1,
+                    ),
+                }
+            } else if self.discard {
                 AgentControlRecordBody::MessageDiscarded {
                     message_id: MessageId::new("message").unwrap(),
                     reason: MessageDiscardReason::Cancelled,
@@ -211,7 +224,41 @@ async fn cancellation_race_and_delivery(execution: Execution) {
     assert_eq!(accepted.active_streams.load(Ordering::SeqCst), 0);
 }
 
+#[allow(clippy::too_many_lines)] // One sequence covers resolved claims and their distinct rejection paths.
 async fn resolved_claims_and_failures() {
+    let replaced = handle(Scenario {
+        replaced: true,
+        ..Scenario::default()
+    });
+    assert!(matches!(
+        drive_message(
+            replaced.as_ref(),
+            input("message"),
+            &CancellationToken::new(),
+            &Sink::default()
+        )
+        .await,
+        Err(MessageRunError::Discarded {
+            reason: MessageDiscardReason::Replaced,
+            ..
+        })
+    ));
+    assert!(
+        replaced
+            .message
+            .as_ref()
+            .unwrap()
+            .cancellations
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        replaced.cursors.lock().unwrap().len(),
+        1,
+        "the old identity never follows its successor"
+    );
+
     let cancel = CancellationToken::new();
     cancel.cancel();
     let claimed = handle(Scenario {

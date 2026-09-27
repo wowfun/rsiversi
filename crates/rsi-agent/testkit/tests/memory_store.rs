@@ -300,3 +300,9 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
     drop(store);
     assert!(payload_identity.upgrade().is_none());
 }
+
+#[tokio::test]
+async fn queue_store_atomic_order_and_receipt_contract() {
+    let store = MemoryStore::new();
+    rsi_agent_testkit::assert_queue_store_contract(&store, header()).await;
+}

@@ -3,6 +3,20 @@ use rsi_agent_session_protocol::MessageDelivery;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    async fn mutate_queue(
+        &self,
+        session: &SessionId,
+        request: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> TurnResult<rsi_agent_session_protocol::QueueMutationReceipt> {
+        self.mutate_queue_owned(session, request).await
+    }
+    async fn queue_mutation_status(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> TurnResult<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        self.read_queue_receipt(session, operation).await
+    }
     fn controlled_work(
         &self,
         session: &SessionId,

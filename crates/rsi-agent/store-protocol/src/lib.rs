@@ -6,11 +6,10 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentMessageSource, AgentPath,
-    ForkTurnSelection, MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ,
-    MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId, MessageTarget, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, validate_control_sequence,
-    validate_fact_sequence,
+    ActivationId, AgentControlRecord, AgentMessage, AgentPath, ForkTurnSelection,
+    MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES,
+    MessageDelivery, MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, StepId, TurnId, validate_control_sequence, validate_fact_sequence,
 };
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
@@ -20,6 +19,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod domain;
+mod queue;
+pub use queue::{validate_queue_successor, validate_queue_suffix, validate_queue_withdrawal};
 mod program;
 pub use program::*;
 mod program_graph;
@@ -38,7 +39,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 26;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 28;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -339,6 +340,7 @@ impl AtomicSessionAppend {
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.validate_terminal_boundary()?;
         self.validate_domain_commits()?;
+        validate_queue_suffix(&self.controls)?;
         self.facts
             .iter()
             .map(|fact| fact.encoded_len())
@@ -763,6 +765,8 @@ pub enum StoreAgentMessageState {
 /// One bounded mailbox entry projected by the Store-owned message index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreAgentMessage {
+    /// Stable slot and original ready-order position, separate from actual acceptance.
+    pub queue_slot: rsi_agent_session_protocol::QueueSlot,
     /// Immutable ingress intent.
     pub delivery: rsi_agent_session_protocol::MessageDelivery,
     /// Original resolved steering Turn; retained after promotion for audit.
@@ -785,6 +789,20 @@ pub struct StoreAgentMessage {
     pub state: StoreAgentMessageState,
 }
 
+/// Whether an ingress can advance from a Step to the next Turn on settlement.
+#[must_use]
+pub fn message_permits_promotion(
+    source: rsi_agent_session_protocol::AgentMessageSourceKind,
+    delivery: MessageDelivery,
+    bound_turn: Option<&TurnId>,
+) -> bool {
+    matches!(
+        source,
+        rsi_agent_session_protocol::AgentMessageSourceKind::Completion
+            | rsi_agent_session_protocol::AgentMessageSourceKind::Program
+    ) || delivery == MessageDelivery::Steer && bound_turn.is_some()
+}
+
 impl StoreAgentMessage {
     /// Ensures a bound next-Step steer cannot be consumed by another Turn.
     pub fn validate_claim_turn(&self, turn_id: &TurnId) -> Result<()> {
@@ -802,17 +820,17 @@ impl StoreAgentMessage {
     }
     /// Whether this immutable ingress may be promoted when its activation ends.
     pub fn permits_promotion(&self) -> bool {
-        matches!(
-            self.message.source,
-            AgentMessageSource::Completion { .. } | AgentMessageSource::Program { .. }
-        ) || self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
-            && self.bound_turn_id.is_some()
+        message_permits_promotion(
+            self.message.source.kind(),
+            self.delivery,
+            self.bound_turn_id.as_ref(),
+        )
     }
 
     /// Ready ordering on promotion; human steering preserves acceptance FIFO.
     pub fn promotion_order(&self, timestamp_ms: u64, control_seq: u64) -> (u64, u64) {
-        if self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer {
-            (self.accepted_timestamp_ms, self.accepted_control_seq)
+        if self.delivery == MessageDelivery::Steer {
+            (self.queue_slot.timestamp_ms, self.queue_slot.control_seq)
         } else {
             (timestamp_ms, control_seq)
         }
@@ -820,7 +838,9 @@ impl StoreAgentMessage {
 
     /// Revalidates one indexed projection independently of its table encoding.
     pub fn validate(&self, durable_control_seq: u64) -> Result<()> {
-        use rsi_agent_session_protocol::MessageDelivery;
+        self.queue_slot
+            .validate(self.accepted_control_seq)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         let accepted_target = match self.delivery {
             MessageDelivery::NextStep => MessageTarget::NextStep,
             MessageDelivery::Steer if self.bound_turn_id.is_some() => MessageTarget::NextStep,
@@ -879,6 +899,12 @@ impl StoreAgentMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorePendingMessage {
+    /// Stable initial identity and ordering, without allocating message content.
+    pub queue_slot: rsi_agent_session_protocol::QueueSlot,
+    /// Immutable source class; presentation policy decides which classes are editable.
+    pub source_kind: rsi_agent_session_protocol::AgentMessageSourceKind,
+    /// Whether invocation options differ from the default value.
+    pub has_turn_options: bool,
     /// Exact cancellation/retry identity.
     pub message_id: MessageId,
     /// Immutable caller intent.
@@ -932,8 +958,17 @@ impl StoreSessionInspection {
         }
         let mut previous = 0;
         let mut ids = BTreeSet::new();
+        let mut slots = BTreeSet::new();
         for entry in &self.pending {
-            use rsi_agent_session_protocol::MessageDelivery;
+            entry
+                .queue_slot
+                .validate(entry.accepted_control_seq)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if !slots.insert(&entry.queue_slot.id) {
+                return Err(StoreError::Corrupt(
+                    "Session inspection repeats a queue slot".into(),
+                ));
+            }
             let route_valid = matches!(
                 (entry.delivery, entry.target, entry.bound_turn_id.is_some()),
                 (MessageDelivery::NextTurn, MessageTarget::NextTurn, false)
@@ -1840,6 +1875,35 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support domain request lookup".into(),
         ))
     }
+    /// Returns the latest immutable acceptance belonging to a stable queue slot.
+    async fn read_queue_slot(
+        &self,
+        session: &SessionId,
+        slot: &rsi_agent_session_protocol::QueueSlotId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        let _ = (session, slot);
+        Err(StoreError::Invalid(
+            "Store does not support queue slots".into(),
+        ))
+    }
+    /// Looks up a lifetime-retained mutation receipt by its caller operation identity.
+    async fn read_queue_mutation(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        let _ = (session, operation);
+        Err(StoreError::Invalid(
+            "Store does not support queue receipts".into(),
+        ))
+    }
+    /// Counts retained admitted identities for inspection and index validation.
+    async fn queue_mutation_count(&self, session: &SessionId) -> Result<usize> {
+        let _ = session;
+        Err(StoreError::Invalid(
+            "Store does not support queue receipts".into(),
+        ))
+    }
     /// Reads exact Turn-attributed canonical domain-control usage from derived indexes.
     async fn read_turn_domain_usage(
         &self,
@@ -1969,6 +2033,13 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         let _ = session_id;
         Err(StoreError::Invalid(
             "this Store does not support Session inspection".into(),
+        ))
+    }
+    /// Checks a validated indexed message identity without reading its payload.
+    async fn agent_message_exists(&self, session: &SessionId, message: &MessageId) -> Result<bool> {
+        let _ = (session, message);
+        Err(StoreError::Invalid(
+            "this Store does not support message identity probes".into(),
         ))
     }
     /// Reads one exact indexed message without loading the pending mailbox.
@@ -2265,6 +2336,27 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn promotion_policy_covers_every_ingress_class_and_bound_steer() {
+        use rsi_agent_session_protocol::{AgentMessageSourceKind as Kind, MessageDelivery, TurnId};
+        let turn = TurnId::new("active").unwrap();
+        for (source, delivery, bound, expected) in [
+            (Kind::Human, MessageDelivery::NextTurn, false, false),
+            (Kind::Human, MessageDelivery::NextStep, true, false),
+            (Kind::Human, MessageDelivery::Steer, false, false),
+            (Kind::Human, MessageDelivery::Steer, true, true),
+            (Kind::Continuation, MessageDelivery::NextStep, false, false),
+            (Kind::Agent, MessageDelivery::NextStep, false, false),
+            (Kind::Completion, MessageDelivery::NextStep, false, true),
+            (Kind::Program, MessageDelivery::NextStep, false, true),
+        ] {
+            assert_eq!(
+                super::message_permits_promotion(source, delivery, bound.then_some(&turn)),
+                expected
+            );
+        }
+    }
+
     use super::*;
     use rsi_agent_session_protocol::{AgentMessageContent, MessageOptions};
 
@@ -2462,7 +2554,7 @@ mod tests {
                         message: AgentMessage {
                             message_id: MessageId::new(format!("large-control-{sequence}"))
                                 .unwrap(),
-                            source: AgentMessageSource::Human,
+                            source: rsi_agent_session_protocol::AgentMessageSource::Human,
                             content: vec![AgentMessageContent::Text {
                                 text: "x"
                                     .repeat(rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES),
@@ -2470,7 +2562,7 @@ mod tests {
                             options: MessageOptions::default(),
                         },
                         root_session_id: SessionId::new("large-control-root").unwrap(),
-                        delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                        delivery: MessageDelivery::NextStep,
                         bound_turn_id: None,
                         target: MessageTarget::NextStep,
                         wake_required: false,

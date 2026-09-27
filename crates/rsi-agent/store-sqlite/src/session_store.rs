@@ -318,6 +318,39 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn read_queue_slot(
+        &self,
+        session: &SessionId,
+        slot: &rsi_agent_session_protocol::QueueSlotId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        self.ensure_session_validated(session).await?;
+        let session = session.clone();
+        let slot = slot.clone();
+        self.with_reader(move |connection| {
+            let transaction=connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
+            let id:Option<String>=transaction.query_row("SELECT message_id FROM agent_messages WHERE session_id=?1 AND queue_slot_id=?2 ORDER BY accepted_control_seq DESC LIMIT 1",params![session.as_str(),slot.as_str()],|row|bounded_text(row,0,256)).optional().map_err(sql_error)?;
+            let entry=id.map(|id| MessageId::new(id).map_err(|error|StoreError::Corrupt(error.to_string())).and_then(|id|super::validation::read_indexed_agent_message(&transaction,&session,&id))).transpose()?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(entry)
+        }).await
+    }
+    async fn read_queue_mutation(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        self.ensure_session_validated(session).await?;
+        let session = session.clone();
+        let operation = operation.clone();
+        self.with_reader(move |connection| super::queue::read(connection, &session, &operation))
+            .await
+    }
+    async fn queue_mutation_count(&self, session: &SessionId) -> Result<usize> {
+        self.ensure_session_validated(session).await?;
+        let session = session.clone();
+        self.with_reader(move |connection| super::queue::count(connection, &session))
+            .await
+    }
     async fn read_turn_domain_usage(
         &self,
         session_id: &SessionId,
@@ -1386,14 +1419,24 @@ impl SessionStore for SqliteStore {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).map_err(sql_error)?;
             let mut statement = transaction.prepare("SELECT
                 message_id, delivery, target, bound_turn_id,
-                accepted_control_seq, (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL) FROM agent_messages WHERE session_id = ?1 AND state = 'pending' ORDER BY accepted_control_seq LIMIT ?2").map_err(sql_error)?;
+                accepted_control_seq, (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL), queue_slot_id, queue_timestamp_ms, queue_control_seq, message_source, has_turn_options FROM agent_messages WHERE session_id = ?1 AND state = 'pending' ORDER BY accepted_control_seq LIMIT ?2").map_err(sql_error)?;
             let rows = statement.query_map(params![session_id.as_str(), i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("bounded mailbox")], |row| {
-                Ok((bounded_text(row, 0, 256)?, bounded_text(row, 1, 16)?, bounded_text(row, 2, 16)?, optional_text(row, 3, 256)?, row.get::<_, i64>(4)?, row.get::<_, bool>(5)?))
+                Ok((bounded_text(row, 0, 256)?, bounded_text(row, 1, 16)?, bounded_text(row, 2, 16)?, optional_text(row, 3, 256)?, row.get::<_, i64>(4)?, row.get::<_, bool>(5)?, bounded_text(row,6,256)?, row.get::<_, i64>(7)?, row.get::<_, i64>(8)?, bounded_text(row,9,32)?,row.get::<_,bool>(10)?))
             }).map_err(sql_error)?;
             let mut pending = Vec::new();
             for row in rows {
-                let (id, delivery, target, bound, seq, permits_promotion) = row.map_err(sql_error)?;
+                let (id, delivery, target, bound, seq, permits_promotion, slot, time, order, source, has_turn_options) = row.map_err(sql_error)?;
                 pending.push(StorePendingMessage {
+                    queue_slot: rsi_agent_session_protocol::QueueSlot {id:rsi_agent_session_protocol::QueueSlotId::new(slot).map_err(|error|StoreError::Corrupt(error.to_string()))?, timestamp_ms:decode_u64("queue timestamp",time)?, control_seq:decode_u64("queue sequence",order)?},
+                    source_kind: match source.as_str() {
+                        "human"=>rsi_agent_session_protocol::AgentMessageSourceKind::Human,
+                        "agent"=>rsi_agent_session_protocol::AgentMessageSourceKind::Agent,
+                        "program"=>rsi_agent_session_protocol::AgentMessageSourceKind::Program,
+                        "completion"=>rsi_agent_session_protocol::AgentMessageSourceKind::Completion,
+                        "continuation"=>rsi_agent_session_protocol::AgentMessageSourceKind::Continuation,
+                        _=>return Err(StoreError::Corrupt("invalid queue source".into())),
+                    },
+                    has_turn_options,
                     permits_promotion,
                     message_id: MessageId::new(id).map_err(|error| StoreError::Corrupt(error.to_string()))?,
                     delivery: match delivery.as_str() { "next_turn" => MessageDelivery::NextTurn, "next_step" => MessageDelivery::NextStep, "steer" => MessageDelivery::Steer, _ => return Err(StoreError::Corrupt("invalid inspected delivery".into())) },
@@ -1411,6 +1454,18 @@ impl SessionStore for SqliteStore {
                 pending, active_turn_id, activation_phase, tree, };
             inspection.validate()?;
             Ok(inspection)
+        }).await
+    }
+
+    async fn agent_message_exists(&self, session: &SessionId, message: &MessageId) -> Result<bool> {
+        self.ensure_session_validated(session).await?;
+        let session = session.clone();
+        let message = message.clone();
+        self.with_reader(move |connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_messages WHERE session_id=?1 AND message_id=?2) FROM sessions WHERE session_id=?1",
+                params![session.as_str(), message.as_str()], |row| row.get(0),
+            ).optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(session.to_string()))
         }).await
     }
 
@@ -1493,7 +1548,7 @@ impl SessionStore for SqliteStore {
                             length(CAST(state_json AS BLOB)),
                             CASE WHEN length(CAST(state_json AS BLOB)) <= ?3
                                  THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
                      FROM agent_messages
                      WHERE session_id = ?1 AND state = 'pending'
                      ORDER BY accepted_control_seq",
@@ -2322,7 +2377,7 @@ fn read_indexed_message(
                                     length(CAST(state_json AS BLOB)),
                                     CASE WHEN length(CAST(state_json AS BLOB)) <= ?4
                                          THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
                              FROM agent_messages
                              WHERE session_id = ?1 AND message_id = ?2",
                             params![

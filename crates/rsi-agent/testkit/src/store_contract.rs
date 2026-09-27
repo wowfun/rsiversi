@@ -1,3 +1,5 @@
+mod queue;
+pub use queue::assert_queue_store_contract;
 mod program;
 pub use program::assert_program_store_contract;
 

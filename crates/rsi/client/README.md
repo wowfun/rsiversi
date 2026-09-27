@@ -170,3 +170,13 @@ External observation polls every 500 ms during activity and backs off unchanged
 idle observations to at most eight seconds. Local controls wake the observer.
 Detaching cancels controller waiters and drains local tasks promptly; mutations
 already admitted by the Host remain Host-owned and are never resent on detach.
+
+Queue presentation borrows pending routing metadata and the displayed Turn from
+its bounded projection. Sorting a view does not clone message identifiers or Turn
+identities; controls that outlive the view explicitly capture their own values.
+
+Exact queue-slot lookup borrows its indexed entry without allocating or sorting a view.
+
+The bounded queue projection exposes an immutable revision identity. Only a
+visible slot change replaces it; unrelated controls preserve it. Consumers must
+also bind displayed-Turn actions to their own current Turn identity.

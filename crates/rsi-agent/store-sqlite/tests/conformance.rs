@@ -1267,14 +1267,14 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
              INSERT INTO agent_messages
                  (session_id, message_id, accepted_control_seq, root_session_id,
                   message_source, message_json, target, wake_required, state, state_json,
-                  delivery, bound_turn_id, accepted_timestamp_ms)
+                  delivery, bound_turn_id, accepted_timestamp_ms, queue_slot_id, queue_timestamp_ms, queue_control_seq, has_turn_options)
              SELECT '{session}',
                     CASE WHEN value = {corrupt_count}
                          THEN printf('%.*c', 257, 'x')
                          ELSE printf('completion-%03d', value) END,
                     value, '{session}', 'completion', source.message_json,
                     'next_step', 0, 'pending', source.state_json,
-                    'next_step', NULL, 1
+                    'next_step', NULL, 1, printf('completion-slot-%03d', value), 1, value, 0
              FROM counter
              JOIN agent_messages AS source
                ON source.session_id = '{session}'
@@ -2156,6 +2156,118 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
     ));
     assert!(matches!(
         store.read_agent_mailbox(&session, None).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn queue_store_atomic_order_and_receipt_contract() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temporary.path()).unwrap();
+    rsi_agent_testkit::assert_queue_store_contract(&store, header("queue-contract")).await;
+    drop(store);
+    SqliteStore::verify(temporary.path()).unwrap();
+    let store = SqliteStore::open(temporary.path()).unwrap();
+    assert_eq!(
+        store
+            .queue_mutation_count(&SessionId::new("queue-contract").unwrap())
+            .await
+            .unwrap(),
+        4101
+    );
+    drop(store);
+    let connection = Connection::open(temporary.path().join("sessions.sqlite3")).unwrap();
+    // A valid canonical acceptance is still the wrong coordinate for this receipt.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE queue_mutations SET control_seq = 66 WHERE operation_id = 'replace'",
+                []
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    assert!(
+        matches!(SqliteStore::verify(temporary.path()), Err(StoreError::Corrupt(message)) if message.contains("queue receipt index"))
+    );
+}
+
+#[tokio::test]
+async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let session = SessionId::new("pending-options").unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let controls = (1..=2)
+        .map(|seq| {
+            let accepted = accepted_message_control(
+                seq,
+                &session,
+                &MessageId::new(format!("message-{seq}")).unwrap(),
+            );
+            let mut body = accepted.body().clone();
+            if let AgentControlRecordBody::MessageAccepted { message, .. } = &mut body
+                && seq == 2
+            {
+                message.options.sandbox = Some(rsi_sandbox::SandboxMode::ReadOnly);
+            }
+            AgentControlRecord::new(seq, seq, body).unwrap()
+        })
+        .collect();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header(session.as_str())),
+                facts: vec![],
+                controls,
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let pending = store.inspect_session(&session).await.unwrap().pending;
+    assert_eq!(
+        pending
+            .iter()
+            .map(|row| row.has_turn_options)
+            .collect::<Vec<_>>(),
+        [false, true]
+    );
+    // Corruption injection after preparation proves the warm metadata path does not
+    // inspect message payloads. An ordinary writer cannot mutate these immutable rows.
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let original: String = connection
+        .query_row(
+            "SELECT message_json FROM agent_messages WHERE message_id='message-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE agent_messages SET message_json='not JSON' WHERE message_id='message-1'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        store.inspect_session(&session).await.unwrap().pending,
+        pending
+    );
+    connection.execute("UPDATE agent_messages SET message_json=?1, has_turn_options=1 WHERE message_id='message-1'", [&original]).unwrap();
+    drop(connection);
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        store.inspect_session(&session).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(store);
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
         Err(StoreError::Corrupt(_))
     ));
 }

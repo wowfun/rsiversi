@@ -50,7 +50,7 @@ const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 15] = [
+const EXPECTED_TABLES: [(&str, &str); 16] = [
     ("program_runs", "CREATE TABLE program_runs (
         session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
         run_id TEXT NOT NULL,
@@ -198,6 +198,17 @@ const EXPECTED_TABLES: [(&str, &str); 15] = [
          ) STRICT",
     ),
     (
+        "queue_mutations",
+        "CREATE TABLE queue_mutations (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            operation_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            PRIMARY KEY (session_id, operation_id),
+            UNIQUE (session_id, control_seq),
+            FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
         "agent_messages",
         "CREATE TABLE agent_messages (
             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
@@ -206,9 +217,13 @@ const EXPECTED_TABLES: [(&str, &str); 15] = [
             delivery TEXT NOT NULL CHECK (delivery IN ('next_turn', 'next_step', 'steer')),
             bound_turn_id TEXT,
             accepted_timestamp_ms INTEGER NOT NULL CHECK (accepted_timestamp_ms > 0),
+            queue_slot_id TEXT NOT NULL,
+            queue_timestamp_ms INTEGER NOT NULL CHECK (queue_timestamp_ms > 0),
+            queue_control_seq INTEGER NOT NULL CHECK (queue_control_seq > 0 AND queue_control_seq <= accepted_control_seq),
             root_session_id TEXT NOT NULL,
             message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program')),
             message_json TEXT NOT NULL,
+            has_turn_options INTEGER NOT NULL CHECK (has_turn_options IN (0, 1)),
             target TEXT NOT NULL CHECK (target IN ('next_turn', 'next_step')),
             wake_required INTEGER NOT NULL CHECK (wake_required IN (0, 1)),
             state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'discarded')),
@@ -253,7 +268,11 @@ const EXPECTED_TABLES: [(&str, &str); 15] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 13] = [
+const EXPECTED_INDEXES: [(&str, &str); 14] = [
+    (
+        "agent_messages_by_slot",
+        "CREATE INDEX agent_messages_by_slot ON agent_messages (session_id, queue_slot_id, accepted_control_seq DESC)",
+    ),
     (
         "agent_controls_by_activation",
         "CREATE INDEX agent_controls_by_activation ON agent_controls(session_id, json_extract(control_json,'$.type'), json_extract(control_json,'$.activation_id'))",
@@ -904,6 +923,7 @@ mod domain;
 mod filesystem;
 mod program;
 mod program_graph;
+mod queue;
 mod reset;
 pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt, SqliteStoreResetRequest};
 mod preparation;

@@ -14,6 +14,7 @@ pub use command_submission::{CommandSubmission, CommandSubmissionView};
 mod lifetime;
 mod message;
 mod observation;
+mod queue;
 mod read;
 mod submission;
 pub use controller::commands::{
@@ -33,5 +34,6 @@ pub use observation::{
     ObservationFailure, ObservationKind, ObservationSink, observe_interactions,
     observe_projections, observe_session,
 };
+pub use queue::{QueueItem, QueueProjection, reconcile_queue, validate_queue_receipt};
 pub use read::read_with_capacity_retry;
 pub use submission::submit_with_reconciliation;

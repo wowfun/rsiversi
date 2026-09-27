@@ -254,3 +254,7 @@ remains specific to Conversation calls and cannot supersede program calls.
 
 Program entered-input Facts obey the same single-text and complete 8 KiB encoded
 notice bound as their mailbox message; entering a Step cannot broaden content.
+
+Queue mutation fingerprints hash the canonical closed envelope while counting its
+encoded bytes in one pass. Shape and content limits apply before hashing; the
+streaming writer enforces the same request byte limit without retaining JSON.

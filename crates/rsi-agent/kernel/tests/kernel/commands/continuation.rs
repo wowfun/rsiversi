@@ -1611,3 +1611,100 @@ async fn commit_time_quiescence_rejection_is_retryable_busy_without_charging() {
     drop(lease);
     fixture.stop().await;
 }
+
+#[tokio::test]
+async fn queue_replace_does_not_resupersede_and_withdraw_wakes_existing_automatic_waiter() {
+    use rsi_agent_session_protocol::{
+        QueueMutation, QueueMutationOutcome, QueueMutationRequest, QueueOperationId, QueueSlotId,
+    };
+    let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    let lease = arm(&fixture).await;
+    let _reservation = reserve(&fixture, &lease).await;
+    fixture
+        .kernel
+        .submit_message(SubmitMessage {
+            session: SubmitSession::Resume(
+                fixture
+                    .kernel
+                    .prepare_resume(&fixture.session_id)
+                    .await
+                    .unwrap(),
+            ),
+            message: mailbox_message("human-blocker"),
+            delivery: MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let automatic_before = fixture
+        .store
+        .read_agent_message(&fixture.session_id, &input().message_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        automatic_before.state,
+        rsi_agent_store_protocol::StoreAgentMessageState::Discarded { .. }
+    ));
+    {
+        let idle =
+            SessionContinuations::wait_idle(&fixture.kernel, &lease, CancellationToken::new());
+        tokio::pin!(idle);
+        assert!(futures_util::poll!(idle.as_mut()).is_pending());
+        let request = QueueMutationRequest {
+            operation_id: QueueOperationId::new("replace-human").unwrap(),
+            slot_id: QueueSlotId::new("human-blocker").unwrap(),
+            expected_message_id: MessageId::new("human-blocker").unwrap(),
+            mutation: QueueMutation::Replace {
+                new_message_id: MessageId::new("edited-human").unwrap(),
+                content: vec![AgentMessageContent::Text {
+                    text: "edited blocking input".into(),
+                }],
+            },
+        };
+        fixture
+            .kernel
+            .mutate_queue(&fixture.session_id, request)
+            .await
+            .unwrap();
+        assert!(futures_util::poll!(idle.as_mut()).is_pending());
+        assert_eq!(
+            fixture
+                .store
+                .read_agent_message(&fixture.session_id, &input().message_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            automatic_before
+        );
+        let receipt = fixture
+            .kernel
+            .mutate_queue(
+                &fixture.session_id,
+                QueueMutationRequest {
+                    operation_id: QueueOperationId::new("withdraw-human").unwrap(),
+                    slot_id: QueueSlotId::new("human-blocker").unwrap(),
+                    expected_message_id: MessageId::new("edited-human").unwrap(),
+                    mutation: QueueMutation::Withdraw,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, QueueMutationOutcome::Withdrawn);
+        tokio::time::timeout(std::time::Duration::from_secs(2), idle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .read_agent_message(&fixture.session_id, &input().message_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            automatic_before,
+            "withdraw does not resurrect the superseded automatic input"
+        );
+    }
+    drop(lease);
+    fixture.stop().await;
+}

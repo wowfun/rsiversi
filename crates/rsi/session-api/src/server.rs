@@ -207,6 +207,19 @@ fn root_operations(
             }
         }),
     )?;
+    let header_service = service.clone();
+    let header_scratch = scratch.clone();
+    let read_header = registrar.register(
+        Operation::ReadHeader.spec(),
+        json_handler(move |_, request: wire::Attach| {
+            let service = header_service.clone();
+            let scratch = header_scratch.clone();
+            async move {
+                let reservation = scratch.reserve(Operation::ReadHeader).await?;
+                admitted(service.read_header(&request.session_id).await, reservation)
+            }
+        }),
+    )?;
     let recent = registrar.register(
         Operation::Recent.spec(),
         json_handler(move |_, request: wire::Recent| {
@@ -231,7 +244,7 @@ fn root_operations(
             }
         }),
     )?;
-    Ok(vec![create, attach, recent])
+    Ok(vec![create, attach, read_header, recent])
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.
 fn handle_operations(
@@ -357,6 +370,21 @@ fn handle_operations(
         add!(Image, |owner, request: SubmitDirectImage| async move {
             owner.generate_image(request).await
         }),
+        add!(
+            MutateQueue,
+            |owner, request: rsi_agent_session_protocol::QueueMutationRequest| async move {
+                request.validate().map_err(|error| {
+                    rsi_session_protocol::SessionError::Invalid(error.to_string())
+                })?;
+                owner.mutate_queue(request).await
+            }
+        ),
+        add!(
+            QueueMutationStatus,
+            |owner, operation: rsi_agent_session_protocol::QueueOperationId| async move {
+                owner.queue_mutation_status(&operation).await
+            }
+        ),
         add!(MessageStatus, |owner, message: MessageId| async move {
             owner.message_status(&message).await
         }),

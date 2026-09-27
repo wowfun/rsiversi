@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
@@ -26,7 +27,6 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
-rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

@@ -25,8 +25,8 @@ cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
 
-Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` (26). Schema 25
-and earlier versions are rejected before recovery or writes; there is no implicit
+Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` defined in
+[src/lib.rs](src/lib.rs). Earlier versions are rejected before recovery or writes; there is no implicit
 migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.
 
@@ -91,7 +91,10 @@ and an optional bound steering Turn separately from their mutable current
 target. Pending next-Step completion and bound human-steer messages can be
 promoted at terminal settlement. Human-steer ready keys retain their acceptance
 timestamp/control sequence; Completion ready keys retain promotion order.
-Both adapters validate this against the canonical control stream.
+Both adapters validate this against the canonical control stream. A bound steer
+requires the matching current activation in Running or Parked phase. Duplicate
+queue operation IDs are invalid commits, not transient I/O failures; rejection
+leaves both streams and all derived indexes unchanged.
 
 Ready-message pages carry the authority-neutral source kind without message
 bodies. The source kind comes from the same classifier as the mailbox index;
@@ -262,3 +265,34 @@ checks run during SQLite verification; they do not decide execution policy.
 
 SQLite indexes Program activation counterparts by Session, control kind and exact
 activation identity. Proof lookup does not scan unrelated activation history.
+
+## Queue successors and receipts
+
+A queue slot starts with the initial MessageId and survives Human replacement or
+conversion. Each successor has a new MessageId, acceptance timestamp and control
+sequence. Append-only successor controls retain the predecessor and inherit its
+original ready-order key: root grouping, timestamp, SessionId and ready control
+sequence. Neither original payload nor delivery intent is rewritten, including
+prefixes already pinned by a fork. Steer promotion preserves that same order.
+
+Store admission discards the predecessor and its ready row before accepting the
+successor in one transaction. A full 64-message mailbox can therefore replace an
+entry without temporary capacity overflow; failure rolls the entire transaction
+back. Store graph validation independently rejects a successor whose
+predecessor is no longer pending or belongs to another slot.
+
+Each admitted queue operation retains a receipt of at most 4 KiB, indexed by
+operation identity into the canonical control stream until Session deletion.
+There is no lifetime receipt count limit. Both success and rejection must remain
+replayable to distinguish an unknown outcome from a new request. Disk history may
+grow with use; indexed reads and bounded append batches do not load that history
+into memory. SQLite's offline verifier checks derived indices against canonical
+controls. Receipt counts are an inspection/validation operation, not admission.
+
+`agent_message_exists` checks an indexed identity without loading message content.
+It uses the Store's validated Session boundary; callers reserve only metadata
+capacity for this probe. Full payload reads retain their separate byte budget.
+
+`message_permits_promotion` owns the shared ingress promotion rule used by Store
+validation and client projections. Source kind, resolved delivery and an exact
+Turn binding determine the result; adapters do not duplicate that decision.

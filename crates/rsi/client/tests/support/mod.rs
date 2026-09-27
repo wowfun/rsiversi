@@ -86,6 +86,20 @@ impl Handle {
 
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn mutate_queue(
+        &self,
+        _: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::QueueMutationReceipt> {
+        panic!("queue mutation outside this fixture's behavior")
+    }
+    async fn queue_mutation_status(
+        &self,
+        _: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>>
+    {
+        panic!("queue lookup outside this fixture's behavior")
+    }
+
     async fn tree_metrics(
         &self,
         _: bool,
@@ -308,6 +322,12 @@ impl SessionHandle for Handle {
 pub struct Service(pub Vec<Arc<Handle>>);
 #[async_trait]
 impl SessionService for Service {
+    async fn read_header(
+        &self,
+        _: &rsi_agent_session_protocol::SessionId,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        panic!("unexpected durable Header read")
+    }
     async fn create(
         &self,
         _: rsi_session_protocol::CreateSession,

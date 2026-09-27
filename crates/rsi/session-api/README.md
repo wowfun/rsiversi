@@ -13,8 +13,8 @@ failures as missing configuration.
 
 
 The current Session format is 18. Operations negotiate their own versions:
-create v7; attach, recent, draft-snapshot, select-preset and inspect v6; history,
-observe and read-message v5; submit v4. Message-status is v3. Interactions, questions
+create and inspect v7; attach, recent, draft-snapshot, select-preset and observe v6;
+history and read-message v5; submit v4. Message-status is v3. Interactions, questions
 and answer-question are v2 for typed closed reviews; older closed decoders are not
 compatible. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.
@@ -170,3 +170,22 @@ a distinct Data mutation with a 512 KiB encoded request ceiling covering the
 Clients validate operation-specific terminal, attachment, stream, controller and
 input receipt coordinates before exposing replies. Unsupported terminal policy
 and native failures retain the bounded typed terminal error taxonomy.
+
+`mutate-queue` is a Data mutation with an 8 MiB request and 8 KiB reply ceiling;
+`queue-mutation-status` is a Control read with 8 KiB bounds. Both use the existing
+exact Session/Header target and grants. Replacement content uses the same media
+and captured-reference verification as submission. The client validates the
+receipt's operation, request fingerprint, slot and predecessor, and treats an
+untrustworthy mutation reply as an unknown outcome. It retains the frozen request
+for status lookup or an explicit identical retry; transport never invents a new
+operation or replays a mutation automatically.
+Inspection v7 includes pending queue-slot identity, source class and invocation
+option metadata. Observation v6 carries the new successor and queue-receipt
+control variants. These payload changes require their own operation versions,
+independently of the new Header read operation.
+
+`SessionService::read_header` reads one durable Store Header by SessionId without
+attaching, creating a handle, touching activity or loading transcript. Unpublished
+drafts are absent. The authenticated `session/read-header` v1 operation exposes
+the same read and validates the echoed identity; narrowed Session contribution
+clients do not gain this deployment-wide operation.

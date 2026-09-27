@@ -354,3 +354,49 @@ Initial Turn input classification follows the exact acceptance message identitie
 through paged claim Facts until those inputs enter or the first model intent
 begins. Later steering cannot change this classification. Root-only callers enforce
 lineage separately; automatic-work adapters select allowed continuation domains.
+
+## Queue mutation
+
+`mutate_queue` changes one Human message only while it remains Pending. The
+request names a stable QueueSlotId and uses `expected_message_id` as its sole
+compare-and-set predecessor. Replace supplies complete bounded content and a new
+MessageId, retaining delivery, options and Header. Convert supplies a new
+MessageId and the exact displayed TurnId; it requires default options and binds
+Steer to that Turn without an idle fallback. Withdraw discards only the pending
+message. A claim that wins admission makes these operations reject; withdrawal
+never becomes Turn cancellation. Other message sources remain observable but
+cannot be edited through this surface.
+
+`CancelTarget::Message` retains its stronger request-cancellation contract for
+ACP, Program and message-driving clients: pending input is discarded and claimed
+input can cancel its Turn. A superseded MessageId is terminal and never redirects
+cancellation to its successor. GUI/TUI Stop remains exact-Turn cancellation.
+
+Every mutation carries a caller-frozen operation identity. `queue_mutation_status`
+returns its compact durable receipt after restart. Same identity and fingerprint
+returns the original receipt; a different fingerprint conflicts. Unknown outcomes
+require query or an identical resend, never a new operation identity. Validation,
+authorization and capacity failures before admission have no receipt. Once
+admitted, both success and domain rejection commit a receipt atomically with any
+mailbox change. The [Store contract](../store-protocol/README.md) owns receipt
+retention and canonical index validation.
+
+A converted message whose bound Turn ends before claim follows normal terminal
+or recovery promotion to NextTurn, retaining its original queue ordering. The
+mutation does not change the immutable intent of its predecessor. Replace is not
+fresh submission: it does not supersede automatic continuations again. Withdraw
+and Convert remove their actual blockers and notify existing waiters to reevaluate;
+neither revives superseded work nor promises immediate execution. Ordinary
+non-Continuation NextTurn acceptance keeps its existing automatic-work priority.
+
+Successful and rejected admitted operations retain compact durable receipts until
+Session deletion. There is no lifetime operation quota: a long-lived Session must
+remain editable. Identical retries recover the original result; clients stop on a
+known rejection instead of issuing new identities for the same stale intent.
+Receipt lookup is indexed and does not load all earlier operations. Admission,
+individual payloads and append batches remain bounded.
+
+An already-promoted Steer remains a waking NextTurn input when replaced. The new
+acceptance retains Steer intent without rebinding to a later Turn; the old
+acceptance retains its original Turn binding for audit. Queue mutation shares
+the per-Session submission admission gate with both NextTurn and NextStep claims.

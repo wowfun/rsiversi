@@ -916,6 +916,38 @@ impl SessionStore for FactReadRaceStore {
         Ok(page)
     }
 
+    async fn agent_message_exists(
+        &self,
+        session: &SessionId,
+        message: &MessageId,
+    ) -> rsi_agent_store_protocol::Result<bool> {
+        self.inner.agent_message_exists(session, message).await
+    }
+
+    async fn read_queue_slot(
+        &self,
+        session: &SessionId,
+        slot: &rsi_agent_session_protocol::QueueSlotId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreAgentMessage>> {
+        self.inner.read_queue_slot(session, slot).await
+    }
+
+    async fn read_queue_mutation(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>>
+    {
+        self.inner.read_queue_mutation(session, operation).await
+    }
+
+    async fn queue_mutation_count(
+        &self,
+        session: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<usize> {
+        self.inner.queue_mutation_count(session).await
+    }
+
     async fn read_agent_message(
         &self,
         session_id: &SessionId,
@@ -1691,3 +1723,6 @@ use tool_origin::control_tool_caller;
 
 #[path = "kernel/structured.rs"]
 mod structured;
+
+#[path = "kernel/queue.rs"]
+mod queue;

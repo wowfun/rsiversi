@@ -87,7 +87,14 @@ control prefixes and feeding separate
 mailbox, ready, active-activation and bounded domain-head projections. Domain
 version/request membership and exact canonical update positions are verified in
 that same pass. Domain indexes retain positions and derived capacity metadata;
-only controls contain the authoritative complete state. Completed pending payloads
+only controls contain the authoritative complete state. Queue receipt indexes
+are checked against the already decoded canonical record's
+operation identity and sequence, without rereading that receipt body. Cold proof
+still grows with session history and may repeat after validation-cache eviction.
+Rejected receipts have no preceding mutation controls to read; successful edits
+also validate their one- or two-control mutation boundary. Receipt retention has
+no expiry, so these costs remain part of opening long-lived sessions.
+Completed pending payloads
 are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not
 multiply Header reads. Activation guards require this proof even when
@@ -208,7 +215,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 26 admits version 2 selected-reference envelopes and the current mandatory Agent-preset
+The exact schema version 28 stores immutable queue successors and a lifetime-retained queue operation index with individually bounded receipts. It rejects older schema versions without migration or reset. The format admits version 2 selected-reference envelopes and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one
@@ -255,3 +262,14 @@ most 4096 completed samples. Default builds contain no timing instrumentation.
 The Agent CI job explicitly lints this feature and runs its ordinary tests,
 including a small warm-reader case with exact sample and validation counts.
 The larger contention report remains an ignored opt-in test using the same case.
+
+Pending inspection reads a stored `has_turn_options` scalar, computed from the
+validated acceptance at append time. It never parses message JSON to determine
+queue action availability. Canonical/index validation checks the scalar against
+the decoded immutable message, including on reopen and offline verification.
+
+Cold index validation derives each accepted queue slot once from the canonical
+stream and its immediately preceding successor link, then shares it with the
+mailbox and ready projections. It does not re-query or re-decode that link for
+each projection. Successor and receipt boundary proofs still read their bounded
+adjacent controls; these checks are not a constant-cost session-open guarantee.

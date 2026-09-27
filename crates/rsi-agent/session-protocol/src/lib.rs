@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod queue;
+pub use queue::*;
 mod program;
 pub use program::*;
 mod compaction;
@@ -179,6 +181,8 @@ string_identity!(TurnId, "turn");
 string_identity!(EffectId, "effect");
 string_identity!(ProgramRunId, "program run");
 string_identity!(MessageId, "message");
+string_identity!(QueueSlotId, "queue slot");
+string_identity!(QueueOperationId, "queue operation");
 string_identity!(ActivationId, "activation");
 string_identity!(StepId, "step");
 string_identity!(DomainRequestId, "domain request");
@@ -423,8 +427,9 @@ pub enum AgentMessageSource {
     },
 }
 
-/// Authority-neutral, in-process classification of an accepted message source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Authority-neutral classification of an accepted message source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentMessageSourceKind {
     /// Bounded `ProgramRun` terminal notice.
     Program,
@@ -707,6 +712,8 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDiscardReason {
+    /// Human input was replaced or converted by an atomic queue mutation.
+    Replaced,
     /// Program completion authority belonged to an earlier process generation.
     ProgramInterrupted,
     /// Caller cancelled the message before claim.
@@ -873,6 +880,14 @@ pub enum AgentControlRecordBody {
         target: MessageTarget,
         wake_required: bool,
     },
+    /// A pending Human predecessor was retired immediately before its successor acceptance.
+    MessageSuccessor {
+        predecessor_id: MessageId,
+        successor_id: MessageId,
+        slot: QueueSlot,
+    },
+    /// Compact durable result for an admitted queue operation.
+    QueueMutationRecorded { receipt: QueueMutationReceipt },
     /// One message entered an exact activation/turn/step Fact boundary.
     MessageClaimed {
         message_id: MessageId,
@@ -936,6 +951,19 @@ impl AgentControlRecordBody {
     #[allow(clippy::too_many_lines)] // One closed control enum validates each owning payload at this boundary.
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::MessageSuccessor {
+                predecessor_id,
+                successor_id,
+                slot,
+            } => {
+                if predecessor_id == successor_id {
+                    return Err(SessionError::Invalid(
+                        "queue successor repeats its predecessor identity".into(),
+                    ));
+                }
+                slot.validate(u64::MAX)
+            }
+            Self::QueueMutationRecorded { receipt } => receipt.validate(),
             Self::ProgramRun { run_id, event } => event.validate(run_id),
             Self::ProgramCompletionReserved { ordinal, .. } => {
                 if *ordinal == 0 || *ordinal > MAXIMUM_PROGRAM_CHILDREN {
@@ -1084,6 +1112,13 @@ impl AgentControlRecord {
             ));
         }
         body.validate()?;
+        if matches!(&body, AgentControlRecordBody::QueueMutationRecorded { receipt } if receipt.control_seq != seq)
+            || matches!(&body, AgentControlRecordBody::MessageSuccessor { slot, .. } if slot.control_seq >= seq)
+        {
+            return Err(SessionError::Invalid(
+                "queue control boundary disagrees with its record".into(),
+            ));
+        }
         let mut record = Self {
             seq,
             timestamp_ms,

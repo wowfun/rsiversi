@@ -142,6 +142,9 @@ pub(super) fn failure(
             ) && error.validate().is_ok()
         }
         Failure::Invalid { message } => message.len() <= 4096,
+        Failure::QueueOperationConflict { .. } | Failure::QueueOutcomeUnknown { .. } => {
+            operation == Operation::MutateQueue
+        }
         Failure::DraftConflict { .. } => operation == Operation::Create,
         Failure::Conflict { .. } => operation == Operation::Image,
         Failure::MessageConflict { .. } | Failure::MessageOutcomeUnknown { .. } => {
@@ -186,6 +189,24 @@ impl State {
 }
 #[async_trait]
 impl SessionService for SessionClient {
+    async fn read_header(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_session_protocol::Result<SessionHeader> {
+        let header: SessionHeader = self
+            .state
+            .call(
+                Operation::ReadHeader,
+                &wire::Attach {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await?;
+        if header.session_id() != session_id {
+            return Err(malformed(Operation::ReadHeader));
+        }
+        Ok(header)
+    }
     async fn create(
         &self,
         request: CreateSession,
@@ -660,6 +681,45 @@ impl SessionHandle for Handle {
             message_id,
             Operation::MessageStatus,
         )
+    }
+    async fn mutate_queue(
+        &self,
+        request: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::QueueMutationReceipt> {
+        request
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let unknown = || SessionError::QueueOutcomeUnknown {
+            operation_id: request.operation_id.clone(),
+        };
+        let result: rsi_session_protocol::Result<rsi_agent_session_protocol::QueueMutationReceipt> =
+            self.call(Operation::MutateQueue, &request).await;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(
+                SessionError::Api(ApiError::OutcomeUnknown)
+                | SessionError::QueueOutcomeUnknown { .. },
+            ) => return Err(unknown()),
+            Err(error) => return Err(error),
+        };
+        if receipt.validate_for(&request).is_err() {
+            return Err(unknown());
+        }
+        Ok(receipt)
+    }
+    async fn queue_mutation_status(
+        &self,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>>
+    {
+        let receipt: Option<rsi_agent_session_protocol::QueueMutationReceipt> =
+            self.call(Operation::QueueMutationStatus, operation).await?;
+        if receipt.as_ref().is_some_and(|receipt| {
+            receipt.validate().is_err() || &receipt.operation_id != operation
+        }) {
+            return Err(malformed(Operation::QueueMutationStatus));
+        }
+        Ok(receipt)
     }
     async fn generate_image(
         &self,

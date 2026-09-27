@@ -1,3 +1,5 @@
+#[path = "client_tests/queue.rs"]
+mod queue;
 use super::*;
 
 #[path = "client_tests/commands.rs"]
@@ -591,7 +593,7 @@ fn session_client_requires_current_header_operation_versions() {
         (Operation::Recent, 6),
         (Operation::DraftSnapshot, 6),
         (Operation::SelectPreset, 6),
-        (Operation::Inspect, 6),
+        (Operation::Inspect, 7),
     ];
     for (operation, version) in versions {
         let current = operation.spec();
@@ -609,13 +611,10 @@ fn session_client_requires_current_header_operation_versions() {
             Err(ApiError::Unavailable)
         ));
     }
-    for operation in [
-        Operation::History,
-        Operation::Observe,
-        Operation::ReadMessage,
-    ] {
+    for operation in [Operation::History, Operation::ReadMessage] {
         assert_eq!(operation.spec().id.version(), 5);
     }
+    assert_eq!(Operation::Observe.spec().id.version(), 6);
     assert_eq!(Operation::Submit.spec().id.version(), 4);
     assert_eq!(Operation::MessageStatus.spec().id.version(), 3);
     assert!(SessionClient::new(Remote::new()).is_ok());

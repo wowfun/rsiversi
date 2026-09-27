@@ -372,6 +372,7 @@ impl SessionStore for MemoryStore {
                     last_settled_control_seq: 0,
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
                     domain_versions: BTreeMap::new(),
+                    queue_mutations: BTreeMap::new(),
                     domain_requests: BTreeMap::new(),
                     domain_usage: BTreeMap::new(),
                 },
@@ -512,6 +513,72 @@ impl SessionStore for MemoryStore {
         Ok(Some(record.clone()))
     }
 
+    async fn read_queue_slot(
+        &self,
+        session: &SessionId,
+        slot: &rsi_agent_session_protocol::QueueSlotId,
+    ) -> Result<Option<StoreAgentMessage>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.sessions.contains_key(session) {
+            return Err(StoreError::NotFound(session.to_string()));
+        }
+        Ok(state
+            .queue_slots
+            .get(&(session.clone(), slot.clone()))
+            .and_then(|id| state.agent_messages.get(&(session.clone(), id.clone())))
+            .cloned())
+    }
+    async fn read_queue_mutation(
+        &self,
+        session: &SessionId,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session)
+            .ok_or_else(|| StoreError::NotFound(session.to_string()))?;
+        let Some(seq) = session.queue_mutations.get(operation) else {
+            return Ok(None);
+        };
+        match session
+            .controls
+            .get(
+                usize::try_from(
+                    seq.checked_sub(1).ok_or_else(|| {
+                        StoreError::Corrupt("queue receipt cursor is zero".into())
+                    })?,
+                )
+                .map_err(|_| StoreError::Corrupt("queue receipt cursor overflow".into()))?,
+            )
+            .map(AgentControlRecord::body)
+        {
+            Some(AgentControlRecordBody::QueueMutationRecorded { receipt })
+                if &receipt.operation_id == operation =>
+            {
+                Ok(Some(receipt.clone()))
+            }
+            _ => Err(StoreError::Corrupt("queue receipt index differs".into())),
+        }
+    }
+    async fn queue_mutation_count(&self, session: &SessionId) -> Result<usize> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(state
+            .sessions
+            .get(session)
+            .ok_or_else(|| StoreError::NotFound(session.to_string()))?
+            .queue_mutations
+            .len())
+    }
     async fn read_turn_domain_usage(
         &self,
         session_id: &SessionId,
@@ -1119,6 +1186,10 @@ impl SessionStore for MemoryStore {
                 candidate == session_id && matches!(entry.state, StoreAgentMessageState::Pending)
             })
             .map(|(_, entry)| StorePendingMessage {
+                queue_slot: entry.queue_slot.clone(),
+                source_kind: entry.message.source.kind(),
+                has_turn_options: entry.message.options
+                    != rsi_agent_session_protocol::MessageOptions::default(),
                 permits_promotion: entry.permits_promotion(),
                 message_id: entry.message.message_id.clone(),
                 delivery: entry.delivery,
@@ -1147,6 +1218,19 @@ impl SessionStore for MemoryStore {
         };
         inspection.validate()?;
         Ok(inspection)
+    }
+
+    async fn agent_message_exists(&self, session: &SessionId, message: &MessageId) -> Result<bool> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.sessions.contains_key(session) {
+            return Err(StoreError::NotFound(session.to_string()));
+        }
+        Ok(state
+            .agent_messages
+            .contains_key(&(session.clone(), message.clone())))
     }
 
     async fn read_agent_message(
@@ -1658,12 +1742,36 @@ fn apply_atomic_memory_append(
                 last_settled_control_seq: 0,
                 control_prefix_digest: control_digest,
                 domain_versions: BTreeMap::new(),
+                queue_mutations: BTreeMap::new(),
                 domain_requests: BTreeMap::new(),
                 domain_usage: BTreeMap::new(),
             },
         );
     }
-    for record in &append.controls {
+    for (index, record) in append.controls.iter().enumerate() {
+        if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
+            && let Some(AgentControlRecordBody::QueueMutationRecorded { receipt }) =
+                append.controls.get(index + 1).map(AgentControlRecord::body)
+            && receipt.outcome == rsi_agent_session_protocol::QueueMutationOutcome::Withdrawn
+        {
+            let predecessor = state
+                .agent_messages
+                .get(&(session_id.clone(), message_id.clone()))
+                .ok_or_else(|| StoreError::Corrupt("queue predecessor is absent".into()))?;
+            rsi_agent_store_protocol::validate_queue_withdrawal(predecessor, receipt)?;
+        }
+        if let AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } = record.body() {
+            let predecessor = state
+                .agent_messages
+                .get(&(session_id.clone(), predecessor_id.clone()))
+                .ok_or_else(|| StoreError::Corrupt("queue predecessor is absent".into()))?;
+            rsi_agent_store_protocol::validate_queue_successor(
+                predecessor,
+                record,
+                &append.controls[index + 1],
+                &append.controls[index + 2],
+            )?;
+        }
         let controls = std::slice::from_ref(record);
         apply_program_updates(state, &session_id, controls)?;
         apply_message_updates(state, &session_id, minimum_entered_fact_seq, controls)?;
@@ -1834,6 +1942,31 @@ fn apply_message_updates(
 ) -> Result<()> {
     for record in controls {
         match record.body() {
+            AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } => {
+                let entry = state
+                    .agent_messages
+                    .get_mut(&(session_id.clone(), predecessor_id.clone()))
+                    .ok_or_else(|| StoreError::Corrupt("queue predecessor is absent".into()))?;
+                entry.state = StoreAgentMessageState::Discarded {
+                    reason: rsi_agent_session_protocol::MessageDiscardReason::Replaced,
+                    control_seq: record.seq(),
+                };
+            }
+            AgentControlRecordBody::QueueMutationRecorded { receipt } => {
+                let session = state
+                    .sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+                if session
+                    .queue_mutations
+                    .insert(receipt.operation_id.clone(), record.seq())
+                    .is_some()
+                {
+                    return Err(StoreError::Invalid(
+                        "queue receipt identity conflict".into(),
+                    ));
+                }
+            }
             AgentControlRecordBody::MessageAccepted {
                 message,
                 delivery,
@@ -1871,12 +2004,40 @@ fn apply_message_updates(
                         "mailbox exceeds its pending-message bound".into(),
                     ));
                 }
+                let queue_slot = state
+                    .sessions
+                    .get(session_id)
+                    .and_then(|session| {
+                        record
+                            .seq()
+                            .checked_sub(2)
+                            .and_then(|index| usize::try_from(index).ok())
+                            .and_then(|index| session.controls.get(index))
+                    })
+                    .and_then(|previous| match previous.body() {
+                        AgentControlRecordBody::MessageSuccessor {
+                            slot, successor_id, ..
+                        } if successor_id == &message.message_id => Some(slot.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        rsi_agent_session_protocol::QueueSlot::initial(
+                            &message.message_id,
+                            record.timestamp_ms(),
+                            record.seq(),
+                        )
+                    });
+                state.queue_slots.insert(
+                    (session_id.clone(), queue_slot.id.clone()),
+                    message.message_id.clone(),
+                );
                 let key = (session_id.clone(), message.message_id.clone());
                 if state
                     .agent_messages
                     .insert(
                         key,
                         StoreAgentMessage {
+                            queue_slot,
                             delivery: *delivery,
                             bound_turn_id: bound_turn_id.clone(),
                             accepted_timestamp_ms: record.timestamp_ms(),
@@ -2273,6 +2434,8 @@ fn apply_activation_updates(
             | AgentControlRecordBody::MessageDiscarded { .. }
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
+            | AgentControlRecordBody::MessageSuccessor { .. }
+            | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. } => {}
         }
     }
@@ -2299,11 +2462,16 @@ fn apply_ready_updates(
                         "ready index repeats a message identity".into(),
                     ));
                 }
+                let slot = &state
+                    .agent_messages
+                    .get(&message_key)
+                    .ok_or_else(|| StoreError::Corrupt("ready message is absent".into()))?
+                    .queue_slot;
                 let key = (
                     root_session_id.clone(),
-                    record.timestamp_ms(),
+                    slot.timestamp_ms,
                     session_id.clone(),
-                    record.seq(),
+                    slot.control_seq,
                 );
                 state.ready_messages.insert(
                     key.clone(),
@@ -2311,14 +2479,18 @@ fn apply_ready_updates(
                         session_id: session_id.clone(),
                         message_id: message.message_id.clone(),
                         source_kind: message.source.kind(),
-                        control_seq: record.seq(),
-                        timestamp_ms: record.timestamp_ms(),
+                        control_seq: slot.control_seq,
+                        timestamp_ms: slot.timestamp_ms,
                         target: *target,
                     },
                 );
                 state.ready_keys.insert(message_key, key);
             }
-            AgentControlRecordBody::MessageClaimed { message_id, .. }
+            AgentControlRecordBody::MessageSuccessor {
+                predecessor_id: message_id,
+                ..
+            }
+            | AgentControlRecordBody::MessageClaimed { message_id, .. }
             | AgentControlRecordBody::MessageDiscarded { message_id, .. } => {
                 let message_key = (session_id.clone(), message_id.clone());
                 if let Some(key) = state.ready_keys.remove(&message_key) {
@@ -2369,6 +2541,7 @@ fn apply_ready_updates(
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
         }
     }

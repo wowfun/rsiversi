@@ -550,3 +550,9 @@ Program child preparation derives direct-child segments and tree capacity from
 one validated subtree snapshot. Cancellation drains admitted source mutations and
 rechecks membership until stable, reusing each snapshot for cancellation and pending
 input retirement; it cannot freeze membership before concurrent source work drains.
+
+Queue conversion checks current resident Turn authority under Session submission
+admission. Running Turns and permanent flush failures are not evictable; startup
+repair settles unfinished durable Turns before the service is exposed. A cold
+Session therefore has no live conversion target. Receipt replay, replacement and
+withdrawal do not load a new Agent composition or reserve resident capacity.

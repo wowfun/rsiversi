@@ -177,7 +177,32 @@ pub(super) fn apply_atomic_sqlite_append(
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("control-prefix digest", &digest))?;
-    for record in &append.controls {
+    for (index, record) in append.controls.iter().enumerate() {
+        if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
+            && let Some(AgentControlRecordBody::QueueMutationRecorded { receipt }) =
+                append.controls.get(index + 1).map(AgentControlRecord::body)
+            && receipt.outcome == rsi_agent_session_protocol::QueueMutationOutcome::Withdrawn
+        {
+            let predecessor = super::validation::read_indexed_agent_message(
+                transaction,
+                &append.session_id,
+                message_id,
+            )?;
+            rsi_agent_store_protocol::validate_queue_withdrawal(&predecessor, receipt)?;
+        }
+        if let AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } = record.body() {
+            let predecessor = super::validation::read_indexed_agent_message(
+                transaction,
+                &append.session_id,
+                predecessor_id,
+            )?;
+            rsi_agent_store_protocol::validate_queue_successor(
+                &predecessor,
+                record,
+                &append.controls[index + 1],
+                &append.controls[index + 2],
+            )?;
+        }
         insert_control(
             transaction,
             &append.session_id,
@@ -285,6 +310,12 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } => {
+                self.insert_message_discarded(predecessor_id, MessageDiscardReason::Replaced)
+            }
+            AgentControlRecordBody::QueueMutationRecorded { receipt } => {
+                super::queue::insert(self.transaction, self.session_id, receipt)
+            }
             AgentControlRecordBody::ProgramCompletionReserved {
                 activation_id,
                 run_id,
@@ -450,13 +481,14 @@ impl ControlIndexer<'_, '_> {
                 "mailbox exceeds its pending-message bound".into(),
             ));
         }
+        let slot = super::queue::acceptance_slot(self.transaction, self.session_id, self.record)?;
         self.transaction
             .execute(
                 "INSERT INTO agent_messages
                     (session_id, message_id, accepted_control_seq, root_session_id,
                      message_source, message_json, target, wake_required, state, state_json,
-                     delivery, bound_turn_id, accepted_timestamp_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12)",
+                     delivery, bound_turn_id, accepted_timestamp_ms, queue_slot_id, queue_timestamp_ms, queue_control_seq, has_turn_options)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     self.session_id.as_str(),
                     message.message_id.as_str(),
@@ -470,6 +502,10 @@ impl ControlIndexer<'_, '_> {
                     message_delivery_name(delivery),
                     bound_turn_id.map(TurnId::as_str),
                     sqlite_u64("acceptance timestamp", self.record.timestamp_ms())?,
+                    slot.id.as_str(),
+                    sqlite_u64("queue timestamp", slot.timestamp_ms)?,
+                    sqlite_u64("queue control", slot.control_seq)?,
+                    message.options != rsi_agent_session_protocol::MessageOptions::default(),
                 ],
             )
             .map_err(sql_error)?;
@@ -486,8 +522,8 @@ impl ControlIndexer<'_, '_> {
                     root_session_id.as_str(),
                     self.session_id.as_str(),
                     message.message_id.as_str(),
-                    sqlite_u64("accepted control sequence", self.record.seq())?,
-                    sqlite_u64("message timestamp", self.record.timestamp_ms())?,
+                    sqlite_u64("queue control sequence", slot.control_seq)?,
+                    sqlite_u64("queue timestamp", slot.timestamp_ms)?,
                     message_target_name(target),
                 ],
             )
@@ -870,6 +906,10 @@ pub(super) type IndexedMessageRow = (
     String,
     Option<String>,
     i64,
+    String,
+    i64,
+    i64,
+    bool,
 );
 
 pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedMessageRow> {
@@ -887,6 +927,10 @@ pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<I
         row.get(10)?,
         row.get(11)?,
         row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
+        row.get(16)?,
     ))
 }
 
@@ -901,6 +945,11 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
     if row.2 != message_source_name(&message.source) {
         return Err(StoreError::Corrupt(
             "mailbox source discriminator differs from its typed message".into(),
+        ));
+    }
+    if row.16 != (message.options != rsi_agent_session_protocol::MessageOptions::default()) {
+        return Err(StoreError::Corrupt(
+            "mailbox option presence differs from its typed message".into(),
         ));
     }
     let target = match row.4.as_str() {
@@ -924,6 +973,12 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
         ));
     }
     Ok(StoreAgentMessage {
+        queue_slot: rsi_agent_session_protocol::QueueSlot {
+            id: rsi_agent_session_protocol::QueueSlotId::new(row.13)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+            timestamp_ms: decode_u64("queue timestamp", row.14)?,
+            control_seq: decode_u64("queue control", row.15)?,
+        },
         delivery: match row.10.as_str() {
             "next_turn" => rsi_agent_session_protocol::MessageDelivery::NextTurn,
             "next_step" => rsi_agent_session_protocol::MessageDelivery::NextStep,

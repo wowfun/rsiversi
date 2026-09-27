@@ -98,6 +98,11 @@ Controlled barriers cover source-claim retirement, executor replacement,
 cancelled commit waiters, terminal drain, and shutdown timeout while admitted
 mutations remain in flight. Exact spawn retries wait for the original admitted
 creation and recover its receipt; mismatched messages or lineage are rejected.
+Queue races pause an admitted commit before Store application: identical operation
+IDs replay one receipt, changed requests conflict, and caller cancellation cannot
+release Session admission early. Successor-ID collisions with ordinary submission
+are checked in both commit orders. The shared Store contract independently rejects
+a complete conversion suffix bound to an absent Turn and checks atomic rollback.
 Activation terminal tests reject publication that bypasses atomic settlement.
 Staging a large publication releases global state while retaining the same
 session's admission. Control-tree selection rejects failed history validation

@@ -885,6 +885,7 @@ mod structured;
 use notifications::{SessionWatch, SessionWatchHub};
 mod completion_reply;
 mod observation;
+mod queue_mutation;
 mod recovery;
 mod store_reads;
 mod tool_origin;

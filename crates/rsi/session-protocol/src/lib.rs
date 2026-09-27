@@ -471,6 +471,16 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt>;
     /// Reads the latest durable claim or discard state for one message.
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt>;
+    /// Compares and mutates one pending Human queue slot in this exact Session.
+    async fn mutate_queue(
+        &self,
+        request: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt>;
+    /// Looks up the original operation after an unknown reply, including after restart.
+    async fn queue_mutation_status(
+        &self,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>>;
     /// Accepts one direct Image generation turn and waits for durable acceptance.
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt>;
     /// Idempotently cancels an unclaimed message or an accepted Turn.
@@ -544,6 +554,8 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     async fn activity(&self) -> Result<SessionActivityPage> {
         Err(SessionError::NotFound("Session activity owner".into()))
     }
+    /// Reads only the durable Header, without a handle, transcript or activity effect.
+    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader>;
     /// Creates one unpublished draft handle after rejecting a durable identity collision.
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
     /// Resolves a live draft or attaches to one exact durable session from Store alone.
@@ -655,6 +667,17 @@ pub enum SessionError {
         session: String,
         /// Caller-owned Message identity safe to retry or query.
         message: String,
+    },
+    /// A queue operation identity was reused with different immutable input.
+    #[error("queue operation identity conflicts with its durable request")]
+    QueueOperationConflict,
+    /// Delivery cannot establish this exact mutation's result.
+    #[error(
+        "queue operation {operation_id} has an unknown outcome; query or retry the same request"
+    )]
+    QueueOutcomeUnknown {
+        /// Original caller identity, retained until reconciliation.
+        operation_id: rsi_agent_session_protocol::QueueOperationId,
     },
     /// A bounded live resource is exhausted.
     #[error("Session capacity is exhausted")]
