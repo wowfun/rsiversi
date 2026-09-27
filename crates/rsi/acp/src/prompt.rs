@@ -118,18 +118,26 @@ async fn observe(
         .observe(submission.cursor)
         .await
         .map_err(|_| Failure::Backend)?;
+    let mut cursor = submission.cursor;
     let mut turn = submission.turn.clone();
     let mut cancel_deadline = None;
     loop {
         let observation = tokio::select! { biased;
             () = cancellation.cancelled(), if cancel_deadline.is_none() => {
                 cancel_deadline = Some(tokio::time::Instant::now() + SETTLEMENT);
+                // A suspended page can own the Store budget needed by cancellation.
+                drop(updates);
                 tokio::time::timeout(SETTLEMENT, session.handle.cancel(CancelTarget::Message(submission.message.clone()), None)).await.map_err(|_| Failure::Timeout)?.map_err(|_| Failure::Backend)?;
+                updates = session.handle.observe(cursor).await.map_err(|_| Failure::Backend)?;
                 continue;
             }
             () = async { match cancel_deadline { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => return Err(Failure::Timeout),
             update = updates.next() => update.ok_or(Failure::Backend)?.map_err(|_| Failure::Backend)?,
         };
+        match &observation {
+            SessionObservation::Control { record, .. } => cursor.control_seq = record.seq(),
+            SessionObservation::Fact { fact, .. } => cursor.fact_seq = fact.seq(),
+        }
         match observation {
             SessionObservation::Control { .. } if turn.is_none() => {
                 match session

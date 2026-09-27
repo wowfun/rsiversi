@@ -349,6 +349,7 @@ async fn native_acp_retains_prompt_after_handler_loss_and_cancel_settles_before_
             .await,
         Err(Failure::Busy)
     ));
+    let handle = owner.owned.lock().unwrap().values().next().unwrap().clone();
     backend
         .cancel(schema::CancelNotification::new(created.session_id.clone()))
         .await
@@ -358,6 +359,30 @@ async fn native_acp_retains_prompt_after_handler_loss_and_cancel_settles_before_
         .await
         .unwrap();
     assert!(owner.owned.lock().unwrap().is_empty());
+    let history = handle.history_before(None, 128).await.unwrap();
+    assert_eq!(
+        history
+            .facts
+            .iter()
+            .filter(|fact| matches!(
+                fact.body(),
+                rsi_agent_session_protocol::SessionFactBody::MessageTurnAccepted { .. }
+            ))
+            .count(),
+        1,
+        "resuming observation must not resubmit the message"
+    );
+    assert!(
+        history.facts.iter().any(|fact| matches!(
+            fact.body(),
+            rsi_agent_session_protocol::SessionFactBody::TurnTerminal {
+                outcome: rsi_agent_session_protocol::TurnOutcome::Cancelled,
+                ..
+            }
+        )),
+        "close requires durable cancellation, not just observer teardown"
+    );
+    drop(handle);
     backend.shutdown().await.unwrap();
     client.close().await.unwrap();
     server.close().await.unwrap();
