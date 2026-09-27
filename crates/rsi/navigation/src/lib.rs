@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
+use futures_util::{StreamExt, future::BoxFuture};
 use rsi_agent_session_protocol::SessionId;
 use rsi_api_protocol::{
     ApiError, ApiRegistrarContract, ConnectionDescriptionContract, HostEpoch, Result,
@@ -14,7 +14,7 @@ use rsi_meta::{
 };
 use rsi_navigation_api::{
     MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
-    SessionMetadata, revision,
+    PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
 };
 use rsi_session_protocol::{SessionContract, SessionError, SessionService};
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
@@ -43,6 +43,11 @@ impl Document {
     fn validate(&self) -> Result<()> {
         for record in self.records.values() {
             record.validate()?;
+        }
+        if self.records.values().filter(|record| record.pinned).count() > 64 {
+            return Err(ApiError::Invalid(
+                "at most 64 sessions may be pinned".into(),
+            ));
         }
         if self.records.len() > 8192
             || serde_json::to_vec(&serde_json::json!({"metadata":self}))
@@ -147,32 +152,15 @@ impl Navigation {
             cursor = Some(row.cursor());
             let id = row.header.session_id();
             let metadata = document.records.get(id).cloned().unwrap_or_default();
-            if metadata.archived != filter.archived {
+            if metadata.archived != filter.archived || metadata.pinned {
                 continue;
             }
             let path = row.header.canonical_cwd();
-            if !query.is_empty()
-                && !metadata
-                    .title
-                    .as_ref()
-                    .is_some_and(|title| title.to_lowercase().contains(&query))
-                && !path.to_lowercase().contains(&query)
-                && !id.as_str().contains(&query)
-            {
+            if !matches_query(&query, id, &metadata, Some(path)) {
                 continue;
             }
-            let derived = WorkspaceId::parse(hex::encode(sha2::Sha256::digest(path.as_bytes())))
-                .map_err(|_| ApiError::Backend("invalid Session workspace identity".into()))?;
-            let workspace = match self.workspace.get(&derived).await {
-                Ok(record) => Some(record.id),
-                Err(WorkspaceError::Unknown(_)) => None,
-                Err(_) => return Err(ApiError::Unavailable),
-            };
-            if filter
-                .workspace
-                .as_ref()
-                .is_some_and(|id| workspace.as_ref() != Some(id))
-            {
+            let workspace = self.workspace_for(path).await?;
+            if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
             entries.push(NavigationEntry {
@@ -203,6 +191,98 @@ impl Navigation {
             },
         })
     }
+    async fn workspace_for(&self, path: &str) -> Result<Option<WorkspaceId>> {
+        let derived = WorkspaceId::parse(hex::encode(sha2::Sha256::digest(path.as_bytes())))
+            .map_err(|_| ApiError::Backend("invalid Session workspace identity".into()))?;
+        match self.workspace.get(&derived).await {
+            Ok(record) => Ok(Some(record.id)),
+            Err(WorkspaceError::Unknown(_)) => Ok(None),
+            Err(_) => Err(ApiError::Unavailable),
+        }
+    }
+    /// Reads all pinned Headers with no attach or activity side effects.
+    ///
+    /// # Panics
+    /// Panics if a prior panic poisoned navigation state.
+    pub fn pinned(
+        self: &Arc<Self>,
+        filter: NavigationFilter,
+    ) -> Result<BoxFuture<'static, Result<PinnedPage>>> {
+        filter.validate()?;
+        self.run(move |owner| {
+            Box::pin(async move {
+                let document = owner
+                    .state
+                    .lock()
+                    .expect("navigation state poisoned")
+                    .document
+                    .clone();
+                let mut available = Vec::new();
+                let mut missing = Vec::new();
+                let query = filter.query.to_lowercase();
+                let reads: Vec<_> = document
+                    .records
+                    .iter()
+                    .filter(|(_, metadata)| metadata.pinned && metadata.archived == filter.archived)
+                    .map(|(id, metadata)| {
+                        let session = owner.session.clone();
+                        let id = id.clone();
+                        let metadata = metadata.clone();
+                        async move {
+                            let result = session.read_header(&id).await;
+                            (id, metadata, result)
+                        }
+                    })
+                    .collect();
+                let mut headers = futures_util::stream::iter(reads).buffered(4);
+                while let Some((id, metadata, result)) = headers.next().await {
+                    let header = match result {
+                        Ok(header) => header,
+                        Err(SessionError::NotFound(_)) => {
+                            if filter.workspace == WorkspaceFilter::All
+                                && matches_query(&query, &id, &metadata, None)
+                            {
+                                missing.push(PinnedEntry::Missing {
+                                    session: id.clone(),
+                                    metadata: metadata.clone(),
+                                });
+                            }
+                            continue;
+                        }
+                        Err(error) => return Err(session_error(error)),
+                    };
+                    let path = header.canonical_cwd();
+                    if !matches_query(&query, &id, &metadata, Some(path)) {
+                        continue;
+                    }
+                    let workspace = owner.workspace_for(path).await?;
+                    if !filter.workspace.matches(workspace.as_ref()) {
+                        continue;
+                    }
+                    available.push((
+                        header.created_at_ms(),
+                        id.clone(),
+                        PinnedEntry::Available {
+                            entry: NavigationEntry {
+                                session: id.clone(),
+                                created_at_ms: header.created_at_ms().to_string(),
+                                path: path.into(),
+                                workspace,
+                                metadata: metadata.clone(),
+                            },
+                        },
+                    ));
+                }
+                available.sort_by(|a, b| (&b.0, &b.1).cmp(&(&a.0, &a.1)));
+                let mut entries: Vec<_> = available.into_iter().map(|(_, _, row)| row).collect();
+                entries.extend(missing.into_iter().rev());
+                Ok(PinnedPage {
+                    metadata_revision: document.revision.to_string(),
+                    entries,
+                })
+            })
+        })
+    }
     /// Replaces navigation metadata once and retains the write independently of its waiter.
     ///
     /// # Panics
@@ -211,8 +291,11 @@ impl Navigation {
         self: &Arc<Self>,
         session: SessionId,
         expected: &str,
-        metadata: SessionMetadata,
+        mut metadata: SessionMetadata,
     ) -> Result<BoxFuture<'static, Result<MetadataReceipt>>> {
+        if metadata.archived {
+            metadata.pinned = false;
+        }
         metadata.validate()?;
         let expected = revision(expected)?;
         let permit = self
@@ -235,19 +318,12 @@ impl Navigation {
                         "navigation revision conflict; refresh before editing".into(),
                     ));
                 }
-                let handle = owner
-                    .session
-                    .attach(&session)
-                    .await
-                    .map_err(session_error)?;
-                handle.header().await.map_err(session_error)?;
-                match handle.draft_snapshot().await {
-                    Ok(_) => {
-                        return Err(ApiError::Invalid(
-                            "save a first message before editing Host navigation metadata".into(),
-                        ));
-                    }
-                    Err(SessionError::NotFound(_)) => {}
+                match owner.session.read_header(&session).await {
+                    Ok(_) => {}
+                    Err(SessionError::NotFound(_))
+                        if document.records.get(&session).is_some_and(|old| {
+                            metadata == SessionMetadata::default() || old.pinned && !metadata.pinned
+                        }) => {}
                     Err(error) => return Err(session_error(error)),
                 }
                 if metadata == SessionMetadata::default() {

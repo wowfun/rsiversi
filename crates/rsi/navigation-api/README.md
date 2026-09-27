@@ -21,3 +21,16 @@ Grouping uses a WorkspaceId derived from the Header's canonical path and an exac
 registry lookup. Missing registrations remain unregistered; reads never create
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
+
+Navigation wire version 2 separates pinned discovery from ordinary continuation.
+The version-1 durable metadata document accepts a missing `pinned` field as false;
+new records always write it. At most 64 records may be pinned. Archiving clears
+pinning in the same revision CAS. A dedicated pinned query reads every pinned
+Header through the read-only Session operation, independent of recent-page depth.
+It applies the same title/path/identity, archive and workspace filter, sorts by
+creation time then SessionId descending, and reports missing Headers as disabled
+entries that may be explicitly unpinned. Other read failures remain errors. A
+query never cleans up metadata. Ordinary pages exclude pinned entries.
+
+Workspace filters explicitly select all, one registered identity, or unregistered
+Headers. No matching row is not proof of exhaustion when a cursor remains.

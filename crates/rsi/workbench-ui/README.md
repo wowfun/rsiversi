@@ -79,3 +79,30 @@ are displayed separately; old resident Sessions are not edited.
 
 Navigation only acknowledges coalesced invalidations when it will query the
 current filter; an attention-only timer tick cannot consume a later publication.
+
+Navigation keeps at most 16 independently expanded group pages, each with at most
+64 entries and its own opaque ticket/cursor. Group continuation replaces that
+bounded page; the view identifies continued pages so the document does not imply
+that earlier results are still present. Search/filter replacement releases group
+pages. Pinned rows are a separate complete bounded query. Mutation refreshes the
+pin section and invalidates retained groups under the new metadata revision.
+
+Unchanged metadata refreshes preserve continued workspace pages and their tickets.
+Newest pages may refresh to include newly durable Sessions; identical results
+keep their tickets. A metadata revision change invalidates group cursors without
+automatic re-expansion: each group shows an explicit refresh control before its
+rows or mutations are available again.
+
+A confirmed navigation replacement remains successful if its follow-up reads fail
+or race another revision. The view explicitly reports that the change was saved
+but refresh is unavailable, clears stale results and invalidates old cursors.
+Group refreshes run with at most four reads in flight. With unchanged metadata,
+the last validated page remains usable during a read; identical results preserve
+its ticket. A failed read invalidates only that group, while others can finish.
+No mutation is retried to repair a failed refresh.
+
+Automatic navigation and attention reads have a five-second deadline and yield
+to an admitted user action: cancellation releases their serialized read owner
+before that action runs. Background reads do not occupy the user-operation slot.
+Cancelled refresh notifications remain pending. User mutations retain normal
+owned-work semantics and are never cancelled or replayed by this preemption.

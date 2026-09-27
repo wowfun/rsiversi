@@ -113,3 +113,34 @@ fn source_index_bounds_allocation_and_lets_renderers_choose_eviction() {
         Some(source(u64::try_from(MAXIMUM_BLOCK_SOURCES).unwrap()))
     );
 }
+
+#[test]
+fn sequence_membership_handles_fields_gaps_and_eviction() {
+    let mut index = SourceIndex::default();
+    for seq in [1, 7, 10, u64::MAX] {
+        index.insert(source(seq)).unwrap();
+    }
+    index
+        .insert(SourceRef {
+            seq: 7,
+            field: FactField::InputText { index: 0 },
+        })
+        .unwrap();
+    for seq in [1, 7, 10, u64::MAX] {
+        assert!(index.contains_sequence(seq));
+    }
+    for seq in [0, 2, 6, 8, u64::MAX - 1] {
+        assert!(!index.contains_sequence(seq));
+    }
+    index.remove(index.position(source(7)).unwrap());
+    assert!(index.contains_sequence(7));
+    index.remove(
+        index
+            .position(SourceRef {
+                seq: 7,
+                field: FactField::InputText { index: 0 },
+            })
+            .unwrap(),
+    );
+    assert!(!index.contains_sequence(7));
+}

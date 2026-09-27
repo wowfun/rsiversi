@@ -93,7 +93,8 @@ by Fact sequence and semantic content position. Text/image fields of one ordered
 content array interleave by their original index. An exact duplicate returns its
 existing position, including at capacity; a missing interior source is a distinct
 insertion. Zero sequence and excess count are rejected without changing the index.
-The index retains neither text nor Facts. Renderers remove corresponding source
+Sequence membership uses binary search, including when several fields share a
+sequence. The index retains neither text nor Facts. Renderers remove corresponding source
 entries whenever they evict a text span or Piece, choose the eviction direction,
 and charge the index's allocated capacity to their own metadata budget. A highest
 sequence watermark cannot substitute for this retained-source membership.

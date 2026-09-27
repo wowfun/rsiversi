@@ -46,6 +46,12 @@ impl SourceIndex {
     pub fn position(&self, source: SourceRef) -> Option<usize> {
         self.sources.binary_search(&source).ok()
     }
+    /// Tests sequence membership in logarithmic time, independent of source field.
+    pub fn contains_sequence(&self, seq: u64) -> bool {
+        self.sources
+            .binary_search_by_key(&seq, |source| source.seq)
+            .is_ok()
+    }
     /// Borrows the retained source at a presentation position.
     pub fn get(&self, position: usize) -> Option<SourceRef> {
         self.sources.get(position).copied()

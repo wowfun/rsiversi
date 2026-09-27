@@ -40,3 +40,23 @@ cannot acknowledge it for another principal or prevent future acknowledgments.
 A failed eviction or write closes admission as an unknown outcome. Ready and
 closed external conversations retain unread observations according to their epoch
 and sequence, including history loaded from a remote peer.
+
+Navigation wire version 2 separates pinned discovery from ordinary continuation.
+The version-1 durable metadata document accepts a missing `pinned` field as false;
+new records always write it. At most 64 records may be pinned. Archiving clears
+pinning in the same revision CAS. A dedicated pinned query reads every pinned
+Header through the read-only Session operation, independent of recent-page depth.
+It applies the same title/path/identity, archive and workspace filter, sorts by
+creation time then SessionId descending, and reports missing Headers as disabled
+entries that may be explicitly unpinned. Other read failures remain errors. A
+query never cleans up metadata. Missing-Header records may also be explicitly
+cleared by replacing them with default metadata, whether pinned or not, under
+the same revision CAS. This cannot create metadata for an unpublished Session.
+Ordinary pages exclude pinned entries.
+
+Workspace filters explicitly select all, one registered identity, or unregistered
+Headers. No matching row is not proof of exhaustion when a cursor remains.
+
+Pinned Header reads use at most four concurrent reads per bounded pinned query. The
+captured metadata revision, missing-Header rows, stable sorting and error semantics
+are unchanged; a read failure is not an empty pinned list.

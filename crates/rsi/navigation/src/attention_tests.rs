@@ -8,6 +8,12 @@ use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage
 struct Sources(Mutex<ExternalStatus>);
 #[async_trait]
 impl SessionService for Sources {
+    async fn read_header(
+        &self,
+        _: &rsi_agent_session_protocol::SessionId,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        panic!("unexpected durable Header read")
+    }
     async fn create(
         &self,
         _: CreateSession,

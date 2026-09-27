@@ -6,9 +6,26 @@ use rsi_session_protocol::{
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, WorkspaceStatus};
 
 #[derive(Debug)]
-struct Rows(Vec<SessionSummary>);
+struct Rows(Vec<SessionSummary>, Arc<ReadConcurrency>);
+#[derive(Debug, Default)]
+struct ReadConcurrency {
+    active: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
 #[async_trait]
 impl SessionService for Rows {
+    async fn read_header(&self, id: &SessionId) -> rsi_session_protocol::Result<SessionHeader> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let active = self.1.active.fetch_add(1, SeqCst) + 1;
+        self.1.peak.fetch_max(active, SeqCst);
+        tokio::task::yield_now().await;
+        self.1.active.fetch_sub(1, SeqCst);
+        self.0
+            .iter()
+            .find(|row| row.header.session_id() == id)
+            .map(|row| row.header.clone())
+            .ok_or_else(|| SessionError::NotFound(id.to_string()))
+    }
     async fn create(
         &self,
         _: CreateSession,
@@ -83,6 +100,9 @@ impl Domain for ReadOnlyDomain {
     }
 }
 fn owner() -> Arc<Navigation> {
+    owner_with_reads(Arc::new(ReadConcurrency::default()))
+}
+fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
     let settings = FrozenAgentSettings::new(
         "default",
         "system",
@@ -112,7 +132,7 @@ fn owner() -> Arc<Navigation> {
             maximum_records: 1,
             maximum_bytes: 8 * 1024 * 1024,
         })),
-        session: Arc::new(Rows(rows)),
+        session: Arc::new(Rows(rows, reads)),
         workspace: Arc::new(Workspaces),
         epoch: HostEpoch::generate().unwrap(),
         state: Mutex::new(State {
@@ -209,6 +229,7 @@ fn metadata_bounds_reject_durable_and_external_oversize_or_control_titles() {
     for title in [String::new(), "中".repeat(86), "line\nbreak".into()] {
         assert!(
             SessionMetadata {
+                pinned: false,
                 title: Some(title),
                 archived: false
             }
@@ -232,4 +253,228 @@ fn metadata_bounds_reject_durable_and_external_oversize_or_control_titles() {
         .validate()
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn old_and_missing_pins_are_complete_without_attach_and_excluded_from_pages() {
+    let owner = owner();
+    let metadata = SessionMetadata {
+        title: Some("Pinned project".into()),
+        archived: false,
+        pinned: true,
+    };
+    let records = ["row-001", "row-300", "gone"]
+        .map(|id| (SessionId::new(id).unwrap(), metadata.clone()))
+        .into();
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        revision: 7,
+        records,
+    });
+    let pins = owner
+        .pinned(NavigationFilter::default())
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(pins.metadata_revision, "7");
+    assert_eq!(pins.entries.len(), 3);
+    assert!(
+        matches!(&pins.entries[0], PinnedEntry::Available {entry} if entry.session.as_str()=="row-300")
+    );
+    assert!(
+        matches!(&pins.entries[1], PinnedEntry::Available {entry} if entry.session.as_str()=="row-001")
+    );
+    assert!(
+        matches!(&pins.entries[2], PinnedEntry::Missing {session,..} if session.as_str()=="gone")
+    );
+    let mut filter = NavigationFilter {
+        workspace: WorkspaceFilter::Unregistered,
+        ..Default::default()
+    };
+    let unregistered = owner.pinned(filter.clone()).unwrap().await.unwrap();
+    assert_eq!(unregistered.entries.len(), 2);
+    filter.query = "row-001".into();
+    assert_eq!(
+        owner
+            .pinned(filter.clone())
+            .unwrap()
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert!(
+        owner
+            .query(filter, None)
+            .unwrap()
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let page = owner
+        .query(NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(!page.entries.iter().any(|entry| entry.metadata.pinned));
+    assert_eq!(
+        owner.state.lock().unwrap().document.records.len(),
+        3,
+        "queries never remove missing pins"
+    );
+    owner.close().await;
+}
+#[test]
+fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
+    let legacy: Document = serde_json::from_value(
+        serde_json::json!({"revision":1,"records":{"old":{"title":null,"archived":false}}}),
+    )
+    .unwrap();
+    assert!(!legacy.records.values().next().unwrap().pinned);
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap()["records"]["old"]["pinned"],
+        false
+    );
+    let mut document = Document::default();
+    for id in 0..64 {
+        document.records.insert(
+            SessionId::new(format!("pin-{id}")).unwrap(),
+            SessionMetadata {
+                pinned: true,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(document.validate().is_ok());
+    document.records.insert(
+        SessionId::new("pin-65").unwrap(),
+        SessionMetadata {
+            pinned: true,
+            ..Default::default()
+        },
+    );
+    assert!(document.validate().is_err());
+    assert!(
+        SessionMetadata {
+            pinned: true,
+            archived: true,
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn pinned_headers_overlap_at_most_four_reads_and_keep_sorted_order() {
+    let reads = Arc::new(ReadConcurrency::default());
+    let owner = owner_with_reads(reads.clone());
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        revision: 1,
+        records: (1..=64)
+            .map(|id| {
+                (
+                    SessionId::new(format!("row-{id:03}")).unwrap(),
+                    SessionMetadata {
+                        pinned: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+    });
+    let pins = owner
+        .pinned(NavigationFilter::default())
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(pins.entries.len(), 64);
+    assert_eq!(reads.peak.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(reads.active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for (offset, entry) in pins.entries.iter().enumerate() {
+        assert!(
+            matches!(entry, PinnedEntry::Available {entry} if entry.session.as_str() == format!("row-{:03}", 64-offset))
+        );
+    }
+    owner.close().await;
+}
+
+#[derive(Debug)]
+struct RecordingDomain(DomainSpec, Mutex<Option<serde_json::Value>>);
+#[async_trait]
+impl Domain for RecordingDomain {
+    fn spec(&self) -> &DomainSpec {
+        &self.0
+    }
+    async fn snapshot(&self) -> BTreeMap<String, serde_json::Value> {
+        panic!("unexpected snapshot")
+    }
+    async fn put(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> std::result::Result<(), rsi_storage::StorageError> {
+        assert_eq!(key, "metadata");
+        *self.1.lock().unwrap() = Some(value);
+        Ok(())
+    }
+    async fn delete(&self, _: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
+        panic!("unexpected deletion")
+    }
+}
+#[tokio::test]
+async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
+    let mut owner = owner();
+    let domain = Arc::new(RecordingDomain(
+        owner.domain.spec().clone(),
+        Mutex::new(None),
+    ));
+    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let missing = SessionId::new("gone").unwrap();
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        revision: 7,
+        records: [(
+            missing.clone(),
+            SessionMetadata {
+                title: Some("Old archived conversation".into()),
+                archived: true,
+                pinned: false,
+            },
+        )]
+        .into(),
+    });
+    assert!(
+        owner
+            .replace(missing.clone(), "6", SessionMetadata::default())
+            .unwrap()
+            .await
+            .is_err()
+    );
+    assert!(domain.1.lock().unwrap().is_none());
+    owner
+        .replace(missing.clone(), "7", SessionMetadata::default())
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(owner.state.lock().unwrap().document.records.is_empty());
+    let saved: Document =
+        serde_json::from_value(domain.1.lock().unwrap().clone().unwrap()).unwrap();
+    assert!(saved.records.is_empty());
+    assert_eq!(saved.revision, 8);
+    assert!(
+        owner
+            .replace(
+                missing,
+                "8",
+                SessionMetadata {
+                    title: Some("fabricated".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .await
+            .is_err()
+    );
+    owner.close().await;
 }

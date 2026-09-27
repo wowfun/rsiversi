@@ -36,6 +36,14 @@ pub(super) fn register(
             }
         }),
     )?;
+    let pinned_owner = owner.clone();
+    let pinned = registrar.register(
+        NavigationOperation::Pinned.spec(),
+        json_handler(move |_, filter: NavigationFilter| {
+            let owner = pinned_owner.clone();
+            async move { owner.pinned(filter)?.await.map(Ok::<_, Never>) }
+        }),
+    )?;
     let replace = registrar.register(
         NavigationOperation::Replace.spec(),
         json_handler(move |_context, input: Replace| {
@@ -48,5 +56,5 @@ pub(super) fn register(
             }
         }),
     )?;
-    Ok(vec![query, replace])
+    Ok(vec![query, pinned, replace])
 }

@@ -66,6 +66,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         .await
         .unwrap();
     let metadata = SessionMetadata {
+        pinned: false,
         title: Some("调试工作区".into()),
         archived: true,
     };
@@ -86,7 +87,15 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             .is_empty()
     );
     run_message_to_terminal(&handle, "navigation-first-message").await;
-    let header = handle.header().await.unwrap();
+    let service = running.session_service().unwrap();
+    let activity = service.activity().await.unwrap();
+    let header = service.read_header(&session).await.unwrap();
+    assert_eq!(header, handle.header().await.unwrap());
+    assert_eq!(
+        service.activity().await.unwrap(),
+        activity,
+        "Header reads cannot fabricate activity"
+    );
     let before = handle.inspect().await.unwrap();
     let device = running
         .device_administration()
@@ -147,6 +156,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             .is_none()
     );
     drop(handle);
+    drop(service);
     assert!(running.shutdown().await.is_clean());
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
@@ -217,5 +227,29 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     drop(database);
     drop(handle);
     assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_service_ownership_outlives_runtime_teardown_until_the_caller_releases_it() {
+    let (endpoint, provider) = provider().await;
+    let fixture = fixture(&endpoint);
+    let profile = host_profile(&fixture);
+    let running = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
+        .await
+        .unwrap();
+    let service = running.session_service().unwrap();
+    assert!(running.shutdown().await.is_clean());
+    // Runtime retirement cannot destroy a capability owned by its caller.
+    assert!(
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
+            .await
+            .is_err()
+    );
+    drop(service);
+    let restarted = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
+        .await
+        .unwrap();
+    assert!(restarted.shutdown().await.is_clean());
     provider.abort();
 }
