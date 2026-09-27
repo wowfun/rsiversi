@@ -11,7 +11,7 @@ using the result even when the programmatic reader verifies it.
 ## Decision
 
 This partially supersedes the schema-authority and standard reader defaults in the
-[subagent decision](../../implemented/feature/2026-09-03-recoverable-subagent-tree.md).
+[subagent decision](2026-09-03-recoverable-subagent-tree.md).
 The model spawn adapter validates an 8 KiB annotation-free schema using the
 existing OutputContract. The standard reader returns bounded encoded pages,
 while programmatic access retains full values and exact initial Completion checks.

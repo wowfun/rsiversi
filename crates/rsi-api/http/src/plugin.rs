@@ -80,7 +80,7 @@ impl PluginFactory for HttpFactory {
         )
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        activate(plan, None).await
+        activate(plan, None, None).await
     }
 }
 
@@ -96,14 +96,15 @@ impl PluginFactory for StaticHttpFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let assets = plan.local::<crate::HttpAssetsContract>()?;
-        activate(plan, Some(assets)).await
+        activate(plan, Some(assets), None).await
     }
 }
 async fn activate(
     mut plan: ActivationPlan,
     assets: Option<Arc<dyn crate::HttpAssets>>,
+    bootstrap: Option<Arc<dyn crate::BrowserBootstrap>>,
 ) -> rsi_meta::Result<()> {
-    let config = plan.take_state::<HttpConfig>()?;
+    let mut config = plan.take_state::<HttpConfig>()?;
     let execution = plan.context().runtime().execution().clone();
     let description = plan.local::<ConnectionDescriptionContract>()?;
     let services = HttpServices {
@@ -112,9 +113,30 @@ async fn activate(
         endpoint: description.endpoint_id.clone(),
         epoch: description.host_epoch.clone(),
     };
-    let server = HttpServer::bind(execution.clone(), config, services)
-        .await
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
+    let server = if let Some(bootstrap) = bootstrap {
+        let listener = tokio::net::TcpListener::bind(config.bind)
+            .await
+            .map_err(|error| {
+                MetaError::Activation(format!(
+                    "Cannot listen on {}; use --port to select another port: {error}",
+                    config.bind
+                ))
+            })?;
+        config.bind = listener
+            .local_addr()
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        config.public_origin = if config.bind.port() == 80 {
+            "http://127.0.0.1".into()
+        } else {
+            format!("http://{}", config.bind)
+        };
+        HttpServer::from_listener(execution.clone(), listener, config, services)
+            .await
+            .and_then(|server| server.with_browser_bootstrap(bootstrap))
+    } else {
+        HttpServer::bind(execution.clone(), config, services).await
+    }
+    .map_err(|error| MetaError::Activation(error.to_string()))?;
     let server = if let Some(assets) = assets {
         server.with_assets(assets)
     } else {
@@ -158,4 +180,58 @@ async fn activate(
             })
         }),
     )
+}
+
+/// Loopback Web listener with socket-derived origin and explicit launch exchange.
+#[derive(Debug)]
+pub struct LocalBrowserHttpFactory {
+    /// Application-owned launch authority; ordinary HTTP listeners never receive it.
+    bootstrap: Arc<dyn crate::BrowserBootstrap>,
+    diagnostic: std::sync::Mutex<Option<String>>,
+}
+impl LocalBrowserHttpFactory {
+    /// Freezes the explicit launch exchange without opening a listener.
+    pub fn new(bootstrap: Arc<dyn crate::BrowserBootstrap>) -> Self {
+        Self {
+            bootstrap,
+            diagnostic: std::sync::Mutex::new(None),
+        }
+    }
+    /// Takes a startup diagnostic without exposing credentials.
+    ///
+    /// # Panics
+    /// Panics if another thread poisoned the diagnostic mutex.
+    pub fn take_diagnostic(&self) -> Option<String> {
+        self.diagnostic
+            .lock()
+            .expect("HTTP diagnostic poisoned")
+            .take()
+    }
+}
+#[async_trait]
+impl PluginFactory for LocalBrowserHttpFactory {
+    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        let port: u16 = serde_json::from_value(desired.clone())
+            .map_err(|_| MetaError::InvalidInput("invalid local Web port".into()))?;
+        let config = HttpConfig {
+            bind: ([127, 0, 0, 1], port).into(),
+            public_origin: "http://127.0.0.1".into(),
+            tls: None,
+            allow_loopback_http: true,
+        };
+        let config = serde_json::to_value(config)
+            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        Ok(HttpFactory
+            .prepare(&config)?
+            .requiring_local::<crate::HttpAssetsContract>())
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let assets = plan.local::<crate::HttpAssetsContract>()?;
+        activate(plan, Some(assets), Some(self.bootstrap.clone()))
+            .await
+            .inspect_err(|error| {
+                *self.diagnostic.lock().expect("HTTP diagnostic poisoned") =
+                    Some(error.to_string());
+            })
+    }
 }

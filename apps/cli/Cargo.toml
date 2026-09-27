@@ -1,0 +1,82 @@
+[package]
+name = "rsi-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "rsi"
+path = "src/main.rs"
+doc = false
+
+[[example]]
+name = "workbench-addon"
+path = "../../fixtures/rsi/addon-workbench/main.rs"
+
+[[example]]
+name = "profile-leaf-probe"
+path = "../../fixtures/rsi/profile-management/probe.rs"
+
+[features]
+paired-web-tests = []
+
+[dependencies]
+rsi-build-info = { path = "../../crates/rsi/build-info" }
+rsi-app-catalog = { path = "../catalog" }
+rsi = { path = "../../crates/rsi/core" }
+rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
+rsi-terminal = { path = "../terminal" }
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-serve = { path = "../serve" }
+rsi-api-http = { path = "../../crates/rsi-api/http" }
+rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+hex.workspace = true
+rsi-agent-presets = { path = "../../crates/rsi-agent/presets" }
+rsi-agent-store-sqlite = { path = "../../crates/rsi-agent/store-sqlite" }
+rsi-credentials-local = { path = "../../crates/rsi-credentials/local" }
+rsi-credentials-protocol = { path = "../../crates/rsi-credentials/protocol" }
+rsi-host = { path = "../../crates/rsi-host/core" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+rsi-meta-profile = { path = "../../crates/rsi-meta/profile" }
+rsi-process = { path = "../../crates/rsi-process/core" }
+rsi-service-host = { path = "../../crates/rsi/service-host" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
+rsi-agent-plan-policy = { path = "../../crates/rsi-agent/plan-policy" }
+vt100.workspace = true
+rusqlite.workspace = true
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+axum.workspace = true
+tempfile.workspace = true
+rsi-acp = { path = "../../crates/rsi-acp/core" }
+rsi-acp-protocol = { path = "../../crates/rsi-acp/protocol" }
+rsi-session-api = { path = "../../crates/rsi/session-api" }
+rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
+rsi-user-questions-protocol = { path = "../../crates/rsi-user-questions/protocol" }
+futures-util.workspace = true
+rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
+rsi-settings-protocol = { path = "../../crates/rsi-settings/protocol" }
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../crates/rsi-files/native-fs" }
+rsi-api-uds-client = { path = "../../crates/rsi-api/uds-client" }
+libc.workspace = true
+rustix = { workspace = true, features = ["process"] }
+
+[lints]
+workspace = true

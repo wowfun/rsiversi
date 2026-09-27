@@ -75,7 +75,7 @@ bypass a live owner. Host Profile launch hashing retains the
 key hashes that launch key and the product build under `rsi.local.api.v1`;
 it gates this transport generation and does not replace process ownership.
 
-The [Web application](../../../../crates/rsi/web/README.md) runs Meta, Profiles,
+The [Web application](../../../../apps/web-worker/README.md) runs Meta, Profiles,
 shared controllers and two independent surfaces in a Dedicated Worker. Its
 document bridge renders views and forwards input. Assets are a separate plugin
 consumed by the Serve application. Production uses TLS with HTTP/2: actual

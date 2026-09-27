@@ -16,10 +16,15 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod pairing;
+pub use pairing::{PairedWebAssetsFactory, pairing_receipt};
 mod publication;
+mod manifest {
+    include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
+}
 pub use publication::{
-    AssetCandidate, AssetError, AssetResult, BundleLease, StageTicket, WebAssetControl,
-    WebAssetControlContract,
+    AssetCandidate, AssetError, AssetResult, BOOTSTRAP as BOOTSTRAP_FILES, BundleLease,
+    StageTicket, WebAssetControl, WebAssetControlContract,
 };
 
 #[derive(Clone, Deserialize)]
@@ -30,28 +35,14 @@ struct Config {
     files: Vec<String>,
     #[serde(default)]
     watch: bool,
+    #[serde(skip)]
+    pairing: Option<String>,
 }
 fn default_files() -> Vec<String> {
-    [
-        "index.html",
-        "app.js",
-        "worker.js",
-        "download-worker.js",
-        "download-frame.js",
-        "styles.css",
-        "rsi_web.js",
-        "rsi_web_bg.wasm",
-        "mounts.js",
-        "drafts.js",
-        "admission.js",
-        "standard.js",
-        "file-preview.js",
-        "preview-local.html",
-        "preview-online.html",
-        "ui-renderers.json",
-    ]
-    .map(Into::into)
-    .to_vec()
+    manifest::DEFAULT_FILES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
 }
 fn kind(name: &str) -> Option<AssetType> {
     match name.rsplit('.').next()? {
@@ -202,6 +193,9 @@ fn load(
                 bytes,
             },
         );
+    }
+    if let Some(expected) = &config.pairing {
+        pairing::verify(&directory, &config.directory, expected, &files)?;
     }
     Ok(files)
 }

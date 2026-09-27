@@ -20,7 +20,7 @@ export async function verifyMarkdownAgents(page,service,report,browser,bodies) {
  await editor.fill('@reviewer: please check');
  await editor.evaluate(element=>{element.setSelectionRange(9,9);element.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));});
  await pane.getByRole('option').filter({hasText:'reviewer'}).waitFor();await editor.press('Escape');
- const send=async text=>{const before=bodies.length;await editor.fill(text);await pane.getByRole('button',{name:'Send ↗',exact:true}).click();await waitUntil(()=>bodies.length>before,'provider entered');await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();};
+ const send=async text=>{const before=bodies.length;await editor.fill(text);await pane.getByTestId('composer-send').click();await waitUntil(()=>bodies.length>before,'provider entered');await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();};
  await send('@reviewer: delegate to Markdown reviewer, first task');
  const child=version=>bodies.find(body=>body.messages.some(message=>message.role==='system'&&JSON.stringify(message.content).includes(`MARKDOWN-REVIEWER-V${version}`)));
  await waitUntil(()=>!!child(1),'first custom reviewer');assert.equal(child(1).tools?.length??0,0,'empty allow must expose no ordinary tools');

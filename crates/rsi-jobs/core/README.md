@@ -52,3 +52,9 @@ or cancellation of the finalizer future cannot abandon admitted work.
 
 The package contains no executor, persistence, retry policy, process spawning,
 shell policy, or plugin lifecycle.
+
+Producer start may perform work before returning its control object. Signals from
+that work, including child-process readiness, do not establish Jobs publication.
+Only successful `submit` establishes an identifier visible to list/read. Consumers
+without that receipt must observe the Jobs registry independently. Reservations
+keep unpublished work owned if publication fails.

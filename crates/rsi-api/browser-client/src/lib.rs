@@ -35,3 +35,14 @@ pub use bridge::BrowserResourceSnapshot;
 pub use connection::BrowserClient;
 #[cfg(target_arch = "wasm32")]
 pub use plugin::BrowserClientFactory;
+
+#[cfg(target_arch = "wasm32")]
+mod bootstrap;
+#[cfg(target_arch = "wasm32")]
+pub use bootstrap::bootstrap_local_browser;
+
+#[cfg(any(target_arch = "wasm32", test))]
+mod bootstrap_recovery;
+
+#[cfg(any(target_arch = "wasm32", test))]
+mod bootstrap_response;

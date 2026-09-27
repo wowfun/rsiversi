@@ -102,7 +102,7 @@ def verify(script, button, fill, until, screenshot, report, requests):
     destination = report / 'native-export.json'
     try:
         fill('textarea[aria-label="Main message"]', '/export "suggested.json" -f json -i h,m,lpr,last-provider-response')
-        button('Send ↗')
+        button('Send')
         until(keys.chooser)
         keys.chord('Control_L', 'l'); keys.chord('Control_L','a'); keys.type(str(destination)); keys.chord('Return')
         until(destination.is_file)

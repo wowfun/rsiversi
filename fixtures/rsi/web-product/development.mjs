@@ -1,4 +1,4 @@
-// Run against an already-started, isolated cargo xtask dev web environment.
+// Run against an already-started, isolated pnpm -C apps/web dev environment.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
@@ -7,7 +7,7 @@ import {chromium} from 'playwright';
 const [directory,origin,report]=process.argv.slice(2);
 if(!directory||!origin||!report)throw new Error('Pass isolated development directory, origin and new report directory');
 await mkdir(report,{recursive:false});
-const source=resolve('plugins/rsi/web/src/navigation.tsx'), bootstrap=resolve('plugins/rsi/web/app.js');
+const source=resolve('apps/web/src/navigation.tsx'), bootstrap=resolve('apps/web/app.js');
 const original=await readFile(source,'utf8'), boot=await readFile(bootstrap,'utf8');
 const updated=original.replace('<h2>Conversations</h2>','<h2>Conversations HMR verified</h2>');
 assert.notEqual(updated,original);
@@ -20,7 +20,7 @@ try {
   await page.getByLabel('Device registration receipt').fill(receipt.trim());await page.getByLabel('Allow local HTTP for development').check();
   await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
   await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(join(directory,'workspace'));
-  await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces .nav-item').click();
+  await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').click();
   const input=page.getByLabel('Main message',{exact:true});await input.fill('draft survives feature HMR 中文');
   const identity=await page.evaluate(()=>{window.fixtureDocumentId=crypto.randomUUID();window.fixtureEditor=document.querySelector('textarea[aria-label="Main message"]');return window.fixtureDocumentId});
   const session=await page.locator('.pane-session').textContent();

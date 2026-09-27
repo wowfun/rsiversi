@@ -150,3 +150,14 @@ commit revision captured before the read. An unchanged revision avoids Store
 reads without allocating Session observers or generation pins. Providers without
 a revision fall back to fresh reads. Broker requests and resident running state
 are always sampled separately.
+
+`SessionService::read_header` reads one durable Store Header by SessionId without
+attaching, creating a handle, touching activity or loading transcript. Unpublished
+drafts are absent. The authenticated `session/read-header` v1 operation exposes
+the same read and validates the echoed identity; narrowed Session contribution
+clients do not gain this deployment-wide operation.
+
+A new queue replacement transfers its owned content through normal input admission
+and back into the unchanged request before Kernel submission. Validation does not
+clone the full replacement payload; committed retries still resolve their receipt
+before reading media or workspace state.

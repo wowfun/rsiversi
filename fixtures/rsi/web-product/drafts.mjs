@@ -5,7 +5,7 @@ import { join } from "node:path";
 // Real IndexedDB transactions in two documents; no Session/provider claims.
 export async function verifyDrafts(browser, root) {
   const context = await browser.newContext();
-  const source = await readFile(join(root, "plugins/rsi/web/drafts.js"), "utf8");
+  const source = await readFile(join(root, "apps/web/drafts.js"), "utf8");
   await context.route("http://localhost:37919/**", route => route.fulfill({ contentType: "text/javascript", body: route.request().url().endsWith("drafts.js") ? source : "" }));
   const page = await context.newPage(), other = await context.newPage();
   try {
@@ -55,6 +55,25 @@ export async function verifyDrafts(browser, root) {
     assert.equal(settled.pending, null);
     assert.equal(settled.opaque, '{"revision":18446744073709551615,"arguments":{"z":1,"a":2}}');
     assert.equal(settled.receipt, '{"request_id":"original-id","accepted_control_seq":18446744073709551615,"observed_fact_seq":18446744073709551614}');
+    const queued = await page.evaluate(async () => {
+      const original = await store.get("main", "first");
+      const opaque = '{"session":"first","header":"frozen-header","request":{"kind":"queue","input":{"operation_id":"queue-original","slot_id":"slot","expected_message_id":"old","mutation":{"action":"replace","new_message_id":"successor","content":[{"type":"text","text":"complete queued text"}]}}}}';
+      const prepared = await store.freeze(original, {kind:"queue",id:"queue-original",opaque,text_bytes:20,images:0,references:0});
+      const unknown = await store.settle(await store.begin(prepared), {status:"unknown"});
+      const reopened = await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)});
+      const restored = await reopened.get("main","first");
+      if(restored.pending.opaque !== opaque || restored.pending.id !== "queue-original") throw new Error("unknown queue envelope changed on reopen");
+      let cancelled=false;try {await reopened.cancelPrepared(restored);}catch {cancelled=true;}
+      const finished = await reopened.settle(restored, {status:"complete",receipt:'{"operation_id":"queue-original"}'});
+      return {cancelled,kind:unknown.pending.kind,phase:restored.pending.phase,text:finished.text,images:finished.images,pending:finished.pending};
+    });
+    assert.deepEqual(queued,{cancelled:true,kind:"queue",phase:"unknown",text:"typed during execution",images:[],pending:null});
+    assert.deepEqual(await page.evaluate(async()=>{
+      const original=await store.get("main","first");
+      const prepared=await store.freeze(original,{kind:"queue",id:"conflict",opaque:'{"operation":"conflict"}',text_bytes:0,images:0,references:0});
+      const finished=await store.settle(await store.begin(prepared),{status:"rejected",error:"identity conflict"});
+      return {text:finished.text,pending:finished.pending,receipt:finished.receipt};
+    }),{text:"typed during execution",pending:null,receipt:'{"operation_id":"queue-original"}'});
     const boundaries = await page.evaluate(async () => {
       let record = await store.ensure("compare", "aba", "c".repeat(64));
       await store.removeEmpty(record);

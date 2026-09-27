@@ -42,7 +42,7 @@ an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. Cookie calls
 require the exact configured Origin and `X-Rsi-Csrf: 1`. Every request checks the
 exact configured Host; foreign Origin, query parameters, conflicting credentials,
 duplicate security headers and unsupported methods are rejected before dispatch.
-Credentials never appear in URLs, diagnostics or serialized configuration.
+Durable credentials never appear in URLs, diagnostics or serialized configuration.
 
 `X-Rsi-Expected-Device`, when present, must be one canonical DeviceId matching
 the authenticated caller before dispatch. It narrows a connection; it never
@@ -149,3 +149,18 @@ images, fonts and connections. Supplied or remote scripts can send previewed
 contents to HTTPS servers; this is broader than remote image access.
 The classification grants no API authority and never accepts request-authored
 CSP strings. Product asset providers own which exact paths receive each policy.
+
+An explicitly injected BrowserBootstrap capability enables the loopback-only
+`POST /api/v1/browser-bootstrap` route. It requires an empty body, exact Host and
+Origin, and `X-Rsi-Csrf: 1`. A single bounded `X-Rsi-Launch-Ticket` header exchanges
+a one-use application ticket for a device cookie; without that header
+a valid cookie returns only EndpointId and DeviceId for recovery. Bearer
+credentials and expected-device mismatches are rejected. A ticket can replace an
+old browser cookie after explicit credential rotation; an expected-device header
+is forbidden for that exchange. An explicit ticket takes precedence even when the
+browser sends a valid cookie. A rejected ticket never falls back to that cookie;
+ambiguous duplicate cookies are rejected before ticket consumption. Ticket issuance and
+configuration grants are outside the transport. Other listeners do not expose
+this route. Durable device credentials remain forbidden in URLs; the local Web
+application may hand off its short-lived bootstrap ticket in a URL fragment,
+which the document removes before starting the Worker.

@@ -25,7 +25,7 @@ Set `RSI_RUST_ANALYZER` to the pinned executable; no installer is invoked.
 
 With the same explicit server, `RSI_WEB_ASSETS=/absolute/assets node
 fixtures/rsi/lsp/browser.mjs /absolute/report` verifies Chromium and Firefox.
-`cargo test -p rsi --test service_host_cli language_tui_opens_real_definition_and_closes_service_observation -- --ignored`
+`cargo test -p rsi-cli --test service_host_cli language_tui_opens_real_definition_and_closes_service_observation -- --ignored`
 exercises the actual PTY; `RSI_TUI_PTY_REPORT` retains cell frames. The desktop
 [product fixture](../desktop-product/README.md) accepts `--language /absolute/rust-analyzer`.
 All three open the actual definition after an emoji-containing query and preserve

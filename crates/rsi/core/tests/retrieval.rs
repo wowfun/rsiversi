@@ -15,6 +15,7 @@ fn composition(root: &Path) -> StandardComposition {
         HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
         BTreeMap::new(),
         None,
+        rsi::ApplicationCatalogMetadata::default(),
     )
 }
 async fn call(

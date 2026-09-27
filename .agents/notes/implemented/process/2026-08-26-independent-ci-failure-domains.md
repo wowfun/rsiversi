@@ -51,13 +51,18 @@ focused integration or environment preflight in a consuming product job does
 not transfer that ownership; the coverage check recognizes whole-target commands
 rather than treating every package selector as another owning test suite.
 
-The Linux desktop job owns native admission, standalone-versus-paired build
-rejection, frame-ACK failure, startup-close deadlines, and the normal conversation
-close/restart path. Its frozen distribution uses a fresh target directory; the
-budget includes that cold build rather than assuming the ordinary Cargo cache
-covers it. Independent desktop fault scenarios run after a successful shared build and
-sandbox preflight even when another scenario fails. Their phase diagnostics and
-bounded redacted child logs are always uploaded. Sandbox policy remains active
+The Linux desktop job owns native admission, paired asset and Host incompatibility
+rejection, frame-ACK failure, document-close deadlines, and the normal conversation
+close/restart path. It prepares the paired distributions before running scenarios.
+The primary and incompatible-family builds have separate step budgets. Different
+Rust flags invalidate Cargo fingerprints, so the foreign family cannot be budgeted
+as an incremental rebuild. The job budget includes both possible cold builds;
+only the scenario that consumes the foreign family depends on its success.
+Independent desktop fault scenarios require a successful shared build and run even
+when another scenario fails; missing-ACK and close-deadline checks do not depend
+on sandbox preflight. Tool-using scenarios additionally require that preflight.
+Their phase diagnostics and bounded redacted child logs are always uploaded.
+Sandbox policy remains active
 through those scenarios and is restored by an always-running final step.
 The browser job also runs the shared document typecheck and ownership
 tests before product interaction.
@@ -125,7 +130,22 @@ alone do not establish an application or CI latency improvement.
 Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
 headroom, including conditionally selected platform steps. Every browser job
 command has an explicit step deadline; setup actions share the headroom. The repository budget
-test enforces this conservative ceiling when steps are added.
+test enforces this lower bound when steps are added and rejects explicit job
+deadlines above the [GitHub-hosted runner limit](https://docs.github.com/en/actions/reference/limits)
+of 360 minutes, including jobs without explicit step deadlines. A budget that
+cannot satisfy both constraints requires splitting work instead of raising the
+deadline beyond the platform limit. These checks validate configured deadlines,
+not observed execution time or the sufficiency of setup headroom. The desktop
+foreign-family rejection remains required; making it fail-soft would lose that
+acceptance evidence without demonstrating a timing improvement.
+
+The Web build, browser acceptance and paired-bundle integration probes have
+separate step deadlines, outcomes and logs. Both consumers depend only on a
+successful shared build and their environment prerequisites; a browser assertion
+failure does not skip ACP/LSP/addon evidence. Namespace policy is restored by
+each step that needs it. Browser consumers also name the independent shared
+fixture-package installation prerequisite; none assumes another test step
+completed its npm setup.
 
 The Web terminal fixture has its own step deadline, outcome and evidence archive.
 It reuses the main product build when present, and can still run after later main

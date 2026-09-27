@@ -11,7 +11,7 @@ decision from completing or being reconsidered independently.
 
 ## Decision
 
-The terminal subtree owns one [interaction reference](../../../../crates/rsi/terminal/docs/tui-design.md).
+The terminal subtree owns one [interaction reference](../../../../apps/terminal/docs/tui-design.md).
 Product documentation links to it; terminal and presentation READMEs retain their
 own lifecycle, trust, codec and resource contracts. The development guide owns
 how to implement and verify a change. Durable rationale follows independent Agent
@@ -29,6 +29,10 @@ DSH filename or require a new documentation index.
 Keeping parallel specifications in READMEs makes routine updates ambiguous.
 An omnibus design note gives independent changes a single lifecycle. A generated
 navigation inventory adds maintenance without establishing a contract owner.
+
+The [shared presentation decision](../architecture/2026-09-26-shared-presentation-design.md)
+separates common information rules from their terminal expression while retaining
+this decision's platform ownership and independent rationale.
 
 ## Consequences
 

@@ -20,7 +20,7 @@ export async function waitUntil(probe, label, ms = 30_000) {
 
 export function boundedRun(binary, args, options = {}) {
   const result = spawnSync(binary, args, { timeout: 300_000, maxBuffer: 2 * 1024 * 1024, ...options });
-  assert.equal(result.status, 0, result.error?.message ?? result.stderr?.toString());
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr?.toString() ?? `Process exited with status ${result.status}`);
   return result;
 }
 export async function deadline(promise, label, ms = 30_000) {
@@ -160,7 +160,7 @@ export async function startService({ binary, assets, report, configure, onReques
   try {
     await mkdir(workspace); await mkdir(env.HOME);
     const config = join(env.XDG_CONFIG_HOME, "rsi");
-    const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/web");
+    const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/browser-fixture");
     await mkdir(host, { recursive: true }); await mkdir(application, { recursive: true });
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
     await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n[steps.config.reasoning_efforts.fixture-model]\nsupported = ["low", "high"]\ndefault = "low"\n`);
@@ -172,7 +172,7 @@ export async function startService({ binary, assets, report, configure, onReques
     const address = `127.0.0.1:${reservation.address().port}`; const origin = `https://${address}`;
     await new Promise(resolve => reservation.close(resolve));
     const startProcess = async () => {
-    child = spawn(binary, ["--profile", "web", "--bind", address, "--origin", origin, "--tls-certificate", certificate, "--tls-key", key], { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn(binary, ["--profile", "browser-fixture", "--bind", address, "--origin", origin, "--tls-certificate", certificate, "--tls-key", key], { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });
     const lines = createInterface({ input: child.stdout });

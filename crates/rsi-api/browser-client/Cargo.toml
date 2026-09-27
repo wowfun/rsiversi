@@ -27,5 +27,10 @@ wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = ["AbortController", "AbortSignal", "DedicatedWorkerGlobalScope", "WorkerGlobalScope", "Headers", "Request", "RequestInit", "RequestCredentials", "RequestMode", "RequestRedirect", "Response", "ReadableStream", "ReadableStreamByobReader"] }
 zeroize.workspace = true
 
+[dev-dependencies]
+http.workspace = true
+rsi-api-client = { path = "../client" }
+serde_json.workspace = true
+
 [lints]
 workspace = true

@@ -9,7 +9,7 @@ Its stdin accepts one bounded catalog or grant operation and stdout returns the
 typed result. Browser tests use it to issue explicit Device leaf grants; remote
 configuration authority alone does not grant source changes.
 
-Build with `cargo build -p rsi --example profile-leaf-probe`. Run `browser.mjs`
+Build with `cargo build -p rsi-cli --example profile-leaf-probe`. Run `browser.mjs`
 with `RSI_WEB_ASSETS` pointing to a fresh product build and an explicit report
 directory. It exercises Chromium and Firefox, reviewed publication, original
 receipt recovery, stale source, grant revocation, and a narrow viewport.

@@ -1,10 +1,8 @@
 Read the product [contract](README.md) before changing standard composition or
 CLI behavior.
 
-- The core library owns standard composition, Application and Host Profile
-  catalogs, product domain adapters and Host lifecycle semantics. Terminal
-  application plugins own their argument grammar, input, rendering and signals;
-  the binary owns launcher/management parsing, process control and Tokio setup.
+- The core library owns standard composition, Profile catalog mechanics, product domain adapters and Host lifecycle semantics.
+  Application ownership and injection follow [apps governance](../../apps/AGENTS.md).
 - Keep default tests keyless, isolated from real user state, and observable
   through the built binary or public library interface.
 - The [application/client foundation decision](../../.agents/notes/implemented/architecture/2026-09-06-application-client-foundation.md)

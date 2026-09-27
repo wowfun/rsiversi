@@ -33,8 +33,16 @@ pub use addon::{
     MAXIMUM_ADDON_SCHEMA_DEPTH, MAXIMUM_FACTORY_DESCRIPTION_BYTES, MAXIMUM_STANDARD_ADDONS,
     StandardAddon, StandardAddonBuilder, StandardAddonSet,
 };
+mod application_catalog;
+pub use application_catalog::{
+    ApplicationCatalog, ApplicationCatalogMetadata, ApplicationCatalogProvider,
+};
 mod application_connection;
-pub use application_connection::{ApplicationDiagnostics, standard_application_host};
+pub mod application_services;
+pub use application_connection::{
+    ApplicationDiagnostics, BASE_APPLICATION_PLUGINS, base_application_catalog,
+    standard_application_host,
+};
 mod application_composition;
 pub use application_composition::ApplicationComposition;
 mod application_bootstrap;
@@ -431,6 +439,8 @@ impl RunningRsi {
     }
 
     /// Shuts down this service's Profile and Jobs, preserving a scoped parent's Runtime.
+    /// A clean outcome proves runtime teardown, not destruction of caller-retained
+    /// Local capability Arcs. Drop those capabilities before reopening the same paths.
     pub async fn shutdown(&self) -> rsi_meta::ShutdownOutcome {
         self.host.shutdown().await
     }

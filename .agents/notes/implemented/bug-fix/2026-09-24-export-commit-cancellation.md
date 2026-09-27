@@ -13,7 +13,7 @@ has been admitted. A view lifetime also cannot own that operation's capacity.
 Cancellation belongs at the [native sink's](../../../../crates/rsi/session-export/README.md)
 last reversible boundary. Existing application task trackers own the operation
 because detached views cannot establish whether persistence ran. The
-[Desktop](../../../../crates/rsi/desktop/README.md) also retains an open native
+[Desktop](../../../../apps/desktop/README.md) also retains an open native
 chooser: its callback API has no programmatic dismissal, and freeing admission
 before that callback would permit orphaned or overlapping dialogs.
 A server-issued reservation identifies cancellation before and after chooser

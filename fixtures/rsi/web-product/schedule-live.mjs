@@ -1,3 +1,4 @@
+import {navigationFilter} from './controls.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real provider reminder lifecycle; never included in default validation.
@@ -15,7 +16,7 @@ try {
   await openWorkspace(page, service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('This is an isolated integration test. Call schedule_create exactly once, with rule {"kind":"after","delay_ms":3000} and prompt "This is the one authorized reminder. Call schedule_list to inspect the spent allowance, then answer LIVE_SCHEDULE_ONCE. Do not create, resume or delete any reminder. Do not modify files." After creation succeeds, immediately finish your current turn with REMINDER_CREATED. Do not use any waiting tool or wait for the due time.');
-  await pane.getByRole('button',{name:'Send ↗',exact:true}).click();
+  await pane.getByTestId('composer-send').click();
   const deadline=Date.now()+180000;
   while(Date.now()<deadline) {
     const text=await pane.locator('.transcript').innerText();
@@ -34,7 +35,7 @@ try {
   const list=facts.find(f=>f.type==='tool_intent' && f.name==='schedule_list' && f.turn_id===automatic[0].turn_id);assert(list,'automatic Turn must call ordinary Tool');
   const listed=facts.find(f=>f.type==='tool_result' && f.effect_id===list.effect_id);assert.equal(listed?.result.value.state.allocated_rounds,1);assert.equal(listed.result.value.state.reminders.length,1);assert.equal(listed.result.value.state.reminders[0].consumed,true);
   const text=facts.filter(f=>f.type==='model_event' && f.turn_id===automatic[0].turn_id).map(f=>f.event?.type==='content_delta' && f.event.delta?.type==='text' ? f.event.delta.value : '').join('');assert.match(text,/LIVE_SCHEDULE_ONCE/);
-  assert.equal(service.provider.requests.length,0);await page.getByRole('region',{name:'Needs attention',exact:true}).getByText('Running',{exact:true}).waitFor({state:'hidden'});await page.screenshot({path:join(report,'schedule-wide.png')});
+  assert.equal(service.provider.requests.length,0);await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByText('Running',{exact:true}).waitFor({state:'hidden'});await page.screenshot({path:join(report,'schedule-wide.png')});
   await page.setViewportSize({width:420,height:900});await pane.locator('.transcript').evaluate(element=>{element.scrollTop=element.scrollHeight;});await page.screenshot({path:join(report,'schedule-narrow.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);
   await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browser.version(),model,reasoning_effort:'off',mock_model_requests:0,automatic_rounds:1,tool_calls:['schedule_create','schedule_list'],elapsed_ms:Date.now()-started},null,2));
 }catch(error){if(page)await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.txt'),fixture.redact(error));throw new Error(fixture.redact(error));}

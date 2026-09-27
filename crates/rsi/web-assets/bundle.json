@@ -1,0 +1,61 @@
+{
+  "bootstrap": [
+    {
+      "name": "index.html",
+      "stage": "document"
+    },
+    {
+      "name": "preview-local.html",
+      "stage": "preview"
+    },
+    {
+      "name": "preview-online.html",
+      "stage": "preview"
+    },
+    {
+      "name": "app.js",
+      "stage": "document"
+    },
+    {
+      "name": "mounts.js",
+      "stage": "copy"
+    },
+    {
+      "name": "drafts.js",
+      "stage": "copy"
+    },
+    {
+      "name": "admission.js",
+      "stage": "copy"
+    },
+    {
+      "name": "worker.js",
+      "stage": "worker"
+    },
+    {
+      "name": "download-worker.js",
+      "stage": "copy"
+    },
+    {
+      "name": "download-frame.js",
+      "stage": "copy"
+    },
+    {
+      "name": "styles.css",
+      "stage": "document"
+    },
+    {
+      "name": "rsi_web.js",
+      "stage": "wasm"
+    },
+    {
+      "name": "rsi_web_bg.wasm",
+      "stage": "wasm"
+    }
+  ],
+  "renderers": [
+    "standard.js",
+    "file-preview.js",
+    "ui-renderers.json"
+  ]
+}

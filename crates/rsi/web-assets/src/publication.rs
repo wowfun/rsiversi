@@ -16,21 +16,7 @@ use tokio::sync::{oneshot, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const MANIFEST: &str = "ui-renderers.json";
-const BOOTSTRAP: &[&str] = &[
-    "index.html",
-    "preview-local.html",
-    "preview-online.html",
-    "app.js",
-    "mounts.js",
-    "drafts.js",
-    "admission.js",
-    "worker.js",
-    "download-worker.js",
-    "download-frame.js",
-    "styles.css",
-    "rsi_web.js",
-    "rsi_web_bg.wasm",
-];
+pub use super::manifest::BOOTSTRAP;
 
 /// Renderer publication rejection, distinct from HTTP transport failures.
 #[derive(Debug, thiserror::Error)]
@@ -260,6 +246,7 @@ impl WebAssetControl {
             directory,
             files,
             watch: false,
+            pairing: None,
         };
         config
             .validate()

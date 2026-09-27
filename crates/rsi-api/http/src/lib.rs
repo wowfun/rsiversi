@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod access;
+mod bootstrap;
+pub use bootstrap::BrowserBootstrap;
 mod assets;
 pub use assets::{AssetType, DocumentPolicy, HttpAsset, HttpAssets, HttpAssetsContract};
 mod bounded_io;
@@ -21,6 +23,8 @@ mod policy;
 mod server;
 mod sse;
 mod tls;
-pub use plugin::{HttpFactory, HttpListener, HttpListenerContract, StaticHttpFactory};
+pub use plugin::{
+    HttpFactory, HttpListener, HttpListenerContract, LocalBrowserHttpFactory, StaticHttpFactory,
+};
 pub use policy::{HttpConfig, TlsFiles};
 pub use server::{HttpServer, HttpServices};

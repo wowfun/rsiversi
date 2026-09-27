@@ -96,7 +96,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
         }).observe(document.body,{subtree:true,childList:true,characterData:true});
         return true;
     ''')
-    button('Trajectory')
+    button('Verbose')
     def text(selector):
         return script('return document.querySelector(arguments[0])?.innerText??""', [selector])
     def has(value):
@@ -112,7 +112,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
         until(lambda: script('return !document.querySelector("#detail").open'))
     def send(prompt, expected):
         fill('textarea[aria-label="Main message"]', prompt)
-        button('Send ↗')
+        button('Send')
         def ready():
             pending = script('return [...document.querySelectorAll(".pending button")].find(b=>b.textContent.startsWith("Review:"))?.textContent??null')
             if pending:

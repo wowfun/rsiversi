@@ -17,7 +17,7 @@ test-only delay and gate fields let integration tests prove callback-watchdog
 and offloaded-destruction behavior.
 
 This plugin-owned slice proves the safe table and builds a real host-platform
-dynamic library. It does not prove that [`rsi-meta-native-loader`](../../../crates/rsi-meta/native-loader/)
+dynamic library. It does not prove that [`rsi-meta-native-loader`](../../../crates/rsi-meta/native-loader)
 has adopted ABI v3; Loader host tables, callback/effect bridging, admission, and
 mapping/unload remain their own integration gate. This fixture is test evidence,
 not a separately supported plugin distribution. Run its standalone checks:

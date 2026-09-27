@@ -45,13 +45,14 @@ choose another Host Profile through the ACP Service factory's `host_profile`.
 The entry accepts no application flags and writes only ACP NDJSON to stdout.
 
 This package implements the standard RSIversi product described by the product
-[contract](../README.md). The library owns the explicit linked factory catalog,
-standard composition and product-owned Profile catalogs. The Session plugin
+[contract](../README.md). The library owns standard Service composition, connection adapters, native staging
+and Profile catalog mechanics. Application factories and built-in Application
+Profiles are supplied explicitly by an application-layer catalog. The Session plugin
 publishes the transport-independent `SessionService`. Its trusted `SessionIngress`
 is registered in the same Host catalog for server endpoint composition; remote
 clients receive only the application-facing Session contract.
-The binary owns launcher/management parsing, process control and the Tokio runtime.
-[rsi-terminal](../terminal/README.md) owns the native application factories, their
+The [CLI contract](../../../apps/cli/README.md) owns executable startup.
+[rsi-terminal](../../../apps/terminal/README.md) owns the native application factories, their
 argument grammars, renderer sinks, terminal input and task lifetime. Shared
 submission reconciliation and observation cursor/retry policy live in
 [rsi-client](../client/README.md).
@@ -330,8 +331,8 @@ command text is retained in installed records.
 Identifiers start with an ASCII letter or digit and contain only ASCII letters,
 digits, `.`, `_` and `-`; ids/targets allow 64 bytes and plugin names 256 bytes.
 Relative artifact/watch paths allow 4096 UTF-8 bytes and 32 normal components.
-Build metadata allows 1–64 argv elements, 4096 bytes per element, 16 KiB total,
-at most 256 watch paths and a 1–600 second deadline. NUL is rejected in paths
+Build metadata allows 1 to 64 argv elements, 4096 bytes per element, 16 KiB total,
+at most 256 watch paths and a 1 to 600 second deadline. NUL is rejected in paths
 and arguments. Portable keys use the Agent catalog's key byte bound and reject
 duplicates and control characters.
 
@@ -461,7 +462,7 @@ immutable declaration metadata, finalized before Host build; it owns no Runtime.
 `rsi --profile inspector` connects to an existing local Service Host through the
 operator connection and never starts a service or creates a Session implicitly.
 
-The binary's [native source commands](../README.md#local-native-addon-sources)
+The binary's [native source commands](../docs/subsystems/composition-and-profiles.md)
 consume this store directly on a joined blocking worker. They expose installation
 and explicit selection receipts independently of runtime staging and retain the
 store's validation, locking and atomic publication boundaries.
@@ -643,3 +644,44 @@ Native program execution is opt-in. A Host Profile can activate
 enable its `program` step (`rsi.agent.program.tools`). Standard presets leave it
 disabled; neither ordinary startup nor ACP requires Node. The runtime and Tool
 contracts belong to [Agent Program](../../rsi-agent/program/README.md).
+
+## Explicit application composition
+
+`ApplicationCatalogMetadata` freezes reserved application plugin IDs and built-in
+Application Profile documents. `StandardComposition` and `ProfileCatalog` require
+this input; the Service daemon receives the same metadata as its native clients.
+Its deterministic digest contributes to the Service launch key. Application
+arguments, Web paths and window extras do not. Native staging reserves the frozen
+IDs without constructing application factories.
+
+`ApplicationCatalogProvider` creates application declarations and bounded
+owner diagnostics against the current Service composition. `ApplicationComposition`
+retains this provider across preflight, native staging and catalog replacement.
+The core connection and Service adapters stay encapsulated in the core-owned
+application services fragment. The provider selects terminal, Serve, ACP and
+presentation factories. No implicit official application catalog is available.
+
+`application_services` owns the local ServingService and LocalBrowserAdministration
+contracts consumed by application plugins. The latter retains its API result type;
+these product contracts do not add transport dependencies to rsi-application.
+
+Local browser launch grants configuration access before rotating an existing
+managed principal. A rejected grant leaves its old credential and live leases
+usable. Conditional rotation verifies the previously observed slot identity under
+the registry's commit lock, so deletion/recreation cannot issue an ungranted
+principal. First creation has no old credential to preserve: grant failure retires
+only its exact newly issued token. Cleanup errors remain explicit.
+
+A failed local-browser grant retains its managed principal while retiring the
+failed credential, so a later launch can still access drafts owned by that DeviceId.
+Only explicit device revocation removes this principal.
+
+Application catalog assembly checks that its factory IDs exactly equal the frozen
+metadata's reserved application IDs before merging Service factories or application
+extras. This check runs on preflight and every staged catalog rebuild. Missing or
+undeclared factories fail before activation; extras retain their separate role.
+
+Local browser launch is single-flight within one Service owner: concurrent and
+later calls share its first successfully authorized managed credential. A failed
+attempt may retry; a successful credential is never silently rotated by another
+call on that owner. Revocation remains effective until an explicit owner restart.

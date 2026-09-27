@@ -27,10 +27,16 @@ alias resolution implicitly.
 
 File opens are read-only, close-on-exec and nonblocking. They return a native
 file handle; callers must check the opened handle's type before reading content.
-Opening a FIFO cannot wait for a writer. These helpers neither enumerate nor
-read file bodies, and allocate no background work. Callers own input length,
+Opening a FIFO cannot wait for a writer. File helpers do not read file bodies
+or allocate background work. Callers own input length,
 read bounds, cancellation, authorization and directory-handle lifetime.
 
 This package has no non-Unix implementation. Consumers with a separate fallback
 must describe that fallback's own guarantees. It does not supply a process
 sandbox enforcement stamp or decide which sources become model context.
+
+`directory_entries` enumerates an already retained directory. Single-level
+`create_directory_no_follow` accepts exactly one nonempty normal name, rejects an
+existing target and opens the result without following a symlink. It never creates
+parents. Callers own enumeration bounds and must retain their own cancellation,
+authorization and absolute-path identity checks.

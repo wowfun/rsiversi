@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export async function verifyDraftMigration(browser, root) {
-  const source = await readFile(join(root,'plugins/rsi/web/drafts.js'),'utf8');
+  const source = await readFile(join(root,'apps/web/drafts.js'),'utf8');
   const reports=[];
   for (const version of [1,2]) for (const phase of ["prepared","dispatching","unknown"]) for (const corrupt of [false,true]) {
     const context=await browser.newContext();

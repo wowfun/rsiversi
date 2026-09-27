@@ -6,13 +6,17 @@ import { join } from "node:path";
 // Real module Worker running the shipped bridge; a gated WASM export fixture
 // isolates commit/disconnect ordering without claiming Rust or server coverage.
 export async function verifyWorkerLifecycle(browser, root) {
-  const worker = await readFile(join(root, "plugins/rsi/web/worker.js"), "utf8");
-  const admission = await readFile(join(root, "plugins/rsi/web/admission.js"), "utf8");
+  const worker = await readFile(join(root, "apps/web/worker.js"), "utf8");
+  const admission = await readFile(join(root, "apps/web/admission.js"), "utf8");
   const wasm = `
     let rejectCommit;
     const blocked = [];
+    export function build_family() { return "__RSI_BUILD_FAMILY__"; }
     export default async function init() {}
-    export async function connect() {}
+    export async function connect() { postMessage({kind:"fixture_connected"}); }
+    export async function connect_local() { postMessage({kind:"fixture_connected"}); }
+    export function acknowledge_frame() {}
+    export async function directory_input() {}
     export async function next_view() { return ["1", "{}", "{}"]; }
     export async function commit_renderer() {
       postMessage({ kind: "fixture_commit" });
@@ -37,7 +41,7 @@ export async function verifyWorkerLifecycle(browser, root) {
   `;
   const server = createServer((request, response) => {
     response.setHeader("Content-Type", request.url === "/" ? "text/html" : "text/javascript");
-    response.end(request.url === "/worker.js" ? worker : request.url === "/admission.js" ? admission : request.url === "/rsi_web.js" ? wasm : "<!doctype html><body>");
+    response.end(request.url === "/foreign-worker.js" ? worker.replace("__RSI_BUILD_FAMILY__", "foreign-worker-family") : request.url === "/worker.js" ? worker : request.url === "/admission.js" ? admission : request.url === "/rsi_web.js" ? wasm : "<!doctype html><body>");
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const page = await browser.newPage();
@@ -55,6 +59,7 @@ export async function verifyWorkerLifecycle(browser, root) {
         const commit = new Promise(resolve => { receiveCommit = resolve; });
         const failure = new Promise(resolve => { receiveFailure = resolve; });
         const call = (method, payload) => new Promise((resolve, reject) => {
+          if (method === "connect") payload.buildFamily = "__RSI_BUILD_FAMILY__";
           const key = ++id; pending.set(key, { resolve, reject });
           worker.postMessage({ kind: "call", id: key, method, payload });
         });
@@ -109,7 +114,33 @@ export async function verifyWorkerLifecycle(browser, root) {
     }
     assert.equal(results[3].ordinary_completed, 8);
     assert.match(results[2].error, /fixture commit failed/);
-    return results;
+    const pairing = await page.evaluate(async () => {
+      const results = [];
+      for (const mode of ['document', 'wasm']) {
+        const worker = new Worker(mode === 'wasm' ? '/foreign-worker.js' : '/worker.js', {type:'module'});
+        let connected = false, timer;
+        try {
+          const reply = new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('pairing rejection deadline')), 5000);
+            worker.onerror = event => reject(new Error(event.message));
+            worker.onmessage = ({data}) => {
+              if (data.kind === 'fixture_connected') connected = true;
+              if (data.kind === 'reply') resolve(data);
+            };
+          });
+          // WASM initialization may fail before the document's first call.
+          await new Promise(resolve => setTimeout(resolve, 50));
+          worker.postMessage({kind:'call', id:1, method:'connect', payload:{localBootstrap:true, buildFamily:'foreign-document-family'}});
+          results.push({mode, reply:await reply, connected});
+        } finally { clearTimeout(timer); worker.terminate(); }
+      }
+      return results;
+    });
+    for (const result of pairing) {
+      assert.equal(result.connected, false, 'pairing must reject before Profile connection');
+      assert.match(result.reply.error, result.mode === 'document' ? /document and Worker families differ/ : /Worker family differs from its bootstrap/);
+    }
+    return {lifecycle: results, pairing};
   } finally {
     await page.close();
     await new Promise(resolve => server.close(resolve));

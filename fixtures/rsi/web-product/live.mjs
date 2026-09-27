@@ -1,3 +1,5 @@
+import {detailMode} from './controls.mjs';
+import './paired-env.mjs';
 // Explicit opt-in only: no key is read by the deterministic suite.
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir,copyFile,chmod,readdir,lstat} from 'node:fs/promises';
@@ -13,7 +15,7 @@ const match=source.toString('utf8').match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*
 assert(match,'authorized DeepSeek key is absent');
 const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
 await mkdir(report,{recursive:true});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY ?? resolve('target/debug/rsi'),binary);await chmod(binary,0o700);
+const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
 const browser=await chromium.launch();let service,page;
 const errors=[];const started=Date.now();
 try {
@@ -39,11 +41,11 @@ try {
   await page.getByText('default_model · confirmed',{exact:true}).waitFor();
   // The receipt is published before the remaining setup readback finishes.
   await page.waitForFunction(()=>!document.querySelector('select[aria-label="Default model"]').disabled);
-  await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.locator('#workspaces .nav-item').click();
-  await page.getByRole('button',{name:'Trajectory',exact:true}).click();
+  await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').click();
+  await detailMode(page,'verbose');
   const input=page.getByLabel('Main message',{exact:true});
-  await input.fill('This is an isolated GUI integration test. Use the available bash tool to write the UTF-8 line "rsi-live-ok" to milestone.txt in the current workspace, then use bash to read that file back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.');
-  await page.getByRole('button',{name:'Send ↗',exact:true}).click();
+  await input.fill('This is an isolated GUI integration test. Use the available bash tool to write exactly 12 UTF-8 bytes: "rsi-live-ok" followed by one LF newline to milestone.txt in the current workspace, then use bash to read that file back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.');
+  await page.getByTestId('composer-send').click();
   const deadline=Date.now()+150000;let approvals=0;
   while(Date.now()<deadline) {
     const review=page.locator('.pending button').filter({hasText:'Review:'});
@@ -56,7 +58,7 @@ try {
   const status=await page.locator('.pane-status').innerText();
   assert.equal(status,'Completed',transcript.slice(-4096));
   const file=join(service.workspace,'milestone.txt');assert((await lstat(file)).isFile());
-  const bytes=await readFile(file);assert.equal(bytes.toString().trim(),'rsi-live-ok');
+  const bytes=await readFile(file);assert.equal(bytes.toString(),'rsi-live-ok\n');
   assert.match(transcript,/bash/);assert.match(transcript,/LIVE_GUI_VERIFIED/);assert.equal(service.provider.requests.length,0,'live scenario must not use the fixture provider');
   await page.waitForFunction(()=>document.querySelectorAll('#sessions .session-row').length===1);
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));

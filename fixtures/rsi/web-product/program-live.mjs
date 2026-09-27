@@ -1,3 +1,4 @@
+import {navigationFilter} from './controls.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {requireProviderUsage} from './evidence.mjs';
 import {cleanupAll} from './cleanup.mjs';
@@ -22,7 +23,7 @@ try {
   for(const mode of ['ordinary','program']) {
     if(mode==='program') {
       const previous=await pane.locator('.pane-session').innerText();
-      await page.locator('#workspaces .nav-item').first().click();
+      await page.locator('#workspaces [data-testid=workspace-open]').first().click();
       await page.waitForFunction(previous=>document.querySelector('[aria-label="Main conversation"] .pane-session')?.textContent!==previous,previous);
     }
     const script="let total=0; for(let i=0;i<4;i++){const r=await tools.call('file_read',{path:`sample-${i}.json`,maximum:32768}); if(r.is_error)throw new Error(JSON.stringify(r.value));total+=JSON.parse(r.value.text).n;} return {total};";
@@ -30,7 +31,7 @@ try {
       ? 'Call file_read directly exactly once for each of sample-0.json, sample-1.json, sample-2.json, sample-3.json (maximum 32768). Do not call run_code, bash or any other tool. Sum their n fields from the returned files.'
       : `Call run_code exactly once with this script, preserving it exactly: ${script} Do not call any other tool directly.`;
     await input.fill(`Isolated integration test. ${instruction} Do not modify files. Finish with LIVE_TOTAL_46 only if the actual tool results sum to 46. Do not repeat the private_payload contents.`);
-    const started=Date.now();await pane.getByRole('button',{name:'Send ↗',exact:true}).click();await input.waitFor();await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]')?.value==='');
+    const started=Date.now();await pane.getByTestId('composer-send').click();await input.waitFor();await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]')?.value==='');
     const deadline=Date.now()+180000;
     while(Date.now()<deadline) {
       const status=await pane.locator('.pane-status').innerText();
@@ -51,7 +52,7 @@ try {
     } else assert(reads.every(read=>read.origin?.kind==='model'));
     const usage=requireProviderUsage(facts);
     measurements.push({mode,session,elapsed_ms,model_requests:facts.filter(f=>f.type==='model_intent').length,tool_calls:intents.length,usage});
-    await page.getByRole('region',{name:'Needs attention',exact:true}).getByText('Running',{exact:true}).waitFor({state:'hidden'});await page.screenshot({path:join(report,`${mode}-wide.png`)});
+    await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByText('Running',{exact:true}).waitFor({state:'hidden'});await page.screenshot({path:join(report,`${mode}-wide.png`)});
     if(mode==='program') {await pane.locator('.message-title').filter({hasText:'Program ·'}).first().scrollIntoViewIfNeeded();await page.screenshot({path:join(report,'program-card-wide.png')});}
   }
   await page.setViewportSize({width:420,height:900});await pane.locator('.message-title').filter({hasText:'Program ·'}).first().scrollIntoViewIfNeeded();await page.screenshot({path:join(report,'program-narrow.png')});

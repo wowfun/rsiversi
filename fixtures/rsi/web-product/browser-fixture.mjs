@@ -1,3 +1,4 @@
+import {detailMode} from './controls.mjs';
 // Shared public-browser setup; probe assertions and service lifetime stay with callers.
 export async function openBrowserPage(engine, errors) {
   const browser = await engine.launch();
@@ -22,6 +23,6 @@ export async function openWorkspace(page, service) {
   await page.locator('.workspace-add summary').click();
   await page.getByLabel('Server directory').fill(service.workspace);
   await page.getByRole('button', {name: 'Add workspace', exact: true}).click();
-  await page.locator('#workspaces .nav-item').first().click();
-  await page.getByRole('button', {name: 'Trajectory', exact: true}).click();
+  await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await detailMode(page,'verbose');
 }

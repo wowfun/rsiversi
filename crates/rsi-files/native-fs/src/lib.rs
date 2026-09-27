@@ -149,3 +149,56 @@ pub fn is_link_rejection(error: &std::io::Error) -> bool {
         .raw_os_error()
         .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
 }
+
+/// Enumerates only the already acquired directory; callers bound and cancel iteration.
+pub fn directory_entries(directory: &Dir) -> std::io::Result<cap_std::fs::ReadDir> {
+    directory.entries()
+}
+
+/// Whether an error happened before or after a directory was created.
+#[derive(Debug)]
+pub enum DirectoryCreationError {
+    /// mkdir did not succeed; no new directory was created by this call.
+    NotCreated(std::io::Error),
+    /// mkdir succeeded, but the resulting directory could not be opened safely.
+    Created(std::io::Error),
+}
+impl std::fmt::Display for DirectoryCreationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCreated(error) => write!(formatter, "{error}"),
+            Self::Created(error) => write!(formatter, "directory created but open failed: {error}"),
+        }
+    }
+}
+impl std::error::Error for DirectoryCreationError {}
+
+/// Creates exactly one directory under a retained parent and opens it without links.
+/// An existing target is an error; no intermediate directory is created.
+pub fn create_directory_no_follow(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+) -> Result<Dir, DirectoryCreationError> {
+    use std::path::Component;
+    let path = Path::new(name);
+    let mut components = path.components();
+    if name.is_empty()
+        || name.as_encoded_bytes().contains(&0)
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+        || path.as_os_str() != name
+        || name.as_encoded_bytes().contains(&b'/')
+    {
+        return Err(DirectoryCreationError::NotCreated(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "single directory name required",
+        )));
+    }
+    rustix::fs::mkdirat(
+        parent,
+        path,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+    )
+    .map_err(|error| DirectoryCreationError::NotCreated(error.into()))?;
+    open_relative_directory_no_follow(parent, path).map_err(DirectoryCreationError::Created)
+}

@@ -180,6 +180,7 @@ fn composition(paths: HostPaths) -> StandardComposition {
             SecretValue::new("fixture-secret").unwrap(),
         )]),
         Some(coding),
+        rsi::ApplicationCatalogMetadata::default(),
     )
     .with_credential_store(Arc::new(EmptySecretStore))
 }
@@ -364,9 +365,12 @@ async fn run_message_with_text_to_terminal(
 async fn built_in_standard_host_profile_boots_the_real_product_composition() {
     let (endpoint, provider) = provider().await;
     let fixture = fixture(&endpoint);
-    let profile = ProfileCatalog::new(fixture.paths.clone())
-        .host(&HostProfileId::new("standard").unwrap())
-        .unwrap();
+    let profile = ProfileCatalog::new(
+        fixture.paths.clone(),
+        rsi::ApplicationCatalogMetadata::default(),
+    )
+    .host(&HostProfileId::new("standard").unwrap())
+    .unwrap();
     assert_eq!(profile.source, ProfileSource::Builtin);
     let running = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
         .await
@@ -683,6 +687,7 @@ async fn application_selection_uses_a_compatible_daemon_and_embeds_only_without_
             )
             .unwrap(),
         ),
+        rsi::ApplicationCatalogMetadata::default(),
     )
     .with_credential_store(Arc::new(EmptySecretStore));
     let remote =
@@ -699,6 +704,7 @@ async fn application_selection_uses_a_compatible_daemon_and_embeds_only_without_
             SecretValue::new("fixture-secret").unwrap(),
         )]),
         None,
+        rsi::ApplicationCatalogMetadata::default(),
     )
     .with_credential_store(Arc::new(EmptySecretStore));
     let error = connect_or_embed_service_host(&client_runtime.root(), incompatible, &profile)
@@ -938,3 +944,6 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
 
 #[path = "session_service/workspace_review.rs"]
 mod workspace_review;
+
+#[path = "session_service/directory_picker.rs"]
+mod directory_picker;

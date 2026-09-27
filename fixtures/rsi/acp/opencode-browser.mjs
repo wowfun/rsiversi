@@ -1,3 +1,4 @@
+import '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {appendFile, mkdir, readFile, writeFile} from 'node:fs/promises';
@@ -12,7 +13,7 @@ await mkdir(output, {recursive: true});
 const marker = join(output, 'peer-pids');
 let workspacePath;
 const service = await startService({
-  binary: resolve(process.env.RSI_BINARY ?? 'target/debug/rsi'),
+  binary: resolve(process.env.RSI_BINARY),
   assets: process.env.RSI_WEB_ASSETS,
   report: output,
   async configure({config, workspace}) {
@@ -56,7 +57,7 @@ try {
   }
   async function prompt(text, markerText, allowEdit) {
     await pane.getByRole('textbox',{name:'External message',exact:true}).fill(text);
-    await pane.getByRole('button',{name:'Send ↗',exact:true}).click();
+    await pane.getByTestId('composer-send').click();
     await waitUntil(async () => {
       const permissions = pane.locator('.external-permission');
       if (await permissions.count()) {

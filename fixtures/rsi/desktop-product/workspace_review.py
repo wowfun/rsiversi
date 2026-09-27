@@ -8,7 +8,7 @@ def reply(body):
     return {'tool_calls':[{'index':0,'id':'desktop-review-patch','type':'function','function':{'name':'apply_patch','arguments':json.dumps({'patch':'*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n'})}}]}
 
 def verify(script, button, fill, until, screenshot, workspace, report):
-    fill('textarea[aria-label="Main message"]','REVIEW_PATCH'); button('Send ↗')
+    fill('textarea[aria-label="Main message"]','REVIEW_PATCH'); button('Send')
     until(lambda: (workspace / 'card.txt').read_text() == 'after · 界\n')
     until(lambda: script('return document.querySelector(".pane-status")?.textContent==="Completed"'))
     button('Workspace changes'); button('Review workspace changes')

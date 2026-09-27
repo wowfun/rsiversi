@@ -15,7 +15,7 @@ owns saved plans and the review domain. Its settlement callback holds both
 handles and commits approval, mode exit and Tool result atomically. The
 closed choice binds to the plan reference and both observed revisions. Generic
 human questions remain product-neutral; all native clients send typed choices.
-The [prior plan decision](../../implemented/feature/2026-09-09-plan-policy.md)
+The [prior plan decision](2026-09-09-plan-policy.md)
 remains authoritative for policy; this extends its one-domain composition.
 
 DSH's `packages/plan/plan-mode/src/index.ts` provides a complete-plan review and

@@ -7,14 +7,14 @@ import {createHash} from 'node:crypto';
 export async function verifyExport(page,service,report,name) {
   const input=page.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('Export Unicode 界 🦀');
-  await page.getByRole('button',{name:'Send ↗',exact:true}).click();
+  await page.getByTestId('composer-send').click();
   await page.waitForFunction(()=>document.querySelector('.pane-status')?.textContent==='Completed');
   const before=service.provider.requests.length;
   const evidence=[];
   for (const [args,filename] of [["'../export fixture.json' -f json -i h,m,pie,lpr,last-provider-response",'export fixture.json'],['','']]) {
     const promised=page.waitForEvent('download');
-    if(args){await input.fill(`/export ${args}`);await page.getByRole('button',{name:'Send ↗',exact:true}).click();}
-    else await page.getByRole('button',{name:'Export',exact:true}).click();
+    if(args){await input.fill(`/export ${args}`);await page.getByTestId('composer-send').click();}
+    else await page.locator(".composer-extras").evaluate(node=>node.open=true);await page.getByRole('button',{name:'Export',exact:true}).click();
     const download=await promised;
     assert.equal(await download.failure(),null);
     const path=await download.path(),bytes=await readFile(path),text=bytes.toString('utf8');

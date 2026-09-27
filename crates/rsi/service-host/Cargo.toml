@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-build-info = { path = "../build-info" }
 rsi-api-http = { path = "../../rsi-api/http" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }
@@ -35,10 +36,6 @@ rsi-api-auth = { path = "../../rsi-api/auth" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
-
-[build-dependencies]
-serde_json.workspace = true
-sha2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

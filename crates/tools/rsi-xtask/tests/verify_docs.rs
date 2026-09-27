@@ -81,8 +81,7 @@ fn valid_repository() -> TempDir {
         "crates/tools/AGENTS.md",
         "crates/rsi-host/AGENTS.md",
         "crates/rsi-meta/AGENTS.md",
-        "plugins/AGENTS.md",
-        "plugins/rsi-meta/AGENTS.md",
+        "apps/AGENTS.md",
         "fixtures/AGENTS.md",
         "fixtures/rsi-meta/AGENTS.md",
         "examples/AGENTS.md",
@@ -99,6 +98,11 @@ fn valid_repository() -> TempDir {
 
     let packages = [
         (
+            "apps/terminal",
+            "terminal",
+            "Application-owned terminal input and lifecycle.",
+        ),
+        (
             "crates/rsi-host/core",
             "rsi-host",
             "A generic static composition host above the Meta lifecycle.",
@@ -114,12 +118,12 @@ fn valid_repository() -> TempDir {
             "This package exposes repository commands.\n\n## Commands\n\n```sh\ncargo xtask verify-docs\n```",
         ),
         (
-            "plugins/rsi-meta/native",
+            "apps/native",
             "native",
             "This plugin provides one native capability.\n\n## Retirement\n\nRetirement stops generation-owned work.",
         ),
         (
-            "plugins/rsi-meta/support",
+            "apps/support",
             "support",
             "Shared protocol types for maintained plugins and fixtures.",
         ),
@@ -133,11 +137,7 @@ fn valid_repository() -> TempDir {
         write(root, &format!("{directory}/Cargo.toml"), &manifest(name));
         write(root, &format!("{directory}/README.md"), &readme(name, body));
     }
-    write(
-        root,
-        "plugins/rsi-meta/native/plugin.toml",
-        "name = \"native\"\n",
-    );
+    write(root, "apps/native/plugin.toml", "name = \"native\"\n");
     repository
 }
 
@@ -248,13 +248,13 @@ fn fragment_only_links_are_checked_against_the_source_document() {
 fn agent_instruction_word_limits_are_inclusive_and_diagnostics_are_sorted() {
     let repository = valid_repository();
     write(repository.path(), "AGENTS.md", &words(400));
-    write(repository.path(), "plugins/rsi-meta/AGENTS.md", &words(300));
+    write(repository.path(), "apps/AGENTS.md", &words(300));
 
     let at_limits = verify(repository.path());
     assert!(at_limits.status.success(), "{}", stderr(&at_limits));
 
     write(repository.path(), "AGENTS.md", &words(401));
-    write(repository.path(), "plugins/rsi-meta/AGENTS.md", &words(301));
+    write(repository.path(), "apps/AGENTS.md", &words(301));
 
     let over_limits = verify(repository.path());
     let errors = stderr(&over_limits);
@@ -263,7 +263,7 @@ fn agent_instruction_word_limits_are_inclusive_and_diagnostics_are_sorted() {
     assert!(errors.contains("AGENTS.md contains 301 words, exceeding its 300-word limit"));
     let root = errors.find("AGENTS.md:1").expect("root budget error");
     let plugin = errors
-        .find("plugins/rsi-meta/AGENTS.md:1")
+        .find("apps/AGENTS.md:1")
         .expect("plugin budget error");
     assert!(root < plugin, "diagnostics should be path-sorted: {errors}");
 }
@@ -313,12 +313,12 @@ fn readme_errors_and_unknown_packages_are_aggregated_and_sorted() {
     );
     write(
         repository.path(),
-        "plugins/rsi-meta/native/README.md",
+        "apps/native/README.md",
         "# wrong-name\n\nNative plugin contract.\n",
     );
     write(
         repository.path(),
-        "plugins/rsi-meta/support/README.md",
+        "apps/support/README.md",
         "## Shared protocol\n\nSupport package contract.\n",
     );
     write(
@@ -548,4 +548,23 @@ fn package_owned_docs_receive_taxonomy_and_link_validation() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("crates/rsi-meta/core/docs/specs"));
     assert!(stderr(&output).contains("legacy decision or specification home is forbidden"));
+}
+
+#[test]
+fn application_docs_have_the_same_taxonomy_gate() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "apps/terminal/docs/subsystems/rendering.md",
+        "# Rendering\n",
+    );
+    assert!(verify(repository.path()).status.success());
+    write(
+        repository.path(),
+        "apps/terminal/docs/specs/legacy.md",
+        "# Legacy\n",
+    );
+    let output = verify(repository.path());
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("apps/terminal/docs/specs"));
 }

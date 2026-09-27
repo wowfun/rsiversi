@@ -25,96 +25,27 @@ does not include private modules or fixture source files from this checkout.
 The native template remains the default. Delivering dynamic libraries still
 requires the existing Native ABI and Portable boundaries.
 
-`cargo xtask dist desktop /absolute/output [--debug]` creates a new Linux paired
-distribution from an immutable capture of all current tracked and non-ignored
-untracked files, including dirty contents. It never stages or commits them. The
-capture records file bytes, modes, symlink destinations, Rust/Cargo/Node/npm and
-GTK/WebKit development versions, target and build flags before either executable
-is built. Toolchain probes use the same cleared build environment and frozen
-working directory as the builds. Symlinks escaping the
-capture and a changing source file are rejected. Internal symlinks are preserved
-literally; an ignored or absent destination remains absent in the frozen tree.
-The capture never follows that link to import ignored local state. A build that
-needs an omitted input must fail in the frozen tree. Both executable builds consume
-that same capture and the same family manifest. Their actual SHA-256 values are
-recorded separately in the distribution receipt. The headless executable beside
-the GUI is the canonical apply-patch helper. Existing output directories are
-rejected; build failure retains the isolated capture and log for diagnosis.
-The command requires Python 3, npm and matching wasm-bindgen on PATH (or the
-explicit RSI_WASM_BINDGEN path); credentials are not forwarded to build children.
-
-`cargo xtask dev tui` and `cargo xtask dev web` create an isolated development
-directory, build and copy the real `rsi` executable once, configure a deterministic
-native provider, and supervise the selected application. A successful default run
-removes its temporary environment, runtime directory and private native outputs.
-Failures retain those files for diagnosis. `--directory ABSOLUTE_NEW_DIRECTORY`
-selects a persistent environment; `--prepare-only` also retains its environment
-without starting an application. Defaults prefer `/var/tmp` and fall back to the
-host temporary directory (`TMPDIR`) if it is unavailable. `--port PORT` selects
-the Web listener port (default 8787); it is rejected for TUI.
-`--smoke` runs a keyless headless request and exits. No provider credential is read
-or required by these defaults. Execution requires Linux or WSL; native Windows
-and macOS launch are unavailable.
-
-Supervised applications and build subprocesses receive an explicit environment
-allowlist and private HOME/XDG directories. Only build subprocesses receive the
-developer's Cargo and Rustup homes, including Cargo configuration and registry
-credentials. The product and generated `run` launcher omit those variables.
-This separates ambient configuration; it is not a filesystem sandbox.
-Native builds explicitly select the launcher executable's target triple,
-independent of ambient Cargo `build.target`. The initial executable and Web WASM
-builds share the repository Cargo target cache.
-Native addon builds share `target/dev-native/cache`. The Linux `flock` utility
-serializes compilation and copying into private `target/dev-native/artifacts/`
-directories, so concurrent watchers cannot exchange artifacts. SourceRoot requires
-those copies to remain under the repository. Both compilation caches remain after
-exit. For persistent environments, `native-output-path` and `runtime-path` record
-the additional directories to remove when the environment is no longer needed.
-
-TUI development selects its independent native presentation Profile. Its existing
-addon watcher builds and enables successful artifacts from an explicit SourceRoot;
-the application's normal staging owner publishes replacements. Build output goes
-to the development log. The watch set is explicit and does not infer a Cargo
-dependency graph. Web development also supervises Vite on the selected loopback
-port and places its isolated API service on a separate ephemeral loopback port.
-The service trusts only the frontend origin; the proxy preserves Origin and Host
-headers. Feature components and styles support HMR. Root composition, transport,
-Worker and saved-input schema changes reload the document. Production CSP and
-renderer publication remain independent of Vite. npm installs the committed lock
-without lifecycle scripts before building the frontend.
-`--no-watch` leaves a fixed presentation. Web Worker/WASM
-changes require rebuilding the Web bundle and restarting its application; renderer
-graphs use their separately owned generation publication. The Web application
-and source watcher each have a separate process group; the launcher supervises
-Ctrl-C shutdown. The TUI also owns a process group, temporarily receives terminal
-foreground ownership, and restores terminal modes under the resident owner.
-The launcher kills remaining group members before reaping each leader and restores
-the previous foreground group when the TUI closes. Cleanup allows 15 seconds
-after TERM and a further two seconds after KILL; either deadline failure names
-the child and preserves the environment for diagnosis. An OS task that cannot
-be killed is reported as incomplete cleanup.
-
-`rsi-xtask` is the private command-line tool for repository policy and cross-workspace verification orchestration. It is invoked through the root Cargo alias as `cargo xtask`; its checks do not edit tracked files unless a caller explicitly selects a documented `--write` mode.
-
 ## Documentation policy
 
-`cargo xtask verify-docs` validates repository-root execution, documentation layout, governance boundaries, active `AGENTS.md` word budgets, Cargo package README identity and minimum prose, internal Markdown links, and active Agent Notes. Independent diagnostics are collected and printed in stable path, line, and message order.
+`cargo xtask verify-docs` is read-only and requires the virtual workspace root.
+It checks documentation taxonomy, governance boundaries, active `AGENTS.md` word
+budgets, Cargo package README identity and minimum prose, relative Markdown links,
+and active Agent Notes. Independent diagnostics are reported in stable path,
+line and message order. Root instructions have a 400-word budget; descendant
+instructions have 300 words. A reasoned, path-specific override is the last resort.
 
-Generated build directories and installed `node_modules` are excluded from
-documentation traversal; authored fixture documentation is still checked.
-Standalone Cargo fixtures must occupy `fixtures/<product>/<fixture>` under an
-existing `crates/<product>` namespace and retain their own package README.
+Every Cargo package requires a sibling README with exactly one level-one heading
+matching its package name and a nonempty prose paragraph. Application directories
+also require a README. Product namespaces own their governance files; root and
+collection boundaries must exist. Product docs use the supported cookbook,
+postmortem, subsystems and user subdirectories. Standalone Cargo fixtures live
+under `fixtures/<product>/<fixture>` in an existing product namespace and retain
+their own README. Generated outputs and installed dependencies are excluded;
+authored fixture documentation is checked.
 
-The distribution verifies captured paths again after building and rejects added
-source files; dependency/build output directories and the desktop package's
-generated Tauri schemas are excluded from that check.
-Cargo also verifies recorded bytes before embedding a build-family identity.
-
-## Agent Note archives
-
-`cargo xtask verify-agent-notes` runs the focused Note lifecycle and archive-integrity checks. `cargo xtask verify-agent-notes --write` is the only documentation command that may append archive seals; it never edits or replaces an existing sealed entry.
-
-## Optional code checks
+`cargo xtask verify-agent-notes` checks Note lifecycle and archive integrity.
+Only its explicit `--write` mode may append archive seals; it never replaces an
+existing seal. [Agent Notes](../../../.agents/notes/README.md) own that lifecycle.
 
 `cargo xtask code-check` runs the repository checks configured by
 [`code-check.toml`](code-check.toml) when a contributor invokes it explicitly.
@@ -153,3 +84,23 @@ header compilation, while the Loader suite maps the real native fixture on the
 executing host.
 
 Repository commands must run from the repository root. Native evidence applies only to the platform that actually executed it.
+
+`cargo xtask verify-architecture` rejects normal, build and test dependencies from
+reusable `crates/` packages into `apps/`, including maintained standalone Cargo
+workspaces and workspace-inherited declarations. It also rejects workspace
+patch/replace paths and explicit Cargo target/build source paths into `apps/`.
+Workspace patch/replace overrides are checked conservatively even when currently unused, since
+they can redirect transitive dependencies. This is a manifest gate: arbitrary
+source includes and process invocations remain subject to ownership review, not
+a claim of whole-program dependency analysis. CI runs it with documentation
+verification. Application development and paired publication belong to
+[rsi-app-tools](../../../apps/devtools/README.md).
+
+Architecture verification collects independent filesystem and dependency errors
+before returning sorted diagnostics. It follows source-directory symlinks inside
+the repository once per physical directory, rejects escapes and reports broken
+paths. Its library ownership scope is `crates/`, as required by the repository
+architecture; an arbitrary `libs/` tree is not an alternative library root.
+The application root is resolved to its physical directory before classifying
+edges, including when `apps/` is a symlink. A broken or escaping application root
+is an error; sibling names such as `appsfoo/` are not application paths.

@@ -41,6 +41,7 @@ impl Fixture {
         let root = temp.path().canonicalize().unwrap();
         let catalog = ProfileCatalog::new(
             HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+            rsi::ApplicationCatalogMetadata::default(),
         );
         let id = HostProfileId::new("leaf-fixture").unwrap();
         let path = catalog

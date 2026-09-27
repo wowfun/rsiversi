@@ -6,13 +6,27 @@ use crate::{AddonScope, StandardAddonSet, StandardComposition};
 pub struct ApplicationComposition {
     pub(crate) service: StandardComposition,
     pub(crate) extras: StandardAddonSet,
+    pub(crate) catalog: std::sync::Arc<dyn crate::ApplicationCatalogProvider>,
 }
 
 impl ApplicationComposition {
     /// Freezes Application-only declarations without activating any factory.
-    pub fn new(service: StandardComposition, extras: StandardAddonSet) -> rsi_host::Result<Self> {
+    pub fn new(
+        service: StandardComposition,
+        catalog: std::sync::Arc<dyn crate::ApplicationCatalogProvider>,
+        extras: StandardAddonSet,
+    ) -> rsi_host::Result<Self> {
         extras.validate_application_only()?;
-        Ok(Self { service, extras })
+        if service.application_metadata() != catalog.metadata() {
+            return Err(rsi_host::HostError::Bootstrap(
+                "application and Service catalog metadata differ".into(),
+            ));
+        }
+        Ok(Self {
+            service,
+            extras,
+            catalog,
+        })
     }
 
     /// Returns the unchanged inputs selecting the Service Host.
@@ -32,14 +46,5 @@ impl ApplicationComposition {
             .filter(|entry| entry.scope == AddonScope::Application)
             .map(|entry| entry.plugin.clone())
             .collect()
-    }
-}
-
-impl From<StandardComposition> for ApplicationComposition {
-    fn from(service: StandardComposition) -> Self {
-        Self {
-            service,
-            extras: StandardAddonSet::default(),
-        }
     }
 }

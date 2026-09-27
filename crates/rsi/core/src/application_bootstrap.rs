@@ -5,11 +5,10 @@ use std::ffi::OsString;
 /// Starts the product's stable bootstrap and its ordinary Application child Profile.
 /// Native staging precedes child catalog construction and shares the same Runtime.
 pub async fn start_application(
-    composition: impl Into<ApplicationComposition>,
+    composition: ApplicationComposition,
     arguments: Vec<OsString>,
     program: ProfileProgram,
 ) -> Result<RunningHost> {
-    let composition = composition.into();
     #[cfg(unix)]
     {
         native::start(composition, arguments, program).await

@@ -126,7 +126,7 @@ fn validate_governance_boundaries(repository: &Path, diagnostics: &mut Vec<Diagn
         "docs/AGENTS.md",
         "crates/AGENTS.md",
         "crates/tools/AGENTS.md",
-        "plugins/AGENTS.md",
+        "apps/AGENTS.md",
         "fixtures/AGENTS.md",
         "examples/AGENTS.md",
         "schemas/AGENTS.md",
@@ -139,7 +139,7 @@ fn validate_governance_boundaries(repository: &Path, diagnostics: &mut Vec<Diagn
         );
     }
 
-    for collection in ["plugins", "fixtures", "examples", "schemas"] {
+    for collection in ["fixtures", "examples", "schemas"] {
         for child in child_directories(&repository.join(collection), repository, diagnostics) {
             require_path(
                 repository,
@@ -148,6 +148,15 @@ fn validate_governance_boundaries(repository: &Path, diagnostics: &mut Vec<Diagn
                 diagnostics,
             );
         }
+    }
+
+    for application in child_directories(&repository.join("apps"), repository, diagnostics) {
+        require_path(
+            repository,
+            &application.join("README.md"),
+            "application must define README.md",
+            diagnostics,
+        );
     }
 
     for product in child_directories(&repository.join("crates"), repository, diagnostics) {
@@ -390,6 +399,13 @@ fn validate_docs_taxonomy(repository: &Path, diagnostics: &mut Vec<Diagnostic>) 
         }
     }
 
+    for application in child_directories(&repository.join("apps"), repository, diagnostics) {
+        let docs = application.join("docs");
+        if docs.is_dir() {
+            doc_roots.push(docs);
+        }
+    }
+
     for docs in doc_roots {
         let Ok(entries) = sorted_entries(&docs) else {
             continue;
@@ -503,6 +519,7 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
     };
     let components = relative.components().collect::<Vec<_>>();
     match components.as_slice() {
+        [Component::Normal(first), Component::Normal(_)] if *first == OsStr::new("apps") => true,
         [
             Component::Normal(first),
             Component::Normal(_),
@@ -512,10 +529,8 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
             Component::Normal(first),
             Component::Normal(second),
             Component::Normal(_),
-        ] if (*first == OsStr::new("plugins")
-            && (*second == OsStr::new("rsi-agent") || *second == OsStr::new("rsi-meta")))
-            || (*first == OsStr::new("fixtures")
-                && repository.join("crates").join(second).is_dir()) =>
+        ] if *first == OsStr::new("fixtures")
+            && repository.join("crates").join(second).is_dir() =>
         {
             true
         }

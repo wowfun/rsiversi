@@ -10,7 +10,7 @@ can exceed the operating system's Unix socket pathname limit.
 
 ## Decision
 
-The repository task builds and freezes the actual product, creates explicit
+The application development supervisor builds and freezes the actual product, creates explicit
 private configuration/state/workspace directories, and launches an ordinary
 Application Profile with a deterministic native provider. It preserves logs and
 the executable digest for inspection. Its launcher clears ambient environment
@@ -51,13 +51,14 @@ a development socket would change an unrelated ownership boundary.
 
 Debug symbol demangling can exceed retained asset capacity even though execution
 code fits. Preserving original symbol names avoids raising the product bound.
-The [Web build](../../../../plugins/rsi/web/README.md) uses native provider admission
+The [Web build](../../../../apps/web/README.md) uses native provider admission
 as its oracle because duplicating the file and byte policy would drift; this
 intentionally adds a native preflight build.
 
 The first product build includes linked backends; subsequent native renderer or
-WASM builds have smaller dependency closures. Worker/bootstrap edits need a new
-bundle and restart. Declared watch inputs must track deliberate source changes.
+WASM builds have smaller dependency closures. Rust and Worker edits need a new paired upstream and restart. Vite serves mutable
+document source under the explicit development-only overlay described by the
+[application ownership decision](../architecture/2026-09-26-application-ownership-and-paired-web.md). Declared watch inputs must track deliberate source changes.
 Local HTTP remains an explicit development opt-in at both server and browser.
 
 Launcher tests cover literal arguments and isolated environment. The smoke oracle
@@ -68,6 +69,6 @@ The launcher signal tests use isolated nonterminal subprocesses; they do not
 verify foreground terminal handoff. Local Linux/WSL PTY runs of the actual
 launcher additionally exercised keyboard exit, supervisor signals, descendant
 cleanup and terminal restoration. Browser product fixtures verify resource
-counters through the product launcher, not through `xtask dev web`. These local
+counters through the product launcher, not through `pnpm dev`. These local
 checks are distinct from the maintained CI smoke test and do not establish
 native Windows or macOS behavior.

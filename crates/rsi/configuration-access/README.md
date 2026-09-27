@@ -58,3 +58,8 @@ finishes, including after reply loss. Credential writes and MCP connection refre
 use this seam. The `rsi.mcp` Settings namespace admits HTTP configuration only in
 its owning validator; Local stdio is kept in the Host Profile and is absent from
 remotely readable Settings values.
+
+Directory listing and creation hold the same admission lease through their actual
+filesystem worker, including after a caller timeout. This stronger grant is needed
+for Host-wide path discovery; registering an already known workspace remains a
+separate operation. Revocation waits for admitted filesystem syscalls to return.

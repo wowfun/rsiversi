@@ -327,3 +327,163 @@ async fn plugin_uses_exact_dependencies_and_retires_both_escaped_authorities() {
     deps.dispose().await;
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[tokio::test]
+async fn managed_rotation_preserves_identity_and_failed_publication_preserves_authority() {
+    let domain = TestDomain::new();
+    let registry = open(domain.clone()).await;
+    let first = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    let lease = registry.authenticate(&first.token).unwrap();
+    domain.fail.store(true, Ordering::SeqCst);
+    assert!(
+        registry
+            .rotate_managed("local-web", "Local Web")
+            .await
+            .is_err()
+    );
+    assert!(!lease.revoked.is_cancelled());
+    assert!(registry.authenticate(&first.token).is_ok());
+    domain.fail.store(false, Ordering::SeqCst);
+    let second = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_eq!(first.record.id, second.record.id);
+    assert!(lease.revoked.is_cancelled());
+    assert!(registry.authenticate(&first.token).is_err());
+    assert!(registry.authenticate(&second.token).is_ok());
+    assert_eq!(registry.list().unwrap().len(), 1);
+    registry.close().await;
+    let registry = open(domain.clone()).await;
+    let third = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_eq!(third.record.id, first.record.id);
+    assert!(
+        !serde_json::to_string(&domain.snapshot().await)
+            .unwrap()
+            .contains(third.token.expose_secret())
+    );
+    assert!(
+        registry
+            .rotate_managed("../bad", "Local Web")
+            .await
+            .is_err()
+    );
+    registry.revoke(&third.record.id).await.unwrap();
+    let fourth = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_ne!(fourth.record.id, third.record.id);
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn exact_credential_cleanup_cannot_revoke_a_later_managed_rotation() {
+    let registry = open(TestDomain::new()).await;
+    let old = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    let current = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_eq!(old.record.id, current.record.id);
+    assert!(!registry.revoke_credential(&old).await.unwrap());
+    let lease = registry.authenticate(&current.token).unwrap();
+    assert!(!lease.revoked.is_cancelled());
+    assert!(registry.revoke_credential(&current).await.unwrap());
+    assert!(lease.revoked.is_cancelled());
+    assert_eq!(registry.list().unwrap(), vec![current.record.clone()]);
+    assert!(registry.authenticate(&current.token).is_err());
+    assert!(!registry.revoke_credential(&current).await.unwrap());
+    let resumed = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_eq!(resumed.record.id, current.record.id);
+}
+
+#[tokio::test]
+async fn retired_managed_credential_preserves_principal_across_restart_and_failed_publication() {
+    let domain = TestDomain::new();
+    let registry = open(domain.clone()).await;
+    let device = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    let lease = registry.authenticate(&device.token).unwrap();
+    domain.fail.store(true, Ordering::SeqCst);
+    assert!(registry.revoke_credential(&device).await.is_err());
+    assert!(!lease.revoked.is_cancelled());
+    assert!(registry.authenticate(&device.token).is_ok());
+    domain.fail.store(false, Ordering::SeqCst);
+    assert!(registry.revoke_credential(&device).await.unwrap());
+    assert!(lease.revoked.is_cancelled());
+    registry.close().await;
+    let registry = open(domain).await;
+    assert!(registry.authenticate(&device.token).is_err());
+    let resumed = registry
+        .rotate_managed("local-web", "Local Web")
+        .await
+        .unwrap();
+    assert_eq!(device.record.id, resumed.record.id);
+    assert!(registry.authenticate(&resumed.token).is_ok());
+    let unmanaged = registry.register("Manual").await.unwrap();
+    assert!(registry.revoke_credential(&unmanaged).await.unwrap());
+    assert!(
+        !registry
+            .list()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == unmanaged.record.id)
+    );
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn managed_rotation_checks_observed_identity_without_revoking_on_conflict() {
+    let registry = open(TestDomain::new()).await;
+    assert!(registry.managed_device("local-web").unwrap().is_none());
+    let first = registry
+        .rotate_managed_if("local-web", "Local Web", None)
+        .await
+        .unwrap();
+    let lease = registry.authenticate(&first.token).unwrap();
+    let observed = registry.managed_device("local-web").unwrap().unwrap();
+    assert_eq!(observed, first.record);
+    assert!(
+        registry
+            .rotate_managed_if("local-web", "Local Web", None)
+            .await
+            .is_err()
+    );
+    assert!(!lease.revoked.is_cancelled());
+    assert!(registry.authenticate(&first.token).is_ok());
+    registry.revoke(&first.record.id).await.unwrap();
+    let second = registry
+        .rotate_managed_if("local-web", "Local Web", None)
+        .await
+        .unwrap();
+    assert!(
+        registry
+            .rotate_managed_if("local-web", "Local Web", Some(&observed.id))
+            .await
+            .is_err()
+    );
+    assert!(registry.authenticate(&second.token).is_ok());
+    let third = registry
+        .rotate_managed_if("local-web", "Local Web", Some(&second.record.id))
+        .await
+        .unwrap();
+    assert_eq!(third.record.id, second.record.id);
+    assert!(registry.authenticate(&second.token).is_err());
+    assert!(registry.authenticate(&third.token).is_ok());
+    registry.close().await;
+}

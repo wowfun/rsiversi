@@ -29,13 +29,20 @@ async fn run() -> Result<u8, Box<dyn std::error::Error>> {
         .and_then(|value| value.into_string().ok())
         .ok_or("profile id required")?;
     let paths = rsi::standard_paths()?;
-    let profile = rsi::ProfileCatalog::new(paths.clone())
+    let profile = rsi::ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
         .application(&rsi::ApplicationProfileId::new(selected)?)?;
-    let composition =
-        rsi::StandardComposition::new(paths, rsi::capture_standard_environment()?, None)
-            .with_addons(addon::addons(Arc::new(addon::Evidence::default())))
-            .with_credential_store(Arc::new(EmptyStore));
-    let (host, diagnostics) = rsi::standard_application_host(composition, arguments.collect())?;
+    let composition = rsi::StandardComposition::new(
+        paths,
+        rsi::capture_standard_environment()?,
+        None,
+        rsi_app_catalog::metadata(),
+    )
+    .with_addons(addon::addons(Arc::new(addon::Evidence::default())))
+    .with_credential_store(Arc::new(EmptyStore));
+    let (host, diagnostics) = rsi::standard_application_host(
+        rsi_app_catalog::compose(composition)?,
+        arguments.collect(),
+    )?;
     let running = host
         .start_program(profile.program()?)
         .await

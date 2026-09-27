@@ -1,0 +1,33 @@
+[package]
+name = "rsi-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-build-info = { path = "../../crates/rsi/build-info" }
+rsi = { path = "../../crates/rsi/core" }
+rsi-api = { path = "../../crates/rsi-api/core" }
+rsi-web-assets = { path = "../../crates/rsi/web-assets" }
+rsi-web-assets-api = { path = "../../crates/rsi/web-assets-api" }
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-api-http = { path = "../../crates/rsi-api/http" }
+rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+serde_json.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+sha2.workspace = true
+rsi-credentials-protocol = { path = "../../crates/rsi-credentials/protocol" }
+tokio = { workspace = true, features = ["sync", "signal", "process", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true

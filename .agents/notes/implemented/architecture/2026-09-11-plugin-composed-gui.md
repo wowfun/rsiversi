@@ -12,8 +12,8 @@ Session or provider policy inside a platform shell would create competing owners
 ## Decision
 
 The shared [GUI application](../../../../crates/rsi/gui/README.md) owns Session
-surfaces and presentation. The [Worker](../../../../crates/rsi/web/README.md) and
-[Linux desktop](../../../../crates/rsi/desktop/README.md) are transport/platform
+surfaces and presentation. The [Worker](../../../../apps/web-worker/README.md) and
+[Linux desktop](../../../../apps/desktop/README.md) are transport/platform
 adapters. Tauri owns the main-thread event loop and private persistent WebView
 storage. Its types do not enter shared business packages or the headless binary.
 An awaitable [Application lifetime](../../../../crates/rsi/application/README.md)
@@ -26,7 +26,7 @@ renderer must not change the desired Service merely by being linked. Native
 catalog refresh and factory reservations retain those extras without leaking
 Application declarations into Service compatibility.
 
-A [paired distribution](../../../../crates/tools/rsi-xtask/README.md) builds desktop
+A [paired distribution](../../../../apps/devtools/README.md) builds desktop
 and headless companion from one frozen capture of current tracked and non-ignored
 source bytes, including dirty files. Recorded source bytes, modes and symlinks
 are validated by the Cargo build script before embedding and registered as Cargo
@@ -35,6 +35,11 @@ and build directories. Both embed one build-family digest; individual
 executable hashes remain artifact identity. The canonical companion is also the
 coding helper. The existing exact launch key and protocol epoch still apply;
 family identity grants no authentication. A borrowed daemon survives GUI teardown.
+Document reload retires its previous frame observation, ACK deadline and renderer
+offer, then joins the real frame lane before requesting a fresh snapshot. The
+Session and submission ledger remain owned by the application. Keeping an old
+long poll after navigation can reject the new document and incorrectly stop the
+application; treating reload as a new observer avoids replaying business work.
 
 First-run configuration uses the existing three provider factories through an
 ordinary [managed-provider owner](../../../../crates/rsi/managed-providers/README.md).
@@ -59,11 +64,13 @@ Workspace grouping uses exact registered paths. Archive changes visibility witho
 detaching a resident Session. Empty-draft reuse requires the current owned, matching,
 unpublished attachment, no pending submission and unchanged captured defaults.
 
-The [document](../../../../plugins/rsi/web/README.md) uses one pinned React runtime
+The [document](../../../../apps/web/README.md) uses one pinned React runtime
 and selected DSH SlotCore/binding/primitives with exact
-[vendoring provenance](../../../../plugins/rsi/web/vendor/dsh/provenance.json).
-Workspace/Session navigation, selected Chat/Trajectory, Session resources and global
-Settings are separate feature surfaces. Existing UI contracts retain action
+[vendoring provenance](../../../../apps/web/vendor/dsh/provenance.json).
+Workspace/Session navigation, transcript detail, Session resources and global
+Settings are separate feature surfaces. The [Turn presentation decision](../feature/2026-09-26-turn-presentation-index.md)
+supersedes the separate Chat/Trajectory choice. The [navigation decision](../feature/2026-09-26-grouped-pinned-navigation.md)
+adds independent complete pins and workspace group queries. Existing UI contracts retain action
 identity and independently contributed views. The former Session DOM renderer
 remains an explicitly initialized island with its own awaited mount lifetime.
 

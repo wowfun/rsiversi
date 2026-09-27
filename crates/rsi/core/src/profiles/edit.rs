@@ -1,7 +1,6 @@
 use super::{
     ApplicationProfileId, HostProfileId, MAXIMUM_PROFILE_DOCUMENT_BYTES, ProfileCatalog,
-    ProfileCatalogError, STANDARD_HOST_PROFILE, builtin_application, reject_builtin_target,
-    reject_legacy_application,
+    ProfileCatalogError, STANDARD_HOST_PROFILE, reject_builtin_target, reject_legacy_application,
 };
 use rsi_files_native_fs::open_absolute_directory_no_follow;
 use rsi_host::{Host, HostProfileEditPreview};
@@ -111,7 +110,7 @@ impl ProfileCatalog {
         reject_builtin_target(
             "Application Profile",
             id.as_str(),
-            builtin_application(id).is_some(),
+            self.applications.profiles().contains_key(id),
         )?;
         if id.as_str() == "session" {
             return Err(ProfileCatalogError::RetiredApplication.into());

@@ -29,3 +29,6 @@ claim-bound, read-only Jobs port.
 All runtime components are ordinary plugins over public `rsi-meta`
 `Runtime -> Context -> Fiber` semantics. `rsi-meta` remains unaware of Agent
 concepts, and provider semantics remain owned by `rsi-ai`.
+
+The [security boundary](docs/security.md) and [testing policy](docs/testing.md)
+define validation ownership and evidence for these contracts.

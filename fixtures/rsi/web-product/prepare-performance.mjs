@@ -5,8 +5,10 @@ const args=process.argv.slice(2);
 if(args.length!==2||!process.env.RSI_WEB_ASSETS) throw new Error('Pass baseline document source and a new output directory; set RSI_WEB_ASSETS');
 const [baseline,directory]=args.map(path=>resolve(path));
 await mkdir(directory,{recursive:false});
-const root=resolve('plugins/rsi/web'), scene=await readFile('fixtures/rsi/web-product/performance-scene.js','utf8');
-const {build}=await import(join(root,'node_modules/vite/dist/node/index.js'));
+const root=resolve('apps/web'), scene=await readFile('fixtures/rsi/web-product/performance-scene.js','utf8');
+const {createRequire}=await import('node:module');
+const require=createRequire(join(root,'package.json'));
+const {build}=await import((await import('node:url')).pathToFileURL(require.resolve('vite')).href);
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function treeHashes(root, relative='') {
   const hashes={};
@@ -21,6 +23,8 @@ async function treeHashes(root, relative='') {
 }
 const generated=join(directory,'generated-assets');
 await cp(process.env.RSI_WEB_ASSETS,generated,{recursive:true});
+// Instrumented documents deliberately carry no product pairing receipt.
+await (await import('node:fs/promises')).rm(join(generated,'rsi-build.json'),{force:true});
 const hashes={},sources={},outputs={};
 for(const [variant,input] of [['baseline',baseline],['current',root]]) {
   const source=join(directory,`${variant}-source`), output=join(directory,variant);
@@ -38,4 +42,4 @@ for(const [variant,input] of [['baseline',baseline],['current',root]]) {
   await build({root:source,configFile:join(source,'vite.config.mjs'),build:{outDir:output,emptyOutDir:false}});
   outputs[variant]=await treeHashes(output);
 }
-await writeFile(join(directory,'instrumentation.json'),JSON.stringify({format:1,source_app_sha256:hashes,source_files_sha256:sources,generated_assets_sha256:await treeHashes(generated),output_files_sha256:outputs,build_package_lock_sha256:digest(await readFile(join(root,'package-lock.json'))),node:process.version,scene_sha256:digest(scene),boundary:'Document projection and persistence; same frozen generated assets and native Host. No Rust frame, transport or provider timing.'},null,2));
+await writeFile(join(directory,'instrumentation.json'),JSON.stringify({format:1,source_app_sha256:hashes,source_files_sha256:sources,generated_assets_sha256:await treeHashes(generated),output_files_sha256:outputs,build_pnpm_lock_sha256:digest(await readFile(join(root,'pnpm-lock.yaml'))),node:process.version,scene_sha256:digest(scene),boundary:'Document projection and persistence; same frozen generated assets and isolated browser engine. No product startup, Rust frame, Host, transport or provider timing.'},null,2));

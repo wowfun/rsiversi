@@ -1,6 +1,9 @@
+import {resources as showResources} from './controls.mjs';
+import './paired-env.mjs';
+import { cleanupAll } from "./cleanup.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile, cp, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, cp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +16,7 @@ const assets = join(directory, "assets");
 const report = process.env.RSI_WEB_REPORT ?? join(directory, "report");
 await mkdir(report, { recursive: true });
 await cp(process.env.RSI_WEB_ASSETS, assets, { recursive: true });
-const base = (await readFile(join(root, "plugins/rsi/web/standard.js"), "utf8")).replace("export async function mount", "async function standardMount");
+const base = (await readFile(join(root, "apps/web/standard.js"), "utf8")).replace("export async function mount", "async function standardMount");
 async function writeGeneration(label, gate = false, fail = false) {
   const renderer = `${base}\nexport async function mount(root, snapshot, host, signal) {\n${gate ? "if (!window.candidateStarted) { window.candidateStarted = true; await new Promise(resolve => { window.finishCandidate = resolve; }); }" : ""}\n${fail ? 'throw new Error("intentional candidate mount failure");' : `const mounted = await standardMount(root, snapshot, host, signal);\nroot.dataset.rendererRevision = ${JSON.stringify(label)};\nwindow.oldLazy = () => import("./lazy.js").then(module => module.label);\nreturn { update: mounted.update, async dispose() { await new Promise(resolve => setTimeout(resolve, 150)); await mounted.dispose(); } };`}\n}\n`;
   const lazy = `export const label = ${JSON.stringify(label)};\n`;
@@ -23,15 +26,15 @@ async function writeGeneration(label, gate = false, fail = false) {
 }
 await writeGeneration("A");
 const binary = join(directory, "rsi");
-await cp(process.env.RSI_WEB_BINARY ?? join(root, "target/debug/rsi"), binary);
+await cp(process.env.RSI_WEB_BINARY, binary);
 let service;
 let diagnosticPage;
 if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
 const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chromium).launch({ headless: true });
 try {
   service = await startService({ binary, assets, report, configure: async ({ config }) => {
-    const profile = join(config, "application-profiles/web/application.profile.toml");
-    const files = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
+    const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
+    const files = ["index.html", "preview-local.html", "preview-online.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
     const content = await readFile(profile, "utf8");
     await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, watch = true, files = ${JSON.stringify(files)}`));
   } });
@@ -53,14 +56,14 @@ try {
   await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
-  await page.locator("#workspaces .nav-item").first().click();
+  await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   const pane = page.getByRole("region", { name: "Main conversation", exact: true });
   await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
-  await pane.getByRole("button", { name: "Send ↗" }).click();
+  await pane.getByTestId("composer-send").click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
   await pane.getByRole("textbox", { name: "Main message" }).fill("resident draft 界");
   const session = await pane.locator(".pane-session").innerText();
-  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await showResources(page);await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   const form = page.locator(".ui-contribution");
   await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("kept form draft");
   await page.locator('[data-renderer-revision="A"]').waitFor();
@@ -86,7 +89,7 @@ try {
   assert.equal(await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).inputValue(), "kept form draft");
   await page.screenshot({ path: join(report, "failed-candidate-keeps-b.png") });
   await page.getByRole("button", { name: "Close details", exact: true }).click();
-  await pane.getByRole("button", { name: "Cancel", exact: true }).click();
+  await pane.getByRole("button", { name: "Stop", exact: true }).click();
   // Exercise the actual WASM Assets owner: the server commits D, but the Worker
   // never receives its reply. Mutations must not be replayed on this connection.
   let lostCommitRequests = 0;
@@ -97,7 +100,7 @@ try {
     assert.equal(await committed.text(), "true");
     await route.abort("failed");
   });
-  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await showResources(page);await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   await page.locator('[data-renderer-revision="B"]').waitFor();
   await writeGeneration("D");
   await page.locator("#connection-state").filter({ hasText: "Connection failed" }).waitFor();
@@ -108,17 +111,17 @@ try {
   await context.unroute("**/api/v1/web-assets/commit/1");
   await page.locator("#reconnect").click();
   await page.locator("#workbench").waitFor({ state: "visible" });
-  await page.locator("#workspaces .nav-item").first().click();
-  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await page.locator("#workspaces [data-testid=workspace-open]").first().click();
+  await showResources(page);await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   await page.locator('[data-renderer-revision="D"]').waitFor();
   assert.equal(await page.evaluate(() => window.workerStarts), 2);
   await page.screenshot({ path: join(report, "lost-commit-reconnected-renderer-d.png") });
   await page.getByRole("button", { name: "Close details", exact: true }).click();
   await page.locator("#detail").waitFor({ state: "hidden" });
   await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn after recovery");
-  await pane.getByRole("button", { name: "Send ↗" }).click();
+  await pane.getByTestId("composer-send").click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
-  await pane.getByRole("button", { name: "Cancel", exact: true }).click();
+  await pane.getByRole("button", { name: "Stop", exact: true }).click();
   await page.evaluate(() => { document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }); });
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await page.locator("#login").waitFor({ state: "visible" });
@@ -134,9 +137,9 @@ try {
   for (const mode of ["static", "broken"]) {
     await mkdir(join(report, mode));
     service = await startService({ binary, assets, report: join(report, mode), configure: async ({ config }) => {
-      const profile = join(config, "application-profiles/web/application.profile.toml");
+      const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
       const content = await readFile(profile, "utf8");
-      const files = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
+      const files = ["index.html", "preview-local.html", "preview-online.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
       if (mode === "broken") files.push("standard.js", "ui-renderers.json", "lazy.js");
       await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(files)}`));
     } });
@@ -150,17 +153,17 @@ try {
     await cold.locator(".workspace-add summary").click();
     await cold.locator("#workspace-path").fill(service.workspace);
     await cold.getByRole("button", { name: "Add workspace", exact: true }).click();
-    await cold.locator("#workspaces .nav-item").first().click();
+    await cold.locator("#workspaces [data-testid=workspace-open]").first().click();
     const coldPane = cold.getByRole("region", { name: "Main conversation", exact: true });
-    await cold.getByRole("button", { name: "Workspace files", exact: true }).click();
+    await showResources(cold);await cold.getByRole("button", { name: "Workspace files", exact: true }).click();
     await cold.locator(".renderer-mount").filter({ hasText: "Renderer unavailable: rsi.standard" }).waitFor();
     await cold.screenshot({ path: join(report, `${mode}-catalog-diagnostic.png`) });
     await cold.getByRole("button", { name: "Close details", exact: true }).click();
     await cold.locator("#detail").waitFor({ state: "hidden" });
     await coldPane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
-    await coldPane.getByRole("button", { name: "Send ↗" }).click();
+    await coldPane.getByTestId("composer-send").click();
     await coldPane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
-    await coldPane.getByRole("button", { name: "Cancel", exact: true }).click();
+    await coldPane.getByRole("button", { name: "Stop", exact: true }).click();
     assert.equal(await cold.evaluate(() => window.workerStarts), 1);
     await cold.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
     await cold.getByRole("button", { name: "Sign out", exact: true }).click();
@@ -179,4 +182,8 @@ try {
     await writeFile(join(report, "failure.txt"), await diagnosticPage.locator("body").innerText());
   }
   throw error;
-} finally { await browser.close(); await service?.close(); }
+} finally {
+  await cleanupAll(() => browser.close(), () => service?.close());
+  // Keep default reports in their temporary directory; explicit reports survive outside it.
+  if (process.env.RSI_WEB_REPORT) await rm(directory, {recursive:true, force:true});
+}

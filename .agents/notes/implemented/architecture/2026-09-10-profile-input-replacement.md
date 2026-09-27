@@ -18,10 +18,10 @@ old complete input for compensation and advance an independent input revision
 even when a new catalog leaves the selected graph unchanged.
 
 This extends the immutable catalog rule in
-[resolved Host catalogs](../../implemented/architecture/2026-09-09-host-resolved-catalog.md)
+[resolved Host catalogs](2026-09-09-host-resolved-catalog.md)
 without admitting post-build registry mutation. It preserves the binding and
 compensation rules in
-[Profile binding convergence](../../implemented/architecture/2026-09-08-profile-binding-convergence.md).
+[Profile binding convergence](2026-09-08-profile-binding-convergence.md).
 
 ## Alternatives considered
 

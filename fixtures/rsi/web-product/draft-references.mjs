@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
 export async function verifyDraftReferences(browser, root) {
-  const source = await readFile(join(root, 'plugins/rsi/web/drafts.js'), 'utf8');
+  const source = await readFile(join(root, 'apps/web/drafts.js'), 'utf8');
   const context = await browser.newContext();
   await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
   const page = await context.newPage();

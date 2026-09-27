@@ -1,0 +1,5 @@
+- Read the [repository architecture](../docs/architecture.md) and the [RSI contract](../crates/rsi/README.md) before changing application ownership.
+- Applications own executable entry, concrete application catalogs, presentation adapters and development/distribution tooling. Reusable product libraries under `crates/` must not depend on this subtree, including in tests or build scripts.
+- Keep catalog metadata explicit in native clients and Service daemons. Arguments and window state do not select Service identity; frozen built-in Profile and reserved-plugin metadata do.
+- Product Web assets require a matching native/bootstrap/Worker build family. Only the supervised Vite development overlay permits mutable document source; it never disables the upstream asset check.
+- Follow the repository test policy and the owning package contract. Keep default checks keyless and isolated; preserve process, terminal and renderer cleanup under cancellation.

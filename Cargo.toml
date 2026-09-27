@@ -1,7 +1,8 @@
 [workspace]
-members = ["crates/*/*"]
+members = ["crates/*/*", "apps/cli", "apps/catalog", "apps/terminal", "apps/serve", "apps/acp", "apps/web-worker", "apps/desktop", "apps/devtools"]
 exclude = [
     "crates/rsi/terminal-native",
+    "crates/rsi/docs",
     "crates/rsi-agent/docs",
     "crates/rsi-ai/docs",
     "crates/rsi-meta/docs",

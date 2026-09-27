@@ -56,6 +56,30 @@ pub trait DeviceAuthentication: fmt::Debug + Send + Sync + 'static {
 pub trait DeviceAdministration: fmt::Debug + Send + Sync + 'static {
     /// Durably registers a device and returns its new secret once.
     async fn register(&self, label: &str) -> Result<RegisteredDevice>;
+    /// Rotates a Local-owned managed slot, preserving its device identity.
+    /// Implementations without managed slots return Unavailable.
+    async fn rotate_managed(&self, _slot: &str, _label: &str) -> Result<RegisteredDevice> {
+        Err(ApiError::Unavailable)
+    }
+    /// Reads a Local-owned slot's public identity without rotating its credential.
+    fn managed_device(&self, _slot: &str) -> Result<Option<DeviceRecord>> {
+        Err(ApiError::Unavailable)
+    }
+    /// Rotates only if this slot still names the expected device (None requires absence).
+    async fn rotate_managed_if(
+        &self,
+        _slot: &str,
+        _label: &str,
+        _expected: Option<&DeviceId>,
+    ) -> Result<RegisteredDevice> {
+        Err(ApiError::Unavailable)
+    }
+    /// Retires only this exact issued credential; a later rotation must survive.
+    /// Managed slots retain their `DeviceId` for the next rotation; unmanaged records are deleted.
+    /// Implementations without conditional revocation return Unavailable.
+    async fn revoke_credential(&self, _device: &RegisteredDevice) -> Result<bool> {
+        Err(ApiError::Unavailable)
+    }
     /// Revokes a registered device after durable publication; repeated revocation is false.
     async fn revoke(&self, id: &DeviceId) -> Result<bool>;
     /// Returns at most 64 non-secret device records.

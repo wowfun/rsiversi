@@ -535,7 +535,8 @@ impl StandardAddonSet {
         Ok(())
     }
 
-    pub(crate) fn merged(&self, addon: StandardAddon) -> rsi_host::Result<Self> {
+    /// Combines one declaration with this frozen set, validating all identities.
+    pub fn merged(&self, addon: StandardAddon) -> rsi_host::Result<Self> {
         Self::new(std::iter::once(addon).chain(self.addons.iter().cloned()))
     }
 
@@ -647,7 +648,8 @@ impl StandardAddonSet {
         Ok(())
     }
 
-    pub(crate) fn merged_set(&self, other: &Self) -> rsi_host::Result<Self> {
+    /// Combines two frozen sets, rejecting duplicate identities.
+    pub fn merged_set(&self, other: &Self) -> rsi_host::Result<Self> {
         Self::new(self.addons.iter().chain(other.addons.iter()).cloned())
     }
 }

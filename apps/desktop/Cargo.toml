@@ -1,0 +1,40 @@
+[package]
+name = "rsi-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-build-info = { path = "../../crates/rsi/build-info" }
+rsi-app-catalog = { path = "../catalog" }
+rsi-session-export = { path = "../../crates/rsi/session-export" }
+tauri-plugin-dialog = "=2.7.1"
+tauri-plugin-clipboard-manager = "=2.3.3"
+rsi = { path = "../../crates/rsi/core" }
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-gui = { path = "../../crates/rsi/gui" }
+rsi-workbench-ui = { path = "../../crates/rsi/workbench-ui" }
+rsi-host = { path = "../../crates/rsi-host/core" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-api-http = { path = "../../crates/rsi-api/http" }
+rsi-web-assets = { path = "../../crates/rsi/web-assets" }
+rsi-ui = { path = "../../crates/rsi/ui" }
+async-trait.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "signal"] }
+tokio-util.workspace = true
+tauri = "=2.11.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[lints]
+workspace = true

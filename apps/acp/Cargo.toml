@@ -1,0 +1,27 @@
+[package]
+name = "rsi-acp-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi = { path = "../../crates/rsi/core" }
+rsi-acp-agent = { path = "../../crates/rsi/acp" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-acp = { path = "../../crates/rsi-acp/core" }
+async-trait.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["time", "net", "signal", "fs", "io-util"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[lints]
+workspace = true

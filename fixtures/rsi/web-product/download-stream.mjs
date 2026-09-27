@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 // Shipped Service Worker and document adapter, with a gated event producer.
 // Rust framing and Store behavior are tested separately at their public seams.
 export async function verifyDownloadStream(browser,root,trace=()=>{}) {
-  const files=Object.fromEntries(await Promise.all(['download-worker.js','download-frame.js','session-export.js'].map(async name=>['/'+name,await readFile(join(root,'plugins/rsi/web',name))])));
+  const files=Object.fromEntries(await Promise.all(['download-worker.js','download-frame.js','session-export.js'].map(async name=>['/'+name,await readFile(join(root,'apps/web',name))])));
   const server=createServer((request,response)=>{response.setHeader('Content-Type',request.url.endsWith('.js')?'text/javascript':'text/html');response.end(files[request.url]??'<!doctype html><body>Streaming download fixture</body>');});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const context=await browser.newContext(),page=await context.newPage();page.setDefaultTimeout(15000);

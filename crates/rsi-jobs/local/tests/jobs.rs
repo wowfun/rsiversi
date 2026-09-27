@@ -1261,6 +1261,52 @@ impl JobProducer for BlockingStartProducer {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_readiness_precedes_publication_but_submit_returns_a_visible_job() {
+    let (runtime, _fiber, jobs) = activated(json!({})).await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let control = TestControl::new(TestSettlement::OnCancel, b"ready", b"");
+    let lease = jobs
+        .register_producer(registration(
+            "blocking",
+            Arc::new(BlockingStartProducer {
+                entered: entered.clone(),
+                release: release.clone(),
+                control,
+            }),
+        ))
+        .unwrap();
+    let authority = jobs.acquire_scope(scope("publication")).unwrap();
+    let submitting = jobs.clone();
+    let scope = authority.clone();
+    let submit = tokio::task::spawn_blocking(move || {
+        submitting.submit(
+            &scope,
+            JobSubmission {
+                name: "publication".into(),
+                producer: "blocking".into(),
+                origin: None,
+                request: JobRequest::new(()),
+                requires_report: true,
+            },
+        )
+    });
+    entered.notified().await;
+    let before = jobs.list(&authority).unwrap();
+    // Release even if the following assertion fails, so the blocking producer can exit.
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    assert!(before.is_empty());
+    let id = submit.await.unwrap().unwrap();
+    let after = jobs.list(&authority).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, id);
+    jobs.finalize_scope(&authority).await.unwrap();
+    drop(lease);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id() {
     let (_runtime, fiber, jobs) = activated(json!({})).await;
     let entered = Arc::new(Notify::new());

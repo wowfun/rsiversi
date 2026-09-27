@@ -11,9 +11,11 @@ def provider_reply(body):
 
 
 def verify(script, button, click, fill, until, screenshot, report):
-    button('Trajectory')
+    button('Filter conversations')
+    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Verbose')
     fill('textarea[aria-label="Main message"]', 'desktop typed profile catalog')
-    button('Send ↗')
+    button('Send')
     answered = False
     def completed():
         nonlocal answered
@@ -31,5 +33,5 @@ def verify(script, button, click, fill, until, screenshot, report):
     assert script(r'const e=document.querySelector("#detail");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its dialog'
     screenshot('typed-recorded-result.png')
     button('Close details')
-    button('Chat')
+    button('Standard')
     (report / 'typed-results.json').write_text(json.dumps({'status':'passed','tool':'host_profile','recorded_contract':'rsi.profile-leaves','version':1,'authority':'agent catalog read only','native_bridge':True},indent=2))

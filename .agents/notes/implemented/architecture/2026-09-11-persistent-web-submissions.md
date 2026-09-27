@@ -25,7 +25,7 @@ remain available in the recovery list even when the old Session cannot reopen.
 The connection API supplies the authenticated caller identity. Browser requests
 pin that device identity and HTTP checks it against the current authentication
 before dispatch or cookie removal. The document selects storage only after this
-identity is established. The [Web contract](../../../../plugins/rsi/web/README.md)
+identity is established. The [Web contract](../../../../apps/web/README.md)
 owns current persistence, limits and recovery behavior; the
 [HTTP contract](../../../../crates/rsi-api/http/README.md) owns the request fence.
 
@@ -35,6 +35,15 @@ objects at Service scope, and its reader validates the reference and returned
 content. Restored document drafts may therefore preview a validated reference
 without reconstructing a Worker membership list. The current pane generation
 and exact-source ticket checks still fence their respective presentation paths.
+
+Queue mutations share this ledger and the existing Rust preparation/dispatch
+bridge. A frozen request binds the original Session, Header, operation, slot and
+predecessor; reconnect cannot retarget it. Complete ordered content retains
+images and selected references while a separate editor changes text. Settlement
+changes the queue projection without clearing the ordinary composer. Querying an
+unknown result precedes an explicit identical retry, which remains safe because
+queue receipts have no eviction window. TUI keeps the same frozen envelope and
+original handle for its application lifetime; Web additionally survives reload.
 
 ## Alternatives considered
 

@@ -9,30 +9,36 @@ import { verifyComposer } from "./composer.mjs";
 // DOM projection only: no Worker, provider, device or network lifecycle claims.
 export async function verifyDom(browser, root, report, name) {
   const page = await browser.newPage();
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
   try {
     const document = await readFile(join(root, "fixtures/rsi/web-product/document-island.html"), "utf8");
-    const standard = await readFile(join(root, "plugins/rsi/web/standard.js"), "utf8");
+    const standard = await readFile(join(root, "apps/web/standard.js"), "utf8");
     await page.route("http://rsi-dom.invalid/**", route => route.fulfill({ contentType: route.request().url().endsWith("standard.js") ? "text/javascript" : "text/html", body: route.request().url().endsWith("standard.js") ? standard : document.replace(/<script[^>]*>[\s\S]*?<\/script>/g, "") }));
-    const admissionSource = await readFile(join(root, "plugins/rsi/web/admission.js"), "utf8");
+    const admissionSource = await readFile(join(root, "apps/web/admission.js"), "utf8");
     await page.route("http://rsi-dom.invalid/admission.js", route => route.fulfill({ contentType: "text/javascript", body: admissionSource }));
     await page.goto("http://rsi-dom.invalid/");
     await page.evaluate(async () => { Object.assign(globalThis, await import("/admission.js")); });
     const offer = { revision: "a".repeat(64), catalog: { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: [{ name: "standard.js", sha256: createHash("sha256").update(standard).digest("hex") }], schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] } };
     await page.evaluate(offer => { window.testRendererOffer = offer; }, offer);
-    await page.addStyleTag({ path: join(root, "plugins/rsi/web/styles.css") });
+    await page.addStyleTag({ path: join(root, "apps/web/styles.css") });
     // Classic exposure is confined to this document-only fixture; production uses ESM.
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/mounts.js"), "utf8")).replace("export class MountTable", "class MountTable")} globalThis.MountTable = MountTable; })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/drafts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export function ", "function ")} Object.assign(globalThis, {DraftStore, DraftEditor, validateEditor}); })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/settings-form.js"), "utf8")).replaceAll("export function ", "function ")} Object.assign(globalThis, {settingsForm, canUseSettingsForm}); })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/file-picker.js"), "utf8")).replace("export function ", "function ")} globalThis.openFilePicker = openFilePicker; })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "plugins/rsi/web/external-pane.js"), "utf8")).replace("export function ", "function ")} globalThis.externalPaneClass = externalPaneClass; })();` });
-    await page.addScriptTag({ content: 'function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "plugins/rsi/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/mounts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export async function ", "async function ").replaceAll("export function ", "function ")} Object.assign(globalThis,{MountTable,writeClipboard,setClipboardWriter}); })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/drafts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export function ", "function ")} Object.assign(globalThis, {DraftStore, DraftEditor, validateEditor}); })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/settings-form.js"), "utf8")).replaceAll("export function ", "function ")} Object.assign(globalThis, {settingsForm, canUseSettingsForm}); })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/file-picker.js"), "utf8")).replace("export function ", "function ")} globalThis.openFilePicker = openFilePicker; })();` });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/external-pane.js"), "utf8")).replace(/^import .*;\n/gm, "").replace("export function ", "function ")} globalThis.externalPaneClass = externalPaneClass; })();` });
+    for(const [file,names] of [['turn-presentation.js','TurnPresentation,readingPosition,readingAnchor,restoreAnchor'],['composer-actions.js','keyboardAction']]) {
+      await page.addScriptTag({content:`(()=>{${(await readFile(join(root,'apps/web',file),'utf8')).replaceAll('export class ','class ').replaceAll('export function ','function ')}Object.assign(globalThis,{${names}});})();`});
+    }
+    await page.addScriptTag({ content: 'const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {
       mounts = await MountTable.open();
       connection = { drafts: await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)}), mounts, pending: new Map(), worker: { terminate() {} }, closing: false };
       for (const key of ["main", "compare"]) panes.set(key, new Pane(key));
       // These are projection fixtures: give each synthetic attachment valid metadata.
       for (const pane of panes.values()) {
+        pane.composerActions={revision:"1",primary:{id:"queue",label:"Send"},alternative:{id:"steer",label:"Steer"}};
         const render = pane.render.bind(pane);
         pane.render = (data, models) => render(data ? { header: "c".repeat(64), creation: null, ...data } : data, models);
       }
@@ -72,6 +78,35 @@ export async function verifyDom(browser, root, report, name) {
       return moves;
     });
     assert.equal(retainedHistory,0,"unchanged omitted history must not detach and reinsert its controls");
+    const turnIdentity = await page.evaluate(() => {
+      const pane=panes.get('main');
+      document.documentElement.dataset.detail='standard';
+      const transcript={omitted:false,blocks:[
+        {key:'process',role:'reasoning',title:'Thinking',text:'Process\n'.repeat(60),sources:1},
+        {key:'answer',role:'assistant',title:'Assistant',text:'Answer\n'.repeat(80),sources:1}],
+        turns:{revision:'1',entries:{t:{id:'t',status:'Running',running:true,foldable:true,partial:false,blocks:['process','answer'],process:['process'],candidate:['answer'],answer:[]}}}};
+      pane.transcript.style.cssText='height:200px;max-height:200px;flex:none;overflow:auto';
+      pane.renderTranscript(transcript,true);
+      const nodes=[...pane.blocks.values()].map(entry=>entry.node);
+      const observer=new MutationObserver(()=>{});observer.observe(pane.transcript,{childList:true});
+      for(let i=0;i<20;i++)pane.renderTranscript(structuredClone(transcript),false);
+      const unchangedMoves=observer.takeRecords().length;observer.disconnect();
+      const answer=nodes[1];pane.transcript.scrollTop=answer.offsetTop+45;pane.readingSummary=true;
+      const before=answer.getBoundingClientRect().top;
+      Object.assign(transcript.turns.entries.t,{status:'Completed',running:false,candidate:[],answer:['answer']});transcript.turns.revision='2';
+      pane.renderTranscript(transcript,false);
+      const anchorDelta=Math.abs(answer.getBoundingClientRect().top-before);
+      const retained=nodes.every((node,i)=>node===[...pane.blocks.values()][i].node);
+      const collapsed=nodes[0].hidden&&!answer.hidden;
+      pane.renderTranscript({omitted:false,blocks:[],turns:{revision:'3',entries:{}}},false);
+      const retired=!pane.turnPresentation.rows.size&&!pane.turnPresentation.expanded.size;
+      pane.transcript.style.cssText='';pane.readingSummary=false;
+      return {unchangedMoves,anchorDelta,retained,collapsed,retired};
+    });
+    // Scroll offsets are rounded by the engine while block geometry remains fractional.
+    assert(turnIdentity.anchorDelta<1,`Turn collapse moved the reading anchor: ${turnIdentity.anchorDelta}`);
+    assert.deepEqual({...turnIdentity,anchorDelta:0},{unchangedMoves:0,anchorDelta:0,retained:true,collapsed:true,retired:true});
+    await writeFile(join(report,`${name}-turn-identity.json`),JSON.stringify(turnIdentity));
     const transcriptScroll = await page.evaluate(() => {
       const pane=panes.get("main"), transcript={omitted:true,blocks:[{key:"scroll",role:"assistant",title:"Assistant",text:"Retained line\n".repeat(100),sources:8}]};
       pane.transcript.style.cssText="height:200px;max-height:200px;flex:none;overflow:auto";
@@ -194,7 +229,7 @@ export async function verifyDom(browser, root, report, name) {
         pane.input.dispatchEvent(new Event("input", { bubbles: true })); await pane.flush();
         pane.send.focus(); pane.render({...data, draft:"obsolete Worker input"}, []);
         const retained = pane.input.value;
-        await pane.submit(false);
+        await pane.submit("primary");
         pane.render({...data, draft:"locally persisted draft"}, []);
         return { retained, submitted, cleared: pane.input.value };
       } finally { call = originalCall; }
@@ -213,7 +248,7 @@ export async function verifyDom(browser, root, report, name) {
           if (text !== "original") { pane.edit(text); await pane.flush(); }
           pane.renderComposer();
           const label = pane.send.textContent, steerDisabled = pane.steer.disabled;
-          await pane.submit(false);
+          await pane.submit("primary");
           results.push({ text, remaining: pane.input.value, label, steerDisabled });
         }
         return results;

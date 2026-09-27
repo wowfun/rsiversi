@@ -8,18 +8,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod addon;
+mod architecture;
 mod cargo_step;
 mod code_check;
-#[cfg(unix)]
-mod dev;
-mod dist;
 mod documentation;
-#[cfg(not(unix))]
-mod dev {
-    pub fn run(_: &[String]) -> Result<(), String> {
-        Err("the development launcher requires Linux or WSL".into())
-    }
-}
 mod repository_root;
 mod rsi_meta;
 
@@ -58,8 +50,6 @@ fn run() -> Result<(), String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
         [command, rest @ ..] if command == "addon" => addon::run(rest),
-        [command, rest @ ..] if command == "dist" => dist::run(rest),
-        [command, rest @ ..] if command == "dev" => dev::run(rest),
         [command] if command == "verify-agent-notes" => {
             let repository = env::current_dir()
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
@@ -91,13 +81,14 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
             rsi_meta::run(&repository)
         }
+        [command] if command == "verify-architecture" => architecture::run(&env::current_dir().map_err(|e| e.to_string())?),
         [command] if command == "code-check" => {
             let repository = env::current_dir()
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
             code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask dist desktop /absolute/output [--debug] | rsi-xtask dev tui|web [--directory PATH] [--prepare-only|--smoke] [--no-watch] [--port PORT] | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
+            "usage: rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

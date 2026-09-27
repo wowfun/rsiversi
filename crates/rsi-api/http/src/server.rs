@@ -46,6 +46,7 @@ pub struct HttpServices {
 #[derive(Debug)]
 pub(crate) struct State {
     pub assets: Option<Arc<dyn crate::HttpAssets>>,
+    pub bootstrap: Option<Arc<dyn crate::BrowserBootstrap>>,
     pub asset_deliveries: Arc<Semaphore>,
     pub diagnostics: crate::HttpDiagnostics,
     pub dispatch: Arc<dyn ApiDispatch>,
@@ -126,6 +127,7 @@ impl HttpServer {
             listener,
             state: State {
                 assets: None,
+                bootstrap: None,
                 asset_deliveries: Arc::new(Semaphore::new(8)),
                 diagnostics: crate::HttpDiagnostics::default(),
                 dispatch: services.dispatch,
@@ -147,6 +149,20 @@ impl HttpServer {
     pub fn with_assets(mut self, assets: Arc<dyn crate::HttpAssets>) -> Self {
         self.state.assets = Some(assets);
         self
+    }
+
+    /// Enables browser bootstrap only on an explicitly loopback HTTP listener.
+    pub fn with_browser_bootstrap(
+        mut self,
+        bootstrap: Arc<dyn crate::BrowserBootstrap>,
+    ) -> Result<Self> {
+        if !self.local_addr()?.ip().is_loopback() || self.tls.is_some() {
+            return Err(ApiError::Invalid(
+                "browser bootstrap requires loopback HTTP".into(),
+            ));
+        }
+        self.state.bootstrap = Some(bootstrap);
+        Ok(self)
     }
 
     /// Returns the actual listener address, including its selected ephemeral port.
@@ -392,6 +408,15 @@ impl State {
         }
         let (parts, body) = request.into_parts();
         let path = parts.uri.path();
+        if path == "/api/v1/browser-bootstrap" {
+            let bootstrap = self.bootstrap.as_ref().ok_or(ApiError::Unavailable)?;
+            return self.access.bootstrap(
+                &parts.headers,
+                &body,
+                bootstrap.as_ref(),
+                &self.endpoint,
+            );
+        }
         if matches!(path, "/api/v1/login" | "/api/v1/logout") {
             return self.access.cookie(path, &parts.headers, &body);
         }
@@ -602,4 +627,79 @@ pub(crate) fn failure(error: ApiError) -> Response<Body> {
         .headers_mut()
         .insert("content-length", http::HeaderValue::from(length));
     response
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    #[derive(Debug)]
+    struct Unavailable;
+    impl DeviceAuthentication for Unavailable {
+        fn authenticate(
+            &self,
+            _: &rsi_credentials_protocol::SecretValue,
+        ) -> Result<rsi_api_protocol::AuthenticatedDevice> {
+            Err(ApiError::Unauthorized)
+        }
+    }
+    impl crate::BrowserBootstrap for Unavailable {
+        fn redeem(
+            &self,
+            _: &rsi_credentials_protocol::SecretValue,
+        ) -> Result<rsi_credentials_protocol::SecretValue> {
+            Err(ApiError::Unauthorized)
+        }
+    }
+    #[tokio::test]
+    async fn bootstrap_rejects_nonloopback_and_tls_independently() {
+        for (loopback, tls) in [(true, false), (false, false), (true, true), (false, true)] {
+            let execution = Execution::native(tokio::runtime::Handle::current());
+            let registry = Arc::new(rsi_api::ApiRegistry::new(execution.clone()));
+            let listener = TcpListener::bind(if loopback { "127.0.0.1:0" } else { "0.0.0.0:0" })
+                .await
+                .unwrap();
+            let tls = if tls {
+                let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../fixtures/rsi-api/tls");
+                Some(
+                    crate::tls::acceptor(&crate::TlsFiles {
+                        certificate: directory.join("server-cert.pem"),
+                        key: directory.join("server-key.pem"),
+                    })
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            let permitted = loopback && tls.is_none();
+            // Isolate this guard from HttpConfig's independent rejection of nonloopback HTTP.
+            let server = HttpServer::new(
+                execution,
+                listener,
+                Policy {
+                    origin: "http://127.0.0.1".into(),
+                    authority: "127.0.0.1".into(),
+                    secure: tls.is_some(),
+                },
+                tls,
+                HttpServices {
+                    dispatch: registry.clone(),
+                    authentication: Arc::new(Unavailable),
+                    endpoint: EndpointId::from_bytes([1; 16]),
+                    epoch: HostEpoch::from_bytes([2; 16]),
+                },
+            );
+            let result = server.with_browser_bootstrap(Arc::new(Unavailable));
+            if permitted {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    matches!(result, Err(ApiError::Invalid(ref message)) if message == "browser bootstrap requires loopback HTTP")
+                );
+            }
+            drop(result);
+            registry.close().await;
+        }
+    }
 }

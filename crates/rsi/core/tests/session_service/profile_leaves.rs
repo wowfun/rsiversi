@@ -98,7 +98,10 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
 {
     let fixture = fixture("http://127.0.0.1:1");
     let source = std::fs::read(&fixture.profile).unwrap();
-    let sources = ProfileCatalog::new(fixture.paths.clone());
+    let sources = ProfileCatalog::new(
+        fixture.paths.clone(),
+        rsi::ApplicationCatalogMetadata::default(),
+    );
     let editable = sources
         .copy_host(
             &HostProfileId::new("fixture").unwrap(),
@@ -623,7 +626,10 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
 async fn profile_commit_reply_loss_reconciles_the_original_ticket_and_directory_replacement_conflicts()
  {
     let fixture = fixture("http://127.0.0.1:1");
-    let sources = ProfileCatalog::new(fixture.paths.clone());
+    let sources = ProfileCatalog::new(
+        fixture.paths.clone(),
+        rsi::ApplicationCatalogMetadata::default(),
+    );
     let editable = sources
         .copy_host(
             &HostProfileId::new("fixture").unwrap(),

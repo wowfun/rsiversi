@@ -10,27 +10,15 @@ publish = false
 path = "src/lib.rs"
 doctest = false
 
-[[bin]]
-name = "rsi"
-path = "src/main.rs"
-
-[[example]]
-name = "workbench-addon"
-path = "../../../fixtures/rsi/addon-workbench/main.rs"
-
 [[example]]
 name = "session-api-eval"
 path = "eval/session.rs"
 
-[[example]]
-name = "profile-leaf-probe"
-path = "../../../fixtures/rsi/profile-management/probe.rs"
-
 [dependencies]
-rsi-service-ui = { path = "../service-ui" }
+rsi-directory-picker-api = { path = "../directory-picker-api" }
+rsi-directory-picker = { path = "../directory-picker" }
 rsi-lsp = { path = "../../rsi-lsp/core" }
 rsi-lsp-ui = { path = "../lsp-ui" }
-rsi-workspace-review-ui = { path = "../workspace-review-ui" }
 rsi-acp = { path = "../../rsi-acp/core" }
 rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-acp-host = { path = "../../rsi-acp/host" }
@@ -42,7 +30,6 @@ rsi-pty = { path = "../../rsi-pty/core" }
 rsi-mcp = { path = "../../rsi-mcp/core" }
 rsi-retrieval = { path = "../../rsi-retrieval/core" }
 rsi-agent-references = { path = "../../rsi-agent/references" }
-rsi-workbench-ui = { path = "../workbench-ui" }
 rsi-workspace-review = { path = "../workspace-review" }
 rsi-workspace-review-api = { path = "../workspace-review-api" }
 rsi-history = { path = "../history" }
@@ -54,9 +41,7 @@ rsi-managed-providers = { path = "../managed-providers" }
 rsi-configuration-api = { path = "../configuration-api" }
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }
-rsi-session-tree-ui = { path = "../session-tree-ui" }
 rsi-client-preferences = { path = "../client-preferences" }
-rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-files = { path = "../../rsi-files/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-files-tools = { path = "../../rsi-files/tools" }
@@ -66,12 +51,9 @@ rsi-ui-api = { path = "../ui-api" }
 rsi-ui-portable = { path = "../ui-portable" }
 rsi-session-ui = { path = "../session-ui" }
 rsi-client-composition = { path = "../client-composition" }
-rsi-web-assets = { path = "../web-assets" }
 rsi-api-http-client = { path = "../../rsi-api/http-client" }
 rsi-api-device-api = { path = "../../rsi-api/device-api" }
-rsi-terminal = { path = "../terminal" }
 rsi-application = { path = "../application" }
-rsi-serve = { path = "../serve" }
 rsi-api-http = { path = "../../rsi-api/http" }
 rsi-client = { path = "../client" }
 rsi-api = { path = "../../rsi-api/core" }
@@ -168,12 +150,10 @@ toml_edit.workspace = true
 
 [dev-dependencies]
 rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
-vt100.workspace = true
 rusqlite.workspace = true
 base64.workspace = true
 rsi-session-testkit = { path = "../session-testkit" }
 rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
-portable-pty.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 axum.workspace = true
 tempfile.workspace = true

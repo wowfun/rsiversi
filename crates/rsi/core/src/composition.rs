@@ -115,11 +115,11 @@ const IMAGE_FACTORY: &str = "rsi.ai.image";
 
 const STANDARD_AGENT_PROFILE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../plugins/rsi-agent-presets/standard/agent.profile.toml"
+    "/presets/standard/agent.profile.toml"
 ));
 const STANDARD_AGENT_METADATA: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../plugins/rsi-agent-presets/standard/preset.toml"
+    "/presets/standard/preset.toml"
 ));
 
 const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
@@ -128,11 +128,11 @@ const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
         "acp-internal",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plugins/rsi-agent-presets/acp-internal/agent.profile.toml"
+            "/presets/acp-internal/agent.profile.toml"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plugins/rsi-agent-presets/acp-internal/preset.toml"
+            "/presets/acp-internal/preset.toml"
         )),
     ),
 ];
@@ -140,6 +140,7 @@ const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
 /// Frozen inputs used to construct the standard linked catalog and fragments.
 #[derive(Clone, Debug)]
 pub struct StandardComposition {
+    applications: crate::ApplicationCatalogMetadata,
     paths: HostPaths,
     user_home: Option<PathBuf>,
     captured_environment: BTreeMap<String, SecretValue>,
@@ -1070,8 +1071,10 @@ impl StandardComposition {
         paths: HostPaths,
         captured_environment: BTreeMap<String, SecretValue>,
         coding_tools: Option<StandardCodingTools>,
+        applications: crate::ApplicationCatalogMetadata,
     ) -> Self {
         Self {
+            applications,
             credential_store: Arc::new(FileSecretStore::with_trusted_root_alias(
                 paths.config().join("credentials/credentials.json"),
             )),
@@ -1089,6 +1092,11 @@ impl StandardComposition {
             #[cfg(unix)]
             native_catalog: None,
         }
+    }
+
+    /// Frozen application metadata supplied by the executable's catalog owner.
+    pub const fn application_metadata(&self) -> &crate::ApplicationCatalogMetadata {
+        &self.applications
     }
 
     /// Supplies the launcher's captured home for the optional personal skill root.
@@ -1271,6 +1279,7 @@ impl StandardComposition {
                     bash: tools.bash_tool.executable(),
                     apply_patch: tools.apply_patch.executable(),
                 }),
+            &self.applications,
         )
         .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
         let profile = match &profile.path {
@@ -1438,7 +1447,7 @@ impl StandardComposition {
         crate::profile_management::register(
             &mut builder,
             self.clone(),
-            crate::ProfileCatalog::new(paths.clone()),
+            crate::ProfileCatalog::new(paths.clone(), self.applications.clone()),
             local_api.map(str::to_owned),
         )?;
         builder.register_linked(
@@ -1511,7 +1520,7 @@ impl StandardComposition {
                 ProfileEntry::new("rsi-session", SESSION_FACTORY, Value::Null),
             ],
         ))?;
-        crate::api_composition::register(&mut builder)?;
+        crate::api_composition::register(&mut builder, self.user_home.clone())?;
         if let Some(launch_key) = local_api {
             builder.register_fragment(ProfileFragment::new(
                 "rsi.standard.local-api",
@@ -1552,14 +1561,11 @@ impl StandardComposition {
         &self,
         factories: &[AddonFactoryDescription],
     ) -> rsi_host::Result<std::collections::BTreeSet<String>> {
-        let (application, _) =
-            crate::application_connection::application_addons(self.clone().into(), Vec::new())
-                .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
         Ok(factories
             .iter()
-            .chain(application.descriptions())
             .filter(|entry| matches!(entry.identity, rsi_meta::FactoryIdentity::Linked { .. }))
             .map(|entry| entry.plugin.clone())
+            .chain(self.applications.plugins().iter().cloned())
             .chain(crate::client_composition::linked_plugins()?)
             .chain(std::iter::once("rsi.meta.profile".into()))
             .collect())
@@ -2347,9 +2353,14 @@ mod tests {
             );
         }
         assert!(
-            StandardComposition::new(paths, BTreeMap::new(), None)
-                .with_user_home(Some("relative".into()))
-                .is_err()
+            StandardComposition::new(
+                paths,
+                BTreeMap::new(),
+                None,
+                crate::ApplicationCatalogMetadata::default()
+            )
+            .with_user_home(Some("relative".into()))
+            .is_err()
         );
     }
 
@@ -2360,9 +2371,14 @@ mod tests {
         let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
         let home = std::ffi::OsString::from_vec(vec![b'/', 0xff]);
         assert!(
-            StandardComposition::new(paths, BTreeMap::new(), None)
-                .with_user_home(Some(home.into()))
-                .is_err()
+            StandardComposition::new(
+                paths,
+                BTreeMap::new(),
+                None,
+                crate::ApplicationCatalogMetadata::default()
+            )
+            .with_user_home(Some(home.into()))
+            .is_err()
         );
     }
 
@@ -2437,7 +2453,12 @@ mod tests {
             temporary.path().join("cache"),
         )
         .unwrap();
-        let composition = StandardComposition::new(paths.clone(), BTreeMap::new(), None);
+        let composition = StandardComposition::new(
+            paths.clone(),
+            BTreeMap::new(),
+            None,
+            crate::ApplicationCatalogMetadata::default(),
+        );
         let addons = composition.agent_addons().unwrap();
         let public = composition.preset_catalog(true, &addons).unwrap();
         let id = AgentPresetId::new("acp-internal").unwrap();

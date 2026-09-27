@@ -239,18 +239,18 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
             .strip_prefix(repository())
             .expect("workspace manifest below repository");
         let mut components = relative.components();
-        assert_eq!(
-            components
-                .next()
-                .and_then(|value| value.as_os_str().to_str()),
-            Some("crates"),
-            "workspace package {name} escaped crates/"
+        let owner = components
+            .next()
+            .and_then(|value| value.as_os_str().to_str());
+        assert!(
+            matches!(owner, Some("crates" | "apps")),
+            "workspace package {name} escaped crates/ and apps/"
         );
         let product = components
             .next()
             .and_then(|value| value.as_os_str().to_str())
             .expect("product directory");
-        if product == "rsi-meta" {
+        if owner == Some("crates") && product == "rsi-meta" {
             assert!(
                 meta_packages.contains(name),
                 "rsi-meta package {name} is absent from the conformance authority"
@@ -346,8 +346,19 @@ fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
         .unwrap();
     let verify = documentation
         .iter()
-        .find(|step| step["run"].as_str() == Some("cargo xtask verify-docs"))
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.lines().any(|line| line == "cargo xtask verify-docs"))
+        })
         .unwrap();
+    assert!(
+        verify["run"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .any(|line| line == "cargo xtask verify-architecture")
+    );
     assert_eq!(
         verify["env"]["RSI_AGENT_NOTES_BASE"].as_str(),
         Some("${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}")
@@ -543,9 +554,9 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
     let step = steps
         .iter()
         .find(|step| {
-            step["run"]
-                .as_str()
-                .is_some_and(|run| run.contains("cargo xtask dev tui --smoke"))
+            step["run"].as_str().is_some_and(|run| {
+                run.contains("cargo run --locked -p rsi-app-tools -- dev tui --smoke")
+            })
         })
         .expect("product CI exercises the actual development launcher");
     let condition = step["if"].as_str().unwrap();
@@ -560,7 +571,9 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
         );
     }
     let run = step["run"].as_str().unwrap();
-    let smoke = run.find("cargo xtask dev tui --smoke").unwrap();
+    let smoke = run
+        .find("cargo run --locked -p rsi-app-tools -- dev tui --smoke")
+        .unwrap();
     for setup in [
         "trap restore_policy EXIT",
         "kernel.unprivileged_userns_clone=1",
@@ -574,7 +587,56 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
 }
 
 #[test]
-fn ci_job_deadlines_cover_their_explicit_step_budgets_with_headroom() {
+fn ci_job_deadlines_cover_step_budgets_within_the_hosted_runner_limit() {
+    let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    assert_ci_job_deadlines(&workflow);
+}
+
+#[test]
+fn ci_job_deadlines_accept_the_hosted_runner_ceiling() {
+    assert_ci_job_deadlines(
+        "jobs:
+  bounded:
+    timeout-minutes: 360
+    steps:
+      - run: cargo test
+        timeout-minutes: 350
+  unbounded:
+    timeout-minutes: 360
+    steps:
+      - run: cargo test
+",
+    );
+}
+
+#[test]
+#[should_panic(expected = "fixture job budget 361m exceeds the 360m GitHub-hosted runner limit")]
+fn ci_job_deadlines_reject_over_limit_despite_sufficient_headroom() {
+    assert_ci_job_deadlines(
+        "jobs:
+  fixture:
+    timeout-minutes: 361
+    steps:
+      - run: cargo test
+        timeout-minutes: 350
+",
+    );
+}
+
+#[test]
+#[should_panic(expected = "fixture job budget 361m exceeds the 360m GitHub-hosted runner limit")]
+fn ci_job_deadlines_reject_over_limit_without_explicit_step_budgets() {
+    assert_ci_job_deadlines(
+        "jobs:
+  fixture:
+    timeout-minutes: 361
+    steps:
+      - run: cargo test
+",
+    );
+}
+
+fn assert_ci_job_deadlines(workflow: &str) {
     #[derive(Deserialize)]
     struct Workflow {
         jobs: BTreeMap<String, Job>,
@@ -595,9 +657,14 @@ fn ci_job_deadlines_cover_their_explicit_step_budgets_with_headroom() {
         timeout_minutes: Option<u64>,
     }
 
-    let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
-    let workflow: Workflow = yaml_serde::from_str(&workflow).expect("workflow YAML");
+    let workflow: Workflow = yaml_serde::from_str(workflow).expect("workflow YAML");
     for (name, job) in workflow.jobs {
+        if let Some(job_budget) = job.timeout_minutes {
+            assert!(
+                job_budget <= 360,
+                "{name} job budget {job_budget}m exceeds the 360m GitHub-hosted runner limit"
+            );
+        }
         let explicit_step_budget = job
             .steps
             .iter()
@@ -661,8 +728,8 @@ fn gui_jobs_exercise_document_types_and_native_failure_boundaries() {
     };
     let browser = scripts("rsi-meta-browser");
     for command in [
-        "npm run typecheck --prefix ../../../plugins/rsi/web",
-        "npm test --prefix ../../../plugins/rsi/web",
+        "pnpm -C ../../../apps/web typecheck",
+        "pnpm -C ../../../apps/web test",
     ] {
         assert!(
             browser.contains(command),
@@ -672,9 +739,9 @@ fn gui_jobs_exercise_document_types_and_native_failure_boundaries() {
     let desktop = scripts("rsi-desktop");
     for seam in [
         "fixtures/rsi/desktop-admission/Cargo.toml",
-        "--foreign-binary",
+        "--foreign-bundle",
         "--ack-timeout",
-        "--startup-close",
+        "--close-timeout",
         "--save-failure",
         "--restart",
         "--refresh-during-click",
@@ -733,6 +800,64 @@ fn evaluation_evidence_is_independent_of_standard_tests_and_always_retained() {
             .as_str()
             .unwrap()
             .contains("rsi-session-api-evaluation")
+    );
+}
+
+#[test]
+fn paired_web_consumers_have_independent_failure_domains() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let step = |id| {
+        steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some(id))
+            .unwrap()
+    };
+    let harness = step("web_harness");
+    assert_eq!(
+        harness["working-directory"].as_str(),
+        Some("fixtures/rsi/web-product")
+    );
+    assert!(
+        harness["run"]
+            .as_str()
+            .unwrap()
+            .contains("npm ci --ignore-scripts")
+    );
+    let build = step("web_build");
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("pnpm -C ../../../apps/web build")
+    );
+    assert!(!build["run"].as_str().unwrap().contains("sudo sysctl"));
+    for id in ["web_product", "web_integrations", "web_terminals"] {
+        let consumer = step(id);
+        let condition = consumer["if"].as_str().unwrap();
+        assert!(condition.contains("!cancelled()"));
+        assert!(condition.contains("steps.web_build.outcome == 'success'"));
+        assert!(condition.contains("steps.web_harness.outcome == 'success'"));
+        assert!(!condition.contains("steps.web_product.outcome"));
+        assert!(!condition.contains("steps.web_integrations.outcome"));
+        assert!(
+            consumer["run"]
+                .as_str()
+                .unwrap()
+                .contains("trap restore_policy EXIT")
+        );
+    }
+    let probes = step("web_integrations")["run"].as_str().unwrap();
+    assert!(probes.contains("run-paired.py"));
+    assert!(probes.contains("--ignored --exact --list"));
+    assert!(
+        !step("web_product")["run"]
+            .as_str()
+            .unwrap()
+            .contains("run-paired.py")
     );
 }
 

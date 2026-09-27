@@ -30,16 +30,19 @@ driver and the delivered durable settlement projection, rather than treating
 their independent streams as one notification.
 
 First install the shared document's pinned build dependencies with
-`npm ci --ignore-scripts --prefix ../../../plugins/rsi/web` from this directory.
-Then `npm ci && npm test` builds the actual Rust Web bundle and native RSI executable,
-then drives the product document and Dedicated Worker in Chromium and Firefox.
+`pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts` from this directory.
+The local-launch scenario also injects classified HTTP rejections to verify that
+Worker diagnostics distinguish capacity and retired-service failures from an
+expired ticket, without cookie fallback concealing a definitive rejection.
+Build a paired publication with `pnpm -C apps/web build --debug` from the repository
+root. Then `npm ci && npm test` consumes its Rust Worker and native executable and drives the product document and Dedicated Worker in Chromium and Firefox.
 The runner also exercises document-only reset/reopen and unresolved-submission
 button projection using the shipped JavaScript; those checks are distinct from
 Worker and transport evidence. The document-only and gated Worker fixtures load
 the shipped admission module, so their transport limits and request classification
 match the product. Install those Playwright browsers first. `RSI_WASM_BINDGEN` selects a matching
-wasm-bindgen executable. `RSI_WEB_ASSETS` and `RSI_WEB_BINARY` can select already
-built artifacts explicitly; `RSI_WEB_REPORT` selects a new evidence directory.
+wasm-bindgen executable. `RSI_PAIRED_BUNDLE` selects a complete existing publication.
+Explicit `RSI_WEB_ASSETS` and `RSI_WEB_BINARY` must pass the same receipt checks; `RSI_WEB_REPORT` selects a new evidence directory.
 
 The fixture owns an isolated real Service Host, temporary settings and Workspace,
 ephemeral TLS/H2 listener and a bounded deterministic OpenAI-compatible provider.
@@ -85,8 +88,8 @@ without image elements. Separate document tests simulate composing and key-code
 not establish native IME platform behavior.
 
 Client preferences are edited through the generic Settings UI. The current
-application retains its input mode; signing out and reconnecting applies the
-saved Enter behavior while restoring contributed Session and Files actions.
+application applies its input mode after the successful save; signing out and
+reconnecting retains that behavior while restoring Session and Files actions.
 The fixture checks Shift+Enter and a real plain-Enter submission in that mode.
 
 Image cases import generated PNGs as separate binary bodies through authenticated
@@ -101,7 +104,8 @@ unknown retries, frozen request boundaries, and detail/application cancellation.
 
 Persistent composer checks use real IndexedDB transactions in two documents,
 including revision conflicts, record reincarnation, origin quotas, opaque u64
-requests and receipts, transaction aborts and malformed durable metadata.
+requests and receipts, terminal queue-conflict retirement without draft loss,
+transaction aborts and malformed durable metadata.
 Document composer tests gate saves before repeated Send/reconcile input and
 automatic recovery, checking single admission and the absence of false conflicts.
 They also hold draft loading after a Session header changes. Switching acceptance
@@ -199,9 +203,9 @@ Vite configuration. It injects
 bounded synthetic 16/64/128-block projections, including 128 blocks near the
 1 MiB text limit, and observes actual input through
 two animation frames. Production files are never rewritten. The comparison keeps
-the same native Host/Tauri harness and includes its WebKit web/network process
-PSS; it isolates document rendering and persistence, not provider or transport
-latency. Each engine has separate samples, artifacts and screenshots.
+the same isolated WebKitGTK MiniBrowser harness and includes its web/network
+process PSS. Instrumented copies are not product bundles and cannot be loaded by
+rsi-desktop; this benchmark excludes pairing, native Host and transport costs. Each engine has separate samples, artifacts and screenshots.
 
 Performance results distinguish block count from source text bytes. Chromium
 also reports post-scene JS heap and DOM counters; Firefox has no equivalent CDP
@@ -313,3 +317,48 @@ The targeted probes share browser setup, receipt connection and Workspace openin
 through `browser-fixture.mjs`. Browser setup closes a partially created owner on
 failure; each probe retains its service/evidence cleanup in `finally`. Program
 and workflow probes share one checked standard-preset transformation.
+
+`local-launch.mjs` exercises the built `rsi web` entry with the real static
+bundle and Worker in Chromium and Firefox: fragment removal, automatic cookie
+login, credential/Provider/default-model configuration, reload/new-tab recovery,
+consumed-ticket rejection, cookie recovery after a lost exchange result, manual
+login, configuration grant revocation, stable identity after restart and SIGINT
+cleanup. Run it with explicit
+`RSI_WEB_BINARY` and `RSI_WEB_ASSETS`; `RSI_WEB_BROWSER` can select one engine.
+It owns temporary HOME/XDG paths and uses no live model provider.
+
+The default queue scenario holds an actual Rust Turn at its deterministic provider,
+replaces one queued input, converts it into the displayed Turn, withdraws it and
+then stops the original Turn. It checks that a second queued input actually
+executes and that the ordinary draft survives. IndexedDB probes independently
+verify opaque queue requests across an unknown reply and reopen. Native addon
+probes must use an `RSI_NATIVE_UI_ARTIFACT` built with the same build-family manifest
+as a frozen `RSI_WEB_BINARY`; artifacts from a different family are rejected.
+
+`ui-alignment.mjs` drives directory validation, physical folder creation, complete
+pins, primary Enter/Queue, Stop draft retention, code copying and browser refresh
+with reconnect. It captures 390/768/1024/1440/1920-pixel viewports under light,
+dark and system appearance. Screenshot files are human comparison evidence, not
+pixel goldens. The document-island checks separately observe Turn reclassification,
+unchanged DOM child identity and subpixel-bounded reading-anchor preservation.
+Shared `controls.mjs` opens the actual Resources, detail and navigation controls;
+fixtures identify conversation rows by Session ID rather than visible title text.
+
+
+The UI alignment probe also checks explicit workspace refresh after a metadata
+edit invalidates group cursors: pinning publishes the complete pinned region,
+shows a refresh control for the stale group, and refreshing excludes its pinned
+conversation without silently restarting a retained continuation.
+
+UI alignment also injects failures into the layout database alone: failed saves
+and loads show a notice, in-memory layout remains usable, and draft restoration
+continues from its independent database. Recovering a later save clears its
+notice; a failed load remains explicit for that connection.
+
+The document-only fixture exposes the same imported presentation helpers as the
+product bootstrap, including lazy reading-position capture. It runs in both
+browsers as part of the default fixture test entry.
+
+Layout-persistence evidence polls completed IndexedDB reads until at least one
+record exists, with an explicit deadline. A Promise object is not accepted as a
+truthy persistence result.

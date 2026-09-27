@@ -35,14 +35,16 @@ occurrences in text, log and HTML evidence. It rejects symlinks without reading
 or modifying their targets; it does not scrub images or arbitrary encodings. A detected key fails an
 otherwise successful run; during failure it adds a note to the original exception.
 CI independently runs
-conversation, missing-ACK and startup-close scenarios after the shared build.
+conversation, missing-ACK and document-close-deadline scenarios after the shared build.
 The Tool-using task scenario additionally requires the native sandbox preflight;
-missing-ACK and startup-close do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
+missing-ACK and document-close-deadline do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
 that never starts cannot produce product evidence.
-Before launching a foreign build, the fixture records its frozen executable's
-SHA-256 in `foreign-build/binary.json`. CI excludes the two native executable
-paths in that directory, retaining the scenario evidence and the distribution's
-receipt, build-family manifest and build log. The receipt identifies both paired
+Before launching a foreign build, the fixture checks both executable SHA-256
+values and the family manifest against the supplied bundle's `receipt.json`.
+It records the assets and Host rejection stages in `foreign-family.json`, with
+separate `foreign-assets.log` and `foreign-host.log` diagnostics. CI retains these
+alongside each distribution's receipt, `build-family.json` and build log, excluding
+the native executables. The receipt identifies both paired
 executables; these hashes cannot restore the programs for binary replay.
 The export scenario exercises cancellation before a reservation is claimed and a
 late cancellation of the previous token while a replacement chooser is open. The
@@ -63,12 +65,16 @@ Its receipt checks both binary hashes and their common frozen input manifest.
 `--save-failure` injects an IndexedDB write failure, verifies input survives a
 cancelled window close beyond its original deadline, then explicitly recovers.
 `--ack-timeout` withholds a frame ACK and requires failed-lifetime cleanup.
-`--startup-close` stalls an isolated copy of the document bootstrap before it
-installs its close listener, then closes twice. It requires one bounded deadline,
-unsuccessful document-drain status and completed Runtime cleanup. This does not
-claim successful draft saving from a document that never initialized.
-`--foreign-binary PATH` with `--daemon` verifies rejection of a different build
-family while sharing the same canonical headless companion.
+`--close-timeout` blocks delivery of the native close event through WebDriver
+in a fully admitted paired document, then closes twice. It requires one bounded
+deadline, unsuccessful document-drain status and completed Runtime cleanup.
+This scenario starts after document admission; it does not cover a close request
+before the document installs its listener. That startup interval currently lacks
+a dedicated product fixture.
+`--foreign-bundle DIRECTORY` with `--daemon` uses another complete paired
+Desktop distribution. Mixed assets must fail the asset check; its own assets
+must pass that check and then fail Host compatibility against the running daemon.
+Both rejections preserve the original daemon identity.
 `--refresh-during-click` forces a draft input refresh during native mouse down
 on Send. It checks preserved text-node identity, exactly one real click and the
 resulting submission; this gates the WebKit draft-save/click interleaving.
@@ -87,10 +93,12 @@ the opt-in live smoke; `--tasks` cannot be combined with live mode.
 The inline screenshot scrolls the recorded diff into view and records its full
 containment and center hit, so DOM text alone cannot stand in for visible evidence.
 
-`performance.py --binary ... --driver ... --documents /instrumented/documents
---report /new/report` compares ten runs of 16/64/128-block scenes, including a near-1-MiB text scene, with actual WebDriver
+`performance.py --browser /absolute/MiniBrowser --driver DRIVER --documents DOCUMENTS --report REPORT` compares ten runs of 16/64/128-block scenes, including a near-1-MiB text scene, with actual WebDriver
 input. Prepare the isolated document copies using the Web product fixture.
-PSS includes the desktop process plus all descendant WebKit web/network processes;
+This isolated WebKitGTK benchmark loads instrumented documents through MiniBrowser.
+It measures document rendering and persistence, excluding product startup, pairing,
+Rust transport and Service Host costs. PSS includes MiniBrowser and its descendant
+WebKit web/network processes;
 all three settling samples are retained. `--smoke` checks harness admission only.
 Input-to-paint uses two animation frames, not a claim about physical display scanout.
 
@@ -179,3 +187,22 @@ model or browser-only checks.
 
 The Linux desktop CI mode loop includes `--plan-review`, collecting its native
 WebKitGTK acceptance evidence alongside the other isolated modes.
+
+`--presentation` checks the shared Profile theme/font controls through the native
+Settings bridge, computed text contrast and component geometry, and command-palette
+focus restoration. `--system-theme light|dark` starts the isolated GTK application
+with the corresponding Adwaita palette; the presentation check then requires
+WebKit's system color-scheme query to match that native input. It changes no user
+settings and does not claim native Windows or macOS behavior.
+
+`--queue` uses a held deterministic response to exercise replacement, exact-Turn
+conversion and pending-only withdrawal through the native bridge. It checks one
+current user block, stable slot identity, retained composer text and a surviving
+queued Turn after Stop. This mode is separate from live-provider scenarios.
+
+`--ui-alignment` exercises the native clipboard, real directory creation, and the
+five Web viewport widths with all three theme choices through Settings. Its Xvfb
+screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
+manual comparison evidence, not screenshot baselines. `--reload` performs an
+actual WebDriver document refresh and verifies a saved draft survives observer
+replacement. This is distinct from application restart and a synthetic view refresh.

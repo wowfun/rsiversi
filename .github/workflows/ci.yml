@@ -32,7 +32,9 @@ jobs:
         timeout-minutes: 10
         env:
           RSI_AGENT_NOTES_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-        run: cargo xtask verify-docs
+        run: |
+          cargo xtask verify-docs
+          cargo xtask verify-architecture
       - name: Build public Rust documentation
         timeout-minutes: 15
         env:
@@ -75,7 +77,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 131
+    timeout-minutes: 181
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -96,7 +98,15 @@ jobs:
             fixtures/rsi-api/browser-fetch/package-lock.json
             fixtures/rsi/client-probe/package-lock.json
             fixtures/rsi/web-product/package-lock.json
-            plugins/rsi/web/package-lock.json
+            fixtures/rsi/acp/package-lock.json
+      - name: Install pinned frontend package manager
+        timeout-minutes: 5
+        run: npm install --global pnpm@12.6.0
+      - name: Cache frontend packages
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: target/rsi-app/pnpm-store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('apps/web/pnpm-lock.yaml') }}
       - name: Install matching bindings generator
         id: bindings
         timeout-minutes: 15
@@ -155,8 +165,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config ripgrep
-      - name: Exercise the product Web application over TLS and HTTP/2
-        id: web_product
+      - name: Install Web fixture packages
+        id: web_harness
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: fixtures/rsi/web-product
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_harness.log") 2>&1
+          npm ci --ignore-scripts
+
+      - name: Build the paired Web application
+        id: web_build
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' }}
         timeout-minutes: 40
         working-directory: fixtures/rsi/web-product
@@ -164,7 +184,22 @@ jobs:
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
-          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web-product.log") 2>&1
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_build.log") 2>&1
+          pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts --store-dir "$GITHUB_WORKSPACE/target/rsi-app/pnpm-store"
+          pnpm -C ../../../apps/web typecheck
+          pnpm -C ../../../apps/web test
+          pnpm -C ../../../apps/web build --debug
+
+      - name: Exercise the product Web application over TLS and HTTP/2
+        id: web_product
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
+        timeout-minutes: 20
+        working-directory: fixtures/rsi/web-product
+        env:
+          RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_product.log") 2>&1
           declare -A previous_policy
           restore_policy() {
             for key in "${!previous_policy[@]}"; do
@@ -179,12 +214,37 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
-          npm ci --ignore-scripts --prefix ../../../plugins/rsi/web
-          npm run typecheck --prefix ../../../plugins/rsi/web
-          npm test --prefix ../../../plugins/rsi/web
-          npm ci --ignore-scripts
+          export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
           npm test
+          RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/alignment" node ui-alignment.mjs
+
+      - name: Exercise paired Web integration probes
+        id: web_integrations
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
+        timeout-minutes: 20
+        working-directory: fixtures/rsi/web-product
+        env:
+          RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_integrations.log") 2>&1
+          declare -A previous_policy
+          restore_policy() {
+            for key in "${!previous_policy[@]}"; do
+              sudo sysctl -w "$key=${previous_policy[$key]}"
+            done
+          }
+          trap restore_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
+          export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
           cd ../../..
+          cargo test --locked -p rsi-cli --features paired-web-tests --test service_host_cli web::web_alias_and_profile_serve_default_assets_with_stable_authorized_identity -- --exact
           npm ci --ignore-scripts --prefix fixtures/rsi/acp
           export RSI_ACP_SDK_NODE="$(command -v node)"
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
@@ -195,22 +255,23 @@ jobs:
           cargo test --locked -p rsi-acp-host --test host independent_sdk_agent_new_permissions_resume_full_load_and_cancel -- --ignored --exact
           cargo test --locked -p rsi-lsp --lib tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored --exact --list | rg --fixed-strings --line-regexp 'tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox: test'
           cargo test --locked -p rsi-lsp --lib tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored --exact
-          cargo build --locked -p rsi --bin rsi --example profile-leaf-probe
-          export RSI_BINARY="$GITHUB_WORKSPACE/target/debug/rsi"
-          export RSI_WEB_ASSETS="$RSI_WEB_REPORT/assets"
+          cargo build --locked -p rsi-cli --example profile-leaf-probe
+          export RSI_BINARY="$GITHUB_WORKSPACE/target/rsi-app/current/rsi"
+          export RSI_WEB_ASSETS="$GITHUB_WORKSPACE/target/rsi-app/current/assets"
           node fixtures/rsi/acp/verify.mjs --binary "$RSI_BINARY" --output "$RUNNER_TEMP/rsi-acp-sdk-evidence"
           node fixtures/rsi/acp/browser.mjs "$RUNNER_TEMP/rsi-acp-browser-evidence"
           node fixtures/rsi/profile-management/browser.mjs "$RUNNER_TEMP/rsi-profile-browser-evidence"
           node fixtures/rsi/lsp/browser.mjs "$RUNNER_TEMP/rsi-lsp-browser-evidence"
+          python3 fixtures/rsi/addon-workbench/run-paired.py "$RUNNER_TEMP/rsi-addon-paired-evidence"
 
       - name: Exercise isolated Web terminal application
         id: web_terminals
-        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_product.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
         timeout-minutes: 5
         working-directory: fixtures/rsi/web-product
         env:
-          RSI_WEB_BINARY: ${{ github.workspace }}/target/debug/rsi
-          RSI_WEB_ASSETS: ${{ runner.temp }}/rsi-web-evidence/assets
+          RSI_WEB_BINARY: ${{ github.workspace }}/target/rsi-app/current/rsi
+          RSI_WEB_ASSETS: ${{ github.workspace }}/target/rsi-app/current/assets
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-terminal-evidence
         run: |
           mkdir -p "$RSI_WEB_REPORT"
@@ -233,14 +294,22 @@ jobs:
           done
           node terminal-verify.mjs
       - name: Exercise Session export downloads
-        if: ${{ !cancelled() && steps.web_product.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
         timeout-minutes: 5
         working-directory: fixtures/rsi/web-product
         env:
-          RSI_WEB_BINARY: ${{ github.workspace }}/target/debug/rsi
-          RSI_WEB_ASSETS: ${{ runner.temp }}/rsi-web-evidence/assets
+          RSI_WEB_BINARY: ${{ github.workspace }}/target/rsi-app/current/rsi
+          RSI_WEB_ASSETS: ${{ github.workspace }}/target/rsi-app/current/assets
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-export-evidence
         run: node export-verify.mjs
+      - name: Preserve paired addon evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-addon-paired-evidence
+          path: ${{ runner.temp }}/rsi-addon-paired-evidence
+          if-no-files-found: warn
+
       - name: Preserve Web terminal evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
@@ -470,7 +539,7 @@ jobs:
           RSI_SCAFFOLD_PUBLISHED_SDK: '1'
         run: |
           cargo fetch --locked --manifest-path fixtures/rsi/addon-template/Cargo.toml
-          cargo test --locked -p rsi --test addons scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact
+          cargo test --locked -p rsi-app-catalog --test addons scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact
       - name: Check independent language source addon
         timeout-minutes: 20
         env:
@@ -491,7 +560,7 @@ jobs:
           cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets --all-features -- -D warnings
         timeout-minutes: 10
       - name: Lint standard rsi
-        run: cargo clippy --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
         run: |
@@ -507,7 +576,7 @@ jobs:
         timeout-minutes: 15
       - name: Compile standard rsi tests
         id: standard_build
-        run: cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: runner.os == 'Linux'
@@ -530,7 +599,7 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
@@ -552,7 +621,7 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
-          cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
+          cargo run --locked -p rsi-app-tools -- dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
             smoke_status=$?
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
             exit "$smoke_status"
@@ -600,7 +669,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
-        run: cargo test --locked -p rsi -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
+        run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
 
       - name: Preserve source addon acceptance evidence
@@ -717,7 +786,7 @@ jobs:
 
   rsi-desktop:
     runs-on: ubuntu-24.04
-    timeout-minutes: 215
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Linux desktop dependencies
@@ -759,41 +828,50 @@ jobs:
           done
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
+      - name: Install pinned frontend package manager
+        timeout-minutes: 5
+        run: npm install --global pnpm@12.6.0
       - name: Build shared document and desktop
         id: build
         if: ${{ !cancelled() }}
         timeout-minutes: 110
         run: |
           cargo install wasm-bindgen-cli --version 0.2.127 --locked
-          cargo xtask dist desktop "$RUNNER_TEMP/rsi-desktop-dist" --debug
+          cargo run --locked -p rsi-app-tools -- dist desktop "$RUNNER_TEMP/rsi-desktop-dist" --debug
+      - name: Build incompatible desktop family
+        id: foreign
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 110
+        run: |
+          RUSTFLAGS="-Cdebug-assertions=no" cargo run --locked -p rsi-app-tools -- dist desktop "$RUNNER_TEMP/rsi-desktop-foreign" --debug
       - name: Exercise actual WebKitGTK first conversation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.foreign.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 5
         run: |
-          dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-evidence" --daemon --window-close --restart --save-failure --refresh-during-click --tasks --foreign-binary "$GITHUB_WORKSPACE/target/debug/rsi-desktop" --file-previews --export
+          dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-evidence" --daemon --window-close --restart --save-failure --refresh-during-click --tasks --foreign-bundle "$RUNNER_TEMP/rsi-desktop-foreign/bundle" --file-previews --export
           dbus-run-session -- xvfb-run -a /usr/bin/python3 fixtures/rsi/desktop-product/csp_engine.py --responses "$RUNNER_TEMP/rsi-desktop-evidence/preview-responses.json" --report "$RUNNER_TEMP/rsi-desktop-evidence/csp-engine.json"
       - name: Exercise WebKitGTK external, Profile, history and language surfaces
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
-          for mode in external profiles history language workspace-review attention typed-results plan-review; do
+          for mode in external profiles history language workspace-review attention typed-results plan-review ui-alignment presentation queue reload; do
             mode_args=("--$mode")
             if [[ "$mode" == language ]]; then mode_args+=("$RSI_RUST_ANALYZER"); fi
-            dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-$mode-evidence" "${mode_args[@]}"
+            dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-$mode-evidence" "${mode_args[@]}"
           done
       - name: Exercise missing frame acknowledgement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
-        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-ack-evidence" --daemon --ack-timeout
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-ack-evidence" --daemon --ack-timeout
       - name: Exercise actual WebKitGTK session terminals
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 5
-        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-terminal-evidence" --terminals --window-close
-      - name: Exercise startup close deadline
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-terminal-evidence" --terminals --window-close
+      - name: Exercise document close deadline
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
-        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-startup-evidence" --daemon --startup-close
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-close-evidence" --daemon --close-timeout
       - name: Restore native sandbox runner policy
         if: always()
         run: |
@@ -813,10 +891,11 @@ jobs:
             ${{ runner.temp }}/rsi-desktop-evidence
             ${{ runner.temp }}/rsi-desktop-*-evidence
             ${{ runner.temp }}/rsi-desktop-terminal-evidence
-            ${{ runner.temp }}/rsi-desktop-startup-evidence
+            ${{ runner.temp }}/rsi-desktop-close-evidence
             ${{ runner.temp }}/rsi-desktop-dist/bundle/receipt.json
-            ${{ runner.temp }}/rsi-desktop-dist/build-family.json
+            ${{ runner.temp }}/rsi-desktop-dist/bundle/build-family.json
             ${{ runner.temp }}/rsi-desktop-dist/build.log
-            !${{ runner.temp }}/rsi-desktop-evidence/foreign-build/rsi
-            !${{ runner.temp }}/rsi-desktop-evidence/foreign-build/rsi-desktop
+            ${{ runner.temp }}/rsi-desktop-foreign/bundle/receipt.json
+            ${{ runner.temp }}/rsi-desktop-foreign/bundle/build-family.json
+            ${{ runner.temp }}/rsi-desktop-foreign/build.log
           if-no-files-found: warn

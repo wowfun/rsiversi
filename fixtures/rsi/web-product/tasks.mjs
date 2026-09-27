@@ -1,3 +1,5 @@
+import {detailMode,resources} from './controls.mjs';
+import './paired-env.mjs';
 import assert from "node:assert/strict";
 import { mkdir, writeFile, readFile, copyFile, chmod } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -12,7 +14,7 @@ const assets = process.env.RSI_WEB_ASSETS;
 if (!report || !assets) throw new Error("Set RSI_WEB_REPORT and RSI_WEB_ASSETS");
 await mkdir(report, { recursive: false });
 const binary = join(report, "rsi");
-await copyFile(process.env.RSI_WEB_BINARY ?? resolve("target/debug/rsi"), binary);
+await copyFile(process.env.RSI_WEB_BINARY, binary);
 await chmod(binary, 0o700);
 const binaryHash = createHash("sha256").update(await readFile(binary)).digest("hex");
 await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: binaryHash }));
@@ -29,6 +31,7 @@ async function geometry(page, pane, detail) {
     const root = document.querySelector(detail ? "#detail" : pane);
     const rect = root.getBoundingClientRect();
     const buttons = [...root.querySelectorAll("button")].filter(button => {
+      if (!button.checkVisibility({visibilityProperty:true})) return false;
       const box = button.getBoundingClientRect();
       if (button.disabled || box.width <= 0 || box.height <= 0 || box.top < 0 || box.bottom > innerHeight) return false;
       for (let parent = button.parentElement; parent; parent = parent.parentElement) {
@@ -42,7 +45,7 @@ async function geometry(page, pane, detail) {
       const box = button.getBoundingClientRect();
       return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
     };
-    const send = [...root.querySelectorAll("button")].find(button => button.textContent === "Send ↗");
+    const send = [...root.querySelectorAll("button")].find(button => button.dataset.testid === "composer-send");
     return { viewport: [innerWidth, innerHeight], page_width: document.documentElement.scrollWidth,
       root: { left: rect.left, right: rect.right, width: rect.width },
       controls: buttons.map(button => ({ label: button.textContent, hit: hit(button) })),
@@ -133,8 +136,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.locator(".workspace-add summary").click();
     await page.getByLabel("Server directory").fill(service.workspace);
     await page.locator("#workspace-form").getByRole("button", { name: "Add workspace", exact: true }).click();
-    await page.locator("#workspaces .nav-item").click();
-    await page.getByRole("button", { name: "Trajectory", exact: true }).click();
+    await page.locator("#workspaces [data-testid=workspace-open]").click();
+    await detailMode(page,'verbose');
     const paneSelector = '[aria-label="Main conversation"]';
     const pane = page.locator(paneSelector);
     const detail = page.locator("#detail .ui-contribution");
@@ -148,7 +151,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
       await page.locator("#detail").waitFor({ state: "hidden" });
     };
-    const surface = async name => { await close(); await page.getByRole("button", { name, exact: true }).click(); };
+    const surface = async name => { await close(); await resources(page); await page.getByRole("button", { name, exact: true }).click(); };
     const capture = async (label, isDetail = false, expected = [], reveal) => {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
@@ -171,7 +174,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       const before = service.provider.requests.length;
       await pane.getByLabel("Main message", { exact: true }).fill(text);
       assert.equal(await pane.getByLabel("Main message", { exact: true }).inputValue(), text);
-      await pane.getByRole("button", { name: "Send ↗", exact: true }).click();
+      await pane.getByTestId('composer-send').click();
       await until(async () => {
         const review = pane.locator(".pending button").filter({ hasText: "Review:" });
         if (await review.count()) {

@@ -20,7 +20,7 @@ while product closing already uses native window events and Application actions.
 
 ## Decision
 
-The [preview renderer](../../../../plugins/rsi/web/README.md) checks encoded image
+The [preview renderer](../../../../apps/web/README.md) checks encoded image
 headers before assigning supplied images to a browser decoder, including raster
 signatures disguised by non-image MIME labels. Markup data image/font references
 join the same admitted resource package; response CSP excludes raw data images.
@@ -37,7 +37,7 @@ executing supplied HTML. Response CSP, native navigation, and this admission gat
 have separate jobs: an inert bootstrap may be embedded on affected engines, but
 an unauthorized parent cannot deliver executable content.
 
-The [desktop document](../../../../crates/rsi/desktop/README.md) has no Tauri IPC
+The [desktop document](../../../../apps/desktop/README.md) has no Tauri IPC
 capabilities. Native close fixtures send WM_DELETE_WINDOW on their isolated Xvfb
 display and observe the real drain path. They also verify that JavaScript close
 is denied, that failed draft saves keep the window alive, and that duplicate

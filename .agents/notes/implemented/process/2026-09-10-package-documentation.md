@@ -16,6 +16,10 @@ a development surface. Apply the existing documentation taxonomy to `docs`
 directly below actual Cargo packages as well as product families. Nested package
 docs are not workspace members and need no workspace exclusion.
 
+Product subsystem references own cross-package ordering and lifecycle semantics;
+package READMEs and rustdoc retain exact package interfaces. Product architecture
+links those references through its explanation of ownership.
+
 ## Alternatives considered
 
 Keeping plugin instructions at root blurs ownership. A separate navigation

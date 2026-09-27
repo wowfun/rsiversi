@@ -2,12 +2,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(unix)]
-mod application;
 mod prompt;
 mod replay;
-#[cfg(unix)]
-pub use application::ApplicationFactory;
 
 /// Explicit native backend authority supplied to the stdio Application addon.
 #[derive(Debug)]

@@ -13,7 +13,7 @@ creator Turn's execution claim.
 
 ## Decision
 
-This partially supersedes the [Goal continuation decision](../../implemented/architecture/2026-09-12-goal-continuation.md).
+This partially supersedes the [Goal continuation decision](2026-09-12-goal-continuation.md).
 The Kernel retains continuation owners by `(Session, domain)`, bounded to 64 per domain and
 128 overall, with identical Header and generation for co-resident owners. It permits
 one automatic Turn per Session, gives human input priority and alternates eligible
@@ -40,6 +40,12 @@ with the calling adapter. Schedule reads plan-policy again after disarming its
 prior driver and guards that revision under Kernel commit admission. A second
 preflight read alone would still leave a check-to-commit race; a read-only guard
 avoids manufacturing a policy write that would revoke unrelated Programs.
+
+Queue replacement preserves the existing admission instead of reapplying Human
+priority. Withdrawal and conversion notify current idle waiters after committing
+the changed blocker. They do not allocate a continuation lease or revive an input
+that earlier Human admission superseded. This keeps an edit independent from the
+user's authority to start automatic work.
 
 ## Alternatives considered
 

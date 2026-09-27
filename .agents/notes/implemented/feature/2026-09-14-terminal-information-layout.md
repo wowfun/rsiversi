@@ -26,7 +26,7 @@ Process folds retain their starting context and latest output, and exact source
 anchors bind selection to the acknowledged frame. Human-readable typed Tool
 summaries are the default; raw source details require an explicit action.
 
-The current [interaction reference](../../../../crates/rsi/terminal/docs/tui-design.md)
+The current [interaction reference](../../../../apps/terminal/docs/tui-design.md)
 owns geometry, key behavior, source-copy limits, feedback priority and navigation.
 The [presentation contract](../../../../crates/rsi/terminal-ui/README.md) owns the
 portable codec, frame acknowledgement and separate bounded caches. Home and setup

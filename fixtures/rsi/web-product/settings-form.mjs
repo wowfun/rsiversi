@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 export async function verifySettingsForm(browser,root) {
   const context=await browser.newContext();
-  await context.route('http://settings.fixture/**',async route=>route.fulfill({status:200,contentType:route.request().url().endsWith('.js') ? 'text/javascript' : 'text/html',body:route.request().url().endsWith('.js') ? await readFile(join(root,'plugins/rsi/web/settings-form.js'),'utf8') : '<!doctype html><form></form>'}));
+  await context.route('http://settings.fixture/**',async route=>route.fulfill({status:200,contentType:route.request().url().endsWith('.js') ? 'text/javascript' : 'text/html',body:route.request().url().endsWith('.js') ? await readFile(join(root,'apps/web/settings-form.js'),'utf8') : '<!doctype html><form></form>'}));
   const page=await context.newPage();
   try {
     await page.goto('http://settings.fixture/');

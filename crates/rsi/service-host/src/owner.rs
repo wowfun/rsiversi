@@ -12,7 +12,7 @@ use thiserror::Error;
 /// Service Host wire protocol epoch.
 pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 9;
 static SERVICE_HOST_PRODUCT_BUILD: LazyLock<Result<String, String>> =
-    LazyLock::new(|| match option_env!("RSI_COMPILED_BUILD_FAMILY") {
+    LazyLock::new(|| match rsi_build_info::family() {
         Some(digest) => Ok(format!(
             "{}+family-sha256:{digest}",
             env!("CARGO_PKG_VERSION")

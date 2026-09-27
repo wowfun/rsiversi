@@ -8,8 +8,6 @@ publish = false
 
 [dependencies]
 rsi-meta = { path = "../../rsi-meta/core" }
-rsi-application = { path = "../application" }
-rsi-serve = { path = "../serve" }
 rsi-acp = { path = "../../rsi-acp/core" }
 rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }
@@ -23,14 +21,8 @@ serde.workspace = true
 serde_json.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-tokio = { workspace = true, features = ["time", "net", "signal", "fs", "io-util"] }
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
 tokio-util.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-rustix.workspace = true
 
 [lints]
 workspace = true

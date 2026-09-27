@@ -1,0 +1,84 @@
+[package]
+name = "rsi-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-session-export = { path = "../../crates/rsi/session-export" }
+rsi-ui-api = { path = "../../crates/rsi/ui-api" }
+rsi-service-ui = { path = "../../crates/rsi/service-ui" }
+rsi-history-api = { path = "../../crates/rsi/history-api" }
+rsi-navigation-api = { path = "../../crates/rsi/navigation-api" }
+rsi-acp-protocol = { path = "../../crates/rsi-acp/protocol" }
+rsi-agent-workspace-context = { path = "../../crates/rsi-agent/workspace-context" }
+rsi-agent-todo = { path = "../../crates/rsi-agent/todo" }
+rsi-workbench-ui = { path = "../../crates/rsi/workbench-ui" }
+rsi-credentials-protocol = { path = "../../crates/rsi-credentials/protocol" }
+rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
+rsi-terminal-ui = { path = "../../crates/rsi/terminal-ui" }
+rsi-native-addons-api = { path = "../../crates/rsi/native-addons-api" }
+rsi-inspector = { path = "../../crates/rsi/inspector" }
+rsi-session-tree-ui = { path = "../../crates/rsi/session-tree-ui" }
+rsi-settings-protocol = { path = "../../crates/rsi-settings/protocol" }
+rsi-session-files = { path = "../../crates/rsi/session-files" }
+rsi-session-files-ui = { path = "../../crates/rsi/session-files-ui" }
+rsi-files-protocol = { path = "../../crates/rsi-files/protocol" }
+rsi-ui = { path = "../../crates/rsi/ui" }
+rsi-session-ui = { path = "../../crates/rsi/session-ui" }
+zeroize.workspace = true
+rsi-api-device-api = { path = "../../crates/rsi-api/device-api" }
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-client = { path = "../../crates/rsi/client" }
+rsi-conversation = { path = "../../crates/rsi/conversation" }
+bytes.workspace = true
+rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
+rsi-user-questions-protocol = { path = "../../crates/rsi-user-questions/protocol" }
+async-trait.workspace = true
+base64.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+ratatui.workspace = true
+hex.workspace = true
+sha2.workspace = true
+rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
+rsi-approval-protocol = { path = "../../crates/rsi-approval/protocol" }
+rsi-media-protocol = { path = "../../crates/rsi-media/protocol" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+rsi-host = { path = "../../crates/rsi-host/core" }
+rsi-process = { path = "../../crates/rsi-process/core" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
+rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
+rsi-workspace-protocol = { path = "../../crates/rsi-workspace/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+termina.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "io-std", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, features = ["termios"] }
+
+[dev-dependencies]
+rsi-meta-native-loader = { path = "../../crates/rsi-meta/native-loader" }
+vt100.workspace = true
+portable-pty.workspace = true
+filedescriptor.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true

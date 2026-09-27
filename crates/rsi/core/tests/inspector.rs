@@ -86,6 +86,7 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
         HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
         BTreeMap::new(),
         None,
+        rsi::ApplicationCatalogMetadata::default(),
     )
     .with_addons(StandardAddonSet::new([addon.build().unwrap()]).unwrap());
     let host = composition

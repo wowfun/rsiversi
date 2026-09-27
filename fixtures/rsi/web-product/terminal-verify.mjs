@@ -1,3 +1,4 @@
+import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -37,8 +38,8 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
     };
   });
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} terminal verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces .nav-item').first().click();
-  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByRole('button',{name:'Send ↗',exact:true}).click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
+  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByTestId('composer-send').click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
   const requests=service.provider.requests.length;await verifyTerminals(page,service,directory,name);assert.equal(service.provider.requests.length,requests,'terminal operation invoked the model');
   assert.deepEqual(await page.evaluate(()=>window.terminalStyleViolations),[],'terminal blocked by product CSP');
   await verifyPluginSources(page,service,directory,name);

@@ -13,7 +13,10 @@ exact restored Session; unrelated Session close never waits for another setup.
 Prompt tasks are retained by the adapter independently of the requesting
 handler. Setup tasks likewise retain admission and cleanup ownership if a control
 request disappears; shutdown joins them before retiring the Session owner.
-Cancel targets the admitted message, including its pre-claim interval;
+Cancel targets the admitted message, including its pre-claim interval. Before
+awaiting cancellation, the adapter drops its suspended observation stream so a
+pending page cannot retain the Store read budget needed by cancellation. It
+resumes from the last consumed Fact/control cursors without replaying updates;
 the prompt waits for durable termination and the exact Executor controlled-work
 observation. A prompt response requires both the durable Turn terminal fact and
 settled controlled work; controlled-work settlement alone does not prove a durable
@@ -35,10 +38,5 @@ Tests using a supplied Session owner establish this adapter's behavior only.
 Application composition, private MCP, independent SDK interoperability and live
 provider evidence require their separate product acceptance tests.
 
-On Unix, `ApplicationFactory` owns the stdio entry and signal handling. It uses
-nonblocking duplicated descriptors so cancelling an idle pipe read does not
-leave a blocking Tokio stdin worker behind. Redirected regular files use owned
-file I/O; retirement drains outstanding file work before releasing descriptors.
-Stdout carries only NDJSON; bounded
-categorical diagnostics use stderr. The Service backend is supplied through an
-ordinary Local contract, and Application retirement joins protocol cleanup.
+The [ACP application](../../../apps/acp/README.md) owns Unix stdio and signal
+handling; this library provides its reusable native Agent backend.

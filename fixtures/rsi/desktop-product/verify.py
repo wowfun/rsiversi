@@ -16,6 +16,9 @@ import sys
 import threading
 import tempfile
 import time
+from presentation import verify as verify_presentation
+from alignment import verify as verify_alignment
+from queue_scenario import verify as verify_queue
 from tasks import ProviderControl, verify as verify_tasks
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
@@ -37,15 +40,20 @@ parser.add_argument('--live-env-file', type=Path)
 parser.add_argument('--live-model')
 parser.add_argument('--window-close', action='store_true')
 parser.add_argument('--restart', action='store_true')
+parser.add_argument('--reload', action='store_true')
 parser.add_argument('--daemon', action='store_true')
-parser.add_argument('--foreign-binary', type=Path)
+parser.add_argument('--foreign-bundle', type=Path)
 parser.add_argument('--ack-timeout', action='store_true')
 parser.add_argument('--save-failure', action='store_true')
-parser.add_argument('--startup-close', action='store_true')
+parser.add_argument('--close-timeout', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
 parser.add_argument('--plan-review', action='store_true')
 parser.add_argument('--terminals', action='store_true')
+parser.add_argument('--presentation', action='store_true')
+parser.add_argument('--ui-alignment', action='store_true')
+parser.add_argument('--queue', action='store_true')
+parser.add_argument('--system-theme', choices=('light','dark'))
 parser.add_argument('--external', action='store_true')
 parser.add_argument('--profiles', action='store_true')
 parser.add_argument('--history', action='store_true')
@@ -58,12 +66,13 @@ parser.add_argument('--export', action='store_true')
 args = parser.parse_args()
 if bool(args.live_env_file) != bool(args.live_model):
     parser.error('live mode requires both an authorized environment file and a model')
-if args.tasks and (args.live_env_file or args.startup_close or args.ack_timeout):
+if args.queue and args.live_env_file: parser.error('queue scenario requires its deterministic held response')
+if args.tasks and (args.live_env_file or args.close_timeout or args.ack_timeout):
     parser.error('task mechanisms require the ordinary deterministic product scenario')
-if args.foreign_binary and not args.daemon: parser.error('foreign build check requires --daemon')
+if args.foreign_bundle and not args.daemon: parser.error('foreign build check requires --daemon')
 if args.ack_timeout and args.restart: parser.error('ACK timeout and clean restart are distinct scenarios')
-if args.startup_close and (args.restart or args.save_failure or args.ack_timeout or args.live_env_file or args.refresh_during_click):
-    parser.error('startup close is a separate deterministic scenario')
+if args.close_timeout and (args.restart or args.save_failure or args.ack_timeout or args.live_env_file or args.refresh_during_click):
+    parser.error('close timeout is a separate deterministic scenario')
 secret = None
 if args.live_env_file:
     source = args.live_env_file.read_bytes()
@@ -73,14 +82,6 @@ if args.live_env_file:
     secret = re.sub(r'''^(["'])(.*)\1$''', r'\2', match[1].strip())
     if not secret: raise ValueError('authorized DeepSeek key is empty')
 args.report.mkdir(parents=True, exist_ok=False)
-if args.startup_close:
-    stalled_assets = args.report / 'stalled-assets'
-    shutil.copytree(args.assets, stalled_assets)
-    bootstrap = stalled_assets / 'app.js'
-    original = bootstrap.read_bytes()
-    bootstrap.write_bytes(b'window.fixtureStartupStalled=true;await new Promise(()=>{});\n' + original)
-    (args.report / 'startup-instrumentation.json').write_text(json.dumps({'originalAppSha256': hashlib.sha256(original).hexdigest(), 'stalledAppSha256': hashlib.sha256(bootstrap.read_bytes()).hexdigest(), 'boundary': 'isolated document module is stalled before startup; production Rust binary is unchanged'}, indent=2))
-    args.assets = stalled_assets
 requests = []
 task_provider = ProviderControl()
 class Provider(BaseHTTPRequestHandler):
@@ -91,10 +92,23 @@ class Provider(BaseHTTPRequestHandler):
             self.send_error(413); return
         body = json.loads(self.rfile.read(size))
         requests.append({'model': body.get('model'), 'messages': len(body.get('messages', []))})
+        if args.queue:
+            prompt = next((message.get('content','') for message in reversed(body.get('messages', [])) if message.get('role') == 'user'), '')
+            if isinstance(prompt, list): prompt = ''.join(part.get('text','') for part in prompt)
+            requests[-1]['prompt'] = prompt
+            if prompt == 'Desktop queue hold active':
+                self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+                try:
+                    self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'role':'assistant','content':'Queue fixture is waiting.'},'finish_reason':None}]})+'\n\n').encode()); self.wfile.flush()
+                    for _ in range(1200):
+                        time.sleep(0.1); self.wfile.write(b': keepalive\n\n'); self.wfile.flush()
+                except (BrokenPipeError,ConnectionResetError): pass
+                return
         if args.tasks and task_provider.handle(self, body):
             return
         self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         delta = {'choices': [{'delta': {'role': 'assistant', 'content': 'Desktop conversation verified. 中文输入已收到。'}, 'finish_reason': None}]}
+        if args.ui_alignment: delta['choices'][0]['delta']['content'] += '\n\n```text\nnative clipboard verified\n```'
         done = {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12}}
         delegation = (plan_reply(body) if args.plan_review else None) or (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
         if delegation:
@@ -106,6 +120,7 @@ threading.Thread(target=provider.serve_forever, daemon=True).start()
 env = {key: value for key, value in os.environ.items() if key in ('PATH', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'LANG', 'XAUTHORITY')}
 env.update(TAURI_WEBVIEW_AUTOMATION='true', RSI_OPENAI_COMPATIBLE_API_KEY='isolated-desktop-fixture')
 if secret: env['DEEPSEEK_API_KEY'] = secret
+if args.system_theme: env['GTK_THEME'] = 'Adwaita:dark' if args.system_theme == 'dark' else 'Adwaita'
 for key in ('HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR'):
     path = args.report / key.lower(); path.mkdir(mode=0o700); env[key] = str(path.resolve())
 runtime_directory = tempfile.TemporaryDirectory(prefix='rsi-desktop-', dir='/tmp')
@@ -175,23 +190,31 @@ try:
             value = json.loads(files[0].read_text())
             return value if value.get('endpoint_id') and value.get('host_epoch') else None
         daemon_metadata = until(daemon_ready)
-        if args.foreign_binary:
-            foreign = args.report / 'foreign-build'; foreign.mkdir()
-            shutil.copy2(args.foreign_binary, foreign / 'rsi-desktop')
-            (foreign / 'rsi').symlink_to(companion)
-            with (foreign / 'rsi-desktop').open('rb') as executable:
-                (foreign / 'binary.json').write_text(json.dumps({'sha256': hashlib.file_digest(executable, 'sha256').hexdigest()}) + '\n')
-            rejected = subprocess.run([str((foreign / 'rsi-desktop').resolve()), '--assets', str(args.assets.resolve()), '--host-profile', 'fixture'], env=env, capture_output=True, text=True, timeout=45)
-            (args.report / 'foreign-build.log').write_text(rejected.stdout + rejected.stderr)
-            assert rejected.returncode != 0, 'foreign family unexpectedly attached'
-            assert daemon.poll() is None and daemon_ready() == daemon_metadata
+        if args.foreign_bundle:
+            foreign = args.foreign_bundle.resolve()
+            foreign_receipt = json.loads((foreign / 'receipt.json').read_text())
+            assert foreign_receipt['family_sha256'] != receipt['family_sha256']
+            assert hashlib.sha256((foreign / 'build-family.json').read_bytes()).hexdigest() == foreign_receipt['family_sha256']
+            for name in ('rsi', 'rsi-desktop'):
+                assert hashlib.sha256((foreign / name).read_bytes()).hexdigest() == foreign_receipt['artifacts'][name]
+            evidence = []
+            for stage, selected_assets in [('assets', args.assets.resolve()), ('host', foreign / 'assets')]:
+                rejected = subprocess.run([str(foreign / 'rsi-desktop'), '--assets', str(selected_assets), '--host-profile', 'fixture'], env=env, capture_output=True, text=True, timeout=45)
+                output = rejected.stdout + rejected.stderr
+                (args.report / f'foreign-{stage}.log').write_text(output)
+                assert rejected.returncode != 0, f'foreign family unexpectedly passed {stage}'
+                if stage == 'assets': assert 'Web pairing:' in output and 'family mismatch' in output, output
+                else: assert 'Web pairing:' not in output and 'incompatible' in output.lower(), output
+                assert daemon.poll() is None and daemon_ready() == daemon_metadata
+                evidence.append({'stage': stage, 'exit': rejected.returncode, 'family': foreign_receipt['family_sha256'], 'daemonPreserved': True})
+            (args.report / 'foreign-family.json').write_text(json.dumps(evidence, indent=2))
     phase = 'webdriver-startup'
     def ready():
         try: return call('GET', '/status')
         except (OSError, http.client.HTTPException): return None
     until(ready)
     phase = 'webview-startup'
-    result = call('POST', '/session', {'capabilities': {'alwaysMatch': {'pageLoadStrategy': 'none' if args.startup_close else 'normal', 'webkitgtk:browserOptions': {
+    result = call('POST', '/session', {'capabilities': {'alwaysMatch': {'pageLoadStrategy': 'normal', 'webkitgtk:browserOptions': {
         'binary': str(args.binary.resolve()), 'args': ['--assets', str(args.assets.resolve()), '--host-profile', 'fixture']}}}})
     session = result['sessionId']; root = f'/session/{session}'
     phase = 'product-scenario'
@@ -210,8 +233,17 @@ try:
         if value: call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
         until(lambda: script('return arguments[0].value', [item]) == value)
     def button(text):
+        if text in ('Workspace files', 'Workspace changes', 'Service extensions', 'Session commands', 'Goal'):
+            if script(r'return document.querySelector("[aria-label=\"Toggle resources\"]").getAttribute("aria-expanded")!=="true"'):
+                button('Toggle resources')
+        if text in ('Compact','Standard','Detailed','Verbose'):
+            script(r'''document.querySelector('.conversation-menu').open=true;const e=document.querySelector('[aria-label="Detail level"]');e.value=arguments[0];e.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('.conversation-menu').open=false;return true''',[text.lower()])
+            return
+        if text in ('@ File path','Reference session','Add images','Search history','Export'):
+            script('document.querySelector(".pane.selected .composer-extras").open=true;return true')
+        if text == 'Terminal': script('document.querySelector(".conversation-menu").open=true;return true')
         def attempt():
-            item = script(r'return [...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0]&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
+            item = script(r'return [...document.querySelectorAll(arguments[0]==="External agents"?".external-navigation>summary":"button")].find(b=>(arguments[0]==="Send"?b.dataset.testid==="composer-send":(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0])&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
             if item is None: return False
             try:
                 call('POST', root + f'/element/{eid(item)}/click', {})
@@ -222,13 +254,15 @@ try:
                 raise
             return True
         until(attempt)
+        if text == 'Close details': until(lambda: script('return !document.querySelector("#detail").open'))
     def painted():
         script(r'window.fixturePaint=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.fixturePaint=true));return true')
         until(lambda: script(r'return window.fixturePaint'))
     def screenshot(name):
         painted(); (args.report / name).write_bytes(base64.b64decode(call('GET', root + '/screenshot'), validate=True))
-    if args.startup_close:
-        until(lambda: script('return window.fixtureStartupStalled===true'))
+    if args.close_timeout:
+        until(lambda: script('return document.querySelector("#workbench")?.hidden===false'))
+        script("window.addEventListener('rsi-native-close', event => event.stopImmediatePropagation(), {capture:true}); return true")
         started = time.monotonic()
         native_window_close()
         native_window_close()
@@ -239,7 +273,7 @@ try:
         assert 29 <= elapsed < 45, elapsed
         if daemon:
             assert daemon.poll() is None and daemon_ready() == daemon_metadata
-        (args.report / 'startup-close.json').write_text(json.dumps({'ok': True, 'elapsedSeconds': elapsed, 'closeRequests': 2, 'deadlineFailures': 1, 'cleanupStatus': 1, 'borrowedDaemonPreserved': bool(daemon)}, indent=2))
+        (args.report / 'close-timeout.json').write_text(json.dumps({'ok': True, 'elapsedSeconds': elapsed, 'closeRequests': 2, 'deadlineFailures': 1, 'cleanupStatus': 1, 'borrowedDaemonPreserved': bool(daemon)}, indent=2))
         session = None
         raise SystemExit(0)
     until(lambda: script(r'return document.querySelector("#workbench")?.hidden===false'), 45)
@@ -251,7 +285,7 @@ try:
     item = script(r'return [...document.querySelectorAll("summary")].find(b=>b.textContent.trim()==="Add workspace")')
     call('POST', root + f'/element/{eid(item)}/click', {})
     fill('[aria-label="Server directory"]', str(workspace.resolve())); button('Add workspace')
-    until(lambda: script(r'return document.querySelector("#workspaces .nav-item")'))
+    until(lambda: script(r'return document.querySelector("#workspaces [data-testid=workspace-open]")'))
     button('Settings')
     if not secret:
         script(r'const e=document.querySelector("select[aria-label=Provider]");e.value="openai-compatible";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
@@ -290,14 +324,14 @@ try:
     screenshot('retrieval-settings.png')
     button('Close details')
     (args.report / 'plugins.json').write_text(json.dumps({'status':'passed','revisions':revisions,'retrievalDefaultFlags':flags,'exaStatusRead':True}, indent=2))
-    button('Close settings'); click('#workspaces .nav-item')
+    button('Close settings'); click('#workspaces [data-testid=workspace-open]')
     until(lambda: script(r'return document.querySelector("textarea[aria-label=\"Main message\"]")'))
-    if secret: button('Trajectory')
-    prompt = 'This is an isolated desktop integration test. Use the available bash tool to write the UTF-8 line "rsi-live-ok" to milestone.txt in the current workspace, then use bash to read it back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.' if secret else '桌面首次对话：请确认收到。'
+    if secret: button('Verbose')
+    prompt = 'This is an isolated desktop integration test. Use the available bash tool to write exactly 12 UTF-8 bytes: "rsi-live-ok" followed by one LF newline to milestone.txt in the current workspace, then use bash to read it back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.' if secret else '桌面首次对话：请确认收到。'
     fill('textarea[aria-label="Main message"]', prompt)
     if args.refresh_during_click:
-        script(r'''window.fixturePress={refreshed:false,clicks:0};const b=[...document.querySelectorAll('button')].find(e=>e.textContent==='Send ↗');b.addEventListener('mousedown',()=>{const before=b.firstChild;document.querySelector('textarea[aria-label="Main message"]').dispatchEvent(new Event('input',{bubbles:true}));window.fixturePress.refreshed=true;window.fixturePress.sameTextNode=b.firstChild===before},{once:true});b.addEventListener('click',()=>{window.fixturePress.clicks++},{capture:true});return true''')
-    button('Send ↗')
+        script(r'''window.fixturePress={refreshed:false,clicks:0};const b=[...document.querySelectorAll('button')].find(e=>e.dataset.testid==='composer-send');b.addEventListener('mousedown',()=>{const before=b.firstChild;document.querySelector('textarea[aria-label="Main message"]').dispatchEvent(new Event('input',{bubbles:true}));window.fixturePress.refreshed=true;window.fixturePress.sameTextNode=b.firstChild===before},{once:true});b.addEventListener('click',()=>{window.fixturePress.clicks++},{capture:true});return true''')
+    button('Send')
     if args.refresh_during_click:
         pressed = script('return window.fixturePress')
         (args.report / 'refresh-during-click.json').write_text(json.dumps(pressed, indent=2))
@@ -320,6 +354,9 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace)
+    if args.queue: verify_queue(script, button, fill, until, screenshot, args.report, requests)
+    if args.presentation: verify_presentation(script, button, fill, until, screenshot, args.report, args.system_theme)
     if args.plan_review: verify_plan_review(script, button, fill, until, screenshot, args.report)
     if args.export: verify_export(script, button, fill, until, screenshot, args.report, requests)
     if args.file_previews:
@@ -388,7 +425,7 @@ try:
         verify_tasks(script, button, fill, until, screenshot, workspace, args.report, task_provider)
     # Closing a Rust-owned detail is asynchronous even after native click delivery.
     until(lambda: script('return !document.querySelector("dialog[open]")'))
-    geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Send ↗"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')
+    geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.dataset.testid==="composer-send"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')
     assert geometry['input'] >= 180 and geometry['overflow'] <= 1 and geometry['sendHit'], geometry
     script(r'''window.nativeAdmission=null;window.admissionAck=null;window.admissionFetch=window.fetch;window.fetch=(path,options)=>{if(String(path)==='/_ack'&&!window.admissionAck)return new Promise((resolve,reject)=>{window.admissionAck={frame:JSON.parse(options.body).frame_id,release:async()=>{try{const response=await window.admissionFetch(path,options);window.admissionAck.released={frame:JSON.parse(options.body).frame_id,status:response.status};resolve(response);if(!response.ok)throw Error('held ACK rejected: '+response.status)}catch(error){reject(error);throw error}}}});return window.admissionFetch(path,options)};void window.admissionFetch('/_call/command',{method:'POST',body:JSON.stringify({action:'refresh'})});return true''')
     held_admission = until(lambda: script('return window.admissionAck?.frame'))
@@ -434,6 +471,14 @@ try:
         # The window has already exited through the failed-lifetime path.
         session = None
         raise SystemExit(0)
+    if args.reload:
+        fill('textarea[aria-label="Main message"]', 'saved across document reload')
+        until(lambda: script('return !document.querySelector(".draft-status")?.textContent.includes("Saving")'))
+        call('POST',root+'/refresh',{})
+        until(lambda: script('return document.querySelector("#workbench")?.hidden===false'),45)
+        until(lambda: script(r'''return document.querySelector('textarea[aria-label="Main message"]')?.value==='saved across document reload';'''))
+        screenshot('reloaded.png')
+        (args.report/'reload.json').write_text(json.dumps({'reload':True,'draftRetained':True}))
     if args.restart: fill('textarea[aria-label="Main message"]', 'persistent unsent desktop draft 中文')
     if args.window_close:
         denied = script('return window.__TAURI_INTERNALS__.invoke("plugin:window|close",{label:"main"}).then(()=>"unexpectedly allowed",error=>String(error))')
@@ -448,6 +493,8 @@ try:
             'binary': str(args.binary.resolve()), 'args': ['--assets', str(args.assets.resolve()), '--host-profile', 'fixture']}}}})
         session = result['sessionId']; root = f'/session/{session}'
         until(lambda: script(r'return document.querySelector("#workbench")?.hidden===false'), 45)
+        until(lambda: script(r'return Boolean(document.querySelector("#workspaces .workspace-toggle"))'))
+        if script(r'return document.querySelector("#workspaces .workspace-toggle").getAttribute("aria-expanded")!=="true"'): click('#workspaces .workspace-toggle')
         until(lambda: script(r'return document.querySelectorAll("#sessions .session-row").length===1'))
         click('#sessions .session-row button')
         until(lambda: script(r'return document.querySelector("textarea[aria-label=\"Main message\"]")?.value==="persistent unsent desktop draft 中文"'))
@@ -457,7 +504,7 @@ try:
     if daemon:
         assert daemon.poll() is None, 'desktop shutdown stopped its borrowed daemon'
         assert daemon_ready() == daemon_metadata, 'desktop reconnect replaced the daemon generation'
-    report = {'ok': True, 'capabilities': result['capabilities'], 'requests': requests, 'geometry': geometry, 'actualTyping': True, 'cleanupBeforeMainThreadExit': True, 'windowClose': args.window_close, 'restart': args.restart, 'liveModel': args.live_model, 'approvals': approvals, 'verifiedFileBytes': 12 if secret else None, 'borrowedDaemonPreserved': bool(daemon), 'foreignFamilyRejectedWithSameCompanion': bool(args.foreign_binary), 'daemonIdentity': daemon_metadata}
+    report = {'ok': True, 'capabilities': result['capabilities'], 'requests': requests, 'geometry': geometry, 'actualTyping': True, 'cleanupBeforeMainThreadExit': True, 'windowClose': args.window_close, 'restart': args.restart, 'liveModel': args.live_model, 'approvals': approvals, 'verifiedFileBytes': 12 if secret else None, 'borrowedDaemonPreserved': bool(daemon), 'foreignPairedFamilyRejectedAtHost': bool(args.foreign_bundle), 'daemonIdentity': daemon_metadata}
     (args.report / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)); print(json.dumps(report, ensure_ascii=False))
 except Exception as error:
     record_failure(args.report, phase, error, daemon, process, secret)

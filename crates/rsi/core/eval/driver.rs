@@ -242,6 +242,7 @@ async fn run() -> Result<serde_json::Value> {
         paths.clone(),
         rsi::capture_standard_environment()?,
         Some(tools),
+        rsi::ApplicationCatalogMetadata::default(),
     )
     .with_user_home(rsi::capture_standard_home()?)?
     .with_credential_store(Arc::new(NoCredentialStore));

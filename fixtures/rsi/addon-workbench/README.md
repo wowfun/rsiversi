@@ -24,16 +24,21 @@ change the standard product's Responses default or establish live model behavior
 The `workbench-addon` Cargo example is a minimal embedder of the same declaration
 through `standard_application_host`. It accepts explicit Application Profiles,
 uses an inert credential store, and exposes no custom product launcher branches.
-Build it with `cargo build --locked -p rsi --example workbench-addon`. Freeze that
+Build it with `cargo build --locked -p rsi-cli --example workbench-addon`. Freeze that
 executable before starting any clients. Set `RSI_WORKBENCH_BINARY` to that absolute
 path and `RSI_TUI_PTY_REPORT` to an evidence directory, then run
-`cargo test --locked -p rsi --test service_host_cli independent_addon_tui -- --ignored`.
+`cargo test --locked -p rsi-cli --test service_host_cli independent_addon_tui -- --ignored`.
 The actual TUI and headless application factories share the same addon, command,
 projection, source generation and deterministic provider contract.
 
-With standard Web assets built as described by the
-[product browser fixture](../web-product/README.md), set `RSI_WORKBENCH_BINARY`,
-`RSI_WEB_ASSETS` and `RSI_WORKBENCH_REPORT`, and run `node fixtures/rsi/addon-workbench/verify.mjs`.
+With a successful current paired publication from the
+[product browser fixture](../web-product/README.md), run
+`python3 fixtures/rsi/addon-workbench/run-paired.py /absolute/new-report`.
+The browser CI job runs this probe against its current paired publication.
+It builds the example from that exact frozen source under the shared build lock,
+checks the capture before and after compilation, and retains the publication pin
+while its browser clients run. Its separate receipt records the example hash and
+family; ordinary Cargo examples cannot be combined with product Web assets.
 It uses real Chromium and Firefox, authenticated HTTP and the product Worker,
 records the actual provider's plan state and addon Tool declaration, exercises
 the addon Settings editor, verifies typed input survives the explicit JSON-mode

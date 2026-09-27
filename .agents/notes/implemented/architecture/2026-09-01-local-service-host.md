@@ -103,7 +103,7 @@ Working-directory ownership duplicates a partition already owned by Workspace.
 Daemon autostart hides a background ownership mutation inside ordinary application
 launch. A wire-shaped application API spreads framing and reconnect policy into
 each UI. The original local-only scope did not need HTTP or WebSocket; the accepted
-[application/client foundation](../../implemented/architecture/2026-09-06-application-client-foundation.md)
+[application/client foundation](2026-09-06-application-client-foundation.md)
 adds explicit multi-device access with separate authentication and TLS contracts.
 Session identity remains unsuitable as authentication in either scope.
 
@@ -140,3 +140,23 @@ versions and validation belong to their protocol and Store owners.
 Native and browser transport fixtures
 establish their stated protocol and lifecycle behavior; they do not substitute
 for product visuals or live model verification.
+
+Local browser launch preflights the configuration snapshot before destructive
+credential rotation. Grant failure revokes only that issued credential under the
+authentication owner's commit lock; revoking by DeviceId would race a later
+successful launch that reuses the managed identity. These two publications are
+not one transaction: old cookies remain invalid after rotation, and a failed
+compensation is reported for explicit operator recovery. Launch work is retained
+and drained independently of a cancelled caller.
+
+
+Failed local-browser grant compensation retains the managed slot and principal
+while disabling its verifier. Deleting that slot would orphan browser drafts
+owned by its DeviceId after an otherwise recoverable grant failure. Explicit
+operator device revocation remains the action that removes a principal.
+
+Within one Service owner, launch authorization is single-flight and retains the
+first successful credential. Serializing only rotation and grant would still let
+a later caller invalidate a returned, unconsumed launch link. Sharing the result
+avoids that gap; failures remain retryable and owner restart is the explicit new
+credential boundary. Operator revocation is never undone by an implicit retry.

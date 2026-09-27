@@ -2,7 +2,10 @@ use rsi_host::{ProfileEntry, ProfileFragment};
 use rsi_meta::UpdateMode;
 use serde_json::{Value, json};
 
-pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::Result<()> {
+pub(crate) fn register(
+    builder: &mut crate::StandardAddonBuilder,
+    home: Option<std::path::PathBuf>,
+) -> rsi_host::Result<()> {
     use rsi_api_protocol::{
         ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
         DeviceAdministrationContract, DeviceAuthenticationContract, EndpointIdentityContract,
@@ -73,6 +76,18 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
             Value::Null,
         ));
     }
+    let directory_config = json!({"home":home});
+    builder.register_linked(
+        "rsi.directory-picker",
+        env!("CARGO_PKG_VERSION"),
+        UpdateMode::RestartRequired,
+        std::sync::Arc::new(rsi_directory_picker::DirectoryPickerFactory::new(home)),
+    )?;
+    entries.push(ProfileEntry::new(
+        "rsi.directory-picker",
+        "rsi.directory-picker",
+        directory_config,
+    ));
     builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
     Ok(())
 }

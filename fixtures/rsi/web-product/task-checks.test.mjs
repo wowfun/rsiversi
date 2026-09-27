@@ -34,7 +34,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
         const snapshot = () => ({ model: { standard_view: { elements: [{ kind: "button", label: "Pause after current round", action: "goal", value: ++revision }] } }, busy: false });
         const renderer = await mount(document.querySelector("main"), snapshot(), { invoke() { ++window.invocations; } }, new AbortController().signal);
         window.replaceControl = () => renderer.update(snapshot());
-      }, await readFile(new URL("../../../plugins/rsi/web/standard.js", import.meta.url), "utf8"));
+      }, await readFile(new URL("../../../apps/web/standard.js", import.meta.url), "utf8"));
       let replacements = 0;
       const replace = async () => {
         ++replacements;
@@ -110,3 +110,31 @@ test("task assertions reject missing, hidden, disabled and obscured controls and
     }
   } finally { await browser.close(); }
 });
+
+for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: persistence evidence rejects an empty database and waits for a saved record`, async () => {
+    const { waitForSavedPresentation } = await import('./presentation.mjs');
+    const browser = await engine.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.route('http://layout.invalid/**', route => route.fulfill({body:'<main></main>', contentType:'text/html'}));
+      await page.goto('http://layout.invalid/');
+      await page.evaluate(async () => {
+        const db = await new Promise((resolve,reject) => {
+          const request=indexedDB.open('rsi.presentation',1);
+          request.onupgradeneeded=()=>request.result.createObjectStore('layouts');
+          request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+        });
+        window.saveFixtureLayout=()=>new Promise((resolve,reject)=>{
+          const transaction=db.transaction('layouts','readwrite');
+          transaction.objectStore('layouts').put({layout:'saved'},'fixture');
+          transaction.oncomplete=resolve;transaction.onerror=()=>reject(transaction.error);
+        });
+      });
+      await assert.rejects(waitForSavedPresentation(page, 100), /saved layout|Timeout/);
+      const pending = waitForSavedPresentation(page);
+      await page.evaluate(()=>window.saveFixtureLayout());
+      assert.equal(await pending, true);
+    } finally { await browser.close(); }
+  });
+}

@@ -1,3 +1,5 @@
+import {detailMode} from './controls.mjs';
+import './paired-env.mjs';
 // Opt-in real model acceptance; this file is never loaded by default tests.
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir,copyFile,chmod,readdir} from 'node:fs/promises';
@@ -20,7 +22,7 @@ function facts(session) {
  return records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);
 }
 async function complete(pane,input,prompt) {
- await input.fill(prompt);await pane.getByRole('button',{name:'Send ↗',exact:true}).click();let running=false;
+ await input.fill(prompt);await pane.getByTestId('composer-send').click();let running=false;
  const expires=Date.now()+180000;
  while(Date.now()<expires){
   const status=await pane.locator('.pane-status').innerText();if(!['Completed','Failed'].includes(status))running=true;
@@ -41,7 +43,7 @@ try {
  }});
  const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
  await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register('preview live verification')));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
- await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces .nav-item').first().click();await page.getByRole('button',{name:'Trajectory',exact:true}).click();
+ await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();await detailMode(page,'verbose');
  const main=page.getByRole('region',{name:'Main conversation',exact:true}),input=main.getByRole('textbox',{name:'Main message',exact:true});
  await input.fill('@live');await main.getByRole('option').filter({hasText:'live-reviewer'}).waitFor();await main.getByRole('button',{name:'Preview agent',exact:true}).click();await main.locator('.resource-preview-text').filter({hasText:tokens[0]}).waitFor();await page.screenshot({path:join(report,'live-agent-definition.png')});await main.getByRole('button',{name:'Close preview',exact:true}).click();await input.press('Escape');
  const children=[];let parent;

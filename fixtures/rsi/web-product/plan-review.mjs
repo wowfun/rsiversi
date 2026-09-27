@@ -1,3 +1,5 @@
+import {navigationFilter} from './controls.mjs';
+import './paired-env.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real document/Worker/Host closed-review acceptance; provider is deterministic.
@@ -13,7 +15,7 @@ import {assertNoNotices} from './task-checks.mjs';
 const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS;
 assert(report && assets,'explicit report and built assets required');
 await mkdir(report,{recursive:false});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY??resolve('target/debug/rsi'),binary);await chmod(binary,0o700);
+const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
 await writeFile(join(report,'binary.json'),JSON.stringify({sha256:createHash('sha256').update(await readFile(binary)).digest('hex')}));
 const results=[];
 function response(call) {
@@ -43,9 +45,9 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   await connectWorkbench(page, service, 'closed plan review');
   await openWorkspace(page, service);
     const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
-    await input.fill('/plan on');await pane.getByRole('button',{name:'Send ↗',exact:true}).click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
-    await input.fill('Review the exact saved plan.');await pane.getByRole('button',{name:'Send ↗',exact:true}).click();
-    await page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true}).click();
+    await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
+    await input.fill('Review the exact saved plan.');await pane.getByTestId('composer-send').click();
+    await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true}).click();
     const dialog=page.locator('#detail');await dialog.getByText('Review plan',{exact:true}).waitFor();
     assert.match(await dialog.locator('.review-plan').innerText(),/<em>Literal plan text<\/em>/);assert.equal(await dialog.locator('.review-plan em').count(),0);
     assert.equal(await dialog.getByRole('button',{name:'Send answers',exact:true}).count(),0);

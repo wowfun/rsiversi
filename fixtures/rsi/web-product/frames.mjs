@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { pairedBundle } from "./paired-bundle.mjs";
 
 export async function verifyFrameDom(page, report, browser) {
   const result = await page.evaluate(async () => {
@@ -23,9 +24,19 @@ export async function verifyFrameDom(page, report, browser) {
     const replacement = pane(0); replacement.generation = "2";
     await presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, surfaces: {main:replacement,compare:pane(1)} } }, window.testRendererOffer);
     const replaced = second !== panes.get("main").blocks.get("b").node;
-    return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced };
+    replacement.active="displayed-turn";
+    await presentFrame({kind:"snapshot",frame_id:"6",view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}},window.testRendererOffer);
+    const acknowledgedStop=structuredClone(panes.get("main").stopBinding);
+    const originalRender=mounts.render.bind(mounts);let release;
+    mounts.render=()=>new Promise(resolve=>{release=resolve});
+    const applying=presentFrame({kind:"patch",frame_id:"7",base_frame_id:"6",sections:{},surfaces:[{surface:"main",fields:{active:"new-turn"}}]},window.testRendererOffer);
+    const stopFenced=panes.get("main").cancel.disabled && !panes.get("main").stopBinding;
+    release(undefined);await applying;mounts.render=originalRender;
+    const nextStop=panes.get("main").stopBinding.turn_id;
+
+    return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced, acknowledgedStop, stopFenced, nextStop };
   });
-  assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true });
+  assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true, acknowledgedStop:{generation:"2",turn_id:"displayed-turn"},stopFenced:true,nextStop:"new-turn" });
   await page.screenshot({ path: join(report, `${browser}-incremental-frame-dom.png`) });
 }
 
@@ -33,7 +44,8 @@ export async function verifyFrameDom(page, report, browser) {
 // withholds acknowledgement. This does not infer cleanup from DOM disappearance.
 export async function verifyAcknowledgementDeadline(page, service) {
   const receipt = service.register("ack deadline fixture");
-  const result = await page.evaluate(async receipt => {
+  const { family: buildFamily } = await pairedBundle();
+  const result = await page.evaluate(async ({receipt, buildFamily}) => {
     const worker = new Worker("/worker.js", { type: "module" });
     let sequence = 0, frameCount = 0;
     const pending = new Map();
@@ -52,7 +64,7 @@ export async function verifyAcknowledgementDeadline(page, service) {
     try {
       const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("ACK expiry failed to drain Worker")), 40_000); });
       return await Promise.race([deadline, (async () => {
-        await call("connect", { receipt: JSON.stringify(receipt), devHttp: false });
+        await call("connect", { receipt: JSON.stringify(receipt), devHttp: false, buildFamily });
         const frame = await first;
         const workspace = frame.view.catalog.workspaces[0].id;
         await call("command", JSON.stringify({action:"add_surface",pane:"compare"}));
@@ -64,7 +76,7 @@ export async function verifyAcknowledgementDeadline(page, service) {
         return { frameCount, error, resources };
       })()]);
     } finally { clearTimeout(timer); worker.terminate(); }
-  }, receipt);
+  }, {receipt, buildFamily});
   assert.equal(result.frameCount, 1);
   assert.match(result.error, /acknowledgement timed out/);
   assert.deepEqual(result.resources, { pending_timers: 0, active_alarms: 0, active_requests: 0 });

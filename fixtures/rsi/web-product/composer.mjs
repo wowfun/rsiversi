@@ -56,7 +56,7 @@ export async function verifyComposer(page) {
           dispatches++;
           return JSON.stringify({ status: "complete", receipt: "{}" });
         };
-        const invoke = mode => mode === "submit" ? pane.submit(false) : pane.reconcile("query");
+        const invoke = mode => mode === "submit" ? pane.submit("primary") : pane.reconcile("query");
         const first = invoke(firstMode);
         await waiting;
         const busyWhileSaving = pane.submitting && pane.send.disabled;
@@ -101,7 +101,7 @@ export async function verifyComposer(page) {
       pane.editor.flush = async () => { throw new Error("injected save failure"); };
       for (const mode of ["submit", "query"]) {
         let error;
-        try { await (mode === "submit" ? pane.submit(false) : pane.reconcile("query")); }
+        try { await (mode === "submit" ? pane.submit("primary") : pane.reconcile("query")); }
         catch (reason) { error = reason.message; }
         failures.push({ error, unlocked: !pane.submitting });
       }

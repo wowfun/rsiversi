@@ -9,6 +9,17 @@ calls, with exact Origin and CSRF enforcement by the HTTP endpoint. Cookie login
 and logout are explicit operations. RSI issues each Fetch once and does not
 automatically replay mutations or reauthenticate.
 
+The optional local Web bootstrap exchanges a bounded fragment ticket at the
+Worker's loopback origin for an HttpOnly cookie and connection identity. If the
+exchange outcome is uncertain, it attempts cookie recovery once without replaying
+the ticket. If recovery also fails, the original exchange error is preserved; a
+failed cookie read or cleanup failure must not hide the original exchange error.
+Definitive rejection never falls back to another cookie. Common HTTP errors keep
+their typed status; a lost or malformed ticket response reports OutcomeUnknown. Ordinary connection negotiation still pins the authenticated device.
+Each bootstrap request has a 15-second deadline, a 1 KiB identity response bound
+and the shared 128-byte common-error bound; the
+temporary Fetch owner drains before connection activation.
+
 Before publication the client reads `connection.caller` and requires a Device
 identity. Subsequent requests pin that authenticated device using the HTTP
 expected-device fence. A different tab changing the shared cookie cannot make

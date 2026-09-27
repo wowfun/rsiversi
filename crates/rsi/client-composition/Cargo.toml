@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-directory-picker-api = { path = "../directory-picker-api" }
 rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-acp-api = { path = "../../rsi-acp/api" }
 rsi-session-files = { path = "../session-files" }

@@ -54,6 +54,13 @@ impl Harness {
         tls: bool,
         assets: Option<Arc<dyn rsi_api_http::HttpAssets>>,
     ) -> Self {
+        Self::start_with_bootstrap(tls, assets, None).await
+    }
+    async fn start_with_bootstrap(
+        tls: bool,
+        assets: Option<Arc<dyn rsi_api_http::HttpAssets>>,
+        bootstrap: Option<Arc<dyn rsi_api_http::BrowserBootstrap>>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("{}://{address}", if tls { "https" } else { "http" });
@@ -85,6 +92,11 @@ impl Harness {
             .unwrap();
         let server = if let Some(assets) = assets {
             server.with_assets(assets)
+        } else {
+            server
+        };
+        let server = if let Some(bootstrap) = bootstrap {
+            server.with_browser_bootstrap(bootstrap).unwrap()
         } else {
             server
         };
@@ -1758,4 +1770,237 @@ async fn listener_recovers_from_descriptor_pressure_and_can_stop_during_backoff(
             .await
             .unwrap();
     }
+}
+
+#[derive(Debug)]
+struct Bootstrap(std::sync::atomic::AtomicBool);
+impl rsi_api_http::BrowserBootstrap for Bootstrap {
+    fn redeem(&self, ticket: &SecretValue) -> rsi_api_protocol::Result<SecretValue> {
+        if ticket.expose_secret() != "b".repeat(64)
+            || self.0.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(SecretValue::new("a".repeat(64)).unwrap())
+    }
+}
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One lifecycle covers fencing, consumption and authenticated recovery.
+async fn browser_bootstrap_fences_before_consumption_and_recovers_only_authenticated_cookies() {
+    let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
+    let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
+    let request = || {
+        Harness::client()
+            .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+            .header("x-rsi-csrf", "1")
+    };
+    for (header, value) in [
+        ("host", "evil.invalid"),
+        ("x-rsi-csrf", "invalid"),
+        ("x-rsi-expected-device", "invalid"),
+    ] {
+        assert!(
+            !request()
+                .header("origin", &harness.origin)
+                .header("x-rsi-launch-ticket", "b".repeat(64))
+                .header(header, value)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    assert!(
+        !request()
+            .header("origin", &harness.origin)
+            .header("x-rsi-launch-ticket", "b".repeat(64))
+            .body("unexpected input")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        request()
+            .header("origin", "http://evil.invalid")
+            .header("x-rsi-launch-ticket", "b".repeat(64))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        request()
+            .header("origin", &harness.origin)
+            .header("x-rsi-launch-ticket", "b".repeat(64))
+            .header("authorization", "Bearer conflicting")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert!(!ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+    for expected in [DeviceId::from_bytes([1; 16]), DeviceId::from_bytes([9; 16])] {
+        assert_eq!(
+            request()
+                .header("origin", &harness.origin)
+                .header("x-rsi-launch-ticket", "b".repeat(64))
+                .header("x-rsi-expected-device", expected.as_str())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert!(!ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    let response = request()
+        .header("origin", &harness.origin)
+        .header("x-rsi-launch-ticket", "b".repeat(64))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&response.bytes().await.unwrap()).unwrap()["endpoint_id"],
+        EndpointId::from_bytes([2; 16]).as_str()
+    );
+    assert_eq!(
+        request()
+            .header("origin", &harness.origin)
+            .header("x-rsi-launch-ticket", "b".repeat(64))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        request()
+            .header("origin", &harness.origin)
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        request()
+            .header("origin", &harness.origin)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    harness.authentication.0.cancel();
+    assert_eq!(
+        request()
+            .header("origin", &harness.origin)
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authentication_fallback() {
+    for old_token in ["a".repeat(64), "c".repeat(64)] {
+        let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
+        let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
+        let cookie = format!("rsi-device={old_token}");
+        let request = || {
+            Harness::client()
+                .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+                .header("x-rsi-csrf", "1")
+                .header("origin", &harness.origin)
+                .header("x-rsi-launch-ticket", "b".repeat(64))
+        };
+        // Ambiguous authority fails before consuming the explicit launch ticket.
+        for duplicate_header in [false, true] {
+            let ambiguous = if duplicate_header {
+                request()
+                    .header("cookie", &cookie)
+                    .header("cookie", &cookie)
+            } else {
+                request().header("cookie", format!("{cookie}; {cookie}"))
+            };
+            assert_eq!(ambiguous.send().await.unwrap().status(), 401);
+            assert!(!ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        // A browser sends existing cookies automatically, including a stale credential.
+        let response = request().header("cookie", &cookie).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+        let new_cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(new_cookie, format!("rsi-device={}", "a".repeat(64)));
+        // Even a valid cookie cannot conceal a definitively rejected launch ticket.
+        assert_eq!(
+            request()
+                .header("cookie", &new_cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        let recovery = Harness::client()
+            .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+            .header("x-rsi-csrf", "1")
+            .header("origin", &harness.origin)
+            .header("cookie", &new_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(recovery.status(), 200);
+        assert!(recovery.headers().get("set-cookie").is_none());
+        harness.close().await;
+    }
+}
+
+#[tokio::test]
+async fn browser_bootstrap_revocation_during_launch_never_restores_device_authority() {
+    let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
+    let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
+    harness.authentication.0.cancel();
+    let response = Harness::client()
+        .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+        .header("origin", &harness.origin)
+        .header("x-rsi-csrf", "1")
+        .header("x-rsi-launch-ticket", "b".repeat(64))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+    assert!(response.headers().get("set-cookie").is_none());
+    assert!(ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        harness
+            .authentication
+            .authenticate(&SecretValue::new(TOKEN).unwrap()),
+        Err(ApiError::Unauthorized)
+    ));
+    harness.close().await;
 }

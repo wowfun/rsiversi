@@ -1,0 +1,56 @@
+[package]
+name = "rsi-app-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-build-info = { path = "../../crates/rsi/build-info" }
+rsi-acp-application = { path = "../acp" }
+rsi = { path = "../../crates/rsi/core" }
+rsi-service-ui = { path = "../../crates/rsi/service-ui" }
+rsi-workspace-review-ui = { path = "../../crates/rsi/workspace-review-ui" }
+rsi-workbench-ui = { path = "../../crates/rsi/workbench-ui" }
+rsi-session-tree-ui = { path = "../../crates/rsi/session-tree-ui" }
+rsi-session-files-ui = { path = "../../crates/rsi/session-files-ui" }
+rsi-ui = { path = "../../crates/rsi/ui" }
+rsi-session-ui = { path = "../../crates/rsi/session-ui" }
+rsi-web-assets = { path = "../../crates/rsi/web-assets" }
+rsi-terminal = { path = "../terminal" }
+rsi-application = { path = "../../crates/rsi/application" }
+rsi-serve = { path = "../serve" }
+rsi-api-http = { path = "../../crates/rsi-api/http" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+
+[dev-dependencies]
+rsi-meta-native-loader = { path = "../../crates/rsi-meta/native-loader" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+tempfile.workspace = true
+rsi-native-addons-api = { path = "../../crates/rsi/native-addons-api" }
+rsi-client = { path = "../../crates/rsi/client" }
+rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-agent-composition = { path = "../../crates/rsi-agent/composition" }
+rsi-agent-composition-protocol = { path = "../../crates/rsi-agent/composition-protocol" }
+rsi-agent-presets = { path = "../../crates/rsi-agent/presets" }
+rsi-credentials-local = { path = "../../crates/rsi-credentials/local" }
+rsi-credentials-protocol = { path = "../../crates/rsi-credentials/protocol" }
+rsi-host = { path = "../../crates/rsi-host/core" }
+rsi-meta-scope = { path = "../../crates/rsi-meta/scope" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
+rsi-service-host = { path = "../../crates/rsi/service-host" }
+rsi-tools = { path = "../../crates/rsi-tools/core" }
+rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
+serde_json.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rsi-meta-native-loader = { path = "../../crates/rsi-meta/native-loader" }
+
+[lints]
+workspace = true

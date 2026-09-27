@@ -124,6 +124,31 @@ for each claimed turn and incrementally synchronizes it while that turn runs.
 Context projection removes only complete oldest turns under its message and
 byte bounds; the durable Fact log remains complete.
 
+Queue edits use immutable successors because rewriting an acceptance would
+invalidate both its hash chain and fork boundaries. A slot retains the original
+ready key while every replacement and conversion receives an actual new
+acceptance time and MessageId. Retirement precedes successor admission in the
+same transaction so a full mailbox can still be edited. The same Session gate
+serializes edits with both kinds of claim and terminal promotion. Kernel owns
+Human-only policy; Store validates canonical linkage and indexes mechanically.
+Queue inspection uses an indexed option-presence bit instead of parsing accepted
+message bodies on each refresh. The exact schema changes with this derived
+column; canonical validation rejects drift rather than trusting a mutable hint.
+
+A lifetime receipt index makes an admitted rejection as recoverable as a success.
+Its bounded capacity is checked after an existing operation lookup; exhaustion
+cannot make a saved retry ambiguous. No receipt eviction is allowed because a
+client may retain its original opaque request indefinitely. Recomputing a rejection
+would lose that guarantee: the same stale request can encounter different queue
+state later. The budget is shared by clients authorized to edit that Session;
+this is not hostile-client availability isolation. A buggy or authorized malicious
+client can exhaust it with fresh operation identities, including rejected edits.
+Keeping deterministic recovery and bounded durable state is the chosen trade-off;
+per-client quotas or reclaimable receipts require a separate expiry/authority
+contract, rather than silently changing this one. The exact limits and
+mutation semantics belong to the [Turn contract](../../../../crates/rsi-agent/turn-protocol/README.md#queue-mutation)
+and [Store contract](../../../../crates/rsi-agent/store-protocol/README.md).
+
 ## Alternatives considered
 
 Returning a live-only admission from submit was rejected for the product
@@ -153,7 +178,16 @@ session blob service were not adopted. They
 need measured pressure and their own invalidation or durable-wire contracts;
 none is part of the implemented foundation.
 
+Editing accepted payloads in place would break immutable history. Accepting a
+successor before retiring its predecessor would reject a valid full-queue edit.
+Reusing request cancellation for withdrawal would allow a claim race to stop a
+running Turn. Evicting receipts would let old retries silently become new work.
+
 ## Consequences
+
+Schema 28 rejects old databases without migration or reset. The bounded lifetime
+receipt ledger can prevent further queue edits in a long-lived Session; existing
+receipts remain queryable. This cost buys unambiguous recovery for saved requests.
 
 A process crash can discard a speculative direct-Turn suffix only before submit
 returns its receipt. Mailbox acceptance is already a durable control commit when

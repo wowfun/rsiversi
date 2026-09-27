@@ -2,10 +2,10 @@
 
 WebAssetsFactory is an ordinary native provider of immutable HttpAssets. It reads
 an explicit absolute bundle directory and a closed list of flat filenames at
-activation. The default bundle contains index.html, app.js, worker.js, styles.css,
-rsi_web.js, rsi_web_bg.wasm, mounts.js, drafts.js, admission.js, download-worker.js,
-download-frame.js, standard.js, file-preview.js, preview-local.html,
-preview-online.html and ui-renderers.json. Only HTML, JavaScript, CSS, WASM, JSON and PNG
+activation. The compiled [bundle manifest](bundle.json) owns the fixed bootstrap set, each
+file's production stage, and initial renderer filenames. Rust admission, the
+frontend producer and development proxy consume that same source. It is build
+input, never a receipt- or renderer-supplied override. Only HTML, JavaScript, CSS, WASM, JSON and PNG
 extensions are accepted; names contain ASCII letters, digits, dot, dash or
 underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must
@@ -80,3 +80,15 @@ and reuse the same last-reader allocation and charge across generations. This
 keeps a large unchanged Worker from consuming the overlap budget twice. Changed
 files still reserve their full new capacity before allocation; no digest or
 metadata-only equality substitutes for byte verification.
+
+## Product build pairing
+
+`PairedWebAssetsFactory` requires a native build family and a bounded
+`rsi-build.json` receipt inside the asset directory. At initial admission it
+checks the family and exact SHA-256 hashes of the fixed bootstrap files against
+the bytes retained for HTTP serving. The ordinary `WebAssetsFactory` remains a
+generic library provider; the official application catalog never registers it as
+an unguarded product Web entry. Custom product Profiles use the same paired owner.
+Renderer files and ui-renderers.json retain their existing validated publication
+lifecycle and may change independently. They cannot reclassify bootstrap files.
+Pairing failures expose a consuming, bounded owner diagnostic.

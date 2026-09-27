@@ -29,14 +29,6 @@ pub const HOST_PROFILE_FILE: &str = "host.profile.toml";
 /// Maximum bytes in one product-owned Profile root document.
 pub const MAXIMUM_PROFILE_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROFILE_ENTRIES: usize = 4096;
-const CLI_PROFILE: &str = "cli";
-const HEADLESS_PROFILE: &str = "headless";
-const TUI_PROFILE: &str = "tui";
-const SERVE_PROFILE: &str = "serve";
-const ACP_PROFILE: &str = "acp";
-const DEVICES_PROFILE: &str = "devices";
-const INSPECTOR_PROFILE: &str = "inspector";
-const ADDONS_PROFILE: &str = "addons";
 const STANDARD_HOST_PROFILE: &str = "standard";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -151,6 +143,7 @@ impl HostLaunchKey {
         host_profile: &HostProfileDocument,
         agent_presets: &rsi_agent_presets::AgentPresetLaunchIdentity,
         coding_tools: Option<CodingToolsLaunchIdentity<'_>>,
+        applications: &crate::ApplicationCatalogMetadata,
     ) -> Result<Self, ProfileCatalogError> {
         let mut digest = Sha256::new();
         hash_component(&mut digest, b"domain", b"rsi.session-host.launch-key.v1");
@@ -164,7 +157,12 @@ impl HostLaunchKey {
             b"product-build",
             env!("CARGO_PKG_VERSION").as_bytes(),
         );
-        hash_component(&mut digest, b"composition-epoch", &1_u32.to_be_bytes());
+        hash_component(&mut digest, b"composition-epoch", &2_u32.to_be_bytes());
+        hash_component(
+            &mut digest,
+            b"application-catalog",
+            applications.digest().as_bytes(),
+        );
         hash_component(
             &mut digest,
             b"host-composition",
@@ -175,38 +173,7 @@ impl HostLaunchKey {
             b"host-profile-id",
             host_profile.id.as_str().as_bytes(),
         );
-        match &host_profile.path {
-            Some(path) => {
-                let profile_directory =
-                    path.parent()
-                        .ok_or_else(|| ProfileCatalogError::InvalidDocument {
-                            path: path.clone(),
-                            message: "Host Profile source path has no catalog authority root"
-                                .into(),
-                        })?;
-                let root = profile_directory.parent().ok_or_else(|| {
-                    ProfileCatalogError::InvalidDocument {
-                        path: path.clone(),
-                        message: "Host Profile source path has no catalog authority root".into(),
-                    }
-                })?;
-                if !path.is_absolute()
-                    || path.file_name() != Some(OsStr::new(HOST_PROFILE_FILE))
-                    || profile_directory.file_name() != Some(OsStr::new(host_profile.id.as_str()))
-                    || root.file_name() != Some(OsStr::new(HOST_PROFILE_DIRECTORY))
-                {
-                    return Err(ProfileCatalogError::InvalidDocument {
-                        path: path.clone(),
-                        message: format!(
-                            "Host Profile source path must end in {HOST_PROFILE_DIRECTORY}/{}/{HOST_PROFILE_FILE}",
-                            host_profile.id.as_str()
-                        ),
-                    });
-                }
-                hash_path(&mut digest, b"host-profile-root", root);
-            }
-            None => hash_component(&mut digest, b"host-profile-root", b"builtin"),
-        }
+        hash_host_profile_root(&mut digest, host_profile)?;
         hash_component(
             &mut digest,
             b"agent-preset-base-default",
@@ -260,6 +227,45 @@ impl HostLaunchKey {
     }
 }
 
+fn hash_host_profile_root(
+    digest: &mut Sha256,
+    host_profile: &HostProfileDocument,
+) -> Result<(), ProfileCatalogError> {
+    match &host_profile.path {
+        Some(path) => {
+            let profile_directory =
+                path.parent()
+                    .ok_or_else(|| ProfileCatalogError::InvalidDocument {
+                        path: path.clone(),
+                        message: "Host Profile source path has no catalog authority root".into(),
+                    })?;
+            let root =
+                profile_directory
+                    .parent()
+                    .ok_or_else(|| ProfileCatalogError::InvalidDocument {
+                        path: path.clone(),
+                        message: "Host Profile source path has no catalog authority root".into(),
+                    })?;
+            if !path.is_absolute()
+                || path.file_name() != Some(OsStr::new(HOST_PROFILE_FILE))
+                || profile_directory.file_name() != Some(OsStr::new(host_profile.id.as_str()))
+                || root.file_name() != Some(OsStr::new(HOST_PROFILE_DIRECTORY))
+            {
+                return Err(ProfileCatalogError::InvalidDocument {
+                    path: path.clone(),
+                    message: format!(
+                        "Host Profile source path must end in {HOST_PROFILE_DIRECTORY}/{}/{HOST_PROFILE_FILE}",
+                        host_profile.id.as_str()
+                    ),
+                });
+            }
+            hash_path(digest, b"host-profile-root", root);
+        }
+        None => hash_component(digest, b"host-profile-root", b"builtin"),
+    }
+    Ok(())
+}
+
 impl fmt::Display for HostLaunchKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -284,12 +290,16 @@ pub struct ProfileRow<I> {
 #[derive(Clone, Debug)]
 pub struct ProfileCatalog {
     paths: HostPaths,
+    applications: crate::ApplicationCatalogMetadata,
 }
 
 impl ProfileCatalog {
     /// Creates a pure catalog view without creating directories or reading files.
-    pub const fn new(paths: HostPaths) -> Self {
-        Self { paths }
+    pub const fn new(paths: HostPaths, applications: crate::ApplicationCatalogMetadata) -> Self {
+        Self {
+            paths,
+            applications,
+        }
     }
 
     /// Returns the frozen Host paths used by all catalog operations.
@@ -325,11 +335,11 @@ impl ProfileCatalog {
         }
         let path = self.application_path(id);
         reject_legacy_application(&path)?;
-        if let Some(contents) = builtin_application(id) {
+        if let Some(contents) = self.applications.profiles().get(id) {
             reject_shadow("Application Profile", id.as_str(), &path)?;
             return Ok(ApplicationProfileDocument {
                 id: id.clone(),
-                contents,
+                contents: contents.clone(),
                 source: ProfileSource::Builtin,
                 path: None,
             });
@@ -376,29 +386,22 @@ impl ProfileCatalog {
     pub fn list_applications(
         &self,
     ) -> Result<Vec<ProfileRow<ApplicationProfileId>>, ProfileCatalogError> {
-        let builtins = [
-            CLI_PROFILE,
-            HEADLESS_PROFILE,
-            TUI_PROFILE,
-            SERVE_PROFILE,
-            ACP_PROFILE,
-            DEVICES_PROFILE,
-            INSPECTOR_PROFILE,
-            ADDONS_PROFILE,
-        ];
         let mut ids = list_user_ids::<ApplicationProfileId>(
             &self.paths.config().join(APPLICATION_PROFILE_DIRECTORY),
             APPLICATION_PROFILE_FILE,
         )?;
-        for builtin in builtins {
-            let id = ApplicationProfileId::new(builtin)?;
-            reject_shadow("Application Profile", builtin, &self.application_path(&id))?;
-            ids.insert(id);
+        for id in self.applications.profiles().keys() {
+            reject_shadow(
+                "Application Profile",
+                id.as_str(),
+                &self.application_path(id),
+            )?;
+            ids.insert(id.clone());
         }
         Ok(ids
             .into_iter()
             .map(|id| ProfileRow {
-                source: if builtin_application(&id).is_some() {
+                source: if self.applications.profiles().get(&id).is_some() {
                     ProfileSource::Builtin
                 } else {
                     ProfileSource::User
@@ -443,7 +446,7 @@ impl ProfileCatalog {
         reject_builtin_target(
             "Application Profile",
             target.as_str(),
-            builtin_application(target).is_some(),
+            self.applications.profiles().get(target).is_some(),
         )?;
         let source = self.application(source)?;
         let path = self.application_path(target);
@@ -477,7 +480,7 @@ impl ProfileCatalog {
         reject_builtin_target(
             "Application Profile",
             id.as_str(),
-            builtin_application(id).is_some(),
+            self.applications.profiles().get(id).is_some(),
         )?;
         delete_document_directory(&self.application_path(id))
     }
@@ -491,86 +494,6 @@ impl ProfileCatalog {
         )?;
         delete_document_directory(&self.host_path(id))
     }
-}
-
-fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
-    let (plugin, connection) = match id.as_str() {
-        CLI_PROFILE => ("rsi.application.cli", "rsi.application.connection"),
-        HEADLESS_PROFILE => ("rsi.application.headless", "rsi.application.connection"),
-        TUI_PROFILE => ("rsi.application.tui", "rsi.application.connection"),
-        SERVE_PROFILE => ("rsi.application.serve", "rsi.application.service"),
-        ACP_PROFILE => ("rsi.application.acp", "rsi.application.acp-service"),
-        DEVICES_PROFILE => ("rsi.application.devices", "rsi.application.operator"),
-        ADDONS_PROFILE => ("rsi.application.addons", "rsi.application.operator"),
-        INSPECTOR_PROFILE => ("rsi.application.inspector", "rsi.application.operator"),
-        _ => return None,
-    };
-    let config = if matches!(
-        id.as_str(),
-        DEVICES_PROFILE | INSPECTOR_PROFILE | ADDONS_PROFILE
-    ) {
-        ""
-    } else {
-        "config = { host_profile = \"standard\" }"
-    };
-    let ui = if id.as_str() == TUI_PROFILE {
-        r#"[[steps]]
-kind = "plugin"
-id = "ui"
-plugin = "rsi.ui"
-[[steps]]
-kind = "plugin"
-id = "ui-target"
-plugin = "rsi.ui.target"
-config = "application"
-[[steps]]
-kind = "plugin"
-id = "setup"
-plugin = "rsi.workbench.setup"
-[[steps]]
-kind = "plugin"
-id = "plugins"
-plugin = "rsi.workbench.plugins"
-[[steps]]
-kind = "plugin"
-id = "session-ui"
-plugin = "rsi.session.ui"
-[[steps]]
-kind = "plugin"
-id = "tree-ui"
-plugin = "rsi.session.tree.ui"
-[[steps]]
-kind = "plugin"
-id = "files-ui"
-plugin = "rsi.session.files.ui"
-[[steps]]
-kind = "plugin"
-id = "service-ui"
-plugin = "rsi.service.ui.client"
-[[steps]]
-kind = "plugin"
-id = "workspace-review-ui"
-plugin = "rsi.workspace.review.ui"
-"#
-    } else {
-        ""
-    };
-    Some(
-        format!(
-            r#"format = 1
-[[steps]]
-kind = "plugin"
-id = "connection"
-plugin = "{connection}"
-{config}
-{ui}[[steps]]
-kind = "plugin"
-id = "application"
-plugin = "{plugin}"
-"#
-        )
-        .into_bytes(),
-    )
 }
 
 fn reject_legacy_application(path: &Path) -> Result<(), ProfileCatalogError> {

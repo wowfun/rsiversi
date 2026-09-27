@@ -338,6 +338,9 @@ impl rsi_session_protocol::SessionDraftControl for LocalSessionService {
 
 #[async_trait]
 impl SessionService for LocalSessionService {
+    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+        self.store.header(session_id).await.map_err(map_store_error)
+    }
     async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
         self.collect_activity().await
     }
@@ -570,14 +573,15 @@ impl LocalSessionHandle {
         Ok(())
     }
 
-    async fn prepare_message(
+    async fn prepare_input_content(
         &self,
-        request: SubmitInput,
+        blocks: Vec<SessionInput>,
         header: &SessionHeader,
-    ) -> Result<AgentMessage> {
+    ) -> Result<Vec<AgentMessageContent>> {
+        validate_session_input(&blocks)?;
         self.prepare_workspace(header).await?;
-        let mut content = Vec::with_capacity(request.content.len());
-        for block in request.content {
+        let mut content = Vec::with_capacity(blocks.len());
+        for block in blocks {
             content.push(match block {
                 SessionInput::Text { text } => AgentMessageContent::Text { text },
                 SessionInput::Image { media } => {
@@ -600,6 +604,15 @@ impl LocalSessionHandle {
                 }
             });
         }
+        Ok(content)
+    }
+
+    async fn prepare_message(
+        &self,
+        request: SubmitInput,
+        header: &SessionHeader,
+    ) -> Result<AgentMessage> {
+        let content = self.prepare_input_content(request.content, header).await?;
         let message = AgentMessage {
             message_id: request.message_id,
             source: AgentMessageSource::Human,
@@ -915,6 +928,53 @@ impl SessionHandle for LocalSessionHandle {
             .map_err(map_turn_error)
     }
 
+    async fn mutate_queue(
+        &self,
+        mut request: rsi_agent_session_protocol::QueueMutationRequest,
+    ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt> {
+        use rsi_agent_session_protocol::QueueMutation;
+        let _activity = self.begin_activity()?;
+        request
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        self.reconcile_fresh_read().await?;
+        // A committed retry is resolved before reading media that may since have become unavailable.
+        if self
+            .turns
+            .queue_mutation_status(self.session_id(), &request.operation_id)
+            .await
+            .map_err(map_turn_error)?
+            .is_none()
+            && let QueueMutation::Replace { content, .. } = &mut request.mutation
+        {
+            let header = self.header_snapshot().await?;
+            let input = std::mem::take(content)
+                .into_iter()
+                .map(|block| match block {
+                    AgentMessageContent::Text { text } => SessionInput::Text { text },
+                    AgentMessageContent::Image { media } => SessionInput::Image { media },
+                    AgentMessageContent::Reference { reference } => {
+                        SessionInput::Reference { reference }
+                    }
+                })
+                .collect();
+            *content = self.prepare_input_content(input, &header).await?;
+        }
+        self.turns
+            .mutate_queue(self.session_id(), request)
+            .await
+            .map_err(map_turn_error)
+    }
+    async fn queue_mutation_status(
+        &self,
+        operation: &rsi_agent_session_protocol::QueueOperationId,
+    ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        let _activity = self.begin_activity()?;
+        self.turns
+            .queue_mutation_status(self.session_id(), operation)
+            .await
+            .map_err(map_turn_error)
+    }
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt> {
         let _activity = self.begin_activity()?;
         self.image
@@ -1221,6 +1281,7 @@ fn map_turn_error(error: TurnError) -> SessionError {
             SessionError::Capacity
         }
         TurnError::ShuttingDown => SessionError::ShuttingDown,
+        TurnError::QueueOperationConflict => SessionError::QueueOperationConflict,
         other => SessionError::Backend(other.to_string()),
     }
 }

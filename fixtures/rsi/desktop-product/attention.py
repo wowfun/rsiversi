@@ -18,8 +18,10 @@ def provider_reply(body):
 
 
 def verify(script, button, fill, until, screenshot, report):
+    button('Filter conversations')
+    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
     fill('textarea[aria-label="Main message"]', 'desktop attention question')
-    button('Send ↗')
+    button('Send')
     # require_approval covers ask_user itself before its question can be published.
     until(lambda: script(r'return [...document.querySelectorAll(".attention-navigation button")].some(e=>e.textContent==="Review permission 1")'))
     button('Review permission 1')
@@ -32,7 +34,7 @@ def verify(script, button, fill, until, screenshot, report):
     button('Send answers')
     until(lambda: script(r'return !document.querySelector("#detail")?.getBoundingClientRect().height&&document.querySelector(".pane-status")?.textContent==="Completed"'))
     fill('textarea[aria-label="Main message"]', 'desktop attention approval')
-    button('Send ↗')
+    button('Send')
     until(lambda: script(r'return [...document.querySelectorAll(".attention-navigation button")].some(e=>e.textContent==="Review permission 1")'))
     button('Review permission 1')
     until(lambda: script(r'return document.querySelector("#detail")?.textContent.includes("attention-approved")'))

@@ -50,14 +50,14 @@ export async function verifyImageDom(page) {
       await editor.update(record => editor.store.begin(record));
       pane.edit("same text", [image("b")]); await pane.flush();
       call = async () => JSON.stringify({status:"complete",receipt:"{}"});
-      await pane.submit(false);
+      await pane.submit("primary");
       results.push(pane.input.value);
       call = async (method, payload) => {
         if (method === "prepare_submission") return JSON.stringify({kind:"message",id:"image-next",opaque:payload,text_bytes:9,images: 1, references: 0});
         pane.edit("same text", [image("c")]); await pane.flush();
         return JSON.stringify({status:"complete",receipt:"{}"});
       };
-      await pane.submit(false); results.push(pane.input.value);
+      await pane.submit("primary"); results.push(pane.input.value);
       return results;
     } finally { call = originalCall; }
   });

@@ -1,6 +1,9 @@
+import {resources as showResources} from './controls.mjs';
+import './paired-env.mjs';
+import { cleanupAll } from "./cleanup.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile, cp, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, cp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,14 +23,14 @@ const catalog = JSON.parse(await readFile(join(assets, "ui-renderers.json"), "ut
 catalog.renderers.push({ id: "fixture.rust", abi: 1, entry: files[0], files: await Promise.all(files.map(async name => ({ name, sha256: createHash("sha256").update(await readFile(join(assets, name))).digest("hex") }))), schemas: [{ name: "fixture.counter", version: 1 }], capabilities: ["invoke", "source"], surfaces: ["root", "pane", "sidebar", "dialog"] });
 await writeFile(join(assets, "ui-renderers.json"), JSON.stringify(catalog));
 const binary = join(directory, "rsi");
-await cp(process.env.RSI_WEB_BINARY ?? join(root, "target/debug/rsi"), binary);
+await cp(process.env.RSI_WEB_BINARY, binary);
 if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
 const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chromium).launch({ headless: true });
 let service;
 let page;
 try {
   service = await startService({ binary, assets, report, configure: async ({ config, run }) => {
-    const profile = join(config, "application-profiles/web/application.profile.toml");
+    const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
     const all = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "file-preview.js", "preview-local.html", "preview-online.html", "ui-renderers.json", ...files];
     const text = await readFile(profile, "utf8");
     await writeFile(profile, text.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(all)}`));
@@ -94,12 +97,12 @@ try {
   await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
-  await page.locator("#workspaces .nav-item").first().click();
+  await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   const pane = page.getByRole("region", { name: "Main conversation", exact: true });
-  await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor();
+  await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor({state:"attached"});
   const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
   for (let cycle = 0; cycle < 3; cycle++) {
-    await page.getByRole("button", { name: "Service extensions", exact: true }).click();
+    await showResources(page);await page.getByRole("button", { name: "Service extensions", exact: true }).click();
     await page.locator("#detail").getByRole("button", { name: "Native Session model", exact: true }).click();
     const detail = page.locator("#detail");
     await page.waitForFunction(() => window.nativeDetail?.error || window.nativeDetail?.model);
@@ -126,4 +129,8 @@ try {
 } catch (error) {
   if (page) { await page.screenshot({ path: join(report, "failure.png") }); const body = await page.locator("body").innerText(); await writeFile(join(report, "failure.txt"), body); const detail = JSON.stringify(await page.evaluate(() => window.nativeDetail ?? null)); await writeFile(join(report, "failure-detail.json"), detail); console.error(JSON.stringify({ body, detail })); }
   throw error;
-} finally { await browser.close(); await service?.close(); }
+} finally {
+  await cleanupAll(() => browser.close(), () => service?.close());
+  // Keep default reports in their temporary directory; explicit reports survive outside it.
+  if (process.env.RSI_WEB_REPORT) await rm(directory, {recursive:true, force:true});
+}

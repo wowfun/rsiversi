@@ -24,6 +24,10 @@ const MAX_DEVICES: usize = 64;
 struct StoredDevice {
     record: DeviceRecord,
     token_hash: String,
+    #[serde(default)]
+    credential_retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -136,7 +140,7 @@ impl DeviceAuthentication for DeviceRegistry {
             .durable
             .devices
             .iter()
-            .find(|device| device.token_hash == hash)
+            .find(|device| !device.credential_retired && device.token_hash == hash)
             .ok_or(ApiError::Unauthorized)?;
         Ok(AuthenticatedDevice {
             id: device.record.id.clone(),
@@ -148,60 +152,75 @@ impl DeviceAuthentication for DeviceRegistry {
 #[async_trait]
 impl DeviceAdministration for DeviceRegistry {
     async fn register(&self, label: &str) -> Result<RegisteredDevice> {
-        DeviceRecord::validate_label(label)?;
-        let commit = self.inner.commit.clone().lock_owned().await;
-        let mut durable = {
-            let state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.retired {
-                return Err(ApiError::ShuttingDown);
-            }
-            if state.durable.devices.len() == MAX_DEVICES {
-                return Err(ApiError::Capacity);
-            }
-            state.durable.clone()
-        };
-        let mut entropy = Zeroizing::new([0; 32]);
-        getrandom::fill(entropy.as_mut())
-            .map_err(|_| ApiError::Backend("OS entropy failed".into()))?;
-        let token = SecretValue::new(hex::encode(entropy.as_ref()))
-            .map_err(|_| ApiError::Backend("token construction failed".into()))?;
-        let record = DeviceRecord {
-            id: DeviceId::generate()?,
-            label: label.into(),
-        };
-        durable.devices.push(StoredDevice {
-            record: record.clone(),
-            token_hash: token_hash(&durable.endpoint, &token)?,
-        });
-        // Entropy is not a proof of uniqueness; never publish a duplicate identity.
-        validate_durable(&durable, &durable.endpoint)?;
-        let inner = self.inner.clone();
-        self.execution
-            .spawn(async move {
-                let _commit = commit;
-                publish(&inner.domain, &durable).await?;
-                let mut state = inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.durable = durable;
-                let lease = CancellationToken::new();
-                if state.retired {
-                    // No observer has received this fresh token yet.
-                    lease.cancel();
-                }
-                state.leases.insert(record.id.clone(), lease);
-                Ok(RegisteredDevice { record, token })
-            })
+        self.issue(None, label, Rotation::Any).await
+    }
+
+    async fn rotate_managed(&self, slot: &str, label: &str) -> Result<RegisteredDevice> {
+        validate_slot(slot)?;
+        self.issue(Some(slot), label, Rotation::Any).await
+    }
+
+    fn managed_device(&self, slot: &str) -> Result<Option<DeviceRecord>> {
+        validate_slot(slot)?;
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retired {
+            return Err(ApiError::ShuttingDown);
+        }
+        Ok(state
+            .durable
+            .devices
+            .iter()
+            .find(|device| device.managed.as_deref() == Some(slot))
+            .map(|device| device.record.clone()))
+    }
+    async fn rotate_managed_if(
+        &self,
+        slot: &str,
+        label: &str,
+        expected: Option<&DeviceId>,
+    ) -> Result<RegisteredDevice> {
+        validate_slot(slot)?;
+        self.issue(Some(slot), label, Rotation::Matching(expected.cloned()))
             .await
-            .map_err(|_| ApiError::Backend("device registration task failed".into()))?
     }
 
     async fn revoke(&self, id: &DeviceId) -> Result<bool> {
+        self.revoke_matching(id, None).await
+    }
+    async fn revoke_credential(&self, device: &RegisteredDevice) -> Result<bool> {
+        self.revoke_matching(&device.record.id, Some(&device.token))
+            .await
+    }
+
+    fn list(&self) -> Result<Vec<DeviceRecord>> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retired {
+            return Err(ApiError::ShuttingDown);
+        }
+        Ok(state
+            .durable
+            .devices
+            .iter()
+            .map(|device| device.record.clone())
+            .collect())
+    }
+}
+
+enum Rotation {
+    Any,
+    Matching(Option<DeviceId>),
+}
+
+impl DeviceRegistry {
+    async fn revoke_matching(&self, id: &DeviceId, token: Option<&SecretValue>) -> Result<bool> {
         let commit = self.inner.commit.clone().lock_owned().await;
         let mut durable = {
             let state = self
@@ -214,14 +233,22 @@ impl DeviceAdministration for DeviceRegistry {
             }
             state.durable.clone()
         };
-        let Some(index) = durable
-            .devices
-            .iter()
-            .position(|device| &device.record.id == id)
-        else {
+        let expected = token
+            .map(|token| token_hash(&durable.endpoint, token))
+            .transpose()?;
+        let Some(index) = durable.devices.iter().position(|device| {
+            &device.record.id == id
+                && expected
+                    .as_ref()
+                    .is_none_or(|hash| !device.credential_retired && hash == &device.token_hash)
+        }) else {
             return Ok(false);
         };
-        durable.devices.remove(index);
+        if expected.is_some() && durable.devices[index].managed.is_some() {
+            durable.devices[index].credential_retired = true;
+        } else {
+            durable.devices.remove(index);
+        }
         let id = id.clone();
         let inner = self.inner.clone();
         self.execution
@@ -245,22 +272,109 @@ impl DeviceAdministration for DeviceRegistry {
             .map_err(|_| ApiError::Backend("device revocation task failed".into()))?
     }
 
-    fn list(&self) -> Result<Vec<DeviceRecord>> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.retired {
-            return Err(ApiError::ShuttingDown);
+    async fn issue(
+        &self,
+        managed: Option<&str>,
+        label: &str,
+        rotation: Rotation,
+    ) -> Result<RegisteredDevice> {
+        DeviceRecord::validate_label(label)?;
+        let commit = self.inner.commit.clone().lock_owned().await;
+        let mut durable = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.retired {
+                return Err(ApiError::ShuttingDown);
+            }
+            if state.durable.devices.len() == MAX_DEVICES
+                && !state
+                    .durable
+                    .devices
+                    .iter()
+                    .any(|device| managed.is_some() && device.managed.as_deref() == managed)
+            {
+                return Err(ApiError::Capacity);
+            }
+            state.durable.clone()
+        };
+        if let Rotation::Matching(expected) = rotation {
+            let actual = durable
+                .devices
+                .iter()
+                .find(|device| managed.is_some() && device.managed.as_deref() == managed)
+                .map(|device| &device.record.id);
+            if actual != expected.as_ref() {
+                return Err(ApiError::Invalid(
+                    "managed device slot changed before credential rotation".into(),
+                ));
+            }
         }
-        Ok(state
-            .durable
+        let mut entropy = Zeroizing::new([0; 32]);
+        getrandom::fill(entropy.as_mut())
+            .map_err(|_| ApiError::Backend("OS entropy failed".into()))?;
+        let token = SecretValue::new(hex::encode(entropy.as_ref()))
+            .map_err(|_| ApiError::Backend("token construction failed".into()))?;
+        let existing = durable
             .devices
             .iter()
-            .map(|device| device.record.clone())
-            .collect())
+            .position(|device| managed.is_some() && device.managed.as_deref() == managed);
+        let record = DeviceRecord {
+            id: match existing {
+                Some(index) => durable.devices[index].record.id.clone(),
+                None => DeviceId::generate()?,
+            },
+            label: label.into(),
+        };
+        let stored = StoredDevice {
+            record: record.clone(),
+            token_hash: token_hash(&durable.endpoint, &token)?,
+            credential_retired: false,
+            managed: managed.map(str::to_owned),
+        };
+        match existing {
+            Some(index) => durable.devices[index] = stored,
+            None => durable.devices.push(stored),
+        }
+        // Entropy is not a proof of uniqueness; never publish a duplicate identity.
+        validate_durable(&durable, &durable.endpoint)?;
+        let inner = self.inner.clone();
+        self.execution
+            .spawn(async move {
+                let _commit = commit;
+                publish(&inner.domain, &durable).await?;
+                let mut state = inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.durable = durable;
+                let lease = CancellationToken::new();
+                if state.retired {
+                    // No observer has received this fresh token yet.
+                    lease.cancel();
+                }
+                if let Some(previous) = state.leases.insert(record.id.clone(), lease) {
+                    previous.cancel();
+                }
+                Ok(RegisteredDevice { record, token })
+            })
+            .await
+            .map_err(|_| ApiError::Backend("device registration task failed".into()))?
     }
+}
+
+fn validate_slot(slot: &str) -> Result<()> {
+    if slot.is_empty()
+        || slot.len() > 64
+        || !slot
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(ApiError::Invalid("invalid managed device slot".into()));
+    }
+    Ok(())
 }
 
 fn token_hash(endpoint: &EndpointId, token: &SecretValue) -> Result<String> {
@@ -287,9 +401,17 @@ fn validate_durable(durable: &Durable, endpoint: &EndpointId) -> Result<()> {
     }
     let mut ids = BTreeSet::new();
     let mut hashes = BTreeSet::new();
+    let mut slots = BTreeSet::new();
     for device in &durable.devices {
         DeviceRecord::validate_label(&device.record.label)?;
-        if !ids.insert(&device.record.id)
+        if let Some(slot) = &device.managed {
+            validate_slot(slot)?;
+            if !slots.insert(slot) {
+                return Err(ApiError::Invalid("duplicate managed device slot".into()));
+            }
+        }
+        if (device.credential_retired && device.managed.is_none())
+            || !ids.insert(&device.record.id)
             || !hashes.insert(&device.token_hash)
             || device.token_hash.len() != 64
             || !device

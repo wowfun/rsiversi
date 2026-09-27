@@ -65,3 +65,7 @@ Native tests and the [Worker probe](../../../fixtures/rsi/client-probe/README.md
 share public lifecycle scenarios. These exercise actual Profile/Meta ownership
 with fixture leaf plugins; product UI rendering and live providers have separate
 validation requirements.
+
+`ApplicationDiagnostic` is the application factory's bounded, consuming diagnostic
+port. Catalogs aggregate these trait objects without depending on concrete
+application implementations; missing diagnostics fall back to the Profile error.

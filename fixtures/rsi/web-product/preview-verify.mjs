@@ -1,3 +1,4 @@
+import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,copyFile,chmod,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -20,7 +21,7 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
    URL.revokeObjectURL=url=>{window.previewUrls.delete(url);revoke(url);};
   });page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} preview verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces .nav-item').first().click();
+  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
   const agents=await verifyMarkdownAgents(page,service,directory,name,providerBodies);
   const evidence=await verifyFilePreviews(page,service,directory,name);
   await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);await writeFile(join(directory,'result.json'),JSON.stringify({status:'passed',browser:browser.version(),agents,...evidence},null,2));

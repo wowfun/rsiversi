@@ -37,7 +37,7 @@ export async function verifyImages(page, pane, service, report, name) {
   await rows.first().filter({ hasText: "120 × 80" }).waitFor();
   await page.screenshot({ path: join(report, `${name}-ordered-images.png`) });
   await pane.getByRole("textbox", { name: /message$/ }).fill("Review these ordered images");
-  await pane.getByRole("button", { name: "Send ↗", exact: true }).click();
+  await pane.getByTestId('composer-send').click();
   await pane.locator(".transcript").getByText("Reviewed: Review these ordered images", { exact: false }).waitFor();
   await rows.first().waitFor({ state: "detached" });
   const request = service.provider.requests.findLast(item => item.prompt.trim() === "Review these ordered images");

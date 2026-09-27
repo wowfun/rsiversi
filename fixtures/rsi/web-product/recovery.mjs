@@ -1,3 +1,4 @@
+import './paired-env.mjs';
 import assert from "node:assert/strict";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -14,7 +15,7 @@ assert(["chromium", "firefox"].includes(name));
 const report = process.env.RSI_WEB_REPORT;
 await mkdir(report, { recursive: true });
 const binary=join(report,"rsi");
-await copyFile(process.env.RSI_WEB_BINARY ?? join(root,"target/debug/rsi"),binary);
+await copyFile(process.env.RSI_WEB_BINARY,binary);
 const hash = createHash("sha256");
 for await (const chunk of createReadStream(binary)) hash.update(chunk);
 await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: hash.digest("hex") }));
@@ -74,7 +75,7 @@ try {
   await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button",{name:"Add workspace",exact:true}).click();
-  await page.locator("#workspaces .nav-item").first().click();
+  await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   await input(page).waitFor({state:"visible"});
   await input(page).fill("Saved before the first message");
   const fresh = await sessionId(page);
@@ -98,7 +99,7 @@ try {
   await input(page).fill("Saved in the first tab"); await waitText(page,fresh,"Saved in the first tab");
   await input(other).fill("Unsaved in the second tab");
   await pane(other).getByText(/Input is not saved/).waitFor();
-  assert(await pane(other).getByRole("button",{name:"Send ↗",exact:true}).isDisabled());
+  assert(await pane(other).getByTestId('composer-send').isDisabled());
   await other.screenshot({path:join(report,"conflict-desktop.png")});
   await other.setViewportSize({width:390,height:844}); await other.screenshot({path:join(report,"conflict-narrow.png"),fullPage:true});
   const resolveButton=pane(other).getByRole("button",{name:"Use saved input",exact:true});
@@ -149,7 +150,7 @@ try {
   assert.equal(service.provider.requests.length,0);
   // Lose only the document reply after the real dispatch. Reload must query the same ID.
   await page.evaluate(()=>{window.dropSubmissionReply=true;});
-  await pane(page).getByRole("button",{name:"Send ↗",exact:true}).click();
+  await pane(page).getByTestId('composer-send').click();
   await pane(page).locator(".transcript").getByText("Reviewed: Local-only input after a failed save",{exact:false}).waitFor();
   const pending=await page.evaluate(session=>window.savedRecord(session),replacement);
   assert.equal(pending.pending.phase,"dispatching");

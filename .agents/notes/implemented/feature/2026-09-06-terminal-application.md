@@ -51,7 +51,7 @@ changing Steer routing would require a separate Kernel contract decision.
 
 ## Consequences
 
-The [application/client foundation](../../implemented/architecture/2026-09-06-application-client-foundation.md)
+The [application/client foundation](../architecture/2026-09-06-application-client-foundation.md)
 places CLI, Headless and TUI in an independent terminal package. Ordinary
 application Profiles compose the connection and application plugins; the launcher
 invokes ApplicationRun. Submission reconciliation and observation cursor/retry

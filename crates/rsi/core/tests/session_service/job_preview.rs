@@ -86,15 +86,28 @@ async fn remote_job_preview_follows_actual_tool_origin_and_leaves_the_durable_re
     socket.read_exact(&mut ready).await.unwrap();
     assert_eq!(&ready, b"ready");
     let turn = handle.inspect().await.unwrap().active_turn_id.unwrap();
-    let status = handle
-        .read_jobs(rsi_agent_turn_protocol::TurnJobsRequest {
-            turn_id: turn.clone(),
-            generation: None,
-            after: None,
-            limit: 32,
-        })
-        .await
-        .unwrap();
+    // Child readiness is not the Jobs publication receipt (rsi-jobs core contract).
+    // The local provider tests that ordering with a gated start callback.
+    let status = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(20));
+        loop {
+            ticks.tick().await;
+            let status = handle
+                .read_jobs(rsi_agent_turn_protocol::TurnJobsRequest {
+                    turn_id: turn.clone(),
+                    generation: None,
+                    after: None,
+                    limit: 32,
+                })
+                .await
+                .unwrap();
+            if !status.page().jobs.is_empty() {
+                break status;
+            }
+        }
+    })
+    .await
+    .unwrap();
     let job = &status.page().jobs[0];
     assert!(!job.reported);
     let request = rsi_agent_turn_protocol::JobPreviewRequest {

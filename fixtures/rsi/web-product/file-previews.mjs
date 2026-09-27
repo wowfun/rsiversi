@@ -1,3 +1,4 @@
+import {resources} from './controls.mjs';
 import {createServer} from 'node:http';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
@@ -44,6 +45,7 @@ export async function verifyFilePreviews(page,service,report,browser) {
   const before=service.provider.requests.length;
   const open=async file=>{
     if(await page.locator('#detail').isVisible())await page.getByRole('button',{name:'Close details',exact:true}).click();
+    await resources(page);
     await page.getByRole('button',{name:'Workspace files',exact:true}).click();
     const card=page.locator('.ui-contribution');await card.getByRole('textbox',{name:'Workspace-relative path',exact:true}).fill(`previews/${file}`);
     await card.getByRole('button',{name:'Read file',exact:true}).click();

@@ -1,3 +1,4 @@
+import './paired-env.mjs';
 import {openBrowserPage, connectWorkbench} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real watcher failure and recovery through redacted configuration status.
@@ -9,7 +10,7 @@ import {startService} from './service.mjs';
 const report=process.env.RSI_WEB_REPORT, assets=process.env.RSI_WEB_ASSETS;
 assert(report && assets, 'explicit report and built assets required');
 await mkdir(report,{recursive:false});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY??resolve('target/debug/rsi'),binary);await chmod(binary,0o700);
+const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
 const results=[];
 for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   const directory=join(report,name);await mkdir(directory);

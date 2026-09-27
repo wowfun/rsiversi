@@ -22,7 +22,7 @@ Require separate explicit Local grants scoped to principal, source root,
 Profile, leaf and operation. UI and model tools share that owner; neither a
 configuration grant nor an Agent's tool invocation supplies this grant.
 This narrowly extends the source-only management boundary in the
-[GUI decision](../../implemented/architecture/2026-09-11-plugin-composed-gui.md):
+[GUI decision](2026-09-11-plugin-composed-gui.md):
 explicit leaf grants authorize this reviewed source operation. The existing
 closed Settings namespace policy remains authoritative for Settings writes;
 no Device gains general Profile authoring or addon Settings authority.

@@ -4,7 +4,7 @@ import {waitUntil} from './service.mjs';
 
 export async function verifyInputDialogRetirement(page, pane, kind = "reference") {
   const [button, dialog] = kind === 'file' ? ['@ File path', 'Insert workspace file path'] : ['Reference session', 'Reference a conversation'];
-  await pane.getByRole('button', {name:button, exact:true}).click();
+  await pane.locator('.composer-extras summary').click();await pane.getByRole('button', {name:button, exact:true}).click();
   await page.getByRole('dialog', {name:dialog, exact:true}).waitFor();
   // Retire the connection while the modal is open, as on forced disconnect.
   await page.evaluate(() => document.querySelector('#sign-out').click());
@@ -18,7 +18,7 @@ export async function verifyFilePicker(page,pane,service,report,browser) {
   await input.fill('before  after');
   assert.equal(await input.inputValue(),'before  after','typing must reach the editable draft');
   await input.evaluate(element=>{element.focus();element.setSelectionRange(7,7)});
-  await pane.getByRole('button',{name:'@ File path',exact:true}).click();
+  await pane.locator(".composer-extras").evaluate(node=>node.open=true);await pane.getByRole('button',{name:'@ File path',exact:true}).click();
   assert.equal(await input.inputValue(),'before  after','opening must retain the editable draft');
   const dialog=page.getByRole('dialog',{name:'Insert workspace file path'});
   await dialog.getByLabel('Workspace-relative file path').fill('browse');
@@ -57,7 +57,7 @@ export async function verifyReferenceDraft(page,pane,sourcePane,report,browser) 
   const input=pane.getByRole('textbox',{name:'Main message',exact:true});
   const original=await input.inputValue();
   const source=(await sourcePane.locator('.pane-session').innerText()).split(' · ').at(-1);
-  await pane.getByRole('button',{name:'Reference session',exact:true}).click();
+  await pane.locator(".composer-extras").evaluate(node=>node.open=true);await pane.getByRole('button',{name:'Reference session',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Reference a conversation',exact:true});
   await dialog.getByRole('textbox',{name:'Source Session ID',exact:true}).fill(source);
   await dialog.getByRole('button',{name:'Capture preview',exact:true}).click();
@@ -88,7 +88,8 @@ export async function verifyCompletionPointer(page,pane,service,report,browser) 
   const box=await option.boundingBox();assert(box);
   await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
   const frame=await page.evaluate(()=>window.frameEvidence.snapshots+window.frameEvidence.patches);
-  await page.getByRole('button',{name:'Session commands',exact:true}).evaluate(button=>button.click());
+  // Refresh navigation without deliberately opening a new pane layout section.
+  await page.locator('#refresh').evaluate(button=>button.click());
   await page.waitForFunction(before=>window.frameEvidence.snapshots+window.frameEvidence.patches>before,frame);
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   assert(await option.evaluate(element=>element===window.heldCompletionOption && element.isConnected),'unrelated product frames must preserve the pressed option');

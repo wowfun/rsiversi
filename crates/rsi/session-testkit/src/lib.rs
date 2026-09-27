@@ -233,6 +233,37 @@ pub async fn assert_session_contract(
         claimed.accepted_control_seq
     );
     assert!(claimed_retry.observed_fact_seq >= claimed.observed_fact_seq);
+    let queue_request = rsi_agent_session_protocol::QueueMutationRequest {
+        operation_id: rsi_agent_session_protocol::QueueOperationId::new("claimed-withdraw")
+            .unwrap(),
+        slot_id: rsi_agent_session_protocol::QueueSlotId::new(message_id.as_str()).unwrap(),
+        expected_message_id: message_id.clone(),
+        mutation: rsi_agent_session_protocol::QueueMutation::Withdraw,
+    };
+    let rejected = handle.mutate_queue(queue_request.clone()).await.unwrap();
+    assert!(matches!(
+        rejected.outcome,
+        rsi_agent_session_protocol::QueueMutationOutcome::Rejected {
+            reason: rsi_agent_session_protocol::QueueMutationRejection::Claimed,
+            ..
+        }
+    ));
+    assert_eq!(
+        handle.mutate_queue(queue_request.clone()).await.unwrap(),
+        rejected
+    );
+    assert_eq!(
+        handle
+            .queue_mutation_status(&queue_request.operation_id)
+            .await
+            .unwrap(),
+        Some(rejected)
+    );
+    assert_eq!(
+        handle.message_status(&message_id).await.unwrap().state,
+        claimed.state
+    );
+
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: first.accepted_control_seq,

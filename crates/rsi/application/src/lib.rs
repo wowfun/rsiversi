@@ -67,3 +67,9 @@ pub enum ApplicationError {
 
 /// Application composition result.
 pub type Result<T> = std::result::Result<T, ApplicationError>;
+
+/// Consuming, bounded diagnostic port implemented by an application factory.
+pub trait ApplicationDiagnostic: std::fmt::Debug + Send + Sync {
+    /// Takes the latest owner diagnostic after Profile bootstrap fails.
+    fn take_diagnostic(&self) -> Option<RsiError>;
+}

@@ -60,7 +60,10 @@ async fn profile_tool_uses_live_session_grants_and_the_same_review_and_receipt_o
         axum::serve(listener, app).await.unwrap();
     });
     let fixture = fixture(&endpoint);
-    let sources = ProfileCatalog::new(fixture.paths.clone());
+    let sources = ProfileCatalog::new(
+        fixture.paths.clone(),
+        rsi::ApplicationCatalogMetadata::default(),
+    );
     let path = sources
         .copy_host(
             &HostProfileId::new("fixture").unwrap(),

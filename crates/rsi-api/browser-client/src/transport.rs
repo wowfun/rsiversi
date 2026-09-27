@@ -83,6 +83,7 @@ impl BrowserTransport {
             class: OperationClass::Control,
             headers: self.headers(),
             authorization: token,
+            launch_ticket: None,
             body: ByteBudget::new(1)?.copy(b"")?,
         })?;
         let started = pending.started.clone();
@@ -196,6 +197,7 @@ impl ConnectionTransport for BrowserTransport {
             class: operation.class,
             headers,
             authorization: None,
+            launch_ticket: None,
             body: input,
         })?;
         let mutation = operation.effect == OperationEffect::Mutation;

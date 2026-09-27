@@ -88,3 +88,9 @@ handler and encodes either its reply or its closed domain error under the admitt
 response reservation. Encoding failure after handler entry remains infrastructure
 failure, so a dispatched mutation is reported as unknown. Typed client decoding
 applies the same rule to malformed successful or domain-error responses.
+
+Local managed-slot inspection returns only its non-secret record. Conditional
+rotation compares the expected principal (or expected absence) under the same
+commit lock as publication. A changed slot fails before token replacement; readers
+and failed grants never revoke the existing credential. These operations are not
+registered on the remote device API.

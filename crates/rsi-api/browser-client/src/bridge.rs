@@ -165,6 +165,7 @@ pub(crate) struct RequestData {
     pub class: OperationClass,
     pub headers: Vec<(&'static str, String)>,
     pub authorization: Option<Zeroizing<String>>,
+    pub launch_ticket: Option<Zeroizing<String>>,
     pub body: RetainedBytes,
 }
 pub(crate) struct Head {
@@ -197,6 +198,11 @@ impl LocalRequest {
         if let Some(value) = data.authorization {
             headers
                 .set("authorization", &value)
+                .map_err(|_| invalid())?;
+        }
+        if let Some(value) = data.launch_ticket {
+            headers
+                .set("x-rsi-launch-ticket", &value)
                 .map_err(|_| invalid())?;
         }
         let source = Uint8Array::from(data.body.as_bytes());

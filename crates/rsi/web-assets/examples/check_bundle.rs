@@ -12,8 +12,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .ok_or("expected absolute bundle directory")?,
     );
+    let family = match arguments.next() {
+        Some(flag) if flag == "--write-pairing" => Some(
+            arguments
+                .next()
+                .ok_or("missing family")?
+                .into_string()
+                .map_err(|_| "family must be UTF-8")?,
+        ),
+        Some(_) => return Err("unknown option".into()),
+        None => None,
+    };
     if !directory.is_absolute() || arguments.next().is_some() {
         return Err("expected one absolute bundle directory".into());
+    }
+    if let Some(family) = family {
+        let receipt = rsi_web_assets::pairing_receipt(&directory, &family)?;
+        std::fs::write(directory.join("rsi-build.json"), receipt)?;
     }
     let mut host = HostBuilder::without_paths("bundle-check");
     host.register_local_contract::<HttpAssetsContract>()?;

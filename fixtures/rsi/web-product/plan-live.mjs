@@ -15,9 +15,9 @@ try {
   await connectWorkbench(page, service, 'live plan and structured delegation');
   await openWorkspace(page, service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
-  await input.fill('/plan on');await pane.getByRole('button',{name:'Send ↗',exact:true}).click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();
+  await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();
   await input.fill('This is an isolated integration test. First call plan_write with title "Structured delegation verification" and a body explaining only this harmless task: after human approval, delegate computation of 6 * 7 and read its validated result. Then call request_plan_execution with the exact plan_ref. After approval, use spawn_agent with task_name "calculation", fork_turns "none", message asking the child to return {"answer":42} using report_result, and output_schema {"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}. Wait for that child to complete. Call read_agent_result using the exact result locator returned in its completion and default page size. Do not use bash or change any files. Finish with LIVE_PLAN_STRUCTURED_42 only if the returned fragment actually contains answer 42. Do all these steps through the named tools.');
-  await pane.getByRole('button',{name:'Send ↗',exact:true}).click();
+  await pane.getByTestId('composer-send').click();
   const deadline=Date.now()+240000;
   while(Date.now()<deadline) {
     const answer=page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true});

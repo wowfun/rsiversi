@@ -22,13 +22,15 @@ def provider_reply(body):
 
 
 def verify(script, button, fill, until, screenshot, report):
-    button('Trajectory')
+    button('Filter conversations')
+    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Verbose')
     fill('textarea[aria-label="Main message"]', '/plan on')
-    button('Send ↗')
+    button('Send')
     until(lambda: script('return document.querySelector(".command-receipt")?.textContent.includes("Committed")'))
     until(lambda: script("return document.querySelector('textarea').value === ''"))
     fill('textarea[aria-label="Main message"]', 'PLAN_REVIEW_DESKTOP')
-    button('Send ↗')
+    button('Send')
     until(lambda: script('return [...document.querySelectorAll(".attention-navigation button")].some(e=>e.textContent==="Answer question 1")'))
     button('Answer question 1')
     until(lambda: script('return document.querySelector("#detail .review-plan")'))
@@ -46,4 +48,4 @@ def verify(script, button, fill, until, screenshot, report):
     screenshot('plan-approved-native.png')
     (report / 'plan-review.json').write_text(json.dumps({'ok': True, 'native_bridge': True, 'literal_plan': True, 'closed_choices': True, 'feedback': True, 'approval_visible_to_next_model': True, 'mock_requests': 3}, indent=2))
     (report / 'plan-review-requests.json').write_text(json.dumps(requests, indent=2))
-    button('Chat')
+    button('Standard')

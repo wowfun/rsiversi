@@ -5,7 +5,7 @@ import { join } from "node:path";
 // Document ABI evidence: real ESM imports, no simulated Worker or domain authority.
 export async function verifyMountAdmission(browser, root) {
   const context = await browser.newContext();
-  const bridge = await readFile(join(root, "plugins/rsi/web/mounts.js"), "utf8");
+  const bridge = await readFile(join(root, "apps/web/mounts.js"), "utf8");
   await context.route("http://renderer.test/**", route => {
     const path = new URL(route.request().url()).pathname;
     const body = path === "/" ? "<!doctype html><body>" : path === "/mounts.js" ? bridge : `

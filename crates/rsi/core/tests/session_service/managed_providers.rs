@@ -55,7 +55,7 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
     std::fs::create_dir_all(&alternate).unwrap();
     std::fs::write(
         alternate.join("agent.profile.toml"),
-        include_bytes!("../../../../../plugins/rsi-agent-presets/standard/agent.profile.toml"),
+        include_bytes!("../../presets/standard/agent.profile.toml"),
     )
     .unwrap();
     let runtime = rsi_meta::Runtime::default();

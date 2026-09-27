@@ -57,7 +57,7 @@ try {
   const finalMarker = cancellation ? 'LIVE_WORKFLOW_CANCELLED' : 'LIVE_WORKFLOW_TOTAL_42';
   const afterCompletion = cancellation ? `verify that its actual outcome is cancelled and answer ${finalMarker}` : `verify the actual total and answer ${finalMarker} only when the actual total is 42`;
   await input.fill(`Isolated integration verification. Call run_workflow exactly once with ${observation} and this exact script: ${script}\nAfter the tool returns running, end this Turn with WORKFLOW_DETACHED. Do not wait or poll. When a later workflow completion notice arrives, call workflow_read for that run, ${afterCompletion}. Do not create another workflow or modify files.`);
-  const started = Date.now(); await pane.getByRole('button', {name: 'Send ↗', exact: true}).click();
+  const started = Date.now(); await pane.getByTestId('composer-send').click();
   await page.waitForFunction(() => document.querySelector('[aria-label="Main message"]')?.value === '');
   let processIdentity;
   if (cancellation) {
@@ -69,7 +69,7 @@ try {
     processIdentity={...nodes[0],namespace_pid:JSON.parse(progress.record.event.message).pid};
     await writeFile(join(report,'process.json'),JSON.stringify(processIdentity));
     await input.fill(mode === 'plan' ? '/plan on' : `Call workflow_cancel for run_id ${accepted.record.run_id}, then read its actual outcome using workflow_read. Finish with LIVE_WORKFLOW_CANCELLED only after confirming cancelled. Do not create another run.`);
-    await pane.getByRole('button',{name:'Send ↗',exact:true}).click();
+    await pane.getByTestId('composer-send').click();
     await page.waitForFunction(() => document.querySelector('[aria-label="Main message"]')?.value === '');
   }
   const deadline = Date.now() + 240000;

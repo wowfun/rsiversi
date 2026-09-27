@@ -1,4 +1,4 @@
-"""Real production Tauri/WebKitGTK document input/paint and process-family PSS."""
+"""Isolated WebKitGTK document input/paint and process-family PSS; no product pairing."""
 import argparse
 import base64
 import http.client
@@ -10,9 +10,12 @@ import socket
 import statistics
 import subprocess
 import time
+import threading
+from functools import partial
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 parser = argparse.ArgumentParser(description=__doc__)
-for name in ('binary', 'driver', 'documents', 'report'):
+for name in ('browser', 'driver', 'documents', 'report'):
     parser.add_argument('--' + name, type=Path, required=True)
 parser.add_argument('--smoke', action='store_true')
 args = parser.parse_args(); args.report.mkdir(parents=True, exist_ok=False)
@@ -54,8 +57,8 @@ for variant in ('baseline', 'current'):
     env['TAURI_WEBVIEW_AUTOMATION'] = 'true'
     for key in ('HOME','XDG_CONFIG_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','XDG_RUNTIME_DIR'):
         path = output / key.lower(); path.mkdir(mode=0o700); env[key] = str(path.resolve())
-    config = Path(env['XDG_CONFIG_HOME']) / 'rsi'; host = config / 'host-profiles/fixture'; host.mkdir(parents=True)
-    (host/'host.profile.toml').write_text('format = 1\nsteps = []\n'); (config/'settings.json').write_text('{"rsi.agent":{}}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), partial(SimpleHTTPRequestHandler, directory=str((args.documents / variant).resolve())))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     with socket.socket() as sock: sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
     log = (output/'webdriver.log').open('w')
     driver = subprocess.Popen([str(args.driver.resolve()),'--host=127.0.0.1',f'--port={port}'],env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -73,8 +76,9 @@ for variant in ('baseline', 'current'):
             try: return call('GET','/status')
             except (OSError,http.client.HTTPException): return None
         until(ready)
-        capabilities=call('POST','/session',{'capabilities':{'alwaysMatch':{'webkitgtk:browserOptions':{'binary':str(args.binary.resolve()),'args':['--assets',str((args.documents/variant).resolve()),'--host-profile','fixture']}}}})
+        capabilities=call('POST','/session',{'capabilities':{'alwaysMatch':{'webkitgtk:browserOptions':{'binary':str(args.browser.resolve()),'args':['--automation']}}}})
         session=capabilities['sessionId']; root=f'/session/{session}'
+        call('POST', root+'/url', {'url':f'http://127.0.0.1:{server.server_port}/'})
         def script(source,arguments=None): return call('POST',root+'/execute/sync',{'script':source,'args':arguments or []})
         until(lambda:script('return !!window.rsiPerformance'),45)
         measurements=[]
@@ -109,8 +113,8 @@ for variant in ('baseline', 'current'):
         samples=script('return window.rsiPerformance.samples')
         report={'variant':variant,'capabilities':capabilities['capabilities'],'samples':samples,'measurements':measurements,'trajectory':trajectory}
         (output/'result.json').write_text(json.dumps(report,indent=2)); reports.append(report)
-        script('void window.rsiPerformance.close();return true')
-        until(lambda:'desktop: main-thread exit after Application cleanup' in (output/'webdriver.log').read_text(),45)
+        script('window.perfClosed=false;void window.rsiPerformance.close().then(()=>window.perfClosed=true);return true')
+        until(lambda:script('return window.perfClosed'))
     except Exception:
         if session:
             try:
@@ -126,6 +130,7 @@ for variant in ('baseline', 'current'):
         try: driver.wait(timeout=10)
         except subprocess.TimeoutExpired: driver.kill(); driver.wait()
         log.close()
+        server.shutdown(); server.server_close()
 summary=[]
 for count, text_bytes in scenes:
     row={'blocks':count,'near_limit':bool(text_bytes)}

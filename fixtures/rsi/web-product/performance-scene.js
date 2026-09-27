@@ -27,7 +27,7 @@ window.rsiPerformance = {
     if(bytesPerBlock) for(const block of blocks) { block.text=block.text.padEnd(bytesPerBlock,'x'); block.markdown=fixtureMarkdown(`Result ${blocks.indexOf(block)}: ${block.text}`); }
     fixtureTextBytes=blocks.reduce((bytes,block)=>bytes+new TextEncoder().encode(block.text).length,0);
     const data={generation:String(count),selection:String(run+1),session:`performance-${count}`,header:'c'.repeat(64),creation:null,path:'/workspace/performance',draft:'',model:fixtureModel,transcript:{blocks,status:'Running',omitted:false},pending:[],notice:'',history_more:false,historical:false,ui_surfaces:[],block_actions:[],extension:{}};
-    fixtureView={notice:'',setup:{agent:{default_model:fixtureModel}},catalog:{workspaces:[{id:'fixture',path:'/workspace/performance'}],sessions:[],models:[fixtureModel]},preferences:{enter_submit:false},application_surfaces:[],has_remote_ui:false};
+    fixtureView={notice:'',setup:{agent:{default_model:fixtureModel}},catalog:{workspaces:[{id:'fixture',path:'/workspace/performance'}],sessions:[],models:[fixtureModel]},preferences:{submit_key:"mod_enter",busy_submit:"queue"},application_surfaces:[],has_remote_ui:false};
     if(fixtureKey==='main') fixtureView.surfaces={main:data}; else fixtureView.panes=[data,null];
     render(fixtureView); await fixturePane().binding;
     fixturePane().edit(''); await fixturePane().flush(); fixturePane().input.focus();
@@ -51,7 +51,7 @@ window.rsiPerformance = {
     const roles=['assistant','reasoning','tool'];
     data.transcript={...data.transcript,blocks:data.transcript.blocks.map((block,index)=>({...block,key:`trajectory-${block.key}`,role:roles[index%3],title:roles[index%3],markdown:index%3===0?block.markdown:undefined}))};
     render({...fixtureView});
-    [...document.querySelectorAll('button')].find(button=>button.textContent==='Trajectory')?.click();
+    const detail=document.querySelector('[aria-label="Detail level"]');detail.value='verbose';detail.dispatchEvent(new Event('change',{bubbles:true}));
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
     return {laidOut:[...fixturePane().transcript.querySelectorAll('.message')].filter(node=>node.getClientRects().length).length,reasoning:fixturePane().transcript.querySelectorAll('.reasoning').length,tools:fixturePane().transcript.querySelectorAll('.tool').length};
   },

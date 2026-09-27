@@ -36,6 +36,6 @@ keys select visibility. It returns immutable Arc snapshots and retains only the
 last query selection. Named tables retain their existing overlay semantics.
 
 The authoritative behavior contract is the
-[scoped-contributions section](../docs/architecture.md#scoped-contributions).
+[scoped-contributions section](../docs/subsystems/events-and-contributions.md#scoped-contributions).
 Required public, lifecycle, failure, and concurrency evidence is specified by
 the [scope test matrix](../docs/testing.md#scoped-contributions).

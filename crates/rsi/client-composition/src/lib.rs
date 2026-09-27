@@ -20,7 +20,12 @@ pub fn domain_clients(platform: &str) -> rsi_host::Result<(HostBuilder, Vec<Prof
     builder.register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaReadContract>()?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 8] = [
+    builder.register_local_contract::<rsi_directory_picker_api::ClientContract>()?;
+    let factories: [(&str, Arc<dyn PluginFactory>); 9] = [
+        (
+            "rsi.directory-picker.client",
+            Arc::new(rsi_directory_picker_api::ClientFactory),
+        ),
         ("rsi.acp.client", Arc::new(rsi_acp_api::ClientFactory)),
         (
             "rsi.session.files.client",

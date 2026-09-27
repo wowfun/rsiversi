@@ -26,6 +26,6 @@ opt-in distribution proof after fetching the pinned dependencies. That branch
 preserves the original generated manifest and lock and uses a separate target.
 The Linux standard-product CI job fetches the committed template dependencies with
 `cargo fetch --locked --manifest-path fixtures/rsi/addon-template/Cargo.toml`, then
-runs `RSI_SCAFFOLD_PUBLISHED_SDK=1 cargo test --locked -p rsi --test addons
+runs `RSI_SCAFFOLD_PUBLISHED_SDK=1 cargo test --locked -p rsi-app-catalog --test addons
 scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact`.
 Both branches relocate and perform a second locked offline build before loading.

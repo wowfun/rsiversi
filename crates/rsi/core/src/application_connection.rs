@@ -85,9 +85,12 @@ impl PluginFactory for ConnectionFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: Configuration =
             serde_json::from_value(config.clone()).map_err(|error| self.diagnosed(error))?;
-        let host = ProfileCatalog::new(self.composition.paths().clone())
-            .host(&config.host_profile)
-            .map_err(|error| self.diagnosed(error))?;
+        let host = ProfileCatalog::new(
+            self.composition.paths().clone(),
+            self.composition.application_metadata().clone(),
+        )
+        .host(&config.host_profile)
+        .map_err(|error| self.diagnosed(error))?;
         let retained = host.contents.len() + 4096;
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
@@ -158,171 +161,124 @@ impl PluginFactory for ConnectionFactory {
     }
 }
 
-/// Bounded diagnostics owned by the native application factories.
+/// Ordered, consuming application bootstrap diagnostics.
 #[derive(Debug)]
-pub struct ApplicationDiagnostics {
-    connection: Arc<ConnectionFactory>,
-    cli: Arc<rsi_terminal::CliFactory>,
-    headless: Arc<rsi_terminal::HeadlessFactory>,
-    tui: Arc<rsi_terminal::TuiFactory>,
-    serve: Arc<rsi_serve::ServeFactory>,
-    web_serve: Arc<rsi_serve::ServeFactory>,
-    devices: Arc<rsi_terminal::DevicesFactory>,
-    inspector: Arc<rsi_terminal::InspectorFactory>,
-    native_addons: Arc<rsi_terminal::NativeAddonsFactory>,
-    #[cfg(target_os = "linux")]
-    acp: Arc<rsi_acp_agent::ApplicationFactory>,
-}
+pub struct ApplicationDiagnostics(Vec<Arc<dyn rsi_application::ApplicationDiagnostic>>);
 impl ApplicationDiagnostics {
-    /// Takes an actionable owner diagnostic after generic Profile bootstrap fails.
+    /// Returns the first actionable owner diagnostic.
     pub fn take(&self) -> Option<RsiError> {
-        self.cli
-            .take_diagnostic()
-            .or_else(|| self.headless.take_diagnostic())
-            .or_else(|| self.tui.take_diagnostic())
-            .or_else(|| self.serve.take_diagnostic())
-            .or_else(|| self.web_serve.take_diagnostic())
-            .or_else(|| self.devices.take_diagnostic())
-            .or_else(|| self.inspector.take_diagnostic())
-            .or_else(|| self.native_addons.take_diagnostic())
-            .or_else(|| {
-                self.connection
-                    .diagnostic
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-            })
+        self.0.iter().find_map(|owner| owner.take_diagnostic())
+    }
+}
+impl rsi_application::ApplicationDiagnostic for ConnectionFactory {
+    fn take_diagnostic(&self) -> Option<RsiError> {
+        self.diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 
-/// Freezes the ordinary native application catalog without activating any backend.
+/// Freezes the explicitly supplied application catalog without activating a backend.
 pub fn standard_application_host(
-    composition: impl Into<crate::ApplicationComposition>,
+    composition: crate::ApplicationComposition,
     arguments: Vec<std::ffi::OsString>,
 ) -> crate::Result<(Host, ApplicationDiagnostics)> {
-    let (addons, diagnostics) = application_addons(composition.into(), arguments)?;
-    let mut host = HostBuilder::new(diagnostics.connection.composition.paths().clone());
+    let crate::ApplicationComposition {
+        service,
+        catalog,
+        extras,
+    } = composition;
+    let application = catalog.build(&service, arguments)?;
+    let actual: std::collections::BTreeSet<_> = application
+        .addons
+        .descriptions()
+        .map(|entry| entry.plugin.clone())
+        .collect();
+    if &actual != catalog.metadata().plugins() {
+        return Err(boot(
+            "application catalog factories differ from reserved metadata",
+        ));
+    }
+    application
+        .addons
+        .validate_application_only()
+        .map_err(boot)?;
+    let addons = service
+        .addons()
+        .merged_set(&application.addons)
+        .map_err(boot)?
+        .merged_set(&extras)
+        .map_err(boot)?;
+    addons
+        .validate_platform(&format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+        .map_err(boot)?;
+    let mut host = HostBuilder::new(service.paths().clone());
     addons
         .register_into(&mut host, crate::AddonScope::Application)
         .map_err(boot)?;
-    Ok((host.build().map_err(boot)?, diagnostics))
+    Ok((
+        host.build().map_err(boot)?,
+        ApplicationDiagnostics(application.diagnostics),
+    ))
 }
 
-pub(crate) fn application_addons(
-    composition: crate::ApplicationComposition,
-    arguments: Vec<std::ffi::OsString>,
-) -> crate::Result<(crate::StandardAddonSet, ApplicationDiagnostics)> {
-    let crate::ApplicationComposition {
-        service: composition,
-        extras,
-    } = composition;
-    extras
-        .validate_platform(&format!(
-            "{}-{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ))
-        .map_err(boot)?;
-    let diagnostics = ApplicationDiagnostics {
-        connection: Arc::new(ConnectionFactory {
-            composition,
-            diagnostic: Mutex::new(None),
-        }),
-        cli: Arc::new(rsi_terminal::CliFactory::new(arguments.clone())),
-        headless: Arc::new(rsi_terminal::HeadlessFactory::new(arguments.clone())),
-        tui: Arc::new(rsi_terminal::TuiFactory::new(arguments.clone())),
-        devices: Arc::new(rsi_terminal::DevicesFactory::new(arguments.clone())),
-        inspector: Arc::new(rsi_terminal::InspectorFactory::new(arguments.clone())),
-        native_addons: Arc::new(rsi_terminal::NativeAddonsFactory::new(arguments.clone())),
-        web_serve: Arc::new(rsi_serve::ServeFactory::with_web_assets(arguments.clone())),
-        #[cfg(target_os = "linux")]
-        acp: Arc::new(rsi_acp_agent::ApplicationFactory::new(arguments.clone())),
-        serve: Arc::new(rsi_serve::ServeFactory::new(arguments)),
-    };
-    let mut builder = crate::StandardAddonBuilder::new("rsi.standard.application");
-    diagnostics
-        .connection
-        .composition
-        .addons()
-        .validate_platform(&format!(
-            "{}-{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ))
-        .map_err(boot)?;
-    register_contracts(&mut builder)?;
-    register_presentations(&mut builder)?;
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.credentials.local",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(diagnostics.connection.composition.credentials_factory()),
-        )
-        .map_err(boot)?;
-
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.application.http",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(http::HttpFactory(diagnostics.connection.clone())),
-        )
-        .map_err(boot)?;
+/// IDs of core-owned application connection adapters; no factory is instantiated.
+pub const BASE_APPLICATION_PLUGINS: &[&str] = &[
+    CONNECTION,
+    "rsi.directory-picker.client",
+    "rsi.credentials.local",
+    "rsi.application.http",
     #[cfg(target_os = "linux")]
-    register_service_applications(&mut builder, &diagnostics)?;
-    for (id, factory) in application_factories(&diagnostics) {
-        builder
-            .register_factory(
-                crate::AddonScope::Application,
-                id,
-                env!("CARGO_PKG_VERSION"),
-                UpdateMode::RestartRequired,
-                factory,
-            )
-            .map_err(boot)?;
-    }
-    let addons = diagnostics
-        .connection
-        .composition
-        .addons()
-        .merged_set(&extras)
-        .map_err(boot)?
-        .merged(builder.build().map_err(boot)?)
-        .map_err(boot)?;
-    Ok((addons, diagnostics))
-}
+    "rsi.application.service",
+    #[cfg(target_os = "linux")]
+    "rsi.application.acp-service",
+    #[cfg(target_os = "linux")]
+    "rsi.application.operator",
+];
 
-#[cfg(target_os = "linux")]
-fn register_service_applications(
-    builder: &mut crate::StandardAddonBuilder,
-    diagnostics: &ApplicationDiagnostics,
-) -> crate::Result<()> {
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.application.service",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(service::ServiceFactory(
-                diagnostics.connection.clone(),
-                false,
-            )),
-        )
-        .map_err(boot)?;
+/// Encapsulated connection and Service adapters consumed by an application catalog.
+pub fn base_application_catalog(
+    composition: StandardComposition,
+) -> crate::Result<crate::ApplicationCatalog> {
+    let connection = Arc::new(ConnectionFactory {
+        composition,
+        diagnostic: Mutex::new(None),
+    });
+    let mut builder = crate::StandardAddonBuilder::new("rsi.application.services");
+    register_contracts(&mut builder)?;
     for (id, factory) in [
+        (CONNECTION, connection.clone() as Arc<dyn PluginFactory>),
+        (
+            "rsi.directory-picker.client",
+            Arc::new(rsi_directory_picker_api::ClientFactory),
+        ),
+        (
+            "rsi.credentials.local",
+            Arc::new(connection.composition.credentials_factory()),
+        ),
+        (
+            "rsi.application.http",
+            Arc::new(http::HttpFactory(connection.clone())),
+        ),
+        #[cfg(target_os = "linux")]
+        (
+            "rsi.application.service",
+            Arc::new(service::ServiceFactory(connection.clone(), false)),
+        ),
+        #[cfg(target_os = "linux")]
         (
             "rsi.application.acp-service",
-            Arc::new(service::ServiceFactory(
-                diagnostics.connection.clone(),
-                true,
-            )) as Arc<dyn PluginFactory>,
+            Arc::new(service::ServiceFactory(connection.clone(), true)),
         ),
+        #[cfg(target_os = "linux")]
         (
-            "rsi.application.acp",
-            diagnostics.acp.clone() as Arc<dyn PluginFactory>,
+            "rsi.application.operator",
+            Arc::new(operator::OperatorFactory(connection.clone())),
         ),
     ] {
         builder
@@ -335,75 +291,22 @@ fn register_service_applications(
             )
             .map_err(boot)?;
     }
-    builder
-        .register_factory(
-            crate::AddonScope::Application,
-            "rsi.application.operator",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(operator::OperatorFactory(diagnostics.connection.clone())),
-        )
-        .map_err(boot)?;
-    Ok(())
+    Ok(crate::ApplicationCatalog {
+        addons: crate::StandardAddonSet::new([builder.build().map_err(boot)?]).map_err(boot)?,
+        diagnostics: vec![connection],
+    })
 }
-
 fn boot(error: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(error.to_string())
-}
-
-fn register_presentations(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
-    builder
-        .register_local_contract_at::<rsi_terminal::presentation::FrameRendererContract>(
-            crate::AddonScope::Application,
-        )
-        .map_err(boot)?;
-    for (id, factory) in [
-        (
-            "rsi.terminal.ui",
-            Arc::new(rsi_terminal::presentation::LinkedPresentationFactory)
-                as Arc<dyn PluginFactory>,
-        ),
-        (
-            "rsi.terminal.portable",
-            Arc::new(rsi_terminal::presentation::PortablePresentationFactory)
-                as Arc<dyn PluginFactory>,
-        ),
-    ] {
-        builder
-            .register_factory(
-                crate::AddonScope::Application,
-                id,
-                env!("CARGO_PKG_VERSION"),
-                UpdateMode::Replayable,
-                factory,
-            )
-            .map_err(boot)?;
-    }
-    Ok(())
 }
 
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
     let scope = crate::AddonScope::Application;
     builder
+        .register_local_contract_at::<rsi_directory_picker_api::ClientContract>(scope)
+        .map_err(boot)?;
+    builder
         .register_local_contract_at::<rsi_acp_agent::AgentBackendContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_workbench_ui::SetupFeatureContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_workbench_ui::PluginsFeatureContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_ui::UiContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_ui::UiTargetContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_api_http::HttpAssetsContract>(scope)
-        .map_err(boot)?;
-    builder
-        .register_local_contract_at::<rsi_web_assets::WebAssetControlContract>(scope)
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(scope)
@@ -465,48 +368,10 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .register_local_contract_at::<rsi_api_protocol::ConnectionDescriptionContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_serve::ServingServiceContract>(scope)
+        .register_local_contract_at::<crate::application_services::LocalBrowserAdministrationContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<crate::application_services::ServingServiceContract>(scope)
         .map_err(boot)?;
     Ok(())
-}
-
-fn application_factories(
-    diagnostics: &ApplicationDiagnostics,
-) -> [(&'static str, Arc<dyn PluginFactory>); 19] {
-    [
-        (
-            "rsi.workbench.setup",
-            Arc::new(rsi_workbench_ui::SetupFeatureFactory),
-        ),
-        (
-            "rsi.workbench.plugins",
-            Arc::new(rsi_workbench_ui::PluginsFeatureFactory),
-        ),
-        ("rsi.service.ui.client", Arc::new(rsi_service_ui::Factory)),
-        (
-            "rsi.workspace.review.ui",
-            Arc::new(rsi_workspace_review_ui::Factory),
-        ),
-        ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
-        ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
-        ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),
-        (
-            "rsi.session.tree.ui",
-            Arc::new(rsi_session_tree_ui::SessionTreeUiFactory),
-        ),
-        (
-            "rsi.session.files.ui",
-            Arc::new(rsi_session_files_ui::FilesUiFactory),
-        ),
-        ("rsi.application.serve-web", diagnostics.web_serve.clone()),
-        ("rsi.web.assets", Arc::new(rsi_web_assets::WebAssetsFactory)),
-        ("rsi.application.devices", diagnostics.devices.clone()),
-        ("rsi.application.inspector", diagnostics.inspector.clone()),
-        ("rsi.application.addons", diagnostics.native_addons.clone()),
-        (CONNECTION, diagnostics.connection.clone()),
-        ("rsi.application.cli", diagnostics.cli.clone()),
-        ("rsi.application.headless", diagnostics.headless.clone()),
-        ("rsi.application.tui", diagnostics.tui.clone()),
-        ("rsi.application.serve", diagnostics.serve.clone()),
-    ]
 }
