@@ -1,4 +1,4 @@
-import {details} from "./controls.mjs";
+import {details,resources} from "./controls.mjs";
 import {navigationFilter} from './controls.mjs';
 import './paired-env.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
@@ -54,7 +54,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     assert.equal(await dialog.getByRole('button',{name:'Send answers',exact:true}).count(),0);
     for(const label of ['Approve and execute','Request changes','Decline and end turn'])assert(await dialog.getByRole('button',{name:label,exact:true}).isEnabled());
     await page.screenshot({path:join(path,'review-wide.png')});
-    await page.setViewportSize({width:420,height:860});await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
+    await page.setViewportSize({width:420,height:860});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
     assert(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.screenshot({path:join(path,'review-narrow.png')});
     await dialog.getByLabel('Optional review feedback',{exact:true}).fill('Verified in the actual browser.');
     await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();

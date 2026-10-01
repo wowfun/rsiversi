@@ -102,6 +102,10 @@ marks fresh composition input unavailable until applied and verified. Startup ma
 one bounded attempt. Remote configuration grants permit HTTP refresh and independent
 credential setup; a stdio refresh requires Local origin.
 
+Reapplying the same already-applied HTTP and SSH inputs preserves fresh seed
+availability while configuration retirement settles. Changed or previously
+unsettled inputs remain unavailable until their application succeeds.
+
 The asynchronous retirement wait has a 30-second deadline. If old connection retirement
 outlasts that wait, the caller receives Timeout after replacement has applied;
 the tracked retirement retains configuration admission until its real work ends.

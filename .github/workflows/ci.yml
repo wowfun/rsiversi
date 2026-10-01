@@ -297,6 +297,14 @@ jobs:
           git -C "$RUNNER_TEMP/rsi-workbench-reference" checkout --detach 4878cdabd87d4041bdaff61d04c966883b9fd07a
           RSI_DSH_REFERENCE="$RUNNER_TEMP/rsi-workbench-reference" node fixtures/rsi/workbench-reference/verify.mjs --report "$RUNNER_TEMP/rsi-web-evidence/workbench-reference"
 
+      - name: Preserve failed Web product log before integration probes
+        if: ${{ !cancelled() && steps.web_product.outcome == 'failure' }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-web-product-failure-log
+          path: ${{ runner.temp }}/rsi-browser-logs/web_product.log
+          if-no-files-found: error
+
       - name: Exercise paired Web integration probes
         id: web_integrations
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
@@ -589,6 +597,10 @@ jobs:
         run: RSI_TEST_NODE="$(command -v node)" cargo test --locked -p rsi-agent-program --test runtime -- --ignored
 
   rsi:
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:

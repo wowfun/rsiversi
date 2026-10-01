@@ -15,11 +15,13 @@ export function usePresentation() {
   const [layout,setLayout] = useState<Layout>(validateLayout(defaultLayout) as Layout)
   const [storageNotice,setStorageNotice] = useState('')
   const storage = useRef<PresentationStore>()
+  const revision = useRef(0)
   useLayoutEffect(()=>{
     document.documentElement.dataset.theme = appearance?.theme ?? 'system'
     document.documentElement.dataset.contentSize = String(appearance?.content_font_size ?? 14)
   },[appearance])
   useEffect(()=>{
+    const openingRevision=++revision.current
     let active = true
     let unsubscribe:(()=>void)|undefined
     let focus:(()=>void)|undefined
@@ -32,12 +34,18 @@ export function usePresentation() {
         if (!active) {store.close();return}
         const value = await store.load()
         if (!active) {store.close();return}
-        storage.current = store; setLayout(validateLayout(value))
-        let reading = false
+        storage.current = store
+        if(revision.current===openingRevision)setLayout(validateLayout(value))
+        let reading = false,readAgain=false
         const reload = () => {
-          if(reading || !active || !store)return
-          reading=true
-          void store.load().then(value=>{if(active)setLayout(validateLayout(value))},()=>{if(active)setStorageNotice('Saved layout could not be refreshed.')}).finally(()=>{reading=false})
+          if(!active || !store)return
+          if(reading){readAgain=true;return}
+          reading=true;readAgain=false
+          const loadingRevision=revision.current
+          void store.load().then(
+            value=>{if(active&&!readAgain&&revision.current===loadingRevision)setLayout(validateLayout(value))},
+            ()=>{if(active&&!readAgain&&revision.current===loadingRevision)setStorageNotice('Saved layout could not be refreshed.')},
+          ).finally(()=>{reading=false;if(readAgain)reload()})
         }
         unsubscribe=store.subscribe(reload);focus=reload;window.addEventListener('focus',reload)
       } catch {
@@ -48,12 +56,13 @@ export function usePresentation() {
     return ()=>{active=false;unsubscribe?.();if(focus)window.removeEventListener('focus',focus);storage.current?.close();storage.current=undefined}
   },[identity])
   const apply = (intent:Record<string,unknown>) => {
+    const savingRevision=++revision.current
     setLayout(current=>applyIntent('layouts',current,intent))
     const store=storage.current
     if(!store){setStorageNotice('Layout changes are not saved on this device.');return}
     void store.apply(intent).then(
-      value=>{if(storage.current===store){setLayout(value);setStorageNotice('')}},
-      ()=>{if(storage.current===store)setStorageNotice('Layout changes could not be saved. Reload to restore the saved layout.')},
+      value=>{if(storage.current===store&&revision.current===savingRevision){setLayout(value);setStorageNotice('')}},
+      ()=>{if(storage.current===store&&revision.current===savingRevision)setStorageNotice('Layout changes could not be saved. Reload to restore the saved layout.')},
     )
   }
   return {layout,storageNotice,update:(patch:Partial<Layout>)=>apply({kind:'patch',patch}),expand:(id:string,expanded:boolean)=>apply({kind:'workspace',id,expanded})}

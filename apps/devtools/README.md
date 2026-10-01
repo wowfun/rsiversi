@@ -55,11 +55,12 @@ them for diagnosis. Explicit directories and prepare-only runs persist, with
 
 Product children receive a cleared environment containing only terminal/locale
 inputs and isolated HOME/XDG paths. Build children additionally receive explicit
-Cargo/Rustup homes, caches and selected toolchain inputs; these homes can contain
+Cargo/Rustup homes, caches and selected toolchain inputs, including Cargo's
+incremental, job-count and development/test debug-info settings; these homes can contain
 registry credentials. Generated `run` launchers omit build-only variables. This
 is configuration isolation, not a filesystem sandbox. Native builds select the
 launcher target explicitly; native renderer compilation/copying is serialized
-under `target/dev-native`, with shared caches and private publication paths.
+under `target/dev-native` using Linux `flock`, with shared caches and private publication paths.
 
 Web supervision first builds the paired upstream, then starts Vite and an isolated
 API listener at separate loopback ports. Vite forwards only the intended API and

@@ -47,8 +47,8 @@ Linux user-namespace policy is relaxed only for native Sandbox enforcement and
 standard-product tests that activate the required backend. Compilation and
 linting run first under the runner policy; each test step restores every
 changed sysctl on exit. The isolated frontend smoke activates the same backend
-and runs within the standard-product test step's policy lifetime, with its own
-failure log emitted before restoration. The deterministic required-backend failure test also
+inside its own scoped policy lifetime, with build and request failure logs
+retained before restoration. The deterministic required-backend failure test also
 runs without relaxing policy.
 
 Whole-package lint/test commands establish a package's single CI owner. A
@@ -82,6 +82,13 @@ Its execution budget includes cold oracle fault checks and three task deadlines.
 Desktop diagnostic unit tests run after the native scenarios, so a diagnostic
 assertion cannot suppress otherwise available WebKit evidence.
 
+The standard-product job disables incremental builds and retains line tables
+instead of full debug information for development and test artifacts. Its
+independent native development builds inherit those build-only settings. This
+bounds hosted-runner disk use while preserving source locations in backtraces;
+full debugger variable inspection remains a local build choice. Capacity readings
+before evaluation distinguish resource exhaustion from oracle behavior.
+
 The browser job caches root workspace dependencies and installed Rust tools;
 dependency audit caches installed tools without a target directory. Both use
 the existing pinned Rust cache action and retain locked tool installation.
@@ -101,6 +108,9 @@ Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
 retain its distribution receipt, frozen input manifest, and build log.
+The failed Web product log is also uploaded before independent integration
+probes start, making the failure available while those probes continue. The
+final archive still retains the complete step outcomes and visual evidence.
 
 The always-running `ci-required` job depends on every independent contract and
 consumes the complete `needs` object, failing if it is empty or any result is

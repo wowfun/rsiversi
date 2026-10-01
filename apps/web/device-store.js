@@ -174,26 +174,44 @@ export class DeviceStore {
     return (await this.applyAll([{bucket,intent,scope}]))[0];
   }
   async applyAll(changes) {
+    return this.#applyAll(changes);
+  }
+  async reconcileNavigation(scope,members) {
+    const preference=scope==='sessions:all'?'sessionOrder':scope==='workspaces'?'workspaceOrder':null;
+    if(!preference)throw new Error('Invalid navigation scope');
+    membership(members);
+    return this.#applyAll([
+      {bucket:'orders',scope,intent:{kind:'reconcile',members}},
+      {bucket:'preferences',scope:'',intent:{kind:'patch',patch:{}}},
+    ],preference);
+  }
+  async #applyAll(changes,manualPreference) {
     if(this.closed || !Array.isArray(changes) || changes.length<1 || changes.length>3 || changes.some(change=>!keys(change,'bucket,intent,scope') || !budgets[change.bucket]) || new Set(changes.map(change=>change.bucket)).size!==changes.length)throw new Error('Invalid presentation transaction');
     const selected=changes.map(change=>({...change,key:this.scopedKey(change.scope)}));
     return new Promise((resolve,reject)=>{
       const tx=this.database.transaction(selected.map(change=>change.bucket),'readwrite');
-      const results=new Array(selected.length),changed=new Set();let failure;
-      selected.forEach(({bucket,intent,key,scope},index)=>{
-        const store=tx.objectStore(bucket),read=store.getAll(undefined,budgets[bucket].count+1);
-        read.onsuccess=()=>{
-          try{
-            const value=read.result.find(record=>record.key===key)?.value??defaults(bucket,scope);
-            const applied=applyIntent(bucket,value,intent);
-            const next=boundedValidatedRecords(bucket,read.result,key,applied,Date.now(),applied===value);
+      const results=new Array(selected.length),snapshots=new Array(selected.length),changed=new Set();let failure,remaining=selected.length;
+      const apply=()=>{
+        try{
+          const current=index=>{const {bucket,key,scope}=selected[index],record=snapshots[index].find(record=>record.key===key);return record?record.value:defaults(bucket,scope)};
+          const preferences=manualPreference?validate('preferences',current(1)):null;
+          selected.forEach(({bucket,intent,key,scope},index)=>{
+            const records=snapshots[index],value=current(index);
+            const observe=manualPreference && (bucket==='preferences' || preferences[manualPreference]!=='manual');
+            const applied=observe?validate(bucket,value):applyIntent(bucket,value,intent);
+            const next=boundedValidatedRecords(bucket,records,key,applied,Date.now(),applied===value);
             results[index]=next.replacement;
             if(!next.changed)return;
             changed.add(index);
-            const retained=new Set(next.records.map(record=>record.key));
-            for(const record of read.result)if(!retained.has(record.key))store.delete(record.key);
+            const store=tx.objectStore(bucket),retained=new Set(next.records.map(record=>record.key));
+            for(const record of records)if(!retained.has(record.key))store.delete(record.key);
             store.put(next.replacement);
-          }catch(error){failure=error;tx.abort();}
-        };
+          });
+        }catch(error){failure=error;tx.abort();}
+      };
+      selected.forEach(({bucket},index)=>{
+        const read=tx.objectStore(bucket).getAll(undefined,budgets[bucket].count+1);
+        read.onsuccess=()=>{snapshots[index]=read.result;if(--remaining===0)apply()};
       });
       tx.oncomplete=()=>{
         selected.forEach(({bucket,key},index)=>{

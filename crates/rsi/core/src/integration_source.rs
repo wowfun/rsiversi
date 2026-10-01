@@ -148,7 +148,7 @@ pub(crate) fn requirements(prepared: rsi_meta::PreparedActivation) -> rsi_meta::
 pub(crate) fn capture(
     plan: &rsi_meta::ActivationPlan,
     base: Arc<dyn AgentCompositionSource>,
-    paths: rsi_host::HostPaths,
+    paths: &rsi_host::HostPaths,
 ) -> rsi_meta::Result<Arc<dyn AgentCompositionSource>> {
     let source = Arc::new(SeededSource::new(
         base,
@@ -162,7 +162,7 @@ pub(crate) fn capture(
         let private = crate::acp_inputs::PrivateInputs::new(
             source.clone(),
             plan.context().clone(),
-            paths,
+            paths.clone(),
             plan.local::<rsi_process::DuplexProcessContract>()?,
             plan.local::<rsi_sandbox::SandboxContract>()?,
         );
@@ -208,7 +208,7 @@ impl rsi_meta::PluginFactory for SourceFactory {
             .provide_local::<rsi_agent_composition::AgentCompositionSourceContract>(capture(
                 &plan,
                 self.0.clone(),
-                self.1.clone(),
+                &self.1,
             )?)?;
         Ok(())
     }

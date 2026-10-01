@@ -58,7 +58,10 @@ diagnostics cannot replace the readiness or startup error.
 Goal controls retain bounded Worker invocation/reply evidence and intermediate
 control errors. Resume after a completed paused round waits for both the live
 driver and the delivered durable settlement projection, rather than treating
-their independent streams as one notification.
+their independent streams as one notification. Cancel after resume also waits
+for the second Turn's held response in the transcript and the displayed Waiting
+driver, then exercises the resumed controls at both viewport sizes. A provider
+request arriving server-side alone does not establish a delivered client state.
 
 First install the shared document's pinned build dependencies with
 `pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts` from this directory.
@@ -294,7 +297,10 @@ bytes, semantic diagnostics, filename hints and unchanged provider request count
 
 The download transport probe additionally transfers over 32 MiB with a gated
 producer, rejects Blob buffering, and checks cancellation and abnormal EOF at
-the application and Service Worker boundaries. It records browser download-manager
+the application and Service Worker boundaries. It gates abnormal EOF until the
+browser admits the download, so response failure cannot race initial download
+observation. Per-mode progress is retained in `download-stream-trace.json` even
+when the transport check fails. It records browser download-manager
 failure separately in `download-stream.json`. Firefox currently can leave an
 errored streaming download pending after the producer is released and the
 application reports failure; the fixture explicitly cancels that browser artifact
@@ -417,7 +423,13 @@ Bash and apply-patch results with DeepSeek, inspects Files/Review, and exercises
 SSH terminal. No key is read without this explicit mode. Reports retain model
 facts and transport/build identity; credentials are redacted on cleanup.
 
-`review-lifecycle.mjs` runs current React and storage modules through an isolated
+`review-lifecycle.mjs` also delays a restored navigation read across another
+window's Updated selection, checking that automatic reconciliation preserves the
+committed mode and empty saved order for both Session and workspace navigation.
+Controlled storage replies separately verify that older layout reads, saves and
+errors cannot overwrite a newer local intent, and overlapping invalidations are
+followed by a fresh read. These are React lifecycle checks, not transport evidence.
+It runs current React and storage modules through an isolated
 Vite server in Chromium. It retires Dock initialization during open, read and
 reopen; verifies no late focus/subscription installation; checks content-only host
 snapshot stability; and inspects actual IndexedDB writes during concurrent intents.

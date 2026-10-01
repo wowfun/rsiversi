@@ -28,7 +28,7 @@ export async function verifyDownloadStream(browser,root,trace=()=>{}) {
         URL.createObjectURL=()=>{throw new Error('Export must never create a Blob URL');};
         const {downloadSession}=await import('/session-export.js');
         let reads=0,active=0,maximum=0,release;
-        const stop=new AbortController();window.cancelExport=()=>stop.abort();window.downloadProbe={}; window.downloadSettled=undefined;
+        const stop=new AbortController();window.cancelExport=()=>stop.abort();window.releaseEof=()=>release?.();window.downloadProbe={}; window.downloadSettled=undefined;
         window.downloadResult=downloadSession(async(method,input)=>{
           const op=JSON.parse(input).operation;
           if(op.kind==='open')return JSON.stringify({token:mode,filename:`${mode}.md`});
@@ -36,7 +36,7 @@ export async function verifyDownloadStream(browser,root,trace=()=>{}) {
           active++;maximum=Math.max(maximum,active);reads++;window.downloadProbe.reads=reads;
           let item;
           if(reads===1||mode==='large'&&reads<=count)item={type:'chunk',text:chunk};
-          else if(mode==='cancel'){window.downloadProbe.pending=true;await new Promise(resolve=>{release=resolve;});item=null;}
+          else if(mode==='cancel'||mode==='eof'){window.downloadProbe.pending=true;await new Promise(resolve=>{release=resolve;});item=null;}
           else if(mode==='large'&&reads===count+1)item={type:'complete'};
           else item=null;
           active--;window.downloadProbe.maximum=maximum;
@@ -59,6 +59,9 @@ export async function verifyDownloadStream(browser,root,trace=()=>{}) {
         await page.locator('#replay').evaluate(frame=>frame.remove());
       } else {
         if(mode==='cancel'){await page.waitForFunction(()=>window.downloadProbe.pending);assert.equal(await page.evaluate(()=>window.downloadProbe.reads),2);await page.evaluate(()=>window.cancelExport());}
+        // Fail an admitted download, after the browser has observed its first chunk.
+        // An immediately errored response may never enter the download manager.
+        else {await page.waitForFunction(()=>window.downloadProbe.pending);await page.evaluate(()=>window.releaseEof());}
         assert.equal((await page.evaluate(()=>window.downloadResult)).status,'failed');
         // The application and SW must fail immediately and release the producer.
         // Also record the download manager outcome: Firefox can leave its failed

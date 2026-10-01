@@ -239,6 +239,9 @@ The happy fixture performs preparation, Portable dynamic provide, one complete
 bidirectional callback, nested capability use, effect defer/commit, activation
 rollback, unload, and destruction. A v2-only artifact is rejected because no
 fallback symbol exists.
+Normal ABI functionality uses the catalog's default callback deadline, including
+module initialization. Short deadlines belong to explicit timeout scenarios;
+library mapping and host scheduling are not ABI performance assertions.
 
 Complete Loader evidence requires hostile fixtures for partial entry and create
 ownership, malformed bytes/capability arrays, stale and foreign tokens, double

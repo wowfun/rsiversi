@@ -895,6 +895,27 @@ fn paired_web_consumers_have_independent_failure_domains() {
             .unwrap()
             .contains("run-paired.py")
     );
+    let product_index = steps
+        .iter()
+        .position(|step| step["id"] == "web_product")
+        .unwrap();
+    let probes_index = steps
+        .iter()
+        .position(|step| step["id"] == "web_integrations")
+        .unwrap();
+    let log_index = steps
+        .iter()
+        .position(|step| step["with"]["name"] == "rsi-web-product-failure-log")
+        .unwrap();
+    assert!(product_index < log_index && log_index < probes_index);
+    assert_eq!(
+        steps[log_index]["if"].as_str(),
+        Some("${{ !cancelled() && steps.web_product.outcome == 'failure' }}")
+    );
+    assert_eq!(
+        steps[log_index]["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/rsi-browser-logs/web_product.log")
+    );
 }
 
 #[test]

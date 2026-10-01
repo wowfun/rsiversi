@@ -24,14 +24,14 @@ Path('writer-bytes-'+index).write_bytes(data)
         window.fetch=(path,options)=>{
             const response=original(path,options);
             if(String(path)==='/_call/terminal'&&JSON.parse(options.body).request?.type==='write')
-                void response.then(reply=>reply.clone().json()).then(value=>{if(value.code==='busy')pressure.busy++}).catch(()=>{});
+                void response.then(reply=>reply.clone().json()).then(value=>{if(value.code==='busy'){pressure.busy++;pressure.firstBusyAfterMs??=performance.now()-pressure.startedAt}}).catch(()=>{});
             return response;
         };
         const request=async command=>{
             const response=await fetch('/_call/terminal',{method:'POST',body:JSON.stringify({...base,request:command})});
             const value=JSON.parse(await response.text());if(!response.ok)throw Error(JSON.stringify(value));return value;
         };
-        window.fixtureStartWrites=()=>{const bytes=Array(65536).fill(65);window.fixtureWriters=Promise.all(followers.map(attachment=>request({type:'write',attachment,bytes}).then(value=>{pressure.done++;pressure.responses.push(value.type)}))).catch(error=>pressure.error=String(error))};
+        window.fixtureStartWrites=()=>{pressure.startedAt=performance.now();const bytes=Array(65536).fill(65);window.fixtureWriters=Promise.all(followers.map(attachment=>request({type:'write',attachment,bytes}).then(value=>{pressure.done++;pressure.responses.push(value.type)}))).catch(error=>{pressure.error=String(error);pressure.errorAfterMs=performance.now()-pressure.startedAt})};
         window.fixtureCloseWriters=async()=>{await window.fixtureWriters;for(const terminal of extra)await request({type:'close',terminal});pressure.cleaned=true};
         (async()=>{
             for(let i=1;i<8;i++){

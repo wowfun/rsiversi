@@ -339,7 +339,7 @@ async fn idle_pump_panic_publishes_failure_and_reaps_without_close() {
     assert_eq!(ports.settlements.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn expired_queued_reply_does_not_suppress_safe_shutdown_grace() {
     let (process, ports, send) = process();
     ports.release.notify_one();
@@ -370,6 +370,9 @@ async fn expired_queued_reply_does_not_suppress_safe_shutdown_grace() {
         written.contains("shutdown"),
         "safe retirement must attempt shutdown: {written}"
     );
-    assert!(written.contains("exit"));
+    assert!(
+        written.contains("exit"),
+        "graceful shutdown must finish: {written}"
+    );
     assert_eq!(ports.settlements.load(Ordering::SeqCst), 1);
 }

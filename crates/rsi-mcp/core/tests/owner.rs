@@ -120,6 +120,7 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     let owner = runtime.root().lookup_local::<McpOwnerContract>().unwrap();
     assert!(owner.seed().is_ok());
     assert!(owner.is_stdio("private-local"));
+    check_unchanged_remote_keeps_seed(&owner, rsi_mcp::McpConfig::default()).await;
     check_remote_rejection_and_abandonment(&runtime, &owner, stdio).await;
     let access = runtime
         .root()
@@ -164,6 +165,24 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     fixture.shutdown().await;
 }
 
+async fn check_unchanged_remote_keeps_seed(owner: &rsi_mcp::McpOwner, config: rsi_mcp::McpConfig) {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let before = owner.seed().unwrap();
+    let mut apply = Box::pin(owner.set_remote_stdio(config));
+    match apply.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => {
+            assert!(!owner.settings_pending(), "unchanged inputs became pending");
+            assert_eq!(owner.seed().unwrap().sha256(), before.sha256());
+            apply.await.unwrap();
+        }
+    }
+    assert_eq!(owner.seed().unwrap().sha256(), before.sha256());
+}
+
 async fn check_remote_rejection_and_abandonment(
     runtime: &Runtime,
     owner: &rsi_mcp::McpOwner,
@@ -178,6 +197,7 @@ async fn check_remote_rejection_and_abandonment(
     };
     owner.set_remote_stdio(remote("remote-good")).await.unwrap();
     assert!(!owner.settings_pending());
+    check_unchanged_remote_keeps_seed(owner, remote("remote-good")).await;
     assert_eq!(
         owner.set_remote_stdio(remote("private-local")).await,
         Err(rsi_mcp::McpError::Protocol)
@@ -223,6 +243,17 @@ async fn check_remote_rejection_and_abandonment(
         assert!(owner.is_ssh_stdio("remote-new"));
         assert!(owner.settings_pending());
         // Let the already accepted retirement release configuration admission.
+        tokio::task::yield_now().await;
+        let mut repeated = Box::pin(owner.set_remote_stdio(remote("remote-new")));
+        assert!(matches!(
+            repeated
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(owner.settings_pending());
+        assert!(owner.seed().is_err());
+        drop(repeated);
         tokio::task::yield_now().await;
         owner.refresh(None, CancellationToken::new()).await.unwrap();
         assert!(!owner.settings_pending());

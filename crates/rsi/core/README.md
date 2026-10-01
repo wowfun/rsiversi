@@ -655,7 +655,11 @@ outside the leased Agent Store root, and publishes the bounded
 [history API](../history-api/README.md) to authenticated clients.
 
 Host startup waits for enabled history/cache API instances as well as the managed
-provider owner before returning the service for client capability negotiation.
+provider owner and MCP API registration before returning the service for client
+capability negotiation. MCP endpoint discovery/readiness is independent; an offline
+endpoint must not prevent the configuration API from becoming available. Direct
+generic Host tests must likewise await the API owners before freezing a client
+operation table.
 A reconstructible cache may need asynchronous rebuilding; publishing a client
 operation snapshot before that work settles would permanently omit history from
 that connection. The existing 30-second startup deadline covers this readiness.
