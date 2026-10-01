@@ -1,3 +1,4 @@
+import {closeDetails,openResource,resourceSelector} from "./controls.mjs";
 import {detailMode,resources} from './controls.mjs';
 import './paired-env.mjs';
 import assert from "node:assert/strict";
@@ -27,8 +28,8 @@ async function until(predicate, label, maximum = 30000) {
   }
 }
 async function geometry(page, pane, detail) {
-  return page.evaluate(({ detail, pane }) => {
-    const root = document.querySelector(detail ? "#detail" : pane);
+  return page.evaluate(({ detail, pane, resourceSelector }) => {
+    const root = document.querySelector(detail ? resourceSelector : pane);
     const rect = root.getBoundingClientRect();
     const buttons = [...root.querySelectorAll("button")].filter(button => {
       if (!button.checkVisibility({visibilityProperty:true})) return false;
@@ -48,9 +49,17 @@ async function geometry(page, pane, detail) {
     const send = [...root.querySelectorAll("button")].find(button => button.dataset.testid === "composer-send");
     return { viewport: [innerWidth, innerHeight], page_width: document.documentElement.scrollWidth,
       root: { left: rect.left, right: rect.right, width: rect.width },
-      controls: buttons.map(button => ({ label: button.textContent, hit: hit(button) })),
+      controls: buttons.map(button => {
+        const visible=hit(button), box=button.getBoundingClientRect(),above=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
+        let revealed=false;
+        const transcript=button.closest('.transcript');
+        if(!visible&&above?.closest('.back-bottom')&&transcript){
+          const top=transcript.scrollTop;button.scrollIntoView({block:'center'});revealed=hit(button);transcript.scrollTop=top;
+        }
+        return {label:button.textContent,hit:visible,revealed};
+      }),
       send_hit: detail ? null : !!send && hit(send) };
-  }, { detail, pane });
+  }, { detail, pane, resourceSelector });
 }
 
 const results = [];
@@ -79,7 +88,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
         if (window.taskGoalErrors.at(-1)?.diagnostic !== diagnostic) boundedPush(window.taskGoalErrors, { time: performance.now(), source, diagnostic });
       };
       document.addEventListener("DOMContentLoaded", () => {
-        new MutationObserver(() => observeGoalError(document.querySelector("#detail")?.textContent ?? "", "DOM"))
+        new MutationObserver(() => observeGoalError([...document.querySelectorAll(".resource-content")].map(e=>e.textContent).join("\n"), "DOM"))
           .observe(document.body, { subtree: true, childList: true, characterData: true });
       });
       const post = Worker.prototype.postMessage;
@@ -93,7 +102,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
             }
             if (data?.kind === "view") {
               const frame = JSON.parse(data.view);
-              observeGoalError(JSON.stringify(frame.view?.ui_detail ?? frame.sections?.ui_detail ?? {}), "Worker frame");
+              observeGoalError(JSON.stringify(frame.view?.panels ?? frame.sections?.panels ?? []), "Worker frame");
             }
           });
         }
@@ -140,7 +149,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await detailMode(page,'verbose');
     const paneSelector = '[aria-label="Main conversation"]';
     const pane = page.locator(paneSelector);
-    const detail = page.locator("#detail .ui-contribution");
+    const detail = page.locator(`${resourceSelector} .ui-contribution`);
     const goalUntil = async (predicate, label) => until(async () => {
       const evidence = await page.evaluate(() => ({ errors: window.taskGoalErrors, replies: window.taskInvocations.filter(item => item.name === "goal" && item.reply?.error) }));
       assert.deepEqual(evidence, { errors: [], replies: [] }, `${label}: explicit Goal failure ${JSON.stringify(evidence)}`);
@@ -148,21 +157,20 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     }, label);
     const goalVisible = async (locator, label) => goalUntil(() => locator.isVisible(), label);
     const close = async () => {
-      if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
-      await page.locator("#detail").waitFor({ state: "hidden" });
+      if (await page.locator(resourceSelector).last().isVisible()) await closeDetails(page);
     };
-    const surface = async name => { await close(); await resources(page); await page.getByRole("button", { name, exact: true }).click(); };
+    const surface = async name => { await close(); await openResource(page,name); };
     const capture = async (label, isDetail = false, expected = [], reveal) => {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         if (reveal) await reveal();
-        const expected_controls = await assertControls(page, isDetail ? "#detail .ui-contribution" : paneSelector, expected);
+        const expected_controls = await assertControls(page, isDetail ? `${resourceSelector} .ui-contribution` : paneSelector, expected);
         await assertNoNotices(page);
         const metric = await geometry(page, paneSelector, isDetail);
         assert(metric.page_width <= viewport.width, JSON.stringify(metric));
         assert(metric.root.left >= 0 && metric.root.right <= viewport.width + 1, JSON.stringify(metric));
-        assert(metric.controls.length > 0 && metric.controls.every(button => button.hit), JSON.stringify(metric));
+        assert(metric.controls.length > 0 && metric.controls.every(button => button.hit||button.revealed), JSON.stringify(metric));
         if (!isDetail) assert(metric.send_hit, JSON.stringify(metric));
         measurements.push({ label, size, expected_controls, ...metric });
         await page.screenshot({ path: join(directory, `${label}-${size}.png`), fullPage: true });

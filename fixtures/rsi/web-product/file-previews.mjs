@@ -1,3 +1,4 @@
+import {closeDetails,openResource} from "./controls.mjs";
 import {resources} from './controls.mjs';
 import {createServer} from 'node:http';
 import assert from 'node:assert/strict';
@@ -44,10 +45,10 @@ export async function verifyFilePreviews(page,service,report,browser) {
   await page.evaluate(()=>{window.previewDecodeAttempts=0;const property=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');Object.defineProperty(HTMLImageElement.prototype,'src',{...property,set(value){window.previewDecodeAttempts++;property.set.call(this,value);}});});
   const before=service.provider.requests.length;
   const open=async file=>{
-    if(await page.locator('#detail').isVisible())await page.getByRole('button',{name:'Close details',exact:true}).click();
+    if(await page.locator('.resource-content:visible').count())await closeDetails(page);
     await resources(page);
-    await page.getByRole('button',{name:'Workspace files',exact:true}).click();
-    const card=page.locator('.ui-contribution');await card.getByRole('textbox',{name:'Workspace-relative path',exact:true}).fill(`previews/${file}`);
+    await openResource(page,'Workspace files');
+    const card=page.locator('.resource-content:visible .ui-contribution');await card.getByRole('textbox',{name:'Workspace-relative path',exact:true}).fill(`previews/${file}`);
     await card.getByRole('button',{name:'Read file',exact:true}).click();
     return page.locator('.file-preview');
   };
@@ -112,8 +113,8 @@ export async function verifyFilePreviews(page,service,report,browser) {
   await preview.getByRole('button',{name:'Preview',exact:true}).click();await frame.locator('#network').filter({hasText:'HTTPS enabled'}).waitFor();assert.equal(requests,2);
   await open('demo.html');frame=page.frameLocator('iframe.file-html');await frame.locator('#network').filter({hasText:'Network blocked'}).waitFor();assert.equal(requests,2);
   await page.setViewportSize({width:720,height:980});await page.screenshot({path:join(report,`${browser}-preview-html-narrow.png`)});await page.setViewportSize({width:1440,height:980});
-  await open('large.txt');await page.locator('.ui-contribution').filter({hasText:'Complete preview exceeds 1 MiB'}).waitFor();await page.getByRole('button',{name:'Next page',exact:true}).waitFor();
-  await page.getByRole('button',{name:'Close details',exact:true}).click();assert.equal(service.provider.requests.length,before,'preview invoked a model');
+  await open('large.txt');await page.locator('.resource-content:visible .ui-contribution').filter({hasText:'Complete preview exceeds 1 MiB'}).waitFor();await page.getByRole('button',{name:'Next page',exact:true}).waitFor();
+  await closeDetails(page);assert.equal(service.provider.requests.length,before,'preview invoked a model');
   assert.equal(await page.evaluate(()=>window.previewUrls.size),0,'preview Blob URLs survive close');
   const policy=await verifyPreviewPolicy(page,service.origin);
   return {policy,predecode_bounds:true,aggregate_pixel_bound:true,formats:['code','markdown','png','svg','html'],local_resources:true,https_requests:requests,model_requests:0,version_refresh:true};

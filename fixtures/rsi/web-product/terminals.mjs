@@ -35,7 +35,7 @@ export async function verifyTerminals(page,service,report,name){
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();
  await waitUntil(async()=>await page.evaluate(()=>document.adoptedStyleSheets.length)===stylesBefore,'terminal styles disposed');
  await page.getByRole('button',{name:'Terminal',exact:true}).click();
- await panel.getByRole('button',{name:'Bash 1 · running',exact:true}).click();
+ await panel.getByRole('button',{name:'Terminal 1 · running',exact:true}).click();
  await panel.getByRole('status').filter({hasText:'Read only'}).waitFor();
  await waitUntil(async()=>(await panel.locator('.xterm-rows').innerText()).includes('hidden-linkAFTER-SHORT-CONTROLS'),'reattached snapshot actually rendered');
  await page.screenshot({path:join(report,`${name}-terminal-readonly.png`)});
@@ -54,7 +54,7 @@ export async function verifyTerminals(page,service,report,name){
  await type('exit 7');
  await panel.getByRole('status').filter({hasText:'Exited 7'}).waitFor();
  await page.screenshot({path:join(report,`${name}-terminal-exited.png`)});
- await panel.getByRole('button',{name:'Close terminal',exact:true}).click();
+ await panel.getByRole('button',{name:'Terminate terminal',exact:true}).click();
  await panel.locator('.terminal-empty').waitFor();
  await waitUntil(async()=>await panel.locator('.terminal-tabs button').count()===0,'terminal roster refreshed after close');
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();

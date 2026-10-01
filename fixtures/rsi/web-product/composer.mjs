@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 export async function verifyComposer(page) {
   const switching = await page.evaluate(async () => {
     const pane = panes.get("main"), store = connection.drafts;
-    renderDetail({ detail: null });
+    renderDetailAtFixture({ detail: null });
     const snapshot = (session, generation = session) => ({ generation, session, header: "c".repeat(64), path: "/workspace",
       model: { deployment: "test", model: "model" }, transcript: { blocks: [], status: "Ready", omitted: false }, pending: [], notice: "" });
     pane.render(snapshot("saved-switch"), []); await pane.binding;

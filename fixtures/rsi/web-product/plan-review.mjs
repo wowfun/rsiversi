@@ -1,3 +1,4 @@
+import {details} from "./controls.mjs";
 import {navigationFilter} from './controls.mjs';
 import './paired-env.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
@@ -48,7 +49,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
     await input.fill('Review the exact saved plan.');await pane.getByTestId('composer-send').click();
     await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true}).click();
-    const dialog=page.locator('#detail');await dialog.getByText('Review plan',{exact:true}).waitFor();
+    const dialog=details(page);await dialog.locator('.review-plan').waitFor();
     assert.match(await dialog.locator('.review-plan').innerText(),/<em>Literal plan text<\/em>/);assert.equal(await dialog.locator('.review-plan em').count(),0);
     assert.equal(await dialog.getByRole('button',{name:'Send answers',exact:true}).count(),0);
     for(const label of ['Approve and execute','Request changes','Decline and end turn'])assert(await dialog.getByRole('button',{name:label,exact:true}).isEnabled());
@@ -56,7 +57,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await page.setViewportSize({width:420,height:860});await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
     assert(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.screenshot({path:join(path,'review-narrow.png')});
     await dialog.getByLabel('Optional review feedback',{exact:true}).fill('Verified in the actual browser.');
-    await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await dialog.waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
+    await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
     assert.equal(requests.length,3);assert(JSON.stringify(requests[2].messages).includes('Plan mode is disabled'));
     assert(JSON.stringify(requests[2].messages).includes('Verified in the actual browser.'));
     await page.setViewportSize({width:1440,height:980});await page.screenshot({path:join(path,'approved.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);

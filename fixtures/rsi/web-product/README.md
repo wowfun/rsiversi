@@ -1,8 +1,39 @@
 # Web product verification
 
+CI runs `navigation-order.mjs` and `device-storage.mjs` alongside the Dock probes.
+The storage probe exercises real IndexedDB migration, concurrent writes, rollback,
+and principal isolation in an isolated Chromium profile.
+
+`RSI_REPORT_DIR=/absolute/new/report node dock-durability.mjs` exercises concurrent
+resource opens in two authenticated windows, layout reload, viewport-only float
+clamping, injected IndexedDB write failure and the sixteen-tab bound. Product
+controls perform every layout operation; database reads inspect the committed
+document, and write faults are confined to the isolated browser context.
+
+`RSI_REPORT_DIR=/absolute/new/report node navigation-order.mjs` creates 65 durable
+Sessions through the paired product's authenticated browser and deterministic
+provider. It checks full-member cross-page keyboard moves, actual drag-and-drop,
+cross-window order notifications, persisted selection after responsive remount,
+nonempty row titles and internal/root overflow in eight light/dark viewports. It
+also registers 65 real directories through the product and moves workspace
+siblings through the complete registry seed. Reports identify the exact build
+family and fixture provider; these are product behavior/visual observations,
+not live model evidence or DSH pixel-golden acceptance.
+
+The opt-in `mcp-images-live.mjs` uses the authorized DeepSeek credential file,
+an isolated HTTP MCP server, the real Worker and durable Media CAS. It checks
+expanded template URIs, ordered durable Tool images, text-model follow-up,
+source-image preview and clean sign-out. Captures cover light/dark system themes
+at 1440×900, 1024×768, 767×900 and 390×844 at DPR 1; geometry checks detect
+overflow. These are runtime/visual observations, not DSH pixel-golden acceptance.
+
 Task captures require named controls to be present, enabled and reachable after
-scrolling, and reject product notices as well as JavaScript errors. They await
-asynchronous visible-card mounting before measuring the current control; a
+scrolling, and reject product notices as well as JavaScript errors.
+Named controls must hit directly. For incidental transcript controls beneath the
+floating Back to bottom button, geometry additionally verifies that centering the
+control by scrolling makes it hit, then restores the reading position. Other
+occlusion still fails; the report preserves both the initial and revealed result.
+They await asynchronous visible-card mounting before measuring the current control; a
 viewport change is not settled merely by two animation frames. Inline-card
 captures first scroll their retained Tool block into view, because offscreen
 blocks do not retain executable card mounts. The task
@@ -362,3 +393,50 @@ browsers as part of the default fixture test entry.
 Layout-persistence evidence polls completed IndexedDB reads until at least one
 record exists, with an explicit deadline. A Promise object is not accepted as a
 truthy persistence result.
+
+`RSI_REPORT_DIR=/absolute/isolated/report node device-storage.mjs` exercises current
+presentation-store modules in two actual isolated Chromium pages. It verifies the
+schema upgrade, transaction serialization, 64/65 order movement, abort rollback,
+notification and principal/draft isolation without a Service or model. It is a
+storage check, not a substitute for paired product or visual validation.
+
+The opt-in `ssh-targets.mjs` probe requires explicit isolated sshd/session/auth
+executables, account, fixture directory and optional shared-library path through
+`RSI_TEST_SSH*`. It uses the paired distribution and the fixture-only Local
+`profile-leaf-probe` (`RSI_PROFILE_PROBE` may select its built path). It generates
+its own keys, confirms trust through the Local API, submits candidates through
+the Web UI and verifies real musl helper connections. Exact HTTP directory requests
+prove Use denial before grant and after revocation; stale connection epochs cannot
+disconnect a replacement. Its light/dark captures check the SSH form, not remote
+Session tools, the full target picker or DSH golden alignment.
+
+`RSI_SSH_LIVE=1` additionally opts the SSH probe into `live-fixture.mjs` with
+`RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL` and matching `RSI_WEB_REPORT`/`RSI_REPORT_DIR`.
+It opens an SSH Session from the actual picker, checks target project instructions,
+Bash and apply-patch results with DeepSeek, inspects Files/Review, and exercises an
+SSH terminal. No key is read without this explicit mode. Reports retain model
+facts and transport/build identity; credentials are redacted on cleanup.
+
+`review-lifecycle.mjs` runs current React and storage modules through an isolated
+Vite server in Chromium. It retires Dock initialization during open, read and
+reopen; verifies no late focus/subscription installation; checks content-only host
+snapshot stability; and inspects actual IndexedDB writes during concurrent intents.
+At 16 tabs and 64 history entries, it counts coordinate copies to reject a second
+history replay during intent persistence. A second connection then injects an
+invalid inverse; the next intent must reject it without changing its revision.
+Timing samples are descriptive evidence, not machine-dependent pass thresholds.
+Set `RSI_REPORT_DIR` to retain its deterministic result. It does not use a Service,
+provider credentials or installed bundle and does not replace paired visual checks.
+
+`RSI_REPORT_DIR=/absolute/new/report node dock-panels.mjs` drives independent
+resource panels through the paired product bundle. It verifies split/float,
+Settings preservation and terminal attachment geometry in Chromium, saving
+screenshots and assertions. CI invokes it alongside Dock durability and the
+current-module lifecycle/storage checks; native geometry is covered separately
+by the desktop fixture's `--dock` mode.
+
+The SSH target probe also stalls a second isolated TCP endpoint before SSH
+negotiation. While that target is busy, it verifies an unrelated candidate write
+and a directory read on the real SSH target, and checks the same-target Busy
+response. It closes the stalled socket explicitly and requires a known connection
+failure; this is contention evidence, not a successful second SSH connection.

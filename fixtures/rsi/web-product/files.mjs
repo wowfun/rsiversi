@@ -1,3 +1,4 @@
+import {closeDetails,openResource} from "./controls.mjs";
 import assert from "node:assert/strict";
 import { mkdir, writeFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,10 +14,10 @@ export async function verifyFiles(page, pane, service, report, browser) {
   await writeFile(Buffer.concat([Buffer.from(`${directory}/`), Buffer.from([255])]), "RAW-NAME\n");
   await symlink("00-note.txt", join(directory, "zz-link"));
   const before = service.provider.requests.length;
-  const card = page.locator(".ui-contribution");
+  const card = page.locator(".resource-content:visible .ui-contribution");
   const open = async () => {
-    if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
-    await page.getByRole("button", { name: "Workspace files", exact: true }).click();
+    if (await page.locator(".resource-content:visible").count()) await closeDetails(page);
+    await openResource(page,"Workspace files");
     await card.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("browse");
     await card.getByRole("button", { name: "List directory", exact: true }).click();
     await card.filter({ hasText: "0–16 of 22" }).waitFor();
@@ -52,7 +53,6 @@ export async function verifyFiles(page, pane, service, report, browser) {
   await card.filter({ hasText: "0–16 of 23" }).waitFor();
   await card.getByRole("button", { name: "Release snapshot", exact: true }).click();
   await card.getByRole("button", { name: "Current snapshot", exact: true }).waitFor({ state: "detached" });
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
-  await page.locator("#detail").waitFor({state:"hidden"});
+  await closeDetails(page);
   assert.equal(service.provider.requests.length, before);
 }

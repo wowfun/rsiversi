@@ -1,3 +1,4 @@
+import {closeDetails} from "./controls.mjs";
 import {resources as showResources} from './controls.mjs';
 import './paired-env.mjs';
 import { cleanupAll } from "./cleanup.mjs";
@@ -22,7 +23,7 @@ async function writeGeneration(label, gate = false, fail = false) {
   const lazy = `export const label = ${JSON.stringify(label)};\n`;
   const files = [{ name: "standard.js", bytes: renderer }, { name: "lazy.js", bytes: lazy }];
   for (const file of files) await writeFile(join(assets, file.name), file.bytes);
-  await writeFile(join(assets, "ui-renderers.json"), JSON.stringify({ format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: files.map(file => ({ name: file.name, sha256: createHash("sha256").update(file.bytes).digest("hex") })), schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] }));
+  await writeFile(join(assets, "ui-renderers.json"), JSON.stringify({ format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: files.map(file => ({ name: file.name, sha256: createHash("sha256").update(file.bytes).digest("hex") })), schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog", "pane"] }] }));
 }
 await writeGeneration("A");
 const binary = join(directory, "rsi");
@@ -88,7 +89,7 @@ try {
   await page.locator('[data-renderer-revision="B"]').waitFor();
   assert.equal(await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).inputValue(), "kept form draft");
   await page.screenshot({ path: join(report, "failed-candidate-keeps-b.png") });
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
+  await closeDetails(page);
   await pane.getByRole("button", { name: "Stop", exact: true }).click();
   // Exercise the actual WASM Assets owner: the server commits D, but the Worker
   // never receives its reply. Mutations must not be replayed on this connection.
@@ -116,8 +117,7 @@ try {
   await page.locator('[data-renderer-revision="D"]').waitFor();
   assert.equal(await page.evaluate(() => window.workerStarts), 2);
   await page.screenshot({ path: join(report, "lost-commit-reconnected-renderer-d.png") });
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
-  await page.locator("#detail").waitFor({ state: "hidden" });
+  await closeDetails(page);
   await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn after recovery");
   await pane.getByTestId("composer-send").click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
@@ -158,8 +158,7 @@ try {
     await showResources(cold);await cold.getByRole("button", { name: "Workspace files", exact: true }).click();
     await cold.locator(".renderer-mount").filter({ hasText: "Renderer unavailable: rsi.standard" }).waitFor();
     await cold.screenshot({ path: join(report, `${mode}-catalog-diagnostic.png`) });
-    await cold.getByRole("button", { name: "Close details", exact: true }).click();
-    await cold.locator("#detail").waitFor({ state: "hidden" });
+    await closeDetails(cold);
     await coldPane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
     await coldPane.getByTestId("composer-send").click();
     await coldPane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();

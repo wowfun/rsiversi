@@ -30,7 +30,7 @@ export async function verifyDom(browser, root, report, name) {
     for(const [file,names] of [['turn-presentation.js','TurnPresentation,readingPosition,readingAnchor,restoreAnchor'],['composer-actions.js','keyboardAction']]) {
       await page.addScriptTag({content:`(()=>{${(await readFile(join(root,'apps/web',file),'utf8')).replaceAll('export class ','class ').replaceAll('export function ','function ')}Object.assign(globalThis,{${names}});})();`});
     }
-    await page.addScriptTag({ content: 'const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    await page.addScriptTag({ content: 'const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {
       mounts = await MountTable.open();
@@ -43,7 +43,7 @@ export async function verifyDom(browser, root, report, name) {
         pane.render = (data, models) => render(data ? { header: "c".repeat(64), creation: null, ...data } : data, models);
       }
     });
-    await page.evaluate(() => renderDetail({settings:{ticket:"numeric-switch", namespace:"fixture.numbers", text:'{"limit":2}', description:{writable:true, defaults:{limit:2}, metadata:{description:"Exact numeric input", applies:"live", sensitive_fields:[], schema:{type:"object", properties:{limit:{type:"number"}}, required:["limit"]}}}}}));
+    await page.evaluate(() => renderDetailAtFixture({settings:{ticket:"numeric-switch", namespace:"fixture.numbers", text:'{"limit":2}', description:{writable:true, defaults:{limit:2}, metadata:{description:"Exact numeric input", applies:"live", sensitive_fields:[], schema:{type:"object", properties:{limit:{type:"number"}}, required:["limit"]}}}}}));
     await page.getByLabel("Settings / limit", {exact:true}).fill("1.0000000000000001");
     await page.getByRole("button", {name:"Save settings", exact:true}).click();
     await page.locator(".settings-field-error").filter({hasText:"exact number representation"}).waitFor();
@@ -203,7 +203,7 @@ export async function verifyDom(browser, root, report, name) {
       const sent = [];
       command = async input => { sent.push(input); };
       for (const owner of ["parent-session", "child-session"]) {
-        renderDetail({ detail: { pane: "main", generation: "one", kind: "approval", request: {
+        renderDetailAtFixture({ detail: { pane: "main", generation: "one", kind: "approval", request: {
           id: "call-1", subject: { session_id: owner }, reason: owner, action: "run tool", review: { owner },
         } } });
       }
@@ -274,9 +274,9 @@ export async function verifyDom(browser, root, report, name) {
     });
     assert.deepEqual(ime, { composing: 0, after: 1 });
     const failedSetup = await page.evaluate(() => {
-      renderUiDetail({ ticket: "fixture-startup", model: null, binding: null, error: null });
+      renderUiDetailAtFixture({ ticket: "fixture-startup", model: null, binding: null, error: null });
       const loading = document.querySelector("#detail-body").textContent;
-      renderUiDetail({ ticket: "fixture-startup", model: null, binding: null, error: "Source startup rejected" });
+      renderUiDetailAtFixture({ ticket: "fixture-startup", model: null, binding: null, error: "Source startup rejected" });
       return { loading, failed: document.querySelector("#detail-body").textContent };
     });
     assert.deepEqual(failedSetup, { loading: "Loading…", failed: "Source startup rejected" });
@@ -291,7 +291,7 @@ export async function verifyDom(browser, root, report, name) {
       ] } };
       const detail = { pane: "main", generation: "one", ticket: "100", binding: bound.reference, error: null, busy: false,
         model: { renderer: "rsi.standard", schema: { name: "rsi.standard.view", version: 1 }, data: null, standard_view: bound.view, actions: [{ name: "echo", title: "Apply addon" }], sources: [] } };
-      const show = async detail => { rendererSlots = []; renderDetail({ ui_detail: detail }); await mounts.render(window.testRendererOffer, rendererSlots); };
+      const show = async detail => { rendererSlots = []; renderDetailAtFixture({ ui_detail: detail }); await mounts.render(window.testRendererOffer, rendererSlots); };
       await show(detail);
       document.querySelector("[data-ui-field]").value = "edited 界";
       document.querySelector("[data-ui-field]").dispatchEvent(new Event("input", { bubbles: true }));

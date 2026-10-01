@@ -46,7 +46,7 @@ export async function assertControls(page, rootSelector, labels) {
 
 export async function assertNoNotices(page) {
   const notices = await page.locator("#notice, .pane-notice").allTextContents();
-  const goal = await page.locator("#detail").allTextContents();
+  const goal = await page.locator("#detail[open], .resource-content").allTextContents();
   assert(!goal.some(text => /Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved/.test(text)), `Unexpected Goal feedback: ${JSON.stringify(goal)}`);
   assert(notices.every(text => !text.trim()), `Unexpected product notice: ${JSON.stringify(notices)}`);
 }

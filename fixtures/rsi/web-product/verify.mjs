@@ -1,3 +1,4 @@
+import {closeDetails,details} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import './paired-env.mjs';
 import { verifyPairing } from "./pairing.mjs";
@@ -160,11 +161,11 @@ try {
       await right.getByRole("textbox", { name: "Compare message" }).fill("Review the right workspace");
       await right.getByTestId("composer-send").click();
       await right.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-      await page.locator("#pane-tab-main").click();
+      await selectSurface(page,"main");
       assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "A saved left draft");
       await selectSurface(page,"compare");
       assert.match(await right.locator(".transcript").innerText(), /Reviewed: Review the right workspace/);
-      await page.locator("#pane-tab-main").click();
+      await selectSurface(page,"main");
       await verifyReferenceDraft(page,left,right,report,name);
       await selectSurface(page,"compare");
       assert.equal(await page.evaluate(() => window.untrustedExecuted), undefined);
@@ -199,7 +200,7 @@ try {
       await right.locator('[data-producer="rsi.model-selection.view"] pre').filter({ hasText: '"reasoning_effort": null' }).waitFor({ state: "attached" });
       assert.equal(service.provider.requests.length, beforeEffort + 1);
 
-      await page.locator("#pane-tab-main").click();
+      await selectSurface(page,"main");
       await left.getByRole("textbox", { name: "Main message" }).fill("Please ask a question about the workspace");
       await left.getByTestId("composer-send").click();
       await navigationFilter(page,"attention");await page.getByRole("region", {name:"Needs attention",exact:true}).getByRole("button", {name:"Answer question 1",exact:true}).click();
@@ -207,7 +208,7 @@ try {
       await page.getByRole("textbox", { name: "What matters for this change?" }).fill("Preserve independent drafts and explicit ownership.");
       await page.screenshot({ path: join(report, `${name}-question.png`) });
       await page.getByRole("button", { name: "Send answers", exact: true }).click();
-      await page.locator("#detail").waitFor({ state: "hidden" });
+      await page.getByRole("button",{name:"Send answers",exact:true}).waitFor({state:"hidden"});
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-two-panes.png`) });
       await left.getByRole("textbox", { name: "Main message" }).fill("/plan off");
@@ -249,7 +250,7 @@ try {
       });
       try {
         await sourceButton.click();
-        await page.getByRole("dialog").getByText("Block sources", { exact: true }).waitFor();
+        await page.locator("[data-dockkit-tab]").filter({hasText:"Block sources"}).waitFor();
       } finally {
         await writeFile(join(report, `${name}-source-pointer.json`), JSON.stringify(await page.evaluate(() => {
           window.sourcePointerEvents.abort();
@@ -264,16 +265,16 @@ try {
       await page.getByRole("button", { name: "Previous sources", exact: true }).click();
       await page.locator(".block-sources .hint").filter({ hasText: "Sources 1–" }).waitFor();
       assert.equal(await page.locator(".source-reference").first().innerText(), firstReference);
-      assert.equal(await page.locator("#detail").evaluate(dialog => {
+      assert.equal(await details(page).evaluate(dialog => {
         const bounds = dialog.getBoundingClientRect();
-        const heading = dialog.querySelector(".dialog-heading").getBoundingClientRect();
+        const heading = dialog.closest("[data-dockkit-content]").querySelector("[data-dockkit-strip]").getBoundingClientRect();
         const controls = dialog.querySelector(".block-sources > .actions").getBoundingClientRect();
-        return heading.top >= bounds.top && controls.bottom <= bounds.bottom && dialog.scrollTop === 0;
+        return heading.bottom <= bounds.top + 2 && controls.bottom <= innerHeight && dialog.scrollTop === 0;
       }), true, "source-list paging keeps title and controls in view");
       await page.screenshot({ path: join(report, `${name}-block-sources.png`) });
       await page.locator(".source-reference").first().click();
       await page.locator(".source-text").filter({ hasText: "segment" }).waitFor();
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
 
       await left.getByRole("button", { name: "Earlier history", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "History" }).waitFor();
@@ -323,7 +324,7 @@ try {
       await page.waitForFunction(previous=>!previous.isConnected,savingExact);await savingExact.dispose();
       assert(await approvalSetting.isChecked());
       assert.equal(await numeric.inputValue(),'123');
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();
       await left.getByRole("textbox", { name: "Main message" }).fill("Please run the failing command");
@@ -341,7 +342,7 @@ try {
       await page.getByRole("button", { name: "Session details", exact: true }).click();
       await page.locator(".ui-contribution").filter({ hasText: "Session:" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-contributed-session.png`) });
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
       await page.locator(".ui-contribution").filter({ hasText: "Intent:" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-contributed-tool.png`) });
@@ -353,12 +354,12 @@ try {
       await page.locator(".ui-contribution pre").filter({ hasText: "00004000" }).waitFor();
       assert.match(await page.locator(".ui-contribution pre").innerText(), /00 ff/);
       await page.screenshot({ path: join(report, `${name}-output-hex.png`) });
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
       await page.locator(".ui-contribution").getByRole("button", { name: "Read stderr", exact: true }).click();
       await page.locator(".ui-contribution pre").filter({ hasText: "fixture stderr��" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-output-stderr.png`) });
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
       await page.locator(".ui-contribution").getByRole("button", { name: "Arguments", exact: true }).click();
       await page.locator(".ui-contribution pre").filter({ hasText: '"command"' }).waitFor();
@@ -369,7 +370,7 @@ try {
       await page.screenshot({ path: join(report, `${name}-contributed-source.png`) });
       await page.locator(".ui-contribution").getByRole("button", { name: "Next page", exact: true }).click();
       await page.waitForFunction(previous => document.querySelector(".ui-contribution pre")?.textContent !== previous, contributedSource);
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await left.getByRole("button", { name: "Inspect arguments", exact: true }).last().click();
       await page.locator(".source-text").waitFor();
       const firstSource = await page.locator(".source-text").innerText();
@@ -386,14 +387,14 @@ try {
       assert.equal(await page.getByRole("button", { name: "Next source page", exact: true }).isEnabled(), false);
       await page.getByRole("button", { name: "Previous source page", exact: true }).click();
       await page.locator(".source-text").filter({ hasText: '"command"' }).waitFor();
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await left.getByRole("button", { name: "Inspect result", exact: true }).last().click();
       await page.locator(".source-text").filter({ hasText: '"exit_code": 7' }).waitFor();
       assert.match(await page.locator(".source-text").innerText(), /fixture stdout/);
       assert.match(await page.locator(".source-text").innerText(), /fixture stderr/);
       await page.waitForFunction(() => [...document.querySelectorAll(".pane-notice")].every(node => !node.textContent.trim()));
       await page.screenshot({ path: join(report, `${name}-source-result.png`) });
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await verifyPresentation(page, left, service, report, name);
       await page.setViewportSize({ width: 390, height: 844 });
       const composerBounds = await left.locator(".composer").evaluate(composer => {
@@ -425,11 +426,11 @@ try {
       await page.getByRole("button", { name: "Save settings", exact: true }).click();
       await page.waitForFunction(previous => !previous.isConnected, previousPreferences);
       await previousPreferences.dispose();
-      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await closeDetails(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       assert.match(await left.locator(".composer-hint").innerText(), /Enter to send · Shift Enter for a new line/);
       await page.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
-      await page.locator("#pane-tab-main").click();
+      await selectSurface(page,"main");
       await verifyInputDialogRetirement(page, left);
       await page.locator("#login").waitFor({ state: "visible" });
       assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
@@ -439,7 +440,7 @@ try {
       await page.locator("#receipt").fill(JSON.stringify(receipt));
       await page.locator("#connect").click();
       await page.locator("#workbench").waitFor({ state: "visible" });
-      await page.locator("#pane-tab-main").click();
+      await selectSurface(page,"main");
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();
       await left.locator(".composer-hint").filter({ hasText: "Enter to send · Shift Enter for a new line" }).waitFor();
       await page.getByRole("button", { name: "Workspace files", exact: true }).waitFor();

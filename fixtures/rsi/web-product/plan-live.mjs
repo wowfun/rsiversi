@@ -1,3 +1,4 @@
+import {details} from "./controls.mjs";
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Explicit live plan handoff and structured delegation; never a default test.
@@ -22,9 +23,9 @@ try {
   while(Date.now()<deadline) {
     const answer=page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true});
     if(await answer.count() && await answer.isVisible()) {
-      assert.equal(approvals,0,'unexpected additional review');await answer.click();const dialog=page.locator('#detail');await dialog.getByText('Review plan',{exact:true}).waitFor();
+      assert.equal(approvals,0,'unexpected additional review');await answer.click();const dialog=details(page);await dialog.locator('.review-plan').waitFor();
       const plan=await dialog.locator('.review-plan').innerText();assert.match(plan,/6\s*[*×]\s*7|42|comput|计算|delegat/i);await writeFile(join(report,'reviewed-plan.txt'),plan);await page.screenshot({path:join(report,'live-review.png')});
-      await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();approvals++;await dialog.waitFor({state:'hidden'});await answer.waitFor({state:'hidden'});
+      await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();approvals++;await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await answer.waitFor({state:'hidden'});
     }
     const status=await pane.locator('.pane-status').innerText();if(['Completed','Failed'].includes(status))break;
     await page.waitForTimeout(100);

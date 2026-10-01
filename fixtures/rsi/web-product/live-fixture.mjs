@@ -2,11 +2,11 @@ import './paired-env.mjs';
 // Explicit opt-in live service ownership, shared by product probes.
 import assert from 'node:assert/strict';
 import {readFile,writeFile,appendFile,mkdir,copyFile,chmod} from 'node:fs/promises';
-import {join,resolve} from 'node:path';
+import {join,resolve,dirname} from 'node:path';
 import {startService} from './service.mjs';
 import {redactEvidence} from './evidence.mjs';
 import {cleanupAll} from './cleanup.mjs';
-export async function liveFixture({configure}={}) {
+export async function liveFixture({configure,ssh=false}={}) {
   const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS,model=process.env.RSI_LIVE_MODEL;
   assert(report && assets && model && process.env.RSI_LIVE_ENV_FILE,'explicit live environment, model and report required');
   assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));
@@ -14,6 +14,10 @@ export async function liveFixture({configure}={}) {
   const match=source.toString().match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);assert(match,'authorized key missing');
   const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
   await mkdir(report,{recursive:false});const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
+  if(ssh){
+    for(const name of ['rsi-ssh-helper','receipt.json','build-family.json'])await copyFile(join(dirname(process.env.RSI_WEB_BINARY),name),join(report,name));
+    await chmod(join(report,'rsi-ssh-helper'),0o700);
+  }
   let service;
   const redact=text=>String(text).replaceAll(key,'[REDACTED]');
   async function close() {

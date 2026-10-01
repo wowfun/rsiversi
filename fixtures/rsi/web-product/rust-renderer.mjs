@@ -1,3 +1,4 @@
+import {closeDetails,details} from "./controls.mjs";
 import {resources as showResources} from './controls.mjs';
 import './paired-env.mjs';
 import { cleanupAll } from "./cleanup.mjs";
@@ -103,19 +104,19 @@ try {
   const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
   for (let cycle = 0; cycle < 3; cycle++) {
     await showResources(page);await page.getByRole("button", { name: "Service extensions", exact: true }).click();
-    await page.locator("#detail").getByRole("button", { name: "Native Session model", exact: true }).click();
-    const detail = page.locator("#detail");
+    await details(page).getByRole("button", { name: "Native Session model", exact: true }).click();
+    const detail = details(page);
     await page.waitForFunction(() => window.nativeDetail?.error || window.nativeDetail?.model);
     assert.equal((await page.evaluate(() => window.nativeDetail)).error, null);
     await detail.getByRole("heading", { name: `Native Session ${session}`, exact: true }).waitFor();
     assert.equal(await page.evaluate(async () => (await import(`/rsi-renderers/${window.admittedOffer.revision}/rust-entry.js`)).live_renderers()), 1);
     const before = await detail.locator(".renderer-mount p").innerText();
     await detail.getByRole("button", { name: "Refresh native model", exact: true }).click();
-    await page.waitForFunction(before => document.querySelector("#detail .renderer-mount p")?.textContent !== before, before);
+    await page.waitForFunction(before => document.querySelector(".resource-content .renderer-mount p")?.textContent !== before, before);
     await detail.getByRole("button", { name: "Read native bytes", exact: true }).click();
     await detail.locator("[data-fixture-bytes]").filter({ hasText: "00 ff 41 42 43" }).waitFor();
     if (cycle === 0) await page.screenshot({ path: join(report, "native-session-rust-wasm.png") });
-    await page.getByRole("button", { name: "Close details", exact: true }).click();
+    await closeDetails(page);
     await waitUntil(() => page.evaluate(async () => (await import(`/rsi-renderers/${window.admittedOffer.revision}/rust-entry.js`)).live_renderers() === 0), "Rust renderer disposal");
   }
   assert.equal(await page.evaluate(() => window.workerStarts), 1);

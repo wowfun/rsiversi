@@ -1,3 +1,4 @@
+import {closeDetails} from "./controls.mjs";
 import './paired-env.mjs';
 import assert from "node:assert/strict";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
@@ -93,7 +94,7 @@ try {
   await writeFile(join(report,"after-reload.json"),JSON.stringify(await page.evaluate(session=>window.savedRecord(session),fresh),null,2));
   await pane(page).getByRole("button",{name:"Preview image",exact:true}).click();
   await page.waitForFunction(()=>document.querySelector(".image-preview")?.naturalWidth===18);
-  await page.getByRole("button",{name:"Close details",exact:true}).click();
+  await closeDetails(page);
   const other = await context.newPage(); await connect(other); await restore(other,fresh);
   await other.waitForFunction(()=>document.querySelector('[aria-label="Main conversation"] textarea')?.value==="Saved before the first message");
   await input(page).fill("Saved in the first tab"); await waitText(page,fresh,"Saved in the first tab");
