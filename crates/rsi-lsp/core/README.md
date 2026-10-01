@@ -73,7 +73,8 @@ native Agent caller; arguments cannot replace them.
 
 The product [language UI adapter](../../rsi/lsp-ui/README.md) owns presentation.
 
-Deterministic fake-server tests are keyless. Their independent provider fixtures
+Deterministic fake-server tests are keyless. In-memory shutdown-grace checks use
+a paused Tokio clock; native process and pipe checks retain real time. Their independent provider fixtures
 share the process-wide Files job limit and bound fixture concurrency to that limit;
 protocol-pressure tests still exercise real concurrent pipe progress. Real acceptance uses the repository's
 pinned Rust 1.97.0 rust-analyzer component, with a private Cargo project and build
