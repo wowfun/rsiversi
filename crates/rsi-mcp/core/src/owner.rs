@@ -149,7 +149,14 @@ impl McpOwner {
             .map_err(|_| McpError::Disabled)?;
         let snapshot = self.settings.get().map_err(|_| McpError::Protocol)?;
         let config = self.merged(&snapshot.value, &remote)?;
+        let unchanged = !self.remote_pending.load(Ordering::Acquire)
+            && *self.remote.lock().expect("MCP SSH configuration") == remote
+            && self.applied.lock().expect("MCP settings poisoned").as_ref()
+                == Some(&snapshot.value);
         let retirement = self.service.begin_configuration(config)?;
+        if unchanged {
+            return McpService::settle_configuration(retirement).await;
+        }
         self.remote_pending.store(true, Ordering::Release);
         *self.remote.lock().expect("MCP SSH configuration") = remote;
         McpService::settle_configuration(retirement).await?;
