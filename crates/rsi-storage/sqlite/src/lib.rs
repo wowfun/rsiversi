@@ -7,9 +7,9 @@
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_storage::{
-    BackendLease, KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_RECORDS,
-    MAXIMUM_STORAGE_VALUE_BYTES, StorageError, StorageHubContract, StoredDomain,
-    validate_identifier, validate_value,
+    BackendLease, BackendOperations, KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES,
+    MAXIMUM_STORAGE_RECORDS, MAXIMUM_STORAGE_VALUE_BYTES, StorageError, StorageHubContract,
+    StoredDomain, create_private_directories, encode_value, validate_identifier, validate_value,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const DOMAINS_TABLE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rsi_storage_domains (
@@ -75,7 +74,7 @@ impl SqliteStorageConfig {
 #[derive(Debug)]
 struct SqliteBackend {
     connection: Arc<Mutex<Connection>>,
-    operation: AsyncMutex<()>,
+    operation: Arc<BackendOperations>,
 }
 
 impl SqliteBackend {
@@ -109,111 +108,170 @@ impl SqliteBackend {
         set_sqlite_sidecar_permissions(&path)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            operation: AsyncMutex::new(()),
+            operation: Arc::new(BackendOperations::default()),
         })
     }
 }
 
+impl SqliteBackend {
+    async fn transaction<F>(&self, body: F) -> Result<(), StorageError>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<(), StorageError> + Send + 'static,
+    {
+        let connection = Arc::clone(&self.connection);
+        self.operation
+            .run(move || {
+                let mut connection = connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let transaction = connection
+                    .transaction()
+                    .map_err(|error| sqlite_io(&error))?;
+                finish_transaction(transaction, body)
+            })
+            .await
+    }
+}
+
+fn finish_transaction(
+    transaction: Transaction<'_>,
+    body: impl FnOnce(&Transaction<'_>) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let failure = match body(&transaction) {
+        // Retain the transaction: consuming commit() hides rollback errors in Drop.
+        Ok(()) => match transaction.execute_batch("COMMIT") {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let rejected = matches!(
+                    error.sqlite_error_code(),
+                    Some(
+                        rusqlite::ErrorCode::DatabaseBusy
+                            | rusqlite::ErrorCode::ConstraintViolation
+                    )
+                ) && !transaction.is_autocommit();
+                // A WAL callback can return these same codes after commit has completed.
+                if !rejected {
+                    return Err(StorageError::OutcomeUnknown(format!(
+                        "SQLite commit: {error}"
+                    )));
+                }
+                StorageError::Io(format!("SQLite commit rejected: {error}"))
+            }
+        },
+        Err(error) => error,
+    };
+    transaction.finish().map_err(|rollback| {
+        StorageError::OutcomeUnknown(format!("{failure}; SQLite rollback: {rollback}"))
+    })?;
+    Err(failure)
+}
+
 #[async_trait]
 impl KvBackend for SqliteBackend {
+    fn ensure_available(&self) -> Result<(), StorageError> {
+        self.operation.ensure_available()
+    }
+
     async fn load(&self, domain: &str) -> Result<Option<StoredDomain>, StorageError> {
+        self.ensure_available()?;
         validate_identifier("domain", domain)?;
-        let _operation = self.operation.lock().await;
         let connection = Arc::clone(&self.connection);
         let domain = domain.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let connection = connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let stored_header = connection
-                .query_row(
-                    "SELECT version, record_count FROM rsi_storage_domains WHERE domain = ?1",
-                    [&domain],
-                    |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()
-                .map_err(|error| sqlite_io(&error))?;
-            let Some((version, stored_record_count)) = stored_header else {
-                return Ok(None);
-            };
-            let stored_record_count = usize::try_from(stored_record_count).map_err(|_| {
-                StorageError::Corrupt(format!(
-                    "domain `{domain}` has an invalid backend record count"
-                ))
-            })?;
-            if stored_record_count > MAXIMUM_STORAGE_RECORDS {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{domain}` exceeds the backend record bound"
-                )));
-            }
-            let mut retained_bytes = serde_json::to_vec(&StoredDomain {
-                version,
-                records: BTreeMap::new(),
-            })
-            .map_err(|error| StorageError::Corrupt(error.to_string()))?
-            .len();
-            let mut statement = connection
-                .prepare(
-                    "SELECT key, length(value), value
-                     FROM rsi_storage_records WHERE domain = ?1 ORDER BY key",
-                )
-                .map_err(|error| sqlite_io(&error))?;
-            let mut rows = statement
-                .query([&domain])
-                .map_err(|error| sqlite_io(&error))?;
-            let mut records = BTreeMap::new();
-            while let Some(row) = rows.next().map_err(|error| sqlite_io(&error))? {
-                if records.len() == MAXIMUM_STORAGE_RECORDS {
+        self.operation
+            .run(move || {
+                let connection = connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let stored_header = connection
+                    .query_row(
+                        "SELECT version, record_count FROM rsi_storage_domains WHERE domain = ?1",
+                        [&domain],
+                        |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| sqlite_io(&error))?;
+                let Some((version, stored_record_count)) = stored_header else {
+                    return Ok(None);
+                };
+                let stored_record_count = usize::try_from(stored_record_count).map_err(|_| {
+                    StorageError::Corrupt(format!(
+                        "domain `{domain}` has an invalid backend record count"
+                    ))
+                })?;
+                if stored_record_count > MAXIMUM_STORAGE_RECORDS {
                     return Err(StorageError::Corrupt(format!(
                         "domain `{domain}` exceeds the backend record bound"
                     )));
                 }
-                let key = row.get::<_, String>(0).map_err(|error| sqlite_io(&error))?;
-                let encoded_len = row.get::<_, i64>(1).map_err(|error| sqlite_io(&error))?;
-                if encoded_len < 0
-                    || usize::try_from(encoded_len)
-                        .map_or(true, |length| length > MAXIMUM_STORAGE_VALUE_BYTES)
-                {
+                let mut retained_bytes = serde_json::to_vec(&StoredDomain {
+                    version,
+                    records: BTreeMap::new(),
+                })
+                .map_err(|error| StorageError::Corrupt(error.to_string()))?
+                .len();
+                let mut statement = connection
+                    .prepare(
+                        "SELECT key, length(value), value
+                     FROM rsi_storage_records WHERE domain = ?1 ORDER BY key",
+                    )
+                    .map_err(|error| sqlite_io(&error))?;
+                let mut rows = statement
+                    .query([&domain])
+                    .map_err(|error| sqlite_io(&error))?;
+                let mut records = BTreeMap::new();
+                while let Some(row) = rows.next().map_err(|error| sqlite_io(&error))? {
+                    if records.len() == MAXIMUM_STORAGE_RECORDS {
+                        return Err(StorageError::Corrupt(format!(
+                            "domain `{domain}` exceeds the backend record bound"
+                        )));
+                    }
+                    let key = row.get::<_, String>(0).map_err(|error| sqlite_io(&error))?;
+                    let encoded_len = row.get::<_, i64>(1).map_err(|error| sqlite_io(&error))?;
+                    if encoded_len < 0
+                        || usize::try_from(encoded_len)
+                            .map_or(true, |length| length > MAXIMUM_STORAGE_VALUE_BYTES)
+                    {
+                        return Err(StorageError::Corrupt(format!(
+                            "domain `{domain}` contains an oversized stored value"
+                        )));
+                    }
+                    validate_identifier("record key", &key)
+                        .map_err(|_| StorageError::Corrupt("invalid record key".into()))?;
+                    let encoded_len = usize::try_from(encoded_len).map_err(|_| {
+                        StorageError::Corrupt(format!(
+                            "domain `{domain}` contains an invalid stored value length"
+                        ))
+                    })?;
+                    let entry_bytes = key
+                        .len()
+                        .checked_add(encoded_len)
+                        .and_then(|length| {
+                            length.checked_add(if records.is_empty() { 3 } else { 4 })
+                        })
+                        .ok_or_else(|| domain_byte_bound(&domain))?;
+                    retained_bytes = retained_bytes
+                        .checked_add(entry_bytes)
+                        .ok_or_else(|| domain_byte_bound(&domain))?;
+                    if retained_bytes > MAXIMUM_STORAGE_DOMAIN_BYTES {
+                        return Err(domain_byte_bound(&domain));
+                    }
+                    let bytes = row
+                        .get::<_, Vec<u8>>(2)
+                        .map_err(|error| sqlite_io(&error))?;
+                    let value = serde_json::from_slice(&bytes)
+                        .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+                    validate_value(&value)
+                        .map_err(|_| StorageError::Corrupt("invalid stored value".into()))?;
+                    records.insert(key, value);
+                }
+                if records.len() != stored_record_count {
                     return Err(StorageError::Corrupt(format!(
-                        "domain `{domain}` contains an oversized stored value"
+                        "domain `{domain}` has inconsistent record-count metadata"
                     )));
                 }
-                validate_identifier("record key", &key)
-                    .map_err(|_| StorageError::Corrupt("invalid record key".into()))?;
-                let encoded_len = usize::try_from(encoded_len).map_err(|_| {
-                    StorageError::Corrupt(format!(
-                        "domain `{domain}` contains an invalid stored value length"
-                    ))
-                })?;
-                let entry_bytes = key
-                    .len()
-                    .checked_add(encoded_len)
-                    .and_then(|length| length.checked_add(if records.is_empty() { 3 } else { 4 }))
-                    .ok_or_else(|| domain_byte_bound(&domain))?;
-                retained_bytes = retained_bytes
-                    .checked_add(entry_bytes)
-                    .ok_or_else(|| domain_byte_bound(&domain))?;
-                if retained_bytes > MAXIMUM_STORAGE_DOMAIN_BYTES {
-                    return Err(domain_byte_bound(&domain));
-                }
-                let bytes = row
-                    .get::<_, Vec<u8>>(2)
-                    .map_err(|error| sqlite_io(&error))?;
-                let value = serde_json::from_slice(&bytes)
-                    .map_err(|error| StorageError::Corrupt(error.to_string()))?;
-                validate_value(&value)
-                    .map_err(|_| StorageError::Corrupt("invalid stored value".into()))?;
-                records.insert(key, value);
-            }
-            if records.len() != stored_record_count {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{domain}` has inconsistent record-count metadata"
-                )));
-            }
-            Ok(Some(StoredDomain { version, records }))
-        })
-        .await
-        .map_err(|error| join_error(&error))?
+                Ok(Some(StoredDomain { version, records }))
+            })
+            .await
     }
 
     async fn put(
@@ -223,23 +281,19 @@ impl KvBackend for SqliteBackend {
         key: &str,
         value: &Value,
     ) -> Result<(), StorageError> {
+        self.ensure_available()?;
         validate_identifier("domain", domain)?;
         validate_identifier("record key", key)?;
-        validate_value(value)?;
-        let bytes =
-            serde_json::to_vec(value).map_err(|error| StorageError::Io(error.to_string()))?;
-        let _operation = self.operation.lock().await;
-        let connection = Arc::clone(&self.connection);
+        if version == 0 {
+            return Err(StorageError::InvalidInput(
+                "domain version must be nonzero".into(),
+            ));
+        }
+        let bytes = encode_value(value)?;
         let domain = domain.to_owned();
         let key = key.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut connection = connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let transaction = connection
-                .transaction()
-                .map_err(|error| sqlite_io(&error))?;
-            ensure_version(&transaction, &domain, version)?;
+        self.transaction(move |transaction| {
+            ensure_version(transaction, &domain, version)?;
             let (record_count, key_exists) = transaction
                 .query_row(
                     "SELECT record_count, EXISTS(
@@ -271,26 +325,23 @@ impl KvBackend for SqliteBackend {
                     params![domain, key, bytes],
                 )
                 .map_err(|error| sqlite_io(&error))?;
-            transaction.commit().map_err(|error| sqlite_io(&error))
+            Ok(())
         })
         .await
-        .map_err(|error| join_error(&error))?
     }
 
     async fn delete(&self, domain: &str, version: u32, key: &str) -> Result<(), StorageError> {
+        self.ensure_available()?;
         validate_identifier("domain", domain)?;
         validate_identifier("record key", key)?;
-        let _operation = self.operation.lock().await;
-        let connection = Arc::clone(&self.connection);
+        if version == 0 {
+            return Err(StorageError::InvalidInput(
+                "domain version must be nonzero".into(),
+            ));
+        }
         let domain = domain.to_owned();
         let key = key.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut connection = connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let transaction = connection
-                .transaction()
-                .map_err(|error| sqlite_io(&error))?;
+        self.transaction(move |transaction| {
             if transaction
                 .query_row(
                     "SELECT version FROM rsi_storage_domains WHERE domain = ?1",
@@ -311,10 +362,9 @@ impl KvBackend for SqliteBackend {
                     params![domain, key],
                 )
                 .map_err(|error| sqlite_io(&error))?;
-            transaction.commit().map_err(|error| sqlite_io(&error))
+            Ok(())
         })
         .await
-        .map_err(|error| join_error(&error))?
     }
 }
 
@@ -344,25 +394,22 @@ impl PluginFactory for SqliteStorageFactory {
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let backend: Arc<dyn KvBackend> = Arc::new(backend);
+        let backend = Arc::new(backend);
         let lease: BackendLease = plan
             .local::<StorageHubContract>()?
-            .register(&name, backend)
+            .register(&name, backend.clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let registration = backend.operation.retain_registration(lease);
         plan.defer(
             "withdraw SQLite storage backend",
             Box::new(move || {
                 Box::pin(async move {
-                    drop(lease);
+                    registration.close().await;
                     Ok(())
                 })
             }),
         )
     }
-}
-
-fn join_error(error: &tokio::task::JoinError) -> StorageError {
-    StorageError::Io(format!("storage blocking task failed: {error}"))
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
@@ -519,16 +566,6 @@ fn sqlite_io(error: &rusqlite::Error) -> StorageError {
 }
 
 #[cfg(unix)]
-fn create_private_directories(path: &std::path::Path) -> Result<(), StorageError> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(path)
-        .map_err(|error| StorageError::Io(error.to_string()))
-}
-
-#[cfg(unix)]
 fn ensure_private_database_file(path: &std::path::Path) -> Result<(), StorageError> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = std::fs::OpenOptions::new();
@@ -550,11 +587,6 @@ fn ensure_private_database_file(path: &std::path::Path) -> Result<(), StorageErr
 #[cfg(not(unix))]
 fn ensure_private_database_file(_path: &std::path::Path) -> Result<(), StorageError> {
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_private_directories(path: &std::path::Path) -> Result<(), StorageError> {
-    std::fs::create_dir_all(path).map_err(|error| StorageError::Io(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -634,6 +666,24 @@ mod tests {
 
     static BUSY_PROBE: StdMutex<Option<Arc<BusyProbe>>> = StdMutex::new(None);
 
+    fn deny_rollback(connection: &Connection) {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Transaction {
+                        operation: TransactionOperation::Rollback
+                    }
+                ) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .unwrap();
+    }
+
     fn gated_busy_handler(_attempt: i32) -> bool {
         let probe = BUSY_PROBE
             .lock()
@@ -653,6 +703,262 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         true
+    }
+
+    #[tokio::test]
+    async fn body_and_commit_rejection_preserve_admission_after_rollback() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        assert!(matches!(
+            backend
+                .transaction(|transaction| {
+                    ensure_version(transaction, "rolled-back", 1)?;
+                    Err(StorageError::Io("injected body failure".into()))
+                })
+                .await,
+            Err(StorageError::Io(_))
+        ));
+        assert!(backend.load("rolled-back").await.unwrap().is_none());
+        backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+        let result = backend.transaction(|transaction| {
+            transaction.execute_batch(
+                "PRAGMA defer_foreign_keys=ON;
+                 INSERT INTO rsi_storage_records(domain,key,value) VALUES ('absent','a',x'6e756c6c')"
+            ).map_err(|error| sqlite_io(&error))?;
+            Ok(())
+        }).await;
+        assert!(matches!(result, Err(StorageError::Io(_))), "{result:?}");
+        assert!(backend.connection.lock().unwrap().is_autocommit());
+        assert!(backend.load("absent").await.unwrap().is_none());
+        backend.put("kept", 1, "b", &Value::Null).await.unwrap();
+        backend.operation.close().await;
+        drop(backend);
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert!(reopened.load("absent").await.unwrap().is_none());
+        assert_eq!(
+            reopened.load("kept").await.unwrap().unwrap().records.len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_busy_rolls_back_before_the_connection_accepts_another_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+        {
+            let connection = backend.connection.lock().unwrap();
+            // A rollback-journal reader permits the write body but blocks COMMIT.
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE")
+                .unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+        }
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT * FROM rsi_storage_records;")
+            .unwrap();
+        let result = backend
+            .transaction(|transaction| {
+                ensure_version(transaction, "rejected", 1)?;
+                Ok(())
+            })
+            .await;
+        assert!(matches!(result, Err(StorageError::Io(_))), "{result:?}");
+        assert!(backend.connection.lock().unwrap().is_autocommit());
+        reader.execute_batch("ROLLBACK").unwrap();
+        assert!(backend.load("rejected").await.unwrap().is_none());
+        backend.put("kept", 1, "b", &Value::Null).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wal_error_after_commit_fences_even_when_its_code_resembles_rejection() {
+        use rusqlite::{ffi, hooks::Wal};
+        type Hook = fn(&Wal, i32) -> rusqlite::Result<()>;
+        let hooks: [Hook; 3] = [
+            |_, _| {
+                Err(rusqlite::Error::SqliteFailure(
+                    ffi::Error::new(ffi::SQLITE_IOERR_FSYNC),
+                    None,
+                ))
+            },
+            |_, _| {
+                Err(rusqlite::Error::SqliteFailure(
+                    ffi::Error::new(ffi::SQLITE_CONSTRAINT),
+                    None,
+                ))
+            },
+            |_, _| {
+                Err(rusqlite::Error::SqliteFailure(
+                    ffi::Error::new(ffi::SQLITE_BUSY),
+                    None,
+                ))
+            },
+        ];
+        for hook in hooks {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("state.sqlite3");
+            let backend = SqliteBackend::open(&path).unwrap();
+            backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+            backend.connection.lock().unwrap().wal_hook(Some(hook));
+            assert!(matches!(
+                backend
+                    .put("changed", 1, "visible", &Value::Bool(true))
+                    .await,
+                Err(StorageError::OutcomeUnknown(_))
+            ));
+            assert!(backend.connection.lock().unwrap().is_autocommit());
+            assert_eq!(
+                backend.load("kept").await,
+                Err(StorageError::RecoveryRequired)
+            );
+            assert_eq!(
+                backend.put("kept", 1, "b", &Value::Null).await,
+                Err(StorageError::RecoveryRequired)
+            );
+            backend.operation.close().await;
+            drop(backend);
+            let reopened = SqliteBackend::open(&path).unwrap();
+            assert_eq!(
+                reopened.load("changed").await.unwrap().unwrap().records["visible"],
+                Value::Bool(true)
+            );
+            assert_eq!(
+                reopened.load("kept").await.unwrap().unwrap().records.len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_panic_fences_before_any_poisoned_connection_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+        let result = backend
+            .transaction(|transaction| {
+                ensure_version(transaction, "uncommitted", 1)?;
+                panic!("injected transaction panic");
+            })
+            .await;
+        assert!(matches!(result, Err(StorageError::OutcomeUnknown(_))));
+        assert!(backend.connection.is_poisoned());
+        assert_eq!(
+            backend.load("kept").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        assert_eq!(
+            backend.put("uncommitted", 1, "b", &Value::Null).await,
+            Err(StorageError::RecoveryRequired)
+        );
+        backend.operation.close().await;
+        drop(backend);
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert!(reopened.load("uncommitted").await.unwrap().is_none());
+        assert!(
+            reopened
+                .load("kept")
+                .await
+                .unwrap()
+                .unwrap()
+                .records
+                .contains_key("a")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_rollback_fences_the_connection_and_reopen_recovers_durable_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+        deny_rollback(&backend.connection.lock().unwrap());
+        let result = backend
+            .transaction(|transaction| {
+                ensure_version(transaction, "uncommitted", 1)?;
+                Err(StorageError::Io("injected body failure".into()))
+            })
+            .await;
+        let Err(StorageError::OutcomeUnknown(message)) = result else {
+            panic!("rollback failure must be unknown: {result:?}");
+        };
+        assert!(message.contains("injected body failure") && message.contains("rollback"));
+        assert_eq!(
+            backend.load("kept").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        backend.operation.close().await;
+        drop(backend);
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert!(reopened.load("uncommitted").await.unwrap().is_none());
+        assert_eq!(
+            reopened.load("kept").await.unwrap().unwrap().records.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_commit_with_failed_rollback_still_fences_the_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        backend.put("kept", 1, "a", &Value::Null).await.unwrap();
+        deny_rollback(&backend.connection.lock().unwrap());
+        let result = backend.transaction(|transaction| {
+            ensure_version(transaction, "uncommitted", 1)?;
+            transaction.execute_batch(
+                "PRAGMA defer_foreign_keys=ON;
+                 INSERT INTO rsi_storage_records(domain,key,value) VALUES ('absent','a',x'6e756c6c')"
+            ).map_err(|error| sqlite_io(&error))
+        }).await;
+        let Err(StorageError::OutcomeUnknown(message)) = result else {
+            panic!("failed rollback must fence: {result:?}");
+        };
+        assert!(message.contains("commit rejected") && message.contains("rollback"));
+        assert_eq!(
+            backend.load("kept").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        backend.operation.close().await;
+        drop(backend);
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert!(reopened.load("uncommitted").await.unwrap().is_none());
+        assert!(reopened.load("absent").await.unwrap().is_none());
+        assert_eq!(
+            reopened.load("kept").await.unwrap().unwrap().records.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_depth_survives_real_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let backend = SqliteBackend::open(&path).unwrap();
+        let mut value = Value::Null;
+        for depth in 1..rsi_storage::MAXIMUM_STORAGE_VALUE_DEPTH {
+            value = if depth % 2 == 0 {
+                serde_json::json!({"child":value})
+            } else {
+                Value::Array(vec![value])
+            };
+        }
+        backend.put("domain", 1, "a", &value).await.unwrap();
+        assert!(
+            backend
+                .put("domain", 1, "b", &Value::Array(vec![value.clone()]))
+                .await
+                .is_err()
+        );
+        backend.operation.close().await;
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert_eq!(
+            reopened.load("domain").await.unwrap().unwrap().records["a"],
+            value
+        );
     }
 
     #[tokio::test]

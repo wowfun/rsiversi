@@ -29,7 +29,7 @@ pub(super) fn register(
             let service = service.clone();
             async move {
                 Ok(Ok::<_, Never>(
-                    serde_json::json!({"allowed":service.allowed(&context.origin)}),
+                    serde_json::json!({"allowed":service.allowed(&context.origin)?}),
                 ))
             }
         }),

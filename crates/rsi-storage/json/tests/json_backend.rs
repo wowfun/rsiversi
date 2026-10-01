@@ -94,7 +94,7 @@ async fn committed_record_survives_backend_reactivation() {
         .await
         .unwrap();
     assert_eq!(
-        reopened.snapshot().await["record"],
+        reopened.snapshot().await.unwrap()["record"],
         json!({"path":"/tmp/a"})
     );
 

@@ -1,7 +1,7 @@
 use super::{
     Arc, BTreeMap, BoxFuture, Config, ConfigValue, Deserialize, Domain, DomainFacilityContract,
     DomainSpec, Execution, Mutex, PluginFactory, PreparedActivation, Result, Semaphore,
-    TaskTracker, activation, session_error,
+    TaskTracker, activation, session_error, storage_error,
 };
 use async_trait::async_trait;
 use rsi_acp_protocol::{
@@ -18,17 +18,90 @@ use rsi_navigation_api::{
     attention::{Entry, MarkRead, Operation, Page, Position, Status, Target},
     revision,
 };
-use rsi_session_protocol::{ActivityStatus, SessionContract, SessionService};
+use rsi_session_protocol::{ActivityStatus, SessionIngress, SessionIngressContract};
+use rsi_storage_domain::{RecordObjectSize, encoded_entry_bytes};
 use sha2::Digest as _;
 
+struct ReadingPosition {
+    position: Position,
+    encoded_bytes: usize,
+}
 struct State {
     closed: bool,
-    uncertain: bool,
-    positions: BTreeMap<String, Position>,
+    positions: BTreeMap<String, ReadingPosition>,
     recency: std::collections::VecDeque<String>,
+    size: RecordObjectSize,
+}
+impl State {
+    // Snapshot bounds, keys and Position values are validated before construction.
+    // Cached sizes stay paired with their values; a one-entry projection cannot
+    // overflow usize, and removal always names an existing entry.
+    fn from_positions(positions: BTreeMap<String, Position>) -> Self {
+        let mut size = RecordObjectSize::default();
+        let recency = positions.keys().cloned().collect();
+        let positions = positions
+            .into_iter()
+            .map(|(key, position)| {
+                let encoded_bytes = position_bytes(&key, &position);
+                size = size
+                    .with_entry(None, encoded_bytes)
+                    .expect("bounded positions");
+                (
+                    key,
+                    ReadingPosition {
+                        position,
+                        encoded_bytes,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            closed: false,
+            positions,
+            recency,
+            size,
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        let previous = self
+            .positions
+            .remove(key)
+            .expect("retained reading position");
+        self.size = self
+            .size
+            .without_entry(previous.encoded_bytes)
+            .expect("bounded positions");
+        self.recency.retain(|entry| entry != key);
+    }
+
+    fn put(&mut self, key: String, position: Position, encoded_bytes: usize) {
+        let previous = self.positions.insert(
+            key.clone(),
+            ReadingPosition {
+                position,
+                encoded_bytes,
+            },
+        );
+        self.size = self
+            .size
+            .with_entry(previous.map(|record| record.encoded_bytes), encoded_bytes)
+            .expect("bounded positions");
+        self.recency.retain(|entry| entry != &key);
+        self.recency.push_back(key);
+    }
+}
+fn position_bytes(key: &str, position: &Position) -> usize {
+    encoded_entry_bytes(
+        key,
+        serde_json::to_vec(position)
+            .expect("typed reading position")
+            .len(),
+    )
+    .expect("bounded reading position")
 }
 struct Attention {
-    session: Arc<dyn SessionService>,
+    session: Arc<dyn SessionIngress>,
     external: Arc<dyn ExternalConversations>,
     epoch: HostEpoch,
     domain: Arc<dyn Domain>,
@@ -52,12 +125,10 @@ impl Attention {
         self: &Arc<Self>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
     ) -> Result<BoxFuture<'static, Result<T>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
         let state = self.state.lock().expect("attention admission");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
         }
         let permit = self
             .slots
@@ -74,8 +145,14 @@ impl Attention {
             task.await.map_err(|_| ApiError::OutcomeUnknown)?
         }))
     }
-    async fn candidates(&self) -> Result<Page> {
-        let native = self.session.activity().await.map_err(session_error)?;
+    async fn candidates(&self, origin: &CallOrigin) -> Result<Page> {
+        self.domain.ensure_available().map_err(storage_error)?;
+        let native = self
+            .session
+            .scoped(origin.clone())
+            .activity()
+            .await
+            .map_err(session_error)?;
         let external = self
             .external
             .residents()
@@ -142,9 +219,6 @@ impl Attention {
                 targets,
             });
         }
-        entries.sort_by(|a, b| {
-            (&a.status, &a.position.conversation).cmp(&(&b.status, &b.position.conversation))
-        });
         Ok(Page {
             host_epoch: self.epoch.clone(),
             entries,
@@ -152,22 +226,27 @@ impl Attention {
         })
     }
     async fn read(&self, origin: &CallOrigin) -> Result<Page> {
-        let mut page = self.candidates().await?;
+        let mut page = self.candidates(origin).await?;
+        page.entries.sort_by(|a, b| {
+            (&a.status, &a.position.conversation).cmp(&(&b.status, &b.position.conversation))
+        });
+        let keys: Vec<_> = page
+            .entries
+            .iter()
+            .map(|row| key(origin, &row.position.conversation))
+            .collect();
+        let mut keys = keys.iter();
         let state = self.state.lock().expect("attention reading positions");
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
-        }
+        self.domain.ensure_available().map_err(storage_error)?;
         page.entries.retain(|row| {
+            let key = keys.next().expect("one key per candidate");
             row.status != Status::Unread
                 || (row.position.sequence != "0"
-                    && state
-                        .positions
-                        .get(&key(origin, &row.position.conversation))
-                        .is_none_or(|read| {
-                            read.epoch != row.position.epoch
-                                || revision(&read.sequence).unwrap_or(0)
-                                    < revision(&row.position.sequence).unwrap_or(0)
-                        }))
+                    && state.positions.get(key).is_none_or(|read| {
+                        read.position.epoch != row.position.epoch
+                            || revision(&read.position.sequence).unwrap_or(0)
+                                < revision(&row.position.sequence).unwrap_or(0)
+                    }))
         });
         drop(state);
         let mut bytes = 1024;
@@ -189,7 +268,8 @@ impl Attention {
         if request.host_epoch != self.epoch {
             return Err(ApiError::Invalid("attention Host changed".into()));
         }
-        let page = self.candidates().await?;
+        let page = self.candidates(&origin).await?;
+        self.domain.ensure_available().map_err(storage_error)?;
         let current = page
             .entries
             .iter()
@@ -204,73 +284,56 @@ impl Attention {
         }
         let key = key(&origin, &request.position.conversation);
         let mut position = request.position;
+        {
+            let state = self.state.lock().expect("attention reading positions");
+            self.domain.ensure_available().map_err(storage_error)?;
+            if let Some(previous) = state.positions.get(&key)
+                && previous.position.epoch == position.epoch
+                && revision(&previous.position.sequence)? > revision(&position.sequence)?
+            {
+                position.sequence.clone_from(&previous.position.sequence);
+            }
+        }
+        // The writer permit keeps these cached sizes stable through durable publication.
+        let encoded_bytes = position_bytes(&key, &position);
         let evicted = {
             let state = self.state.lock().expect("attention reading positions");
-            if let Some(previous) = state.positions.get(&key)
-                && previous.epoch == position.epoch
-                && revision(&previous.sequence)? > revision(&position.sequence)?
-            {
-                position.sequence.clone_from(&previous.sequence);
-            }
-            let value = serde_json::to_value(&position).expect("typed reading position");
             let mut projected = state
-                .positions
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        serde_json::to_value(value).expect("typed reading position"),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-            projected.insert(key.clone(), value);
+                .size
+                .with_entry(
+                    state.positions.get(&key).map(|record| record.encoded_bytes),
+                    encoded_bytes,
+                )
+                .expect("bounded positions");
             let mut evicted = Vec::new();
             let mut candidates = state.recency.iter().filter(|candidate| *candidate != &key);
-            while projected.len() > 4096
-                || serde_json::to_vec(&projected)
-                    .expect("bounded reading positions")
-                    .len()
-                    > 1024 * 1024
+            let spec = self.domain.spec();
+            while projected.records() > spec.maximum_records
+                || projected.bytes() > spec.maximum_bytes
             {
                 let oldest = candidates.next().ok_or(ApiError::Capacity)?;
-                projected.remove(oldest);
+                projected = projected
+                    .without_entry(state.positions[oldest].encoded_bytes)
+                    .expect("bounded positions");
                 evicted.push(oldest.clone());
             }
             evicted
         };
         for oldest in &evicted {
-            if self.domain.delete(oldest).await.is_err() {
-                self.state
-                    .lock()
-                    .expect("attention reading positions")
-                    .uncertain = true;
-                return Err(ApiError::OutcomeUnknown);
-            }
+            self.domain.delete(oldest).await.map_err(storage_error)?;
+            // Each acknowledged eviction is already durable even if the next write fails.
+            let mut state = self.state.lock().expect("attention reading positions");
+            state.remove(oldest);
         }
-        if self
-            .domain
+        self.domain
             .put(
                 &key,
                 serde_json::to_value(&position).expect("typed reading position"),
             )
             .await
-            .is_err()
-        {
-            self.state
-                .lock()
-                .expect("attention reading positions")
-                .uncertain = true;
-            return Err(ApiError::OutcomeUnknown);
-        }
+            .map_err(storage_error)?;
         let mut state = self.state.lock().expect("attention reading positions");
-        for oldest in &evicted {
-            state.positions.remove(oldest);
-        }
-        state
-            .recency
-            .retain(|entry| entry != &key && !evicted.contains(entry));
-        state.recency.push_back(key.clone());
-        state.positions.insert(key, position.clone());
+        state.put(key, position.clone(), encoded_bytes);
         Ok(position)
     }
     async fn close(&self) {
@@ -305,7 +368,7 @@ impl PluginFactory for AttentionFactory {
         }
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<DomainFacilityContract>()
-            .requiring_local::<SessionContract>()
+            .requiring_local::<SessionIngressContract>()
             .requiring_local::<ExternalConversationsContract>()
             .requiring_local::<ConnectionDescriptionContract>()
             .requiring_local::<ApiRegistrarContract>())
@@ -325,7 +388,7 @@ impl PluginFactory for AttentionFactory {
             .await
             .map_err(activation)?;
         let mut positions = BTreeMap::new();
-        for (key, value) in domain.snapshot().await {
+        for (key, value) in domain.snapshot().await.map_err(activation)? {
             if key.len() != 64
                 || !key
                     .bytes()
@@ -338,19 +401,14 @@ impl PluginFactory for AttentionFactory {
             positions.insert(key, position);
         }
         let owner = Arc::new(Attention {
-            session: plan.local::<SessionContract>()?,
+            session: plan.local::<SessionIngressContract>()?,
             external: plan.local::<ExternalConversationsContract>()?,
             epoch: plan
                 .local::<ConnectionDescriptionContract>()?
                 .host_epoch
                 .clone(),
             domain,
-            state: Mutex::new(State {
-                closed: false,
-                uncertain: false,
-                recency: positions.keys().cloned().collect(),
-                positions,
-            }),
+            state: Mutex::new(State::from_positions(positions)),
             execution: plan.context().runtime().execution().clone(),
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(2)),

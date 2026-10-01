@@ -67,7 +67,7 @@ async fn sqlite_round_trip_and_version_mismatch_are_visible_at_domain_seam() {
         .await
         .unwrap();
     domain.put("a", json!([1, 2, 3])).await.unwrap();
-    assert_eq!(domain.snapshot().await["a"], json!([1, 2, 3]));
+    assert_eq!(domain.snapshot().await.unwrap()["a"], json!([1, 2, 3]));
 
     #[cfg(unix)]
     {

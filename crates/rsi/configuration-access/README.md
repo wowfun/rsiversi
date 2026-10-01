@@ -63,3 +63,6 @@ Directory listing and creation hold the same admission lease through their actua
 filesystem worker, including after a caller timeout. This stronger grant is needed
 for Host-wide path discovery; registering an already known workspace remains a
 separate operation. Revocation waits for admitted filesystem syscalls to return.
+
+The status query propagates storage failure instead of reporting an absent grant.
+Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).

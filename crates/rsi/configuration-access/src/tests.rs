@@ -14,6 +14,7 @@ struct TestDomain {
     spec: DomainSpec,
     values: Mutex<BTreeMap<String, Value>>,
     fail: AtomicBool,
+    fenced: AtomicBool,
     entered: Semaphore,
     release: Semaphore,
     pause: AtomicBool,
@@ -30,6 +31,7 @@ impl TestDomain {
             },
             values: Mutex::default(),
             fail: AtomicBool::new(false),
+            fenced: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
             pause: AtomicBool::new(false),
@@ -38,11 +40,21 @@ impl TestDomain {
 }
 #[async_trait]
 impl Domain for TestDomain {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        if self.fenced.load(Ordering::Acquire) {
+            Err(StorageError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
     fn spec(&self) -> &DomainSpec {
         &self.spec
     }
-    async fn snapshot(&self) -> BTreeMap<String, Value> {
-        self.values.lock().unwrap().clone()
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<BTreeMap<String, Value>, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        Ok(self.values.lock().unwrap().clone())
     }
     async fn put(&self, key: &str, value: Value) -> std::result::Result<(), StorageError> {
         if self.pause.load(Ordering::SeqCst) {
@@ -135,7 +147,7 @@ async fn revocation_fences_admission_drains_existing_leases_and_survives_restart
         .unwrap();
     // Yield through the actual owner task until its gate has closed, without timing assumptions.
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while owner.allowed(&origin) {
+        while owner.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
         }
     })
@@ -161,7 +173,7 @@ async fn revocation_fences_admission_drains_existing_leases_and_survives_restart
     )
     .await
     .unwrap();
-    assert!(!reopened.allowed(&origin));
+    assert!(!reopened.allowed(&origin).unwrap());
     assert_eq!(reopened.snapshot().await.unwrap().revision, "2");
     reopened.close().await;
     devices.close().await;
@@ -182,7 +194,7 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
         .unwrap();
     domain.entered.acquire().await.unwrap().forget();
     drop(waiter);
-    assert!(!owner.allowed(&origin));
+    assert!(!owner.allowed(&origin).unwrap());
     assert!(matches!(
         owner.set_grant(&CallOrigin::Local, registered.record.id.clone(), "0", true),
         Err(ApiError::Capacity)
@@ -190,7 +202,7 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
     domain.pause.store(false, Ordering::SeqCst);
     domain.release.add_permits(1);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !owner.allowed(&origin) {
+        while !owner.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
         }
     })
@@ -202,9 +214,9 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
             .set_grant(&CallOrigin::Local, registered.record.id.clone(), "1", false)
             .unwrap()
             .await,
-        Err(ApiError::OutcomeUnknown)
+        Err(ApiError::Unavailable)
     ));
-    assert!(!owner.allowed(&origin));
+    assert!(!owner.allowed(&origin).unwrap());
     assert_eq!(
         owner.snapshot().await.unwrap().devices,
         vec![registered.record.id.clone()]
@@ -215,7 +227,7 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
         .unwrap()
         .await
         .unwrap();
-    assert!(owner.allowed(&origin));
+    assert!(owner.allowed(&origin).unwrap());
     let leases = (0..8)
         .map(|_| owner.admit(&origin).unwrap())
         .collect::<Vec<_>>();
@@ -362,7 +374,7 @@ async fn device_authentication_revocation_fences_old_origins_but_retains_admitte
         .unwrap();
     let admitted = owner.admit(&origin).unwrap();
     devices.revoke(&registered.record.id).await.unwrap();
-    assert!(!owner.allowed(&origin));
+    assert!(!owner.allowed(&origin).unwrap());
     assert!(matches!(owner.admit(&origin), Err(ApiError::Unauthorized)));
     assert!(devices.authenticate(&registered.token).is_err());
     let closing = owner.close();
@@ -393,7 +405,7 @@ async fn grant_capacity_rejects_the_sixty_fifth_device_without_changing_durable_
             .await
             .unwrap();
     }
-    let before = domain.snapshot().await;
+    let before = domain.snapshot().await.unwrap();
     let retired = devices.list().unwrap()[0].id.clone();
     devices.revoke(&retired).await.unwrap();
     let registered = devices.register("overflow").await.unwrap();
@@ -404,7 +416,7 @@ async fn grant_capacity_rejects_the_sixty_fifth_device_without_changing_durable_
             .await,
         Err(ApiError::Capacity)
     ));
-    assert_eq!(domain.snapshot().await, before);
+    assert_eq!(domain.snapshot().await.unwrap(), before);
     assert_eq!(owner.snapshot().await.unwrap().devices.len(), 64);
     owner.close().await;
     // Reject the same oversized set at the durable-input boundary on restart.
@@ -515,7 +527,7 @@ async fn credential_write_survives_reply_loss_and_holds_the_revoke_fence() {
         .set_grant(&CallOrigin::Local, registered.record.id, "1", false)
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while owner.allowed(&origin) {
+        while owner.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
         }
     })
@@ -544,9 +556,14 @@ struct BlockingPlugins {
 impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
     async fn plugins(
         &self,
+        origin: rsi_api_protocol::CallOrigin,
         request: rsi_configuration_api::PluginStatusRequest,
     ) -> Result<rsi_configuration_api::PluginStatusPage> {
         use rsi_configuration_api::{PluginHealth, PluginStatusPage, PluginWatcher};
+        assert!(
+            matches!(origin, CallOrigin::Device(_)),
+            "plugin observations borrowed Local authority"
+        );
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         let (lock, changed) = &self.release;
@@ -627,7 +644,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
         .set_grant(&CallOrigin::Local, registered.record.id, "1", false)
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while owner.allowed(&origin) {
+        while owner.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
         }
     })
@@ -655,6 +672,52 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
     ));
     assert_eq!(source.reads.load(Ordering::SeqCst), 1);
     registration.close().await;
+    owner.close().await;
+    devices.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn backend_failure_in_another_domain_closes_cached_grant_admission() {
+    let runtime = settings().await;
+    let devices = devices().await;
+    let domain = TestDomain::new("rsi.configuration.grants");
+    let owner = owner(domain.clone(), devices.clone(), &runtime).await;
+    assert!(owner.allowed(&CallOrigin::Local).unwrap());
+    let registrar = runtime
+        .root()
+        .lookup_local::<ApiRegistrarContract>()
+        .unwrap();
+    let registrations = endpoint::register(registrar.as_ref(), owner.clone()).unwrap();
+    domain.fenced.store(true, Ordering::Release);
+    let dispatch = runtime
+        .root()
+        .lookup_local::<ApiDispatchContract>()
+        .unwrap();
+    let spec = rsi_configuration_api::ConfigurationOperation::Status.spec();
+    let input = ByteBudget::default()
+        .encode(&json!({}), spec.maximum_request_bytes)
+        .unwrap();
+    assert!(matches!(
+        dispatch
+            .admit(&spec.id, CallOrigin::Local)
+            .unwrap()
+            .invoke(input)
+            .await,
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(
+        owner.allowed(&CallOrigin::Local),
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(
+        owner.admit(&CallOrigin::Local),
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(owner.snapshot().await, Err(ApiError::Unavailable)));
+    for registration in registrations {
+        registration.close().await;
+    }
     owner.close().await;
     devices.close().await;
     assert!(runtime.shutdown().await.is_clean());

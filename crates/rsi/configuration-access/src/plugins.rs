@@ -18,9 +18,8 @@ pub fn register_plugin_status(
                 request.validate()?;
                 let _lease = owner.admit(&context.origin)?;
                 let page = source
-                    .plugins(request.clone())
-                    .await
-                    .map_err(|_| ApiError::Unavailable)?;
+                    .plugins(context.origin.clone(), request.clone())
+                    .await?;
                 page.validate(&request).map_err(|_| ApiError::Unavailable)?;
                 Ok(Ok::<_, Never>(page))
             }

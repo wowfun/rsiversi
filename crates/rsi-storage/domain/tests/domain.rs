@@ -22,6 +22,9 @@ struct CommitThenPauseBackend {
 
 #[async_trait]
 impl KvBackend for CommitThenPauseBackend {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        Ok(())
+    }
     async fn load(&self, _domain: &str) -> StorageResult<Option<StoredDomain>> {
         Ok(self.state.lock().unwrap().clone())
     }
@@ -60,6 +63,9 @@ impl KvBackend for CommitThenPauseBackend {
 
 #[async_trait]
 impl KvBackend for Backend {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        Ok(())
+    }
     async fn load(&self, _domain: &str) -> StorageResult<Option<StoredDomain>> {
         Ok(self.state.lock().unwrap().clone())
     }
@@ -148,7 +154,7 @@ async fn failed_backend_write_never_changes_published_snapshot() {
     *backend.reject_writes.lock().unwrap() = true;
     assert!(domain.put("two", json!({"value": 2})).await.is_err());
     assert_eq!(
-        domain.snapshot().await,
+        domain.snapshot().await.unwrap(),
         BTreeMap::from([("one".into(), json!({"value": 1}))])
     );
     *backend.reject_writes.lock().unwrap() = false;
@@ -224,7 +230,7 @@ async fn cancelling_a_caller_after_backend_commit_cannot_split_the_domain_snapsh
 
     tokio::time::timeout(std::time::Duration::from_millis(250), async {
         loop {
-            if domain.snapshot().await.contains_key("one") {
+            if domain.snapshot().await.unwrap().contains_key("one") {
                 break;
             }
             tokio::task::yield_now().await;

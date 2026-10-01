@@ -1,5 +1,9 @@
 # rsi-managed-providers
 
+Reading complete desired provider configurations requires the same configuration
+grant as editing them. The public owner and API both retain the actual caller;
+the Models catalog remains the separately readable inference-route projection.
+
 Model discovery holds the configuration grant and a separate two-request
 admission limit. It checks the caller's configuration authority before validating
 endpoint semantics. Each request freezes endpoint and credential reference,
@@ -30,11 +34,11 @@ Shutdown remains `ShuttingDown`; no discovery failure is retried automatically.
 Official-endpoint capacity metadata supplements only exact discovered model IDs;
 custom endpoints never inherit those facts by model name alone.
 
-The 1 MiB bound includes the Domain record envelope. If a backend write fails,
-the API reports an unknown outcome and the owner closes further write admission
-until Host restart reloads durable truth. Reads retain the last confirmed desired
-revision with an explicit uncertainty diagnostic; it is never used for another
-compare-and-replace while the commit outcome is unknown.
+The 1 MiB bound includes the Domain record envelope. Known pre-commit storage
+failures leave the desired revision unchanged and permit a later explicit edit.
+Unknown commit outcomes fence storage: reads and further edits fail until Host
+restart reloads durable truth. Storage failures use the shared
+[Domain API projection](../../rsi-storage/domain/README.md).
 
 This ordinary Host plugin owns form-managed AI deployment configuration. One
 `rsi.managed-providers` Storage document holds a desired revision and at most 64
@@ -67,3 +71,5 @@ the child Profile. Provider request lifetimes remain with the existing routers.
 User-Profile deployments are not generated or edited here. The Models catalog
 remains the authority for currently callable routes; a collision with a source-owned
 deployment fails ordinary Profile convergence and preserves its source ownership.
+
+Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).

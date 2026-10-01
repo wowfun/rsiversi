@@ -16,6 +16,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, LocalContract, MetaError, PluginFactory,
     PreparedActivation, UpdateMode,
 };
+use rsi_storage_domain::storage_error;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,7 +41,6 @@ struct State {
     applied: u64,
     applying: bool,
     diagnostic: Option<String>,
-    uncertain: bool,
     closed: bool,
 }
 
@@ -62,15 +62,22 @@ impl ManagedProviders {
     ///
     /// # Panics
     /// Panics if an earlier panic poisoned this owner's state lock.
-    pub fn snapshot(&self) -> ProvidersSnapshot {
+    pub fn snapshot(&self, origin: &CallOrigin) -> Result<ProvidersSnapshot> {
+        let _admission = self.access.admit(origin)?;
+        self.admitted_snapshot()
+    }
+    fn admitted_snapshot(&self) -> Result<ProvidersSnapshot> {
+        self.domain
+            .ensure_available()
+            .map_err(rsi_storage_domain::storage_error)?;
         let state = self.state.lock().expect("managed providers state poisoned");
-        ProvidersSnapshot {
+        Ok(ProvidersSnapshot {
             desired_revision: state.document.revision.to_string(),
             applied_revision: state.applied.to_string(),
             deployments: state.document.deployments.clone(),
             applying: state.applying,
             diagnostic: state.diagnostic.clone(),
-        }
+        })
     }
     /// Admits one exact replacement; the owner retains execution if its waiter is lost.
     ///
@@ -82,6 +89,9 @@ impl ManagedProviders {
         expected: &str,
         deployments: Vec<ManagedProvider>,
     ) -> Result<BoxFuture<'static, Result<ProvidersSnapshot>>> {
+        self.domain
+            .ensure_available()
+            .map_err(rsi_storage_domain::storage_error)?;
         let expected = expected
             .parse::<u64>()
             .ok()
@@ -91,9 +101,6 @@ impl ManagedProviders {
         let state = self.state.lock().expect("managed providers state poisoned");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
         }
         if state.document.revision != expected {
             return Err(ApiError::Invalid(
@@ -117,18 +124,24 @@ impl ManagedProviders {
         let task = self.execution.spawn(self.tasks.track_future(async move {
             let (_permit, _lease) = (permit, lease);
             let input = owner.preflight(&document).await?;
-            if owner.domain.put("desired", serde_json::to_value(&document).map_err(|_| ApiError::Invalid("invalid provider document".into()))?).await.is_err() {
-                let mut state = owner.state.lock().expect("managed providers state poisoned");
-                state.uncertain = true;
-                state.diagnostic = Some("Provider storage outcome is unknown. This is the last confirmed configuration; restart the Host to reload durable truth before editing.".into());
-                return Err(ApiError::OutcomeUnknown);
-            }
+            let value = serde_json::to_value(&document)
+                .map_err(|_| ApiError::Invalid("invalid provider document".into()))?;
+            owner
+                .domain
+                .put("desired", value)
+                .await
+                .map_err(storage_error)?;
             {
-                let mut state = owner.state.lock().expect("managed providers state poisoned");
-                state.document = document; state.applying = true; state.diagnostic = None;
+                let mut state = owner
+                    .state
+                    .lock()
+                    .expect("managed providers state poisoned");
+                state.document = document;
+                state.applying = true;
+                state.diagnostic = None;
             }
             owner.converge(input).await;
-            Ok(owner.snapshot())
+            owner.admitted_snapshot()
         }));
         drop(state);
         Ok(Box::pin(async move {
@@ -341,7 +354,7 @@ impl PluginFactory for ManagedProvidersFactory {
             })
             .await
             .map_err(activation)?;
-        let mut records = domain.snapshot().await;
+        let mut records = domain.snapshot().await.map_err(activation)?;
         if records.len() > 1 || records.keys().any(|key| key != "desired") {
             return Err(MetaError::Activation(
                 "invalid managed provider records".into(),
@@ -381,7 +394,6 @@ impl PluginFactory for ManagedProvidersFactory {
                 applied: 0,
                 applying: true,
                 diagnostic: None,
-                uncertain: false,
                 closed: false,
             }),
             writer: Arc::new(Semaphore::new(1)),

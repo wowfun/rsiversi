@@ -21,6 +21,7 @@ struct TestDomain {
     spec: DomainSpec,
     records: Mutex<BTreeMap<String, Value>>,
     fail: AtomicBool,
+    fenced: AtomicBool,
     block: AtomicBool,
     entered: Semaphore,
     release: Semaphore,
@@ -37,6 +38,7 @@ impl TestDomain {
             },
             records: Mutex::default(),
             fail: AtomicBool::new(false),
+            fenced: AtomicBool::new(false),
             block: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
@@ -45,11 +47,21 @@ impl TestDomain {
 }
 #[async_trait]
 impl Domain for TestDomain {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        if self.fenced.load(Ordering::Acquire) {
+            Err(StorageError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
     fn spec(&self) -> &DomainSpec {
         &self.spec
     }
-    async fn snapshot(&self) -> BTreeMap<String, Value> {
-        self.records.lock().unwrap().clone()
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<BTreeMap<String, Value>, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        Ok(self.records.lock().unwrap().clone())
     }
     async fn put(&self, key: &str, value: Value) -> std::result::Result<(), StorageError> {
         if self.block.load(Ordering::SeqCst) {
@@ -83,7 +95,7 @@ async fn stored_verifiers_survive_restart_without_plaintext_and_revoke_live_leas
     let registry = open(domain.clone()).await;
     let device = registry.register("browser").await.unwrap();
     assert!(!format!("{device:?}").contains(device.token.expose_secret()));
-    let stored = serde_json::to_string(&domain.snapshot().await).unwrap();
+    let stored = serde_json::to_string(&domain.snapshot().await.unwrap()).unwrap();
     assert!(!stored.contains(device.token.expose_secret()));
     let authenticated = registry.authenticate(&device.token).unwrap();
     assert_eq!(authenticated.id, device.record.id);
@@ -110,13 +122,13 @@ async fn failed_publication_preserves_valid_authentication_and_rejects_new_regis
     let registry = open(domain.clone()).await;
     let device = registry.register("retained").await.unwrap();
     let lease = registry.authenticate(&device.token).unwrap();
-    let snapshot = domain.snapshot().await;
+    let snapshot = domain.snapshot().await.unwrap();
     domain.fail.store(true, Ordering::SeqCst);
     assert!(registry.revoke(&device.record.id).await.is_err());
     assert!(registry.register("lost").await.is_err());
     assert!(!lease.revoked.is_cancelled());
     assert!(registry.authenticate(&device.token).is_ok());
-    assert_eq!(domain.snapshot().await, snapshot);
+    assert_eq!(domain.snapshot().await.unwrap(), snapshot);
     assert_eq!(registry.list().unwrap(), vec![device.record]);
     registry.close().await;
 }
@@ -202,7 +214,7 @@ async fn capacity_and_durable_validation_fail_closed_without_accepting_unknown_d
         Err(ApiError::Unauthorized)
     ));
     registry.close().await;
-    let correct = domain.snapshot().await;
+    let correct = domain.snapshot().await.unwrap();
     let original = &correct["deployment"];
     let mut duplicate = original.clone();
     duplicate["devices"][1] = duplicate["devices"][0].clone();
@@ -364,7 +376,7 @@ async fn managed_rotation_preserves_identity_and_failed_publication_preserves_au
         .unwrap();
     assert_eq!(third.record.id, first.record.id);
     assert!(
-        !serde_json::to_string(&domain.snapshot().await)
+        !serde_json::to_string(&domain.snapshot().await.unwrap())
             .unwrap()
             .contains(third.token.expose_secret())
     );
@@ -485,5 +497,31 @@ async fn managed_rotation_checks_observed_identity_without_revoking_on_conflict(
     assert_eq!(third.record.id, second.record.id);
     assert!(registry.authenticate(&second.token).is_err());
     assert!(registry.authenticate(&third.token).is_ok());
+    registry.close().await;
+}
+
+#[tokio::test]
+async fn backend_failure_in_another_domain_blocks_cached_authentication_and_administration() {
+    let domain = TestDomain::new();
+    let registry = open(domain.clone()).await;
+    let device = registry.register("fixture").await.unwrap();
+    domain.fenced.store(true, Ordering::Release);
+    assert!(matches!(
+        registry.authenticate(&device.token),
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(registry.list(), Err(ApiError::Unavailable)));
+    assert!(matches!(
+        registry.managed_device("slot"),
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(
+        registry.register("another").await,
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(
+        registry.revoke(&device.record.id).await,
+        Err(ApiError::Unavailable)
+    ));
     registry.close().await;
 }

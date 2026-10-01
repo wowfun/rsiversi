@@ -43,3 +43,5 @@ rotation compares the expected principal (or expected absence) under the same
 commit lock as publication. A changed slot fails before token replacement; readers
 and failed grants never revoke the existing credential. These operations are not
 registered on the remote device API.
+
+Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).

@@ -34,9 +34,9 @@ pub(super) fn register(
     let service = owner.clone();
     let read = registrar.register(
         ProvidersOperation::Read.spec(),
-        json_handler(move |_context, _: Empty| {
+        json_handler(move |context, _: Empty| {
             let service = service.clone();
-            async move { Ok(Ok::<_, Never>(service.snapshot())) }
+            async move { service.snapshot(&context.origin).map(Ok::<_, Never>) }
         }),
     )?;
     let replace = registrar.register(

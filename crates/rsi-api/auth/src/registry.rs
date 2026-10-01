@@ -6,6 +6,7 @@ use rsi_api_protocol::{
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::Execution;
 use rsi_storage_domain::Domain;
+use rsi_storage_domain::storage_error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -69,7 +70,7 @@ impl DeviceRegistry {
                 "device domain requires schema 1, one record and at most 64 KiB".into(),
             ));
         }
-        let mut snapshot = domain.snapshot().await;
+        let mut snapshot = domain.snapshot().await.map_err(storage_error)?;
         if snapshot.len() > 1 || snapshot.keys().any(|key| key != RECORD_KEY) {
             return Err(ApiError::Invalid(
                 "device domain contains unexpected records".into(),
@@ -132,6 +133,10 @@ impl DeviceAuthentication for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner
+            .domain
+            .ensure_available()
+            .map_err(storage_error)?;
         if state.retired {
             return Err(ApiError::ShuttingDown);
         }
@@ -167,6 +172,10 @@ impl DeviceAdministration for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner
+            .domain
+            .ensure_available()
+            .map_err(storage_error)?;
         if state.retired {
             return Err(ApiError::ShuttingDown);
         }
@@ -202,6 +211,10 @@ impl DeviceAdministration for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner
+            .domain
+            .ensure_available()
+            .map_err(storage_error)?;
         if state.retired {
             return Err(ApiError::ShuttingDown);
         }
@@ -221,6 +234,10 @@ enum Rotation {
 
 impl DeviceRegistry {
     async fn revoke_matching(&self, id: &DeviceId, token: Option<&SecretValue>) -> Result<bool> {
+        self.inner
+            .domain
+            .ensure_available()
+            .map_err(storage_error)?;
         let commit = self.inner.commit.clone().lock_owned().await;
         let mut durable = {
             let state = self
@@ -228,6 +245,10 @@ impl DeviceRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.inner
+                .domain
+                .ensure_available()
+                .map_err(storage_error)?;
             if state.retired {
                 return Err(ApiError::ShuttingDown);
             }
@@ -279,6 +300,10 @@ impl DeviceRegistry {
         rotation: Rotation,
     ) -> Result<RegisteredDevice> {
         DeviceRecord::validate_label(label)?;
+        self.inner
+            .domain
+            .ensure_available()
+            .map_err(storage_error)?;
         let commit = self.inner.commit.clone().lock_owned().await;
         let mut durable = {
             let state = self
@@ -286,6 +311,10 @@ impl DeviceRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.inner
+                .domain
+                .ensure_available()
+                .map_err(storage_error)?;
             if state.retired {
                 return Err(ApiError::ShuttingDown);
             }
@@ -430,8 +459,5 @@ fn validate_durable(durable: &Durable, endpoint: &EndpointId) -> Result<()> {
 async fn publish(domain: &Arc<dyn Domain>, durable: &Durable) -> Result<()> {
     let value = serde_json::to_value(durable)
         .map_err(|_| ApiError::Backend("device encoding failed".into()))?;
-    domain
-        .put(RECORD_KEY, value)
-        .await
-        .map_err(|_| ApiError::Backend("device publication failed".into()))
+    domain.put(RECORD_KEY, value).await.map_err(storage_error)
 }

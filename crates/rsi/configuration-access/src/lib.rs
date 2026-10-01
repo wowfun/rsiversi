@@ -17,6 +17,7 @@ use rsi_settings_api::{
     SettingsMutationLease, SettingsMutationPolicy, SettingsMutationPolicyContract,
 };
 use rsi_settings_protocol::{SettingsAccess, SettingsAccessContract};
+use rsi_storage_domain::storage_error;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -127,6 +128,7 @@ impl ConfigurationAccess {
     /// # Panics
     /// Panics if an earlier owner panic poisoned admission state.
     pub fn admit(&self, origin: &CallOrigin) -> Result<ConfigurationLease> {
+        self.domain.ensure_available().map_err(storage_error)?;
         let admission = self
             .admission
             .lock()
@@ -178,15 +180,16 @@ impl ConfigurationAccess {
     ///
     /// # Panics
     /// Panics if an earlier panic poisoned this owner's state lock.
-    pub fn allowed(&self, origin: &CallOrigin) -> bool {
+    pub fn allowed(&self, origin: &CallOrigin) -> Result<bool> {
+        self.domain.ensure_available().map_err(storage_error)?;
         let admission = self
             .admission
             .lock()
             .expect("configuration admission poisoned");
         if admission.closed {
-            return false;
+            return Ok(false);
         }
-        match origin {
+        Ok(match origin {
             CallOrigin::Local => true,
             CallOrigin::Device(device) => {
                 !device.revoked.is_cancelled()
@@ -194,7 +197,7 @@ impl ConfigurationAccess {
                         gate.state.lock().expect("configuration gate poisoned").0
                     })
             }
-        }
+        })
     }
 
     /// Reads the durable grant state; callers reconcile this after an uncertain write.
@@ -206,7 +209,7 @@ impl ConfigurationAccess {
         })
     }
     async fn document(&self) -> Result<Document> {
-        let mut records = self.domain.snapshot().await;
+        let mut records = self.domain.snapshot().await.map_err(storage_error)?;
         if records.len() > 1 || records.keys().any(|key| key != "grants") {
             return Err(ApiError::Backend(
                 "invalid configuration grant records".into(),
@@ -236,6 +239,7 @@ impl ConfigurationAccess {
         expected: &str,
         granted: bool,
     ) -> Result<BoxFuture<'static, Result<GrantSnapshot>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
         if !matches!(origin, CallOrigin::Local) {
             return Err(ApiError::Unauthorized);
         }
@@ -319,7 +323,7 @@ impl ConfigurationAccess {
                 })?,
             )
             .await
-            .map_err(|_| ApiError::OutcomeUnknown)?;
+            .map_err(storage_error)?;
         let mut admission = self
             .admission
             .lock()

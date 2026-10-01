@@ -6,16 +6,22 @@
 
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, LocalContract, PluginFactory, PreparedActivation};
+pub use rsi_storage::StorageError;
 use rsi_storage::{
-    KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_RECORDS, StorageError, StorageHub,
+    KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_RECORDS, StorageHub,
     StorageHubContract, validate_identifier, validate_value,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, OwnedMutexGuard};
+
+mod size;
+pub use size::{RecordObjectSize, encoded_entry_bytes};
 
 /// Immutable declaration for one domain.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -62,7 +68,9 @@ pub trait Domain: fmt::Debug + Send + Sync + 'static {
     /// Returns the immutable declaration used to open this domain.
     fn spec(&self) -> &DomainSpec;
     /// Returns the current committed record snapshot.
-    async fn snapshot(&self) -> BTreeMap<String, Value>;
+    async fn snapshot(&self) -> Result<BTreeMap<String, Value>, StorageError>;
+    /// Checks the health of the retained backend generation without I/O.
+    fn ensure_available(&self) -> Result<(), StorageError>;
     /// Durably publishes one complete JSON value.
     async fn put(&self, key: &str, value: Value) -> Result<(), StorageError>;
     /// Durably deletes one value and reports whether it existed.
@@ -88,216 +96,314 @@ impl LocalContract for DomainFacilityContract {
 #[derive(Debug)]
 struct Facility {
     hub: Arc<dyn StorageHub>,
-    domains: Mutex<HashMap<String, Weak<DomainState>>>,
+    registry: Arc<Registry>,
+}
+
+#[derive(Debug, Default)]
+struct Registry {
+    domains: Mutex<HashMap<String, Weak<Authority>>>,
 }
 
 #[derive(Debug)]
-struct DomainState {
+struct Authority {
     spec: DomainSpec,
+    loaded: OnceCell<LoadedDomain>,
+    registry: Weak<Registry>,
+    recovery_required: AtomicBool,
+}
+
+impl Drop for Authority {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut domains = registry
+                .domains
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if domains
+                .get(&self.spec.id)
+                .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+            {
+                domains.remove(&self.spec.id);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LoadedDomain {
     backend: Arc<dyn KvBackend>,
     records: Arc<AsyncMutex<DomainRecords>>,
 }
 
 #[derive(Debug)]
+struct DomainHandle {
+    authority: Arc<Authority>,
+}
+
+impl DomainHandle {
+    fn loaded(&self) -> &LoadedDomain {
+        self.authority
+            .loaded
+            .get()
+            .expect("initialized domain authority")
+    }
+
+    async fn commit<T: Send + 'static, W: Send + 'static>(
+        &self,
+        records: OwnedMutexGuard<DomainRecords>,
+        write: impl Future<Output = Result<W, StorageError>> + Send + 'static,
+        publish: impl FnOnce(&mut DomainRecords, W) -> T + Send + 'static,
+    ) -> Result<T, StorageError> {
+        // The guard exists before spawning, including if an unpolled task is dropped.
+        let commit = Commit {
+            authority: Arc::clone(&self.authority),
+            records,
+            finished: false,
+        };
+        tokio::spawn(async move {
+            let mut commit = commit;
+            match write.await {
+                Ok(written) => {
+                    let result = publish(&mut commit.records, written);
+                    commit.finished = true;
+                    Ok(result)
+                }
+                Err(error) => {
+                    commit.finished = !error.requires_recovery();
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            StorageError::OutcomeUnknown(format!("domain commit task failed: {error}"))
+        })?
+    }
+}
+
+struct Commit {
+    authority: Arc<Authority>,
+    records: OwnedMutexGuard<DomainRecords>,
+    finished: bool,
+}
+impl Drop for Commit {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Fence before the records guard releases queued readers and writers.
+            self.authority
+                .recovery_required
+                .store(true, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DomainRecords {
-    values: BTreeMap<String, Value>,
+    values: BTreeMap<String, Record>,
+    size: RecordObjectSize,
+}
+
+#[derive(Debug)]
+struct Record {
+    value: Value,
     encoded_bytes: usize,
+}
+
+impl DomainRecords {
+    fn from_values(values: BTreeMap<String, Value>) -> Result<Self, StorageError> {
+        let mut records = Self {
+            values: BTreeMap::new(),
+            size: RecordObjectSize::default(),
+        };
+        for (key, value) in values {
+            validate_identifier("record key", &key)?;
+            let encoded_bytes = encoded_entry_bytes(&key, validate_value(&value)?)?;
+            records.size = records.size.with_entry(None, encoded_bytes)?;
+            records.values.insert(
+                key,
+                Record {
+                    value,
+                    encoded_bytes,
+                },
+            );
+        }
+        Ok(records)
+    }
 }
 
 #[async_trait]
 impl DomainFacility for Facility {
     async fn open(&self, spec: DomainSpec) -> Result<Arc<dyn Domain>, StorageError> {
         spec.validate()?;
-        if let Some(existing) = self
-            .domains
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&spec.id)
-            .and_then(Weak::upgrade)
-        {
-            if existing.spec != spec {
-                return Err(StorageError::InvalidInput(format!(
-                    "domain `{}` is already open with a different specification",
-                    spec.id
-                )));
-            }
-            let domain: Arc<dyn Domain> = existing;
-            return Ok(domain);
-        }
-
-        let backend = self.hub.resolve(&spec.backend)?;
-        let loaded = backend.load(&spec.id).await?;
-        let records = if let Some(loaded) = loaded {
-            if loaded.version != spec.version {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{}` has version {}, expected {}",
-                    spec.id, loaded.version, spec.version
-                )));
-            }
-            if loaded.records.len() > spec.maximum_records {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{}` exceeds its record bound",
-                    spec.id
-                )));
-            }
-            for (key, value) in &loaded.records {
-                validate_identifier("record key", key)?;
-                validate_value(value)?;
-            }
-            let encoded_bytes = encoded_records_bytes(&loaded.records).map_err(|_| {
-                StorageError::Corrupt(format!(
-                    "domain `{}` has an invalid aggregate byte size",
-                    spec.id
-                ))
-            })?;
-            if encoded_bytes > spec.maximum_bytes {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{}` exceeds its aggregate byte bound",
-                    spec.id
-                )));
-            }
-            DomainRecords {
-                values: loaded.records,
-                encoded_bytes,
-            }
-        } else {
-            DomainRecords {
-                values: BTreeMap::new(),
-                encoded_bytes: 2,
+        let authority = {
+            let mut domains = self
+                .registry
+                .domains
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = domains.get(&spec.id).and_then(Weak::upgrade) {
+                existing
+            } else {
+                let authority = Arc::new(Authority {
+                    spec: spec.clone(),
+                    loaded: OnceCell::new(),
+                    registry: Arc::downgrade(&self.registry),
+                    recovery_required: AtomicBool::new(false),
+                });
+                domains.insert(spec.id.clone(), Arc::downgrade(&authority));
+                authority
             }
         };
-        let state = Arc::new(DomainState {
-            spec: spec.clone(),
-            backend,
-            records: Arc::new(AsyncMutex::new(records)),
-        });
-        let mut domains = self
-            .domains
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = domains.get(&spec.id).and_then(Weak::upgrade) {
-            if existing.spec != spec {
-                return Err(StorageError::InvalidInput(format!(
-                    "domain `{}` concurrently opened with a different specification",
-                    spec.id
-                )));
-            }
-            let domain: Arc<dyn Domain> = existing;
-            return Ok(domain);
+        // No strong authority is dropped while holding the registry mutex.
+        if authority.spec != spec {
+            return Err(StorageError::InvalidInput(format!(
+                "domain `{}` is already open with a different specification",
+                spec.id
+            )));
         }
-        domains.insert(spec.id.clone(), Arc::downgrade(&state));
-        let domain: Arc<dyn Domain> = state;
-        Ok(domain)
+        authority
+            .loaded
+            .get_or_try_init(|| async {
+                let backend = self.hub.resolve(&spec.backend)?;
+                let loaded = backend.load(&spec.id).await?;
+                let records = if let Some(loaded) = loaded {
+                    if loaded.version != spec.version {
+                        return Err(StorageError::Corrupt(format!(
+                            "domain `{}` has version {}, expected {}",
+                            spec.id, loaded.version, spec.version
+                        )));
+                    }
+                    if loaded.records.len() > spec.maximum_records {
+                        return Err(StorageError::Corrupt(format!(
+                            "domain `{}` exceeds its record bound",
+                            spec.id
+                        )));
+                    }
+                    let records = DomainRecords::from_values(loaded.records)
+                        .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+                    if records.size.bytes() > spec.maximum_bytes {
+                        return Err(StorageError::Corrupt(format!(
+                            "domain `{}` exceeds its aggregate byte bound",
+                            spec.id
+                        )));
+                    }
+                    records
+                } else {
+                    DomainRecords {
+                        values: BTreeMap::new(),
+                        size: RecordObjectSize::default(),
+                    }
+                };
+                Ok::<_, StorageError>(LoadedDomain {
+                    backend,
+                    records: Arc::new(AsyncMutex::new(records)),
+                })
+            })
+            .await?;
+        let domain = DomainHandle { authority };
+        domain.ensure_available()?;
+        Ok(Arc::new(domain))
     }
 }
 
 #[async_trait]
-impl Domain for DomainState {
+impl Domain for DomainHandle {
     fn spec(&self) -> &DomainSpec {
-        &self.spec
+        &self.authority.spec
     }
 
-    async fn snapshot(&self) -> BTreeMap<String, Value> {
-        self.records.lock().await.values.clone()
+    fn ensure_available(&self) -> Result<(), StorageError> {
+        if self.authority.recovery_required.load(Ordering::Acquire) {
+            return Err(StorageError::RecoveryRequired);
+        }
+        self.loaded().backend.ensure_available()
+    }
+
+    async fn snapshot(&self) -> Result<BTreeMap<String, Value>, StorageError> {
+        self.ensure_available()?;
+        let records = self.loaded().records.lock().await;
+        self.ensure_available()?;
+        Ok(records
+            .values
+            .iter()
+            .map(|(key, record)| (key.clone(), record.value.clone()))
+            .collect())
     }
 
     async fn put(&self, key: &str, value: Value) -> Result<(), StorageError> {
+        self.ensure_available()?;
         validate_identifier("record key", key)?;
-        validate_value(&value)?;
-        let mut records = Arc::clone(&self.records).lock_owned().await;
-        if !records.values.contains_key(key) && records.values.len() == self.spec.maximum_records {
+        let value_bytes = validate_value(&value)?;
+        let records = Arc::clone(&self.loaded().records).lock_owned().await;
+        self.ensure_available()?;
+        let previous = records.values.get(key);
+        if previous.is_none() && records.values.len() == self.authority.spec.maximum_records {
             return Err(StorageError::InvalidInput(format!(
                 "domain `{}` reached its record bound",
-                self.spec.id
+                self.authority.spec.id
             )));
         }
-        let new_entry_bytes = encoded_entry_bytes(key, &value)?;
-        let projected_bytes = if let Some(previous) = records.values.get(key) {
-            records
-                .encoded_bytes
-                .checked_sub(encoded_entry_bytes(key, previous)?)
-                .and_then(|bytes| bytes.checked_add(new_entry_bytes))
-        } else {
-            records
-                .encoded_bytes
-                .checked_add(usize::from(!records.values.is_empty()))
-                .and_then(|bytes| bytes.checked_add(new_entry_bytes))
-        }
-        .ok_or_else(|| StorageError::InvalidInput("domain byte count overflowed".into()))?;
-        if projected_bytes > self.spec.maximum_bytes {
+        let new_entry_bytes = encoded_entry_bytes(key, value_bytes)?;
+        let projected = records
+            .size
+            .with_entry(previous.map(|record| record.encoded_bytes), new_entry_bytes)?;
+        if projected.bytes() > self.authority.spec.maximum_bytes {
             return Err(StorageError::InvalidInput(format!(
                 "domain `{}` reached its aggregate byte bound",
-                self.spec.id
+                self.authority.spec.id
             )));
         }
-        let backend = Arc::clone(&self.backend);
-        let domain = self.spec.id.clone();
-        let version = self.spec.version;
+        let backend = Arc::clone(&self.loaded().backend);
+        let domain = self.authority.spec.id.clone();
+        let version = self.authority.spec.version;
         let key = key.to_owned();
-        tokio::spawn(async move {
-            backend.put(&domain, version, &key, &value).await?;
-            records.values.insert(key, value);
-            records.encoded_bytes = projected_bytes;
-            Ok(())
-        })
+        self.commit(
+            records,
+            async move {
+                backend.put(&domain, version, &key, &value).await?;
+                Ok((key, value))
+            },
+            move |records, (key, value)| {
+                records.values.insert(
+                    key,
+                    Record {
+                        value,
+                        encoded_bytes: new_entry_bytes,
+                    },
+                );
+                records.size = projected;
+            },
+        )
         .await
-        .map_err(|error| StorageError::Io(format!("domain commit task failed: {error}")))?
     }
 
     async fn delete(&self, key: &str) -> Result<bool, StorageError> {
+        self.ensure_available()?;
         validate_identifier("record key", key)?;
-        let mut records = Arc::clone(&self.records).lock_owned().await;
+        let records = Arc::clone(&self.loaded().records).lock_owned().await;
+        self.ensure_available()?;
         let Some(previous) = records.values.get(key) else {
             return Ok(false);
         };
-        let entry_bytes = encoded_entry_bytes(key, previous)?;
-        let projected_bytes = if records.values.len() == 1 {
-            2
-        } else {
-            records
-                .encoded_bytes
-                .checked_sub(entry_bytes)
-                .and_then(|bytes| bytes.checked_sub(1))
-                .ok_or_else(|| StorageError::InvalidInput("domain byte count underflowed".into()))?
-        };
-        let backend = Arc::clone(&self.backend);
-        let domain = self.spec.id.clone();
-        let version = self.spec.version;
+        let projected = records.size.without_entry(previous.encoded_bytes)?;
+        let backend = Arc::clone(&self.loaded().backend);
+        let domain = self.authority.spec.id.clone();
+        let version = self.authority.spec.version;
         let key = key.to_owned();
-        tokio::spawn(async move {
-            backend.delete(&domain, version, &key).await?;
-            records.values.remove(&key);
-            records.encoded_bytes = projected_bytes;
-            Ok(true)
-        })
+        self.commit(
+            records,
+            async move {
+                backend.delete(&domain, version, &key).await?;
+                Ok(key)
+            },
+            move |records, key| {
+                records.values.remove(&key);
+                records.size = projected;
+                true
+            },
+        )
         .await
-        .map_err(|error| StorageError::Io(format!("domain commit task failed: {error}")))?
     }
-}
-
-fn encoded_records_bytes(records: &BTreeMap<String, Value>) -> Result<usize, StorageError> {
-    let mut bytes = 2_usize;
-    for (index, (key, value)) in records.iter().enumerate() {
-        let entry_bytes = encoded_entry_bytes(key, value)?;
-        bytes = bytes
-            .checked_add(usize::from(index > 0))
-            .and_then(|bytes| bytes.checked_add(entry_bytes))
-            .ok_or_else(|| StorageError::InvalidInput("domain byte count overflowed".into()))?;
-    }
-    Ok(bytes)
-}
-
-fn encoded_entry_bytes(key: &str, value: &Value) -> Result<usize, StorageError> {
-    let key_bytes = serde_json::to_vec(key)
-        .map_err(|error| StorageError::InvalidInput(error.to_string()))?
-        .len();
-    let value_bytes = serde_json::to_vec(value)
-        .map_err(|error| StorageError::InvalidInput(error.to_string()))?
-        .len();
-    key_bytes
-        .checked_add(1)
-        .and_then(|bytes| bytes.checked_add(value_bytes))
-        .ok_or_else(|| StorageError::InvalidInput("domain byte count overflowed".into()))
 }
 
 /// Ordinary plugin factory for the domain facility.
@@ -318,7 +424,7 @@ impl PluginFactory for DomainFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let facility: Arc<dyn DomainFacility> = Arc::new(Facility {
             hub: plan.local::<StorageHubContract>()?,
-            domains: Mutex::new(HashMap::new()),
+            registry: Arc::new(Registry::default()),
         });
         let supply = plan
             .context()
@@ -332,5 +438,22 @@ impl PluginFactory for DomainFactory {
                 })
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+/// Projects storage failures into the shared API taxonomy without losing commit certainty.
+pub fn storage_error(error: StorageError) -> rsi_api_protocol::ApiError {
+    use rsi_api_protocol::ApiError;
+    match error {
+        StorageError::OutcomeUnknown(_) => ApiError::OutcomeUnknown,
+        StorageError::Io(_)
+        | StorageError::RecoveryRequired
+        | StorageError::BackendUnavailable(_) => ApiError::Unavailable,
+        error @ (StorageError::InvalidInput(_)
+        | StorageError::DuplicateBackend(_)
+        | StorageError::Corrupt(_)) => ApiError::Backend(error.to_string()),
     }
 }

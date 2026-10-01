@@ -7,18 +7,18 @@
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_storage::{
-    BackendLease, KvBackend, MAXIMUM_STORAGE_RECORDS, StorageError, StorageHubContract,
-    StoredDomain, validate_identifier, validate_value,
+    BackendLease, BackendOperations, BoundedWriter, KvBackend, MAXIMUM_STORAGE_RECORDS,
+    StorageError, StorageHubContract, StoredDomain, create_private_directories,
+    validate_identifier, validate_value,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as AsyncMutex;
 
 const DEFAULT_MAXIMUM_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
 const MAXIMUM_TEMPORARY_NAME_ATTEMPTS: usize = 64;
@@ -44,9 +44,12 @@ fn default_maximum_document_bytes() -> usize {
 impl JsonStorageConfig {
     fn validate(&self) -> Result<(), StorageError> {
         validate_identifier("backend", &self.name)?;
-        if !self.path.is_absolute() {
+        if !self.path.is_absolute()
+            || self.path.parent().is_none()
+            || self.path.file_name().is_none()
+        {
             return Err(StorageError::InvalidInput(
-                "JSON storage path must be absolute".into(),
+                "JSON storage path must be absolute and name a file".into(),
             ));
         }
         if self.maximum_document_bytes == 0
@@ -77,16 +80,20 @@ const fn document_format() -> u32 {
 struct JsonBackend {
     config: Arc<JsonStorageConfig>,
     document: Arc<Mutex<Arc<Document>>>,
-    operation: AsyncMutex<()>,
+    operation: Arc<BackendOperations>,
 }
 
 impl JsonBackend {
     fn open(config: JsonStorageConfig) -> Result<Self, StorageError> {
+        config.validate()?;
         let document = match read_file_bounded(&config.path, config.maximum_document_bytes) {
             Ok(bytes) => {
                 let document: Document = serde_json::from_slice(&bytes)
                     .map_err(|error| StorageError::Corrupt(error.to_string()))?;
                 validate_document(&document)?;
+                sync_parent_directory(config.path.parent().ok_or_else(|| {
+                    StorageError::InvalidInput("JSON storage path has no parent directory".into())
+                })?)?;
                 document
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Document {
@@ -101,20 +108,93 @@ impl JsonBackend {
         Ok(Self {
             config: Arc::new(config),
             document: Arc::new(Mutex::new(Arc::new(document))),
-            operation: AsyncMutex::new(()),
+            operation: Arc::new(BackendOperations::default()),
         })
     }
 
-    fn persist(config: &JsonStorageConfig, candidate: &Document) -> Result<(), StorageError> {
-        let bytes = serde_json::to_vec_pretty(candidate)
-            .map_err(|error| StorageError::Io(error.to_string()))?;
-        if bytes.len() > config.maximum_document_bytes {
-            return Err(StorageError::InvalidInput(format!(
-                "JSON storage document exceeds {} bytes",
-                config.maximum_document_bytes
-            )));
+    async fn mutate(
+        &self,
+        domain: &str,
+        version: u32,
+        key: &str,
+        value: Option<Value>,
+    ) -> Result<(), StorageError> {
+        validate_identifier("domain", domain)?;
+        validate_identifier("record key", key)?;
+        if version == 0 {
+            return Err(StorageError::InvalidInput(
+                "domain version must be nonzero".into(),
+            ));
         }
-        atomic_write(&config.path, &bytes)
+        let domain = domain.to_owned();
+        let key = key.to_owned();
+        self.publish(
+            move |current| {
+                let stored = current.domains.get(&domain);
+                if let Some(stored) = stored {
+                    if stored.version != version {
+                        return Err(version_mismatch(&domain, stored.version, version));
+                    }
+                    if value.is_some()
+                        && !stored.records.contains_key(&key)
+                        && stored.records.len() == MAXIMUM_STORAGE_RECORDS
+                    {
+                        return Err(StorageError::InvalidInput(
+                            "storage domain reached the backend record bound".into(),
+                        ));
+                    }
+                }
+                if value.is_none() && stored.is_none_or(|stored| !stored.records.contains_key(&key))
+                {
+                    return Ok(None);
+                }
+                let mut candidate = current.clone();
+                let stored = candidate
+                    .domains
+                    .entry(domain)
+                    .or_insert_with(|| StoredDomain {
+                        version,
+                        records: BTreeMap::new(),
+                    });
+                if let Some(value) = value {
+                    stored.records.insert(key, value);
+                } else {
+                    stored.records.remove(&key);
+                }
+                Ok(Some(candidate))
+            },
+            atomic_write,
+        )
+        .await
+    }
+
+    // The persistence seam lets tests fail before or after replacement while using
+    // the real publication and fencing path. Production always supplies atomic_write.
+    async fn publish<F, P>(&self, change: F, persist: P) -> Result<(), StorageError>
+    where
+        F: FnOnce(&Document) -> Result<Option<Document>, StorageError> + Send + 'static,
+        P: FnOnce(&JsonStorageConfig, &Document) -> Result<(), StorageError> + Send + 'static,
+    {
+        let document = Arc::clone(&self.document);
+        let config = Arc::clone(&self.config);
+        self.operation
+            .run(move || {
+                let current = Arc::clone(
+                    &document
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                // The operation slot owns the read/modify/publish interval across both locks.
+                let Some(candidate) = change(&current)? else {
+                    return Ok(());
+                };
+                persist(&config, &candidate)?;
+                *document
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(candidate);
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -215,18 +295,25 @@ fn changed_file(label: &str) -> std::io::Error {
 
 #[async_trait]
 impl KvBackend for JsonBackend {
+    fn ensure_available(&self) -> Result<(), StorageError> {
+        self.operation.ensure_available()
+    }
+
     async fn load(&self, domain: &str) -> Result<Option<StoredDomain>, StorageError> {
+        self.ensure_available()?;
         validate_identifier("domain", domain)?;
-        let snapshot = Arc::clone(
-            &self
-                .document
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let document = Arc::clone(&self.document);
         let domain = domain.to_owned();
-        tokio::task::spawn_blocking(move || Ok(snapshot.domains.get(&domain).cloned()))
+        self.operation
+            .run(move || {
+                let snapshot = Arc::clone(
+                    &document
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                Ok(snapshot.domains.get(&domain).cloned())
+            })
             .await
-            .map_err(|error| join_error(&error))?
     }
 
     async fn put(
@@ -236,92 +323,14 @@ impl KvBackend for JsonBackend {
         key: &str,
         value: &Value,
     ) -> Result<(), StorageError> {
-        validate_identifier("domain", domain)?;
-        validate_identifier("record key", key)?;
-        if version == 0 {
-            return Err(StorageError::InvalidInput(
-                "domain version must be nonzero".into(),
-            ));
-        }
+        self.ensure_available()?;
         validate_value(value)?;
-        let _operation = self.operation.lock().await;
-        let config = Arc::clone(&self.config);
-        let document = Arc::clone(&self.document);
-        let domain = domain.to_owned();
-        let key = key.to_owned();
-        let value = value.clone();
-        tokio::task::spawn_blocking(move || {
-            let current = Arc::clone(
-                &document
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            let mut candidate = (*current).clone();
-            let stored = candidate
-                .domains
-                .entry(domain.clone())
-                .or_insert_with(|| StoredDomain {
-                    version,
-                    records: BTreeMap::new(),
-                });
-            if stored.version != version {
-                return Err(version_mismatch(&domain, stored.version, version));
-            }
-            if !stored.records.contains_key(&key) && stored.records.len() == MAXIMUM_STORAGE_RECORDS
-            {
-                return Err(StorageError::InvalidInput(
-                    "storage domain reached the backend record bound".into(),
-                ));
-            }
-            stored.records.insert(key, value);
-            Self::persist(&config, &candidate)?;
-            *document
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(candidate);
-            Ok(())
-        })
-        .await
-        .map_err(|error| join_error(&error))?
+        self.mutate(domain, version, key, Some(value.clone())).await
     }
 
     async fn delete(&self, domain: &str, version: u32, key: &str) -> Result<(), StorageError> {
-        validate_identifier("domain", domain)?;
-        validate_identifier("record key", key)?;
-        let _operation = self.operation.lock().await;
-        let config = Arc::clone(&self.config);
-        let document = Arc::clone(&self.document);
-        let domain = domain.to_owned();
-        let key = key.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let current = Arc::clone(
-                &document
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            let Some(stored) = current.domains.get(&domain) else {
-                return Ok(());
-            };
-            if stored.version != version {
-                return Err(version_mismatch(&domain, stored.version, version));
-            }
-            if !stored.records.contains_key(&key) {
-                return Ok(());
-            }
-            let mut candidate = (*current).clone();
-            candidate
-                .domains
-                .get_mut(&domain)
-                .expect("checked domain")
-                .records
-                .remove(&key);
-            Self::persist(&config, &candidate)?;
-            *document
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(candidate);
-            Ok(())
-        })
-        .await
-        .map_err(|error| join_error(&error))?
+        self.ensure_available()?;
+        self.mutate(domain, version, key, None).await
     }
 }
 
@@ -351,25 +360,22 @@ impl PluginFactory for JsonStorageFactory {
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let backend: Arc<dyn KvBackend> = Arc::new(backend);
+        let backend = Arc::new(backend);
         let lease: BackendLease = plan
             .local::<StorageHubContract>()?
-            .register(&name, backend)
+            .register(&name, backend.clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let registration = backend.operation.retain_registration(lease);
         plan.defer(
             "withdraw JSON storage backend",
             Box::new(move || {
                 Box::pin(async move {
-                    drop(lease);
+                    registration.close().await;
                     Ok(())
                 })
             }),
         )
     }
-}
-
-fn join_error(error: &tokio::task::JoinError) -> StorageError {
-    StorageError::Io(format!("storage blocking task failed: {error}"))
 }
 
 fn validate_document(document: &Document) -> Result<(), StorageError> {
@@ -404,28 +410,63 @@ fn version_mismatch(domain: &str, actual: u32, expected: u32) -> StorageError {
     ))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+fn atomic_write(config: &JsonStorageConfig, document: &Document) -> Result<(), StorageError> {
+    atomic_write_with_sync(config, document, |directory| {
+        if let Some(directory) = directory {
+            directory.sync_all()?;
+        }
+        Ok(())
+    })
+}
+
+// The final-directory-sync seam exercises a failure after the real file replacement.
+fn atomic_write_with_sync(
+    config: &JsonStorageConfig,
+    document: &Document,
+    sync: impl FnOnce(Option<File>) -> std::io::Result<()>,
+) -> Result<(), StorageError> {
+    let path = &config.path;
     let parent = path.parent().ok_or_else(|| {
         StorageError::InvalidInput("JSON storage path has no parent directory".into())
     })?;
     create_private_directories(parent)?;
+    #[cfg(unix)]
+    let directory = Some(File::open(parent).map_err(|error| StorageError::Io(error.to_string()))?);
+    #[cfg(not(unix))]
+    let directory = None;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| StorageError::InvalidInput("JSON storage file name is invalid".into()))?;
-    let (temporary, mut file) = create_temporary_file(parent, file_name)?;
+    let (temporary, file) = create_temporary_file(parent, file_name)?;
     let result = (|| {
         set_file_permissions(&file)?;
-        file.write_all(bytes)
+        let mut writer = BoundedWriter::new(BufWriter::new(&file), config.maximum_document_bytes);
+        encode_document(document, &mut writer)?;
+        writer
+            .flush()
             .and_then(|()| file.sync_all())
             .map_err(|error| StorageError::Io(error.to_string()))?;
         fs::rename(&temporary, path).map_err(|error| StorageError::Io(error.to_string()))?;
-        sync_parent_directory(parent)
+        sync(directory).map_err(|error| StorageError::OutcomeUnknown(error.to_string()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn encode_document(
+    document: &Document,
+    writer: &mut BoundedWriter<impl Write>,
+) -> Result<(), StorageError> {
+    serde_json::to_writer_pretty(&mut *writer, document).map_err(|error| {
+        if writer.limit_exceeded() {
+            StorageError::InvalidInput(error.to_string())
+        } else {
+            StorageError::Io(error.to_string())
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -463,21 +504,6 @@ fn create_temporary_file(parent: &Path, file_name: &str) -> Result<(PathBuf, Fil
 }
 
 #[cfg(unix)]
-fn create_private_directories(path: &Path) -> Result<(), StorageError> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(path)
-        .map_err(|error| StorageError::Io(error.to_string()))
-}
-
-#[cfg(not(unix))]
-fn create_private_directories(path: &Path) -> Result<(), StorageError> {
-    fs::create_dir_all(path).map_err(|error| StorageError::Io(error.to_string()))
-}
-
-#[cfg(unix)]
 fn set_file_permissions(file: &File) -> Result<(), StorageError> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(fs::Permissions::from_mode(0o600))
@@ -487,4 +513,242 @@ fn set_file_permissions(file: &File) -> Result<(), StorageError> {
 #[cfg(not(unix))]
 fn set_file_permissions(_file: &File) -> Result<(), StorageError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config(path: PathBuf) -> JsonStorageConfig {
+        JsonStorageConfig {
+            name: "test".into(),
+            path,
+            maximum_document_bytes: 1024 * 1024,
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_publication_keeps_the_file_slot_until_memory_and_disk_agree() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
+        for delete in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = config(directory.path().join("state.json"));
+            let backend = Arc::new(JsonBackend::open(config.clone()).unwrap());
+            backend.put("domain", 1, "a", &Value::Null).await.unwrap();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let first = tokio::spawn({
+                let backend = backend.clone();
+                async move {
+                    backend
+                        .publish(
+                            move |current| {
+                                let mut candidate = current.clone();
+                                let records =
+                                    &mut candidate.domains.get_mut("domain").unwrap().records;
+                                if delete {
+                                    records.remove("a");
+                                } else {
+                                    records.insert("a".into(), Value::Bool(true));
+                                }
+                                Ok(Some(candidate))
+                            },
+                            move |config, candidate| {
+                                entered.send(()).unwrap();
+                                released.blocking_recv().unwrap();
+                                atomic_write(config, candidate)
+                            },
+                        )
+                        .await
+                }
+            });
+            started.await.unwrap();
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            let mut second = pin!(backend.put("domain", 1, "b", &Value::Null));
+            assert!(matches!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+            release.send(()).unwrap();
+            second.await.unwrap();
+            let live = backend.load("domain").await.unwrap().unwrap();
+            let durable = JsonBackend::open(config)
+                .unwrap()
+                .load("domain")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(live, durable);
+            assert_eq!(live.records.contains_key("a"), !delete);
+            assert!(live.records.contains_key("b"));
+        }
+    }
+
+    #[tokio::test]
+    async fn post_replace_failure_fences_all_domains_until_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path().join("state.json"));
+        let backend = JsonBackend::open(config.clone()).unwrap();
+        backend
+            .put("other", 1, "before", &Value::Bool(true))
+            .await
+            .unwrap();
+        let result = backend
+            .publish(
+                |current| {
+                    let mut candidate = current.clone();
+                    candidate.domains.insert(
+                        "changed".into(),
+                        StoredDomain {
+                            version: 1,
+                            records: BTreeMap::from([("visible".into(), Value::Bool(true))]),
+                        },
+                    );
+                    Ok(Some(candidate))
+                },
+                |config, candidate| {
+                    atomic_write_with_sync(config, candidate, |_| {
+                        Err(std::io::Error::other("injected directory sync failure"))
+                    })
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(StorageError::OutcomeUnknown(_))));
+        assert_eq!(
+            backend.load("other").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        assert_eq!(
+            backend.put("other", 1, "lost", &Value::Null).await,
+            Err(StorageError::RecoveryRequired)
+        );
+        assert_eq!(
+            backend.delete("missing", 1, "absent").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        let reopened = JsonBackend::open(config).unwrap();
+        assert_eq!(
+            reopened.load("other").await.unwrap().unwrap().records.len(),
+            1
+        );
+        assert_eq!(
+            reopened.load("changed").await.unwrap().unwrap().records["visible"],
+            Value::Bool(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_encoding_preserves_file_and_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().join("state.json"));
+        config.maximum_document_bytes = 256;
+        let backend = JsonBackend::open(config.clone()).unwrap();
+        backend.put("domain", 1, "a", &Value::Null).await.unwrap();
+        let before = fs::read(&config.path).unwrap();
+        assert!(matches!(
+            backend
+                .put("domain", 1, "b", &Value::String("x".repeat(256)))
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert_eq!(fs::read(&config.path).unwrap(), before);
+        backend.ensure_available().unwrap();
+        backend
+            .put("domain", 1, "a", &Value::Bool(true))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_depth_survives_real_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path().join("state.json"));
+        let backend = JsonBackend::open(config.clone()).unwrap();
+        let mut value = Value::Null;
+        for _ in 1..rsi_storage::MAXIMUM_STORAGE_VALUE_DEPTH {
+            value = Value::Array(vec![value]);
+        }
+        backend.put("domain", 1, "a", &value).await.unwrap();
+        assert!(
+            backend
+                .put("domain", 1, "b", &Value::Array(vec![value.clone()]))
+                .await
+                .is_err()
+        );
+        backend.operation.close().await;
+        assert!(backend.load("domain").await.is_err());
+        let reopened = JsonBackend::open(config).unwrap();
+        assert_eq!(
+            reopened.load("domain").await.unwrap().unwrap().records["a"],
+            value
+        );
+    }
+    struct InvalidInputWriter;
+    impl Write for InvalidInputWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "underlying I/O rejected write",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn byte_limit_and_underlying_invalid_input_are_distinct() {
+        let mut io = BoundedWriter::new(InvalidInputWriter, 1024);
+        assert!(matches!(
+            encode_document(&Document::default(), &mut io),
+            Err(StorageError::Io(_))
+        ));
+        assert!(!io.limit_exceeded());
+        let mut bounded = BoundedWriter::new(Vec::new(), 1);
+        assert!(matches!(
+            encode_document(&Document::default(), &mut bounded),
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(bounded.limit_exceeded());
+    }
+    #[test]
+    fn configuration_requires_an_absolute_file_path_before_opening() {
+        for path in [
+            PathBuf::new(),
+            PathBuf::from("relative.json"),
+            std::env::current_dir()
+                .unwrap()
+                .ancestors()
+                .last()
+                .unwrap()
+                .to_path_buf(),
+        ] {
+            assert!(matches!(
+                JsonBackend::open(config(path)),
+                Err(StorageError::InvalidInput(_))
+            ));
+        }
+    }
+    #[tokio::test]
+    async fn absent_deletes_preserve_snapshot_identity_and_schema_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = JsonBackend::open(config(directory.path().join("state.json"))).unwrap();
+        backend
+            .put("domain", 1, "present", &Value::Null)
+            .await
+            .unwrap();
+        let before = backend.document.lock().unwrap().clone();
+        backend.delete("domain", 1, "absent").await.unwrap();
+        backend.delete("absent", 1, "absent").await.unwrap();
+        assert!(Arc::ptr_eq(&before, &backend.document.lock().unwrap()));
+        assert!(matches!(
+            backend.delete("domain", 2, "absent").await,
+            Err(StorageError::Corrupt(_))
+        ));
+    }
 }

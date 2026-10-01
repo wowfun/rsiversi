@@ -12,6 +12,9 @@ struct NoopBackend;
 
 #[async_trait]
 impl KvBackend for NoopBackend {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        Ok(())
+    }
     async fn load(&self, _domain: &str) -> StorageResult<Option<StoredDomain>> {
         Ok(None)
     }
