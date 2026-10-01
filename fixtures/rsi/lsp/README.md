@@ -24,6 +24,9 @@ query errors still fail immediately; the product does not replay queries.
 Rust project, and appends explicit language and UI Host leaves. Browser and
 desktop scenarios exercise actual authenticated standard UI actions, UTF-16
 locations and opening the current file, separately from protocol peer tests.
+Their bounded readiness polls explicitly click Repeat query for an empty result
+or ContentModified (-32801), including hover; any other displayed read error
+fails immediately. The original deadline remains in force across repeats.
 Set `RSI_RUST_ANALYZER` to the pinned executable; no installer is invoked.
 
 With the same explicit server, `RSI_WEB_ASSETS=/absolute/assets node

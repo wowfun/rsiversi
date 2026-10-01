@@ -52,10 +52,12 @@ try{
   assert.equal(order.value.ids.length,65);assert.equal(order.value.ids[0],'s-64');
   const rollback=await one.evaluate(async()=>{
     let error;try{await store.apply('layouts',{kind:'patch',patch:{navigation:'invalid'}});}catch(e){error=e.message;}
-    let quota;try{await store.apply('orders',{kind:'reconcile',members:Array.from({length:1024},(_,i)=>({id:`${String(i).padStart(4,'0')}${'x'.repeat(252)}`,partition:'group'}))},'sessions');}catch(e){quota=e.message;}
-    return {error,quota,layout:await store.read('layouts'),order:await store.read('orders','sessions')};
+    const members=length=>Array.from({length},(_,i)=>({id:`${String(i).padStart(4,'0')}${'x'.repeat(252)}`,partition:'group'}));
+    let quota;try{await store.apply('orders',{kind:'reconcile',members:members(768)},'sessions');}catch(e){quota=e.message;}
+    let full;try{await store.apply('orders',{kind:'reconcile',members:members(1024)},'sessions');}catch(e){full=e.message;}
+    return {error,quota,full,layout:await store.read('layouts'),order:await store.read('orders','sessions')};
   });
-  assert.match(rollback.error,/layout/i);assert.match(rollback.quota,/too large/);assert.deepEqual(rollback.layout,expanded);assert.deepEqual(rollback.order,order);
+  assert.match(rollback.error,/layout/i);assert.match(rollback.quota,/too large/);assert.match(rollback.full,/Saved order is full/);assert.deepEqual(rollback.layout,expanded);assert.deepEqual(rollback.order,order);
   const atomic=await one.evaluate(async()=>{
     await store.applyAll([
       {bucket:'orders',scope:'sessions',intent:{kind:'updated'}},

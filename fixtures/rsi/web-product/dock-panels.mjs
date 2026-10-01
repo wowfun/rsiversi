@@ -1,6 +1,7 @@
 import {paired} from './paired-env.mjs';
 import {startService,waitUntil} from './service.mjs';
 import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
+import {resources} from './controls.mjs';
 import {chromium} from 'playwright';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -80,7 +81,9 @@ try{
  const geometries=[];
  for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]]){
    await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});await page.setViewportSize({width,height});
-   await page.waitForFunction(width=>{const desktop=!!document.querySelector('.workbench>.sidebar');const dock=document.querySelector('.resource-dock:not([hidden])');return desktop===(width>=1024)&&!!dock&&dock.classList.contains('resource-fullscreen')===(width<768)},width);
+   await page.waitForFunction(width=>{const desktop=!!document.querySelector('.workbench>.sidebar');const dock=document.querySelector('.resource-dock');return desktop===(width>=1024)&&!!dock&&dock.classList.contains('resource-fullscreen')===(width<768)},width);
+   await resources(page);
+   await page.locator('.resource-dock:not([hidden])').waitFor({state:'visible'});
    const geometry=await page.evaluate(()=>{
      const box=selector=>{const rect=document.querySelector(selector)?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null};
      const control=document.querySelector('#sign-out'),r=control.getBoundingClientRect();return {connectionControlHit:control.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),overflow:document.documentElement.scrollWidth-innerWidth,resources:box('.resource-dock:not([hidden])'),navigation:box('.workbench>.sidebar,.navigation-rail'),main:box('.workspace-main')};

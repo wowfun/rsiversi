@@ -16,14 +16,23 @@ for(const [name,engine]of (process.env.RSI_LSP_BROWSER==='chromium'?[['chromium'
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} language`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
   await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
   await resources(page);await page.getByRole('button',{name:'Service extensions',exact:true}).click();const detail=details(page);await detail.getByRole('button',{name:'Code intelligence',exact:true}).click();
+  async function repeatIndexingRead() {
+   const retry=detail.getByRole('button',{name:'Repeat query',exact:true});
+   if(!await retry.count()||!await retry.isEnabled())return false;
+   const error=await detail.locator('.ui-text').allTextContents();
+   const failure=error.find(text=>text.startsWith('Language read failed:'));
+   assert(!failure||failure==='Language read failed: language server rejected request (code -32801)',failure);
+   await retry.click();
+   return false;
+  }
   await detail.getByRole('textbox',{name:'Line',exact:true}).fill(String(position.line));await detail.getByRole('textbox',{name:'Column',exact:true}).fill(String(position.column));await detail.getByRole('button',{name:'Find definition',exact:true}).click();
-  await waitUntil(async()=>{if(await detail.getByRole('button',{name:'Open src/main.rs:2 (UTF-16 column 12)',exact:true}).count())return true;const retry=detail.getByRole('button',{name:'Repeat query',exact:true});if(await retry.count()&&await retry.isEnabled())await retry.click();return false;},'language server returns actual definition',45_000);
+  await waitUntil(async()=>{if(await detail.getByRole('button',{name:'Open src/main.rs:2 (UTF-16 column 12)',exact:true}).count())return true;return repeatIndexingRead();},'language server returns actual definition',45_000);
   await detail.getByRole('button',{name:'Open src/main.rs:2 (UTF-16 column 12)',exact:true}).click();
   await waitUntil(async()=>(await detail.innerText()).includes(position.definition),'opened definition');assert.match(await detail.locator('pre').innerText(),/^pub struct Bird;/);await page.screenshot({path:join(report,'definition.png')});
   await page.setViewportSize({width:430,height:900});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await page.screenshot({path:join(report,'definition-narrow.png')});assert(await detail.evaluate(e=>e.scrollWidth<=e.clientWidth+1));
-  await detail.getByRole('button',{name:'New language query',exact:true}).click();await detail.getByRole('textbox',{name:'Line',exact:true}).fill(String(position.line));await detail.getByRole('textbox',{name:'Column',exact:true}).fill(String(position.column));await detail.getByRole('button',{name:'Read hover',exact:true}).click();await waitUntil(async()=>await detail.locator('pre').count()&&(await detail.locator('pre').innerText()).includes('Bird'),'real hover');await page.screenshot({path:join(report,'hover-narrow.png')});
+  await detail.getByRole('button',{name:'New language query',exact:true}).click();await detail.getByRole('textbox',{name:'Line',exact:true}).fill(String(position.line));await detail.getByRole('textbox',{name:'Column',exact:true}).fill(String(position.column));await detail.getByRole('button',{name:'Read hover',exact:true}).click();await waitUntil(async()=>await detail.locator('pre').count()&&(await detail.locator('pre').innerText()).includes('Bird')||await repeatIndexingRead(),'real hover');await page.screenshot({path:join(report,'hover-narrow.png')});
   await detail.getByRole('button',{name:'New language query',exact:true}).click();await detail.getByRole('textbox',{name:'Line',exact:true}).fill(String(position.line));await detail.getByRole('textbox',{name:'Column',exact:true}).fill(String(position.column));await detail.getByRole('button',{name:'Find references',exact:true}).click();
-  await waitUntil(async()=>{if(await detail.getByRole('button',{name:'More locations',exact:true}).count())return true;const retry=detail.getByRole('button',{name:'Repeat query',exact:true});if(await retry.count()&&await retry.isEnabled())await retry.click();return false;},'reference result spans multiple pages',45_000);
+  await waitUntil(async()=>{if(await detail.getByRole('button',{name:'More locations',exact:true}).count())return true;return repeatIndexingRead();},'reference result spans multiple pages',45_000);
   const original=await readFile(join(service.workspace,'src/main.rs'),'utf8');const first=await detail.getByRole('button',{name:/^Open /}).allTextContents();assert.equal(first.length,16);
   try {
    // A new query must now fail source admission. Paging must still use the
@@ -36,8 +45,10 @@ for(const [name,engine]of (process.env.RSI_LSP_BROWSER==='chromium'?[['chromium'
    await waitUntil(async()=>(await detail.innerText()).includes('Language read failed:'),'explicit repeat checks current source');
    await page.screenshot({path:join(report,'references-repeat-error.png')});
   } finally {await writeFile(join(service.workspace,'src/main.rs'),original);}
+  const oldError=await detail.locator('.ui-text').elementHandle();
   await detail.getByRole('button',{name:'Repeat query',exact:true}).click();
-  await waitUntil(async()=>{if((await detail.getByRole('button',{name:/^Open /}).count())===16)return true;const retry=detail.getByRole('button',{name:'Repeat query',exact:true});if(await retry.count()&&await retry.isEnabled())await retry.click();return false;},'explicit repeat recovers after source restore');
+  await page.waitForFunction(element=>!element.isConnected,oldError);await oldError.dispose();
+  await waitUntil(async()=>{if((await detail.getByRole('button',{name:/^Open /}).count())===16)return true;return repeatIndexingRead();},'explicit repeat recovers after source restore');
   assert.equal(service.provider.requests.length,0);assert.deepEqual(errors,[]);results.push({browser:name,version:browser.version(),server:position.version,status:'passed',location:position.definition,provider_requests:0,cached_page_survives_source_replacement:true,explicit_repeat_revalidates_source:true,source:await readFile(join(service.workspace,'src/main.rs'),'utf8')});
  }catch(error){if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.txt'),await page.locator('body').innerText());await writeFile(join(report,'calls.json'),JSON.stringify({calls,trace:await page.evaluate(()=>window.languageTrace)},null,2));}throw error;}finally{await browser.close();await service.close();}
 }
