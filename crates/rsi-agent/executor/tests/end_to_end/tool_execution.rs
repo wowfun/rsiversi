@@ -1221,15 +1221,93 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
         requests[1].extensions().to_vec(),
     )
     .unwrap();
-    let rebuilt = replay.build(options.clone()).unwrap();
+    let rebuilt = replay
+        .build(options.clone(), &context_test_profile())
+        .unwrap();
     assert_eq!(rebuilt, requests[1]);
     assert_eq!(
         replay
             .restored(&replay.checkpoint().unwrap())
             .unwrap()
-            .build(options)
+            .build(options, &context_test_profile())
             .unwrap(),
         requests[1]
     );
+    stack.dispose(language, executor).await;
+}
+
+#[derive(Debug)]
+pub(super) struct UncertainTool(pub(super) Arc<AtomicUsize>);
+#[async_trait]
+impl ToolExecutor for UncertainTool {
+    async fn execute(&self, _: Value, _: ToolExecution) -> ToolResultType<ToolResult> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(ToolError::OutcomeUnknown)
+    }
+}
+
+#[tokio::test]
+async fn uncertain_tool_interrupts_without_model_result_or_replay_and_retires_after_durability() {
+    let stack = BaseStack::activate().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("echo", "uncertain", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(UncertainTool(calls.clone())),
+        })
+        .unwrap();
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("test.language.uncertain", provider.clone())
+        .await;
+    let executor = stack.activate_executor("executor-uncertain").await;
+    let (submitted, outcome) = stack.submit_and_wait("run once").await;
+    assert!(matches!(
+        outcome,
+        TurnOutcome::Interrupted {
+            effect: Some(rsi_agent_session_protocol::EffectKind::Tool),
+            ..
+        }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64)
+        .await
+        .unwrap()
+        .facts;
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+    );
+    let identity = facts
+        .iter()
+        .find_map(|fact| match fact.body() {
+            SessionFactBody::ToolStarted { identity, .. } => Some(identity.clone()),
+            _ => None,
+        })
+        .expect("uncertain effect has a durable start");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while stack.tool_runtime().query(&identity).unwrap() != RetainedToolResult::Absent {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(lease);
     stack.dispose(language, executor).await;
 }

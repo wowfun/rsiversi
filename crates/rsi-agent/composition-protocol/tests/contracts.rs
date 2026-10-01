@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+mod execution_fixture;
 #[path = "contracts/projection.rs"]
 mod projection;
 #[path = "contracts/resource.rs"]
@@ -113,7 +115,7 @@ impl AgentComposition for FakeComposition {
 }
 
 fn header(preset_id: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("session-1").unwrap(),
         1,
         "/workspace",

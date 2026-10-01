@@ -17,9 +17,9 @@ use rsi_sandbox::{Sandbox, SandboxContract, SandboxMode};
 use rsi_sandbox_local::SandboxLocalFactory;
 use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
-    PreparedToolCall, RetainedToolResult, ToolCall, ToolCatalogProviderContract,
-    ToolExecutionExtensions, ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract,
-    ToolResultIdentity, ToolRuntime, ToolStart,
+    PreparedToolCall, RetainedToolFailureKind, RetainedToolResult, ToolCall,
+    ToolCatalogProviderContract, ToolError, ToolExecutionExtensions, ToolExecutionPolicy,
+    ToolRegistrar, ToolRegistrarContract, ToolResultIdentity, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -209,8 +209,10 @@ impl BlockingProcess {
     }
 }
 
+#[async_trait::async_trait]
+
 impl Process for BlockingProcess {
-    fn spawn(&self, spec: ProcessSpec) -> rsi_process::Result<ManagedProcess> {
+    async fn spawn(&self, spec: ProcessSpec) -> rsi_process::Result<ManagedProcess> {
         spec.validate()?;
         self.spawns.fetch_add(1, Ordering::AcqRel);
         if let Some(marker) = &self.effect_marker {
@@ -531,19 +533,11 @@ async fn external_cancellation_reports_unknown_effects_after_reaping_the_helper(
 
     assert_eq!(std::fs::read(marker).unwrap(), b"mutated");
     assert!(settled_promptly, "cancellation left the helper running");
-    assert!(matches!(
-        result,
-        Ok(ref result)
-            if result.is_error
-                && result.value["code"] == "effects_unknown"
-                && result.value["replay_safe"] == false
-    ));
+    assert!(matches!(result, Err(ToolError::OutcomeUnknown)));
     assert!(matches!(
         retained,
-        RetainedToolResult::Returned(result)
-            if result.is_error
-                && result.value["code"] == "effects_unknown"
-                && result.value["replay_safe"] == false
+        RetainedToolResult::Failed(failure)
+            if failure.kind == RetainedToolFailureKind::OutcomeUnknown
     ));
     assert!(spawned_once);
     assert!(terminated);
@@ -572,19 +566,11 @@ async fn tool_timeout_reports_unknown_effects_after_reaping_the_helper() {
     fixture.shutdown().await;
 
     assert!(settled_promptly, "Tool timeout left the helper running");
-    assert!(matches!(
-        result,
-        Ok(ref result)
-            if result.is_error
-                && result.value["code"] == "effects_unknown"
-                && result.value["replay_safe"] == false
-    ));
+    assert!(matches!(result, Err(ToolError::OutcomeUnknown)));
     assert!(matches!(
         retained,
-        RetainedToolResult::Returned(result)
-            if result.is_error
-                && result.value["code"] == "effects_unknown"
-                && result.value["replay_safe"] == false
+        RetainedToolResult::Failed(failure)
+            if failure.kind == RetainedToolFailureKind::OutcomeUnknown
     ));
     assert!(spawned_once);
     assert!(terminated);
@@ -601,12 +587,13 @@ async fn malformed_or_over_budget_helper_results_are_retained_as_unknown_effects
         .extensions
         .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(0)))
         .unwrap();
-    let result = prepared.start(start).await.unwrap();
-    assert_eq!(result.value["code"], "effects_unknown");
-    assert_eq!(result.value["replay_safe"], false);
+    assert_eq!(
+        prepared.start(start).await.unwrap_err(),
+        ToolError::OutcomeUnknown
+    );
     assert!(matches!(
         fixture.tools.query(&identity).unwrap(),
-        RetainedToolResult::Returned(_)
+        RetainedToolResult::Failed(failure) if failure.kind == RetainedToolFailureKind::OutcomeUnknown
     ));
     fixture.tools.commit(&identity).unwrap();
 
@@ -627,13 +614,11 @@ async fn malformed_or_over_budget_helper_results_are_retained_as_unknown_effects
         let result = prepared
             .start(fixture.tool_start(CancellationToken::new()))
             .await
-            .unwrap();
-        assert_eq!(result.value["code"], "effects_unknown", "{tail}");
-        assert_eq!(result.value["effects_known"], false);
-        assert!(!result.content.is_empty());
+            .unwrap_err();
+        assert_eq!(result, ToolError::OutcomeUnknown, "{tail}");
         assert!(matches!(
             fixture.tools.query(&identity).unwrap(),
-            RetainedToolResult::Returned(_)
+            RetainedToolResult::Failed(failure) if failure.kind == RetainedToolFailureKind::OutcomeUnknown
         ));
         fixture.tools.commit(&identity).unwrap();
     }

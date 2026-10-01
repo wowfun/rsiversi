@@ -26,6 +26,10 @@ projections. Their protocols and deterministic test support are libraries;
 stateful providers, registries, schedulers, and policy implementations are
 ordinary `rsi-meta` plugins. `rsi-meta` and `rsi-host` do not know those
 products, and `rsi-host` does not select a default implementation.
+The [Execution family](../crates/rsi-execution/README.md) owns location coordinates
+and grouping of execution providers; it does not own target grants, SSH transport
+or Session scheduling. The [SSH family](../crates/rsi-ssh/README.md) owns bounded
+target connection inputs and transport mechanics under product-issued authority.
 The [native Files library](../crates/rsi-files/native-fs/README.md) supplies shared
 directory-handle mechanics; callers retain their own trust and authorization policy.
 
@@ -58,7 +62,7 @@ existing claim-bound read port; Jobs scope ownership stays with the executor.
 
 [`rsi-mcp`](../crates/rsi-mcp/README.md) owns operator-selected external protocol
 servers, finite frozen catalogs and connection retirement. It consumes Process,
-Sandbox, Credentials, Tools and generic Agent composition seeds.
+Sandbox, Credentials, Media, Tools and generic Agent composition seeds.
 [`rsi-retrieval`](../crates/rsi-retrieval/README.md) owns model-selected public-web
 URL policy, bounded retrieval and attributed source results. Their configuration
 and model adapters remain above generic Agent and Meta contracts; neither moves
@@ -84,6 +88,9 @@ Dependencies point from the standard product through product implementations
 and protocols toward `rsi-meta`; foundation packages never depend back on a
 composition or application package. A product may consume another product's
 typed contract, but it may not acquire a privileged lifecycle adapter.
+Serialized metadata uses the owning protocol library. An in-process service
+contract may also consume another family's opaque live capability; a protocol
+package name does not make that capability serializable or imply authority.
 
 Reusable product components live at `crates/<product>/<component>`. The standard
 RSI product's executable applications and their explicit catalog live at

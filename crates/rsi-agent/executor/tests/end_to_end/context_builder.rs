@@ -65,9 +65,10 @@ impl ModelContextCursor for SelectedCursor {
     fn build(
         &self,
         options: rsi_ai_protocol::LanguageRequestOptions,
+        profile: &rsi_ai_protocol::LanguageProfile,
     ) -> rsi_agent_context::Result<LanguageRequest> {
         self.events.lock().unwrap().push("build");
-        let original = self.inner.build(options.clone())?;
+        let original = self.inner.build(options.clone(), profile)?;
         let mut messages = original.messages().to_vec();
         messages.push(rsi_ai_protocol::Message::system_text(&self.marker).unwrap());
         if self.drop_effort {

@@ -18,6 +18,7 @@ pub trait SessionResourceReader: fmt::Debug + Send + Sync + 'static {
     async fn read(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue>;
@@ -42,11 +43,30 @@ impl SessionResourceAdapter {
     pub async fn read(
         &self,
         header: Arc<SessionHeader>,
+        lease: Option<rsi_execution::ExecutionLease>,
         request: ValidatedResourceRequest,
         execution: &rsi_meta::Execution,
         cancellation: CancellationToken,
     ) -> ContributionResult<ValidatedResourceResponse> {
         let request = request.into_request();
+        let _operation = match &lease {
+            Some(lease) if lease.binding().location() == header.coordinates().location() => {
+                Some(lease.admit().map_err(|error| match error {
+                    rsi_process::ProcessError::Capacity => ContributionError::Capacity,
+                    _ => ContributionError::Closed,
+                })?)
+            }
+            None if matches!(request, SessionResourceRequest::Sources)
+                || *header.coordinates().location() == rsi_execution::ExecutionLocation::Local =>
+            {
+                None
+            }
+            _ => {
+                return Err(invalid(
+                    "resource execution lease does not match its Session",
+                ));
+            }
+        };
         if header.agent_preset_id() != self.pin.preset_id() {
             return Err(ContributionError::Invalid(
                 "resource Header does not match its generation".into(),
@@ -93,9 +113,17 @@ impl SessionResourceAdapter {
                 let stop = cancellation.child_token();
                 let _guard = stop.clone().drop_guard();
                 cancellation
-                    .run_until_cancelled(deadline.timeout(
-                        std::panic::AssertUnwindSafe(reader.read(&header, id, stop)).catch_unwind(),
-                    ))
+                    .run_until_cancelled(
+                        deadline.timeout(
+                            std::panic::AssertUnwindSafe(reader.read(
+                                &header,
+                                lease.as_ref(),
+                                id,
+                                stop,
+                            ))
+                            .catch_unwind(),
+                        ),
+                    )
                     .await
                     .ok_or(ContributionError::Closed)?
                     .map_err(|_| {

@@ -6,7 +6,7 @@ impl AgentKernel {
         caller: &AgentCallerAuthority,
         run: &ProgramRunId,
     ) -> TurnResult<rsi_agent_turn_protocol::ProgramSnapshot> {
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         let state = self.read_program_state(caller.session_id(), run).await?;
         let phase = state.phase.clone();
         let progress = state.progress.clone();
@@ -34,7 +34,7 @@ impl AgentKernel {
         };
         // Store/CAS awaits may retire the source Tool. Observation must not
         // publish through a caller that lost its authority during those reads.
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         Ok(rsi_agent_turn_protocol::ProgramSnapshot {
             run_id: run.clone(),
             control_seq: state.control_seq,

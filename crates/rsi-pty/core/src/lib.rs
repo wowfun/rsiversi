@@ -4,7 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_process::{ManagedPtyProcess, PtyProcess, PtyProcessContract, PtyProcessSpec};
+use rsi_process::{PtyProcess, PtyProcessContract, PtyProcessSpec};
 use rsi_pty_protocol::{
     Attachment, InputReceipt, InputState, MAXIMUM_ATTACHMENTS, MAXIMUM_FOLLOWER_BYTES,
     MAXIMUM_OUTPUT_PAGE_BYTES, MAXIMUM_TERMINALS, Operation, OutputPage, Phase, PtyError,
@@ -22,6 +22,8 @@ use std::{
 };
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 mod filter;
+mod process;
+use process::{Launch, TermProcess};
 mod operations;
 mod output;
 const SCREEN_BYTES: usize = 256 * 1024 * 1024;
@@ -139,6 +141,7 @@ impl Drop for Creating<'_> {
 }
 #[derive(Debug)]
 struct Scope {
+    self_weak: Weak<Scope>,
     closing: tokio::sync::Mutex<()>,
     shared: Arc<Shared>,
     inner: Mutex<ScopeState>,
@@ -166,7 +169,8 @@ impl PtyProvider for Provider {
         if scopes.len() >= MAXIMUM_SCOPES {
             return Err(PtyError::Capacity);
         }
-        let scope = Arc::new(Scope {
+        let scope = Arc::new_cyclic(|weak| Scope {
+            self_weak: weak.clone(),
             closing: tokio::sync::Mutex::new(()),
             shared: self.shared.clone(),
             inner: Mutex::new(ScopeState::default()),
@@ -178,7 +182,7 @@ impl PtyProvider for Provider {
 }
 struct Term {
     shared: Arc<Shared>,
-    process: ManagedPtyProcess,
+    process: TermProcess,
     inner: Mutex<TermState>,
     changed: Notify,
     reader_done: AtomicBool,
@@ -200,6 +204,7 @@ struct TermState {
     followers: BTreeMap<String, Follower>,
     next_input: u64,
     inflight: bool,
+    resizing: bool,
     receipts: VecDeque<Record>,
 }
 impl TermState {
@@ -256,6 +261,7 @@ fn unavailable() -> PtyError {
 fn native(error: rsi_process::ProcessError) -> PtyError {
     match error {
         rsi_process::ProcessError::Capacity => PtyError::Capacity,
+        rsi_process::ProcessError::OutcomeUnknown => PtyError::OutcomeUnknown,
         rsi_process::ProcessError::InvalidInput(message) => {
             PtyError::Invalid(message.chars().take(256).collect())
         }
@@ -335,30 +341,65 @@ impl PtyScope for Scope {
         let state = lock(&self.inner);
         state.terminals.is_empty() && self.creating.active.load(Ordering::Acquire) == 0
     }
-    fn create(&self, spec: PtyProcessSpec) -> Result<Attachment> {
+    async fn create(&self, spec: PtyProcessSpec) -> Result<Attachment> {
+        self.create_launch(Launch::Native(spec)).await
+    }
+    async fn create_execution(
+        &self,
+        spec: PtyProcessSpec<rsi_execution::PreparedProcess>,
+    ) -> Result<Attachment> {
+        self.create_launch(Launch::Execution(spec)).await
+    }
+    async fn execute_with(
+        &self,
+        operation: Operation,
+        lease: rsi_execution::ExecutionLease,
+    ) -> Result<Reply> {
+        self.dispatch(operation, Some(lease)).await
+    }
+    async fn execute(&self, operation: Operation) -> Result<Reply> {
+        self.dispatch(operation, None).await
+    }
+    async fn retire(&self) -> Result<()> {
+        self.close_all(true).await
+    }
+}
+impl Scope {
+    async fn create_launch(&self, spec: Launch) -> Result<Attachment> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| PtyError::Unavailable("Tokio runtime is unavailable".into()))?;
+        let scope = self.self_weak.upgrade().ok_or_else(unavailable)?;
+        runtime
+            .spawn(async move { scope.create_owned(spec).await })
+            .await
+            .map_err(|_| PtyError::OutcomeUnknown)?
+    }
+    async fn create_owned(&self, spec: Launch) -> Result<Attachment> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| PtyError::Unavailable("Tokio runtime is unavailable".into()))?;
         spec.validate().map_err(native)?;
-        let terminals = lock(&self.shared.terminals);
-        if self.shared.stopped.load(Ordering::Acquire) {
-            return Err(unavailable());
-        }
-        let state = lock(&self.inner);
-        if state.retired {
-            return Err(unavailable());
-        }
-        if state.terminals.len() + self.creating.active.load(Ordering::Acquire) >= MAXIMUM_TERMINALS
-        {
-            return Err(PtyError::Capacity);
-        }
-        let slot = reserve(&self.shared.slots, 1)?;
-        let _global_creation = self.shared.creating.admit();
-        let _scope_creation = self.creating.admit();
-        drop(state);
-        drop(terminals);
+        let (slot, _global_creation, _scope_creation) = {
+            let _terminals = lock(&self.shared.terminals);
+            if self.shared.stopped.load(Ordering::Acquire) {
+                return Err(unavailable());
+            }
+            let state = lock(&self.inner);
+            if state.retired {
+                return Err(unavailable());
+            }
+            if state.terminals.len() + self.creating.active.load(Ordering::Acquire)
+                >= MAXIMUM_TERMINALS
+            {
+                return Err(PtyError::Capacity);
+            }
+            let slot = reserve(&self.shared.slots, 1)?;
+            let global_creation = self.shared.creating.admit();
+            let scope_creation = self.creating.admit();
+            (slot, global_creation, scope_creation)
+        };
         let size = Size {
-            rows: spec.size.rows,
-            columns: spec.size.columns,
+            rows: spec.size().rows,
+            columns: spec.size().columns,
         };
         let screen = reserve(&self.shared.screens, screen_bytes(size)?)?;
         let parser = vt100::Parser::new(size.rows, size.columns, 1000);
@@ -378,7 +419,10 @@ impl PtyScope for Scope {
             controller: Some(attachment.clone()),
             controller_epoch: 1,
         };
-        let process = self.shared.processes.spawn(spec).map_err(native)?;
+        let process = spec
+            .spawn(self.shared.processes.as_ref())
+            .await
+            .map_err(native)?;
         let term = Arc::new(Term {
             shared: self.shared.clone(),
             process,
@@ -394,6 +438,7 @@ impl PtyScope for Scope {
                 )]),
                 next_input: 1,
                 inflight: false,
+                resizing: false,
                 receipts: VecDeque::new(),
             }),
             changed: Notify::new(),
@@ -425,12 +470,6 @@ impl PtyScope for Scope {
             id: attachment,
             stream_epoch: 1,
         })
-    }
-    async fn execute(&self, operation: Operation) -> Result<Reply> {
-        self.dispatch(operation).await
-    }
-    async fn retire(&self) -> Result<()> {
-        self.close_all(true).await
     }
 }
 struct ReaderGuard(Arc<Term>);
@@ -483,13 +522,16 @@ impl Term {
             loop {
                 let changed = self.changed.notified();
                 if self.reader_done.load(Ordering::Acquire) {
-                    break;
+                    let state = lock(&self.inner);
+                    if !state.inflight && !state.resizing {
+                        break;
+                    }
                 }
                 changed.await;
             }
         })
         .await
-        .map_err(|_| PtyError::Io("terminal screen reader did not settle".into()))?;
+        .map_err(|_| PtyError::Io("terminal screen or control operation did not settle".into()))?;
         outcome.map(|_| ())
     }
 }

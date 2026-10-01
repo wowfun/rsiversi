@@ -111,7 +111,7 @@ async fn native_pty_has_job_control_confines_writes_and_reaps_on_provider_retire
         let mut bad = spec("exit 0", 1024);
         bad.process = plan.clone();
         assert!(matches!(
-            pipes.spawn(bad),
+            pipes.spawn(bad).await,
             Err(ProcessError::InvalidInput(_))
         ));
         let original = temporary.path().join("original");
@@ -142,6 +142,7 @@ async fn native_pty_has_job_control_confines_writes_and_reaps_on_provider_retire
                 },
                 termination_grace_ms: 500,
             })
+            .await
             .unwrap();
         assert!(
             process
@@ -149,6 +150,7 @@ async fn native_pty_has_job_control_confines_writes_and_reaps_on_provider_retire
                     rows: 0,
                     columns: 80
                 })
+                .await
                 .is_err()
         );
         write(
@@ -166,6 +168,7 @@ async fn native_pty_has_job_control_confines_writes_and_reaps_on_provider_retire
                 rows: 40,
                 columns: 120,
             })
+            .await
             .unwrap();
         write(&process, b"stty size\n").await;
         output_until(&process, b"40 120").await;
@@ -247,6 +250,7 @@ async fn native_pty_has_job_control_confines_writes_and_reaps_on_provider_retire
                 rows: 24,
                 columns: 80,
             })
+            .await
             .unwrap();
         assert!(process_fiber.dispose().await.is_clean());
         tokio::time::timeout(Duration::from_secs(5), process.wait())

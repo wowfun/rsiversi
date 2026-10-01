@@ -1,8 +1,8 @@
 # rsi-session-files
 
 This standard-product adapter exposes authenticated, finite workspace browsing
-through ordinary endpoint and client plugins. The API consumes the independent
-Files reader and the actual Session read-lease service. `files/open`, `read`,
+through ordinary endpoint and client plugins. The API consumes the execution
+resolver and the actual Session read-lease service. `files/open`, `read`,
 `list` and `release` are version-one authenticated Data/Read operations: a lost
 waiter cancels work. They accept a Session/Header target and relative paths or
 retained file descriptors, never an absolute root override.
@@ -15,14 +15,24 @@ obtain this capability from the ordinary authenticated domain client plugin.
 
 Every call decodes its closed bounded request, reserves materialization
 scratch and validates ranges before acquiring the actual Session read lease. The Header's canonical cwd
-selects the root for an authenticated caller.
+selects the root for an authenticated caller. Each call forwards its actual
+ingress origin to Session admission and selects a fresh execution lease for the
+Header location; remote paths never enter the Service's native Files reader.
 Session identity, Header fingerprint and file token are correlation values,
 not secrets or authentication. Draft expiry is an unavailable domain object;
 missing/revoked authentication remains an API authorization failure. API or
 Session retirement and device revocation cancel the finite reader future.
 
-Each endpoint generation supplies a distinct Files caller identity. Retirement drains endpoint
-admission, then releases all tokens owned by that caller generation. Every token
+Each endpoint generation supplies a distinct Files caller identity and retains at
+most 64 token resources, including opens in progress. Each token pins its original
+provider and is bound to the opening principal and exact Session/Header. A fresh
+view authorizes continuation without borrowing the opening caller's old grant.
+Reconnection cannot transfer a token to another provider. Release and endpoint
+retirement dispose the retained scope; idle tokens retain no Session activity.
+Release authenticates the owning principal and exact token target but needs no
+new execution lease or live Session; it remains cleanup after Use withdrawal,
+target disconnection or draft expiry.
+Retirement drains endpoint admission, then releases all retained resources. Every token
 continuation receives a freshly authorized binding and retains the finite Session
 lease through I/O. Tokens never retain draft activity. Files owns retained native
 handles and all page/snapshot/token/job limits; this adapter owns bounded wire
@@ -38,3 +48,7 @@ a read/open/release automatically; unavailable/changed objects require explicit
 refresh. HTTP authentication probes use an isolated loopback server and test-only
 credentials; actual draft lifetime is tested at the Session owner and through
 standard-product integration.
+
+Version-2 Files operations include the opened object's executable flag. Metadata
+and bytes retain one source version; clients cannot supply a different mode while
+continuing an existing token.

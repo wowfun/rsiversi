@@ -7,9 +7,9 @@ use super::{
 pub const MAXIMUM_DUPLEX_CHUNK_BYTES: usize = 64 * 1024;
 /// Fully explicit ongoing protocol process request after Sandbox confinement.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DuplexProcessSpec {
+pub struct DuplexProcessSpec<P = ConfinedProcess> {
     /// Exact confined executable, argv and cwd.
-    pub process: ConfinedProcess,
+    pub process: P,
     /// Complete child environment; never merged with ambient values.
     pub environment: Vec<(OsString, OsString)>,
     /// Lossless queued stdout capacity, within the ordinary per-stream ceiling.
@@ -19,6 +19,22 @@ pub struct DuplexProcessSpec {
     /// TERM/KILL and final pipe drain grace.
     pub termination_grace_ms: u64,
 }
+impl<P> DuplexProcessSpec<P> {
+    /// Moves the exact options into another provider's prepared-plan representation.
+    pub fn try_map_process<Q>(
+        self,
+        map: impl FnOnce(P) -> Result<Q>,
+    ) -> Result<DuplexProcessSpec<Q>> {
+        Ok(DuplexProcessSpec {
+            process: map(self.process)?,
+            environment: self.environment,
+            stdout_buffer_bytes: self.stdout_buffer_bytes,
+            stderr_max_bytes: self.stderr_max_bytes,
+            termination_grace_ms: self.termination_grace_ms,
+        })
+    }
+}
+
 impl DuplexProcessSpec {
     /// Validates the same process, environment and capture admission invariants.
     pub fn validate(&self) -> Result<()> {
@@ -128,9 +144,10 @@ impl ManagedDuplexProcess {
     }
 }
 /// Sibling process provider for byte protocols, sharing batch-process admission.
+#[async_trait]
 pub trait DuplexProcess: fmt::Debug + Send + Sync + 'static {
     /// Validates and admits an explicitly confined ongoing process.
-    fn spawn(&self, spec: DuplexProcessSpec) -> Result<ManagedDuplexProcess>;
+    async fn spawn(&self, spec: DuplexProcessSpec) -> Result<ManagedDuplexProcess>;
 }
 /// Local-only protocol process authority; never supplied by the output API.
 #[derive(Debug)]

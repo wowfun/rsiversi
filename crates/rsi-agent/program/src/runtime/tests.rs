@@ -62,6 +62,7 @@ struct Rpc {
     settled: AtomicUsize,
     notified: tokio::sync::Notify,
     blocked: bool,
+    uncertain: bool,
 }
 #[async_trait]
 impl ProgramRpc for Rpc {
@@ -73,44 +74,23 @@ impl ProgramRpc for Rpc {
         _: String,
         args: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ProgramError> {
         self.entered.fetch_add(1, Ordering::SeqCst);
         self.notified.notify_one();
         if self.blocked {
             cancellation.cancelled().await;
         }
         self.settled.fetch_add(1, Ordering::SeqCst);
-        Ok(args)
+        if self.uncertain {
+            Err(ProgramError::OutcomeUnknown)
+        } else {
+            Ok(args)
+        }
     }
 }
 fn request(rpc: Arc<Rpc>) -> Request {
-    use rsi_sandbox::{
-        ConfinedProcess, EnforcementStamp, ProcessStdio, SandboxBackend, SandboxFileSystem,
-        SandboxMode, SandboxNetwork, SandboxScratch,
-    };
-    let cwd = std::env::current_dir().unwrap();
     Request {
-        spec: DuplexProcessSpec {
-            process: ConfinedProcess {
-                owner: None,
-                stdio: ProcessStdio::Pipes,
-                program: std::env::current_exe().unwrap(),
-                arguments: vec![],
-                cwd: cwd.clone(),
-                stamp: EnforcementStamp {
-                    requested: SandboxMode::DangerFullAccess,
-                    backend: SandboxBackend::Unconfined,
-                    workspace: cwd,
-                    filesystem: SandboxFileSystem::Unconfined,
-                    scratch: SandboxScratch::Host,
-                    network: SandboxNetwork::Host,
-                },
-            },
-            environment: vec![],
-            stdout_buffer_bytes: 1024,
-            stderr_max_bytes: 1024,
-            termination_grace_ms: 1,
-        },
+        spec: Mutex::new(None),
         script: "return 42".into(),
         rpc,
         start: CancellationToken::new(),
@@ -133,6 +113,7 @@ async fn oversized_prefix_is_rejected_before_body_read_and_oversized_write_emits
                 .await
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("1 MiB")
         );
         assert_eq!(port.read_bytes.load(Ordering::SeqCst), 4);
@@ -177,7 +158,7 @@ async fn fragmented_duplex_preserves_reply_and_exact_result_bound() {
         if extra == 0 {
             assert_eq!(result.unwrap(), value);
         } else {
-            assert!(result.unwrap_err().contains("256 KiB"));
+            assert!(result.unwrap_err().to_string().contains("256 KiB"));
         }
         assert_eq!(rpc.settled.load(Ordering::SeqCst), 1);
         let bytes = port.written.lock().unwrap();
@@ -209,7 +190,7 @@ async fn excessive_rpc_admission_cancels_and_joins_all_sixteen_handlers() {
         true,
     );
     let result = exchange(port.clone(), port, &req).await.unwrap_err();
-    assert!(result.contains("excessive"));
+    assert!(result.to_string().contains("excessive"));
     assert_eq!(
         rpc.entered.load(Ordering::SeqCst),
         MAXIMUM_PROGRAM_OUTSTANDING_CALLS
@@ -234,6 +215,43 @@ async fn cancellation_joins_admitted_rpc_before_returning() {
     tokio::pin!(exchange);
     tokio::select! { result = &mut exchange => panic!("unexpected settlement {result:?}"), () = rpc.notified.notified() => {} }
     req.cancel.cancel();
-    assert!(exchange.await.unwrap_err().contains("cancelled"));
+    assert!(
+        exchange
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+    );
     assert_eq!(rpc.settled.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn uncertain_rpc_never_replies_to_script_and_survives_cancellation_drain() {
+    for cancelled in [false, true] {
+        let rpc = Arc::new(Rpc {
+            blocked: cancelled,
+            uncertain: true,
+            ..Rpc::default()
+        });
+        let req = request(rpc.clone());
+        let port = frames(
+            [json!({"type":"call","id":1,"method":"effect","arguments":null})],
+            true,
+        );
+        let exchange = exchange(port.clone(), port.clone(), &req);
+        tokio::pin!(exchange);
+        if cancelled {
+            tokio::select! { result = &mut exchange => panic!("unexpected settlement {result:?}"), () = rpc.notified.notified() => {} }
+            req.cancel.cancel();
+        }
+        assert_eq!(exchange.await.unwrap_err(), ProgramError::OutcomeUnknown);
+        assert_eq!(rpc.settled.load(Ordering::SeqCst), 1);
+        let written = port.written.lock().unwrap();
+        let first = u32::from_be_bytes(written[..4].try_into().unwrap()) as usize;
+        assert_eq!(
+            written.len(),
+            first + 4,
+            "only the start frame may reach JavaScript"
+        );
+    }
 }

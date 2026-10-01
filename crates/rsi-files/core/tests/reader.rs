@@ -16,6 +16,95 @@ fn cancel() -> CancellationToken {
 }
 
 #[tokio::test]
+async fn missing_relative_name_is_distinct_from_unavailable_root_and_provider() {
+    let _serial = SERIAL.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let service = LocalFiles::new().unwrap();
+    for kind in [FileKind::File, FileKind::Directory] {
+        assert_eq!(
+            service
+                .open(binding(&root), path("absent"), kind, cancel())
+                .await,
+            Err(FilesError::Missing)
+        );
+        assert_eq!(
+            service
+                .open(
+                    binding(&root.join("absent-root")),
+                    path("absent"),
+                    kind,
+                    cancel()
+                )
+                .await,
+            Err(FilesError::Unavailable)
+        );
+    }
+    service.close().await;
+    assert_eq!(
+        service
+            .open(binding(&root), path("absent"), FileKind::File, cancel())
+            .await,
+        Err(FilesError::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn executable_metadata_and_bytes_share_the_open_version() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _serial = SERIAL.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let filename = root.join("program");
+    fs::write(&filename, "same bytes").unwrap();
+    fs::set_permissions(&filename, fs::Permissions::from_mode(0o600)).unwrap();
+    let service = LocalFiles::new().unwrap();
+    let binding = binding(&root);
+    let original = service
+        .open(binding.clone(), path("program"), FileKind::File, cancel())
+        .await
+        .unwrap();
+    assert!(!original.executable);
+    fs::set_permissions(&filename, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        service
+            .read(binding.clone(), original.token.clone(), 0, 64, cancel())
+            .await,
+        Err(FilesError::Changed)
+    );
+    let refreshed = service
+        .open(binding.clone(), path("program"), FileKind::File, cancel())
+        .await
+        .unwrap();
+    assert!(refreshed.executable);
+    assert_eq!(
+        service.describe(&binding, &refreshed.token).unwrap(),
+        refreshed
+    );
+    let page = service
+        .read(binding.clone(), refreshed.token.clone(), 0, 64, cancel())
+        .await
+        .unwrap();
+    assert_eq!(hex::decode(page.bytes_hex).unwrap(), b"same bytes");
+    let mut directory = service
+        .open(
+            binding.clone(),
+            RelativePath::default(),
+            FileKind::Directory,
+            cancel(),
+        )
+        .await
+        .unwrap();
+    assert!(!directory.executable);
+    directory.executable = true;
+    assert_eq!(
+        directory.validate_for(&RelativePath::default(), FileKind::Directory),
+        Err(FilesError::Invalid)
+    );
+    service.release_caller(binding.caller());
+}
+
+#[tokio::test]
 async fn exact_pages_preserve_non_utf8_controls_offsets_and_reject_wrong_kinds() {
     let _serial = SERIAL.lock().await;
     let temporary = tempfile::tempdir().unwrap();

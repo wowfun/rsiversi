@@ -1,4 +1,4 @@
-use crate::{ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
+use crate::{ProgramError, ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     DomainIdentity, ForkTurnSelection, OutputContract, ProgramDomainGuard, ProgramOutcome,
@@ -93,6 +93,20 @@ fn observation() -> u64 {
 }
 #[async_trait]
 impl ToolExecutor for Workflow {
+    async fn prepare(
+        &self,
+        arguments: &Value,
+        execution: &ToolExecution,
+    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolProcess>> {
+        let arguments: Arguments = serde_json::from_value(arguments.clone())
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        arguments.validate()?;
+        self.runtime
+            .prepare_process(execution)
+            .await
+            .map(Some)
+            .map_err(ToolError::from)
+    }
     async fn execute(
         &self,
         arguments: Value,
@@ -112,19 +126,20 @@ impl ToolExecutor for Workflow {
         )?;
         let mut program = match self
             .runtime
-            .prepare_owned(
+            .admit_owned(
                 args.script,
                 &execution,
                 &scope,
                 Arc::new(WorkflowRpc(run.clone())),
                 run.cancellation(),
+                execution.take_prepared_process()?,
             )
             .await
         {
             Ok(program) => program,
             Err(error) => {
                 self.jobs.finalize_scope(&scope).await.map_err(failure)?;
-                return Err(failure(error));
+                return Err(error.into());
             }
         };
         if let Err(error) = run.accept(&caller).await {
@@ -182,6 +197,9 @@ impl ToolExecutor for Workflow {
             if run.detach().await.is_ok() {return ToolResult::new(json!({"run":identity,"status":"running","detached":true}),vec![],false);}
             wait_finished(&mut receiver).await
         }}.map_err(failure)?;
+        if observed.0 == ProgramOutcome::Interrupted {
+            return Err(ToolError::OutcomeUnknown);
+        }
         ToolResult::new(
             json!({"run":identity,"outcome":observed.0,"value":observed.1,"detached":false}),
             vec![],
@@ -264,21 +282,23 @@ async fn settle_workflow(
         biased;
         () = retiring.cancelled() => {
             let _ = owner.cancel().await;
-            program.cancel();
-            let _ = program.result().await;
-            Err("workflow runtime retired".to_owned())
+            program.cancel_with("workflow runtime retired").await
         }
         () = cancellation.cancelled() => {
-            program.cancel();
-            let _ = program.result().await;
-            Err("workflow cancelled".to_owned())
+            program.cancel_with("workflow cancelled").await
         }
         value = program.result() => value,
     };
     let reported = jobs.wait(&scope, program.job_id(), 0, 0).await;
     let finalized = jobs.finalize_scope(&scope).await;
+    let uncertain = value == Err(ProgramError::OutcomeUnknown)
+        || matches!(&reported, Ok(read) if read.job.status == rsi_jobs::JobStatus::OutcomeUnknown)
+        || matches!(&reported, Err(rsi_jobs::JobsError::OutcomeUnknown))
+        || matches!(&finalized, Ok(report) if report.outcome_unknown)
+        || matches!(&finalized, Err(rsi_jobs::JobsError::OutcomeUnknown));
     let cleanup = reported.map(|_| ()).and(finalized.map(|_| ()));
     let outcome = match (&value, cleanup) {
+        _ if uncertain => ProgramOutcome::Interrupted,
         (_, _) if cancellation.is_cancelled() => ProgramOutcome::Cancelled,
         (_, Err(error)) => ProgramOutcome::Failed {
             code: "program.cleanup".into(),
@@ -287,7 +307,7 @@ async fn settle_workflow(
         (Ok(_), Ok(())) => ProgramOutcome::Completed,
         (Err(error), Ok(())) => ProgramOutcome::Failed {
             code: "program.execution".into(),
-            message: bounded(error),
+            message: bounded(&error.to_string()),
         },
     };
     let outcome = owner
@@ -342,7 +362,7 @@ impl ProgramRpc for WorkflowRpc {
         method: String,
         args: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ProgramError> {
         match method.as_str() {
             "agent" => {
                 let args: AgentArguments =
@@ -483,7 +503,10 @@ mod tests {
             },
             async {
                 finalized.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(rsi_jobs::JobFinalization { unreported: vec![] })
+                Ok(rsi_jobs::JobFinalization {
+                    unreported: vec![],
+                    outcome_unknown: false,
+                })
             },
         )
         .await;
@@ -566,10 +589,6 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_failure_is_terminalized_before_foreground_reports_the_same_outcome() {
-        use rsi_sandbox::{
-            ConfinedProcess, EnforcementStamp, ProcessStdio, SandboxBackend, SandboxFileSystem,
-            SandboxMode, SandboxNetwork, SandboxScratch,
-        };
         let runtime = rsi_meta::Runtime::default();
         let plugin = runtime
             .root()
@@ -593,33 +612,12 @@ mod tests {
             scope: scope.clone(),
             durable: std::sync::Mutex::new(None),
         });
-        let cwd = tempfile::tempdir().unwrap();
         let (outcome, result) =
             tokio::sync::watch::channel(Some(Ok(json!({"script":"succeeded"}))));
         // The process has already settled. Only the Jobs reporting path is faulted
         // by a missing job; no process is spawned or provider contacted.
         let request = Arc::new(crate::runtime::Request {
-            spec: rsi_process::DuplexProcessSpec {
-                process: ConfinedProcess {
-                    owner: None,
-                    stdio: ProcessStdio::Pipes,
-                    program: std::env::current_exe().unwrap(),
-                    arguments: vec![],
-                    cwd: cwd.path().into(),
-                    stamp: EnforcementStamp {
-                        requested: SandboxMode::DangerFullAccess,
-                        backend: SandboxBackend::Unconfined,
-                        workspace: cwd.path().into(),
-                        filesystem: SandboxFileSystem::Unconfined,
-                        scratch: SandboxScratch::Host,
-                        network: SandboxNetwork::Host,
-                    },
-                },
-                environment: vec![],
-                stdout_buffer_bytes: 1024,
-                stderr_max_bytes: 1024,
-                termination_grace_ms: 1,
-            },
+            spec: std::sync::Mutex::new(None),
             script: String::new(),
             rpc: Arc::new(WorkflowRpc(owner.clone())),
             start: CancellationToken::new(),

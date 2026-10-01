@@ -237,7 +237,9 @@ for a read. The cache remains independent of durable Session history.
 
 `SessionReadContract` is a trusted server-side Local capability for finite
 workspace reads. It checks a `SessionTarget` against the actual current Header
-and returns a non-cloneable `SessionReadLease`. That lease keeps an unpublished
+and returns a non-cloneable `SessionReadLease`. Admission receives the actual
+trusted ingress `CallOrigin` and checks its current execution-location access;
+the target and fingerprint never substitute for the caller. That lease keeps an unpublished
 draft active only for the admitted read and exposes the Session service's
 retirement signal. Consumers retain it until their finite operation completes;
 they never put it in idle file tokens or UI subscriptions. Every new read
@@ -298,3 +300,10 @@ clients do not gain this deployment-wide operation.
 
 Every Session transport implements queue mutation and receipt lookup explicitly;
 these are required SessionHandle methods, without a runtime unsupported fallback.
+
+`SessionSourceContract` is a server-only capability bound to one actual Session
+UI target and authenticated origin. Each acquisition returns its current Header,
+finite read lifetime and exact live execution lease. It checks the Header location
+against the lease and cannot be reconstructed from browser coordinates. Source
+workers retain the acquired lifetime through actual completion; retirement cancels
+subsequent work. Ordinary wire Session clients do not implement this capability.

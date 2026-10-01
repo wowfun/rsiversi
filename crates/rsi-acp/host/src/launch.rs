@@ -76,6 +76,7 @@ pub(super) async fn open(
             stderr_max_bytes: 16 * 1024,
             termination_grace_ms: 1000,
         })
+        .await
         .map_err(|_| Error::Launch)?;
     Ok((Peer::start(ProcessTransport::new(process)), mcp_servers))
 }

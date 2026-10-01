@@ -1,4 +1,4 @@
-use super::{CancellationToken, PathBuf, ProductHistorySearch, Request, invalid};
+use super::{PathBuf, ProductHistorySearch, Request, invalid};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrarContract, ApiRegistration, json_handler};
 use rsi_meta::{
@@ -34,6 +34,7 @@ impl PluginFactory for HistoryFactory {
             .requiring_local::<rsi_agent_store_protocol::SessionStoreContract>()
             .requiring_local::<rsi_session_protocol::SessionContract>()
             .requiring_local::<rsi_agent_references::ReferencesContract>()
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<rsi_acp_protocol::service::ExternalConversationsContract>()
             .requiring_local::<rsi_workspace_protocol::WorkspaceRegistryContract>())
     }
@@ -42,11 +43,15 @@ impl PluginFactory for HistoryFactory {
             serde_json::from_value(plan.config().as_ref().clone()).map_err(meta)?;
         let owner = ProductHistorySearch::open(
             config.directory,
-            plan.local::<rsi_agent_store_protocol::SessionStoreContract>()?,
-            plan.local::<rsi_session_protocol::SessionContract>()?,
-            plan.local::<rsi_acp_protocol::service::ExternalConversationsContract>()?,
-            plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
-            plan.local::<rsi_agent_references::ReferencesContract>()?,
+            super::HistorySources {
+                store: plan.local::<rsi_agent_store_protocol::SessionStoreContract>()?,
+                sessions: plan.local::<rsi_session_protocol::SessionContract>()?,
+                external: plan
+                    .local::<rsi_acp_protocol::service::ExternalConversationsContract>()?,
+                workspaces: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
+                references: plan.local::<rsi_agent_references::ReferencesContract>()?,
+                resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
+            },
             plan.context().runtime().execution().clone(),
         )
         .await
@@ -92,7 +97,7 @@ impl PluginFactory for HistoryApiFactory {
                 registrar
                     .register(
                         spec,
-                        json_handler(move |_context, request: Request| {
+                        json_handler(move |context, request: Request| {
                             let owner = owner.clone();
                             let expected = expected.clone();
                             async move {
@@ -100,7 +105,11 @@ impl PluginFactory for HistoryApiFactory {
                                     return Err(invalid("history operation mismatch"));
                                 }
                                 owner
-                                    .call(request, CancellationToken::new())
+                                    .call(
+                                        super::HistoryAuthority::Caller(context.origin),
+                                        request,
+                                        context.retiring,
+                                    )
                                     .await
                                     .map(Ok::<_, Never>)
                             }

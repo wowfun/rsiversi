@@ -298,6 +298,11 @@ impl AgentKernel {
             .acquire(session.session_id())
             .await?;
         let (header, composition) = self.continuation_session(&session)?;
+        let _execution = if armed {
+            execution_admission::admit(header, session.execution())?
+        } else {
+            None
+        };
         let states = self.continuation_binding_states(&session, &binding).await?;
         let snapshot = states
             .iter()
@@ -355,10 +360,12 @@ impl AgentKernel {
         {
             return Err(TurnError::Capacity);
         }
-        let lease =
-            self.inner
-                .continuation_issuer
-                .issue(header.clone(), composition.clone(), binding);
+        let lease = self.inner.continuation_issuer.issue(
+            header.clone(),
+            composition.clone(),
+            binding,
+            session.execution().cloned(),
+        );
         if !armed {
             lease.revoke();
         }
@@ -435,6 +442,9 @@ impl AgentKernel {
             || !expected_composition.same_generation(composition)
         {
             return Err(TurnError::ContinuationDisarmed);
+        }
+        if armed {
+            execution_admission::admit(header, lease.execution())?;
         }
         let current = self
             .inner

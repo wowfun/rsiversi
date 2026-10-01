@@ -144,7 +144,7 @@ impl ApiClient for Remote {
     }
 }
 fn header() -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("session").unwrap(),
         1,
         "/workspace",
@@ -246,7 +246,7 @@ async fn subscription_handlers_admit_actual_delivery_bytes() {
         assert!(operation.spec().maximum_response_bytes > 1_024);
         let held = budget.reserve(held_bytes).unwrap();
         let handler = crate::server_stream::Handler {
-            service: Arc::new(client),
+            service: Arc::new(LocalIngress(Arc::new(client))),
             operation,
         };
         let output = handler
@@ -683,4 +683,21 @@ async fn terminal_output_uses_a_bounded_subscription_and_preserves_typed_failure
     })]);
     assert!(handle.terminal(request).await.is_err());
     assert_eq!(remote.output.used(), 0);
+}
+
+#[derive(Debug)]
+struct LocalIngress(Arc<dyn SessionService>);
+#[async_trait]
+impl rsi_session_protocol::SessionIngress for LocalIngress {
+    fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
+        assert!(matches!(origin, rsi_api_protocol::CallOrigin::Local));
+        self.0.clone()
+    }
+    async fn create_from(
+        &self,
+        request: CreateSession,
+        origin: rsi_api_protocol::CallOrigin,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        self.scoped(origin).create(request).await
+    }
 }

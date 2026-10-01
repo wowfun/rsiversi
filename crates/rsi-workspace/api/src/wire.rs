@@ -9,14 +9,16 @@ use std::path::PathBuf;
 pub(crate) enum Operation {
     Get,
     List,
+    OrderSeed,
     Register,
     Status,
     Delete,
 }
 impl Operation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Get,
         Self::List,
+        Self::OrderSeed,
         Self::Register,
         Self::Status,
         Self::Delete,
@@ -25,12 +27,13 @@ impl Operation {
         let (name, effect) = match self {
             Self::Get => ("get", OperationEffect::Read),
             Self::List => ("list", OperationEffect::Read),
+            Self::OrderSeed => ("order_seed", OperationEffect::Read),
             Self::Register => ("register", OperationEffect::Mutation),
             Self::Status => ("status", OperationEffect::Read),
             Self::Delete => ("delete", OperationEffect::Mutation),
         };
         OperationSpec {
-            id: OperationId::new("workspace", name, 1).expect("constant operation"),
+            id: OperationId::new("workspace", name, 3).expect("constant operation"),
             class: OperationClass::Data,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
@@ -42,6 +45,8 @@ impl Operation {
             },
             maximum_response_bytes: if matches!(self, Self::List) {
                 32 * 1024 * 1024
+            } else if matches!(self, Self::OrderSeed) {
+                128 * 1024 + 64
             } else {
                 128 * 1024
             },
@@ -62,6 +67,7 @@ pub(crate) struct ListRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RegisterRequest {
+    pub location: rsi_workspace_protocol::ExecutionLocation,
     pub path: PathBuf,
 }
 

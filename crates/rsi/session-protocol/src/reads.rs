@@ -70,8 +70,12 @@ impl SessionReadLease {
 /// Trusted server-side binding and finite lifetime service; it grants no API access.
 #[async_trait]
 pub trait SessionReads: fmt::Debug + Send + Sync + 'static {
-    /// Acquire the real Header/activity after the caller's own authorization check.
-    async fn acquire(&self, target: &SessionTarget) -> Result<SessionReadLease>;
+    /// Acquire the Header/activity under the actual trusted ingress caller's location access.
+    async fn acquire(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        target: &SessionTarget,
+    ) -> Result<SessionReadLease>;
 }
 /// Nominal Local contract available to server-side read adapters.
 #[derive(Debug)]

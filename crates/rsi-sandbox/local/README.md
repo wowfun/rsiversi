@@ -9,7 +9,9 @@ executable that merely exits successfully is not enforcement evidence.
 Landlock runners implement `--rsi-landlock-probe 23` and return exit code 23
 only after their own enforcement probe succeeds. All executable behavior probes
 in one activation share a cumulative two-second execution budget and do not
-consult `PATH`. Candidate staging is separately byte-bounded and does not
+consult `PATH`. System probes use an empty environment: loader hooks,
+credentials and helper watchdog/notification variables cannot enter the probe.
+Candidate staging is separately byte-bounded and does not
 consume that behavior budget; copying from a pinned regular-file handle is
 blocking filesystem work and is not falsely described as having a hard
 wall-clock deadline.
@@ -60,6 +62,12 @@ mounts. A canonical descendant
 such as `/tmp/work` is rebound after tmpfs creation in either restricted mode.
 Landlock plans retain host scratch and therefore do not claim Bubblewrap's
 private-scratch evidence.
+
+The separate source-reader method accepts only ReadOnly pipes and verified
+Bubblewrap. It retains the initial read-only host root without masking `/tmp`,
+omits `--share-net`, and records Host scratch plus Isolated network. Source
+consumers select a fixed reader; this method is not a change to ordinary Tool
+confinement. Unsupported source readers fail closed without a Landlock fallback.
 
 Default tests inject the probe and inspect plans without changing host policy.
 On Linux, a composition that selects required restricted support must provide a

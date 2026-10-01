@@ -5,11 +5,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
+pub use rsi_execution_protocol::{ExecutionCoordinates, ExecutionLocation};
 use rsi_meta::LocalContract;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
+
+mod order;
+pub use order::WorkspaceOrderSeed;
 
 /// Stable host-local workspace identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -30,6 +34,28 @@ impl WorkspaceId {
             ));
         }
         Ok(Self(value))
+    }
+
+    /// Derives identity from a path already canonicalized by its owning filesystem.
+    /// This checks the host path spelling without opening the caller's filesystem.
+    pub fn from_canonical_path(path: &Path) -> Result<Self> {
+        let text = validate_workspace_path(path)?;
+        let coordinates = ExecutionCoordinates::new(ExecutionLocation::Local, text)
+            .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?;
+        Ok(Self::from_coordinates(&coordinates))
+    }
+
+    /// Derives machine-scoped identity without probing any filesystem.
+    pub fn from_coordinates(coordinates: &ExecutionCoordinates) -> Self {
+        use sha2::Digest as _;
+        let mut digest = sha2::Sha256::new();
+        if let ExecutionLocation::Ssh { target } = coordinates.location() {
+            digest.update(b"ssh\0");
+            digest.update(target.as_str().as_bytes());
+            digest.update(b"\0");
+        }
+        digest.update(coordinates.path().as_bytes());
+        Self(hex::encode(digest.finalize()))
     }
 
     /// Borrows the exact identity.
@@ -71,6 +97,22 @@ pub fn validate_workspace_path(path: &Path) -> Result<&str> {
     Ok(text)
 }
 
+/// Checks target path data before registration, without using the reader's OS grammar.
+pub fn validate_registration_path<'a>(
+    location: &ExecutionLocation,
+    path: &'a Path,
+) -> Result<&'a str> {
+    let text = validate_workspace_path(path)?;
+    if !rsi_workspace_path::is_absolute(text)
+        || (matches!(location, ExecutionLocation::Ssh { .. }) && !text.starts_with('/'))
+    {
+        return Err(WorkspaceError::InvalidInput(
+            "registration requires an absolute target path without parent components".into(),
+        ));
+    }
+    Ok(text)
+}
+
 /// Exclusive durable insertion-order position, usable after record deletion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,25 +135,27 @@ pub struct WorkspacePage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRecord {
-    /// Stable identity derived from canonical path.
+    /// Stable identity derived from complete coordinates.
     pub id: WorkspaceId,
-    /// Canonical physical absolute directory.
-    pub path: PathBuf,
+    /// Machine and canonical physical absolute directory.
+    pub coordinates: ExecutionCoordinates,
 }
 
 impl WorkspaceRecord {
+    /// Creates a registration identity from target-canonicalized coordinates.
+    pub fn new(coordinates: ExecutionCoordinates) -> Self {
+        Self {
+            id: WorkspaceId::from_coordinates(&coordinates),
+            coordinates,
+        }
+    }
+
     /// Validates a remote record without interpreting the host's path on this device.
     pub fn validate(&self) -> Result<()> {
-        use sha2::Digest as _;
-        let path = validate_workspace_path(&self.path)?;
-        if !rsi_workspace_path::is_normalized_absolute(path) {
+        let expected = WorkspaceId::from_coordinates(&self.coordinates);
+        if expected != self.id {
             return Err(WorkspaceError::Corrupt(
-                "workspace path is not a normalized absolute host path".into(),
-            ));
-        }
-        if hex::encode(sha2::Sha256::digest(path.as_bytes())) != self.id.as_str() {
-            return Err(WorkspaceError::Corrupt(
-                "workspace identity does not match its path".into(),
+                "workspace identity does not match its coordinates".into(),
             ));
         }
         Ok(())
@@ -160,7 +204,7 @@ pub enum WorkspaceStatus {
 /// Closed Workspace failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum WorkspaceError {
-    /// Connection failure preserved by a remote Workspace proxy.
+    /// API or storage failure preserving availability and commit certainty.
     #[error(transparent)]
     Api(rsi_api_protocol::ApiError),
     /// Provider or adapter admission is full.
@@ -194,8 +238,18 @@ pub trait WorkspaceRegistry: fmt::Debug + Send + Sync + 'static {
     /// Returns at most `limit` records in stable insertion order.
     /// The limit must be in `1..=MAXIMUM_WORKSPACES_PER_PAGE`.
     async fn list(&self, after: Option<WorkspaceCursor>, limit: usize) -> Result<WorkspacePage>;
+    /// Reads complete bounded membership under one registry snapshot.
+    async fn order_seed(&self) -> Result<WorkspaceOrderSeed>;
     /// Finds or durably creates the canonical directory registration.
-    async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord>;
+    async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord> {
+        self.register_at(&ExecutionLocation::Local, path).await
+    }
+    /// Canonicalizes and registers a directory on the explicitly selected machine.
+    async fn register_at(
+        &self,
+        location: &ExecutionLocation,
+        path: &Path,
+    ) -> Result<WorkspaceRecord>;
     /// Returns current filesystem status without mutating state.
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus>;
     /// Deletes only the registration and returns whether it existed.
@@ -209,4 +263,18 @@ pub struct WorkspaceRegistryContract;
 impl LocalContract for WorkspaceRegistryContract {
     const KEY: &'static str = "rsi.workspace";
     type Service = dyn WorkspaceRegistry;
+}
+
+/// Trusted authenticated ingress; a scoped view retains its caller, never a serialized grant.
+pub trait WorkspaceIngress: fmt::Debug + Send + Sync + 'static {
+    /// Binds a view to exactly the caller authenticated by its transport.
+    fn scoped(&self, origin: rsi_api_protocol::CallOrigin)
+    -> std::sync::Arc<dyn WorkspaceRegistry>;
+}
+/// Server-only Workspace caller binding.
+#[derive(Debug)]
+pub struct WorkspaceIngressContract;
+impl LocalContract for WorkspaceIngressContract {
+    const KEY: &'static str = "rsi.workspace.ingress";
+    type Service = dyn WorkspaceIngress;
 }

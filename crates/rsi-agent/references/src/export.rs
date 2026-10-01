@@ -233,7 +233,7 @@ mod tests {
         AgentPresetId, ContributionId, FrozenAgentSettings, MessageId, StepId,
     };
     fn header() -> SessionHeader {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new("test").unwrap(),
             1,
             "/workspace",

@@ -1,6 +1,193 @@
 use super::turn_state::apply_tool_body;
 use super::*;
 
+#[derive(Debug)]
+struct ClaimFixture;
+#[async_trait]
+impl rsi_tools_protocol::ToolRuntime for ClaimFixture {
+    fn program_role(&self, _: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
+        None
+    }
+    fn program_roles(&self) -> BTreeMap<String, rsi_tools_protocol::ToolProgramRole> {
+        BTreeMap::new()
+    }
+    fn definition(&self, _: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
+        None
+    }
+    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
+        vec![]
+    }
+    fn prepare(
+        &self,
+        _: &str,
+        _: rsi_tools_protocol::ToolCall,
+    ) -> rsi_tools_protocol::Result<Box<dyn rsi_tools_protocol::PreparedToolCall>> {
+        unreachable!()
+    }
+    fn query(
+        &self,
+        _: &rsi_tools_protocol::ToolResultIdentity,
+    ) -> rsi_tools_protocol::Result<rsi_tools_protocol::RetainedToolResult> {
+        unreachable!()
+    }
+    async fn wait(
+        &self,
+        _: &rsi_tools_protocol::ToolResultIdentity,
+        _: CancellationToken,
+    ) -> rsi_tools_protocol::Result<rsi_tools_protocol::RetainedToolResult> {
+        unreachable!()
+    }
+    fn commit(&self, _: &rsi_tools_protocol::ToolResultIdentity) -> rsi_tools_protocol::Result<()> {
+        unreachable!()
+    }
+}
+#[async_trait]
+impl AgentComposition for ClaimFixture {
+    async fn default_preset_id(
+        &self,
+    ) -> std::result::Result<rsi_agent_session_protocol::AgentPresetId, AgentCompositionError> {
+        unreachable!()
+    }
+    async fn pin(
+        &self,
+        preset: &rsi_agent_session_protocol::AgentPresetId,
+        _: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> std::result::Result<AgentCompositionPin, AgentCompositionError> {
+        AgentCompositionPin::new(
+            preset.clone(),
+            "a".repeat(64),
+            Arc::new(Self),
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
+            rsi_agent_composition_protocol::ContributionCatalog::default(),
+            Arc::new(()),
+        )
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one poisoned and one healthy Session share the same claim queue"
+)]
+async fn invalid_claim_quarantines_only_its_session_and_releases_its_prepared_lane() {
+    use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
+    let kernel = AgentKernel::recover(
+        Arc::new(rsi_agent_testkit::MemoryStore::new()),
+        Arc::new(ClaimFixture),
+    )
+    .await
+    .unwrap();
+    let _executor = TurnExecution::register(&kernel, "binding-worker".into()).unwrap();
+    let header = SessionHeader::new_local(
+        SessionId::new("binding-session").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "test",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let session_id = header.session_id().clone();
+    let turn_id = TurnId::new("binding-turn").unwrap();
+    let pin = ClaimFixture
+        .pin(header.agent_preset_id(), None)
+        .await
+        .unwrap();
+    let mut session = SessionRuntime::new(header, pin, 1, false);
+    let pool = Arc::new(Semaphore::new(1));
+    let lane = Arc::new(TreeClaimLane {
+        pool: pool.clone(),
+        permit: Mutex::new(Some(pool.clone().try_acquire_owned().unwrap())),
+    });
+    let mut turn = TurnControl::new(1, 1);
+    turn.prepared_lane = Some(lane.clone());
+    // Inject an impossible admission mismatch at the defensive issuance boundary.
+    turn.execution = Some(crate::execution_fixture::lease(
+        rsi_execution::ExecutionLocation::Ssh {
+            target: rsi_execution::ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+        },
+        Arc::new(crate::execution_fixture::Gate::default()),
+        1,
+    ));
+    session.turns.insert(turn_id.clone(), turn);
+    session.turn_order.push(turn_id.clone());
+    {
+        let mut state = lock_state(&kernel.inner);
+        state.sessions.insert(session_id.clone(), session);
+        enqueue(&mut state, session_id.clone(), turn_id.clone());
+    }
+    let healthy_id = SessionId::new("healthy-session").unwrap();
+    let healthy_header = SessionHeader::new_local(
+        healthy_id.clone(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "test",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let healthy_pin = ClaimFixture
+        .pin(healthy_header.agent_preset_id(), None)
+        .await
+        .unwrap();
+    let mut healthy = SessionRuntime::new(healthy_header, healthy_pin, 1, false);
+    healthy
+        .turns
+        .insert(turn_id.clone(), TurnControl::new(1, 1));
+    healthy.turn_order.push(turn_id.clone());
+    {
+        let mut state = lock_state(&kernel.inner);
+        state.sessions.insert(healthy_id.clone(), healthy);
+        enqueue(&mut state, healthy_id.clone(), turn_id.clone());
+    }
+    let claim = tokio::time::timeout(
+        Duration::from_secs(2),
+        kernel.claim("binding-worker", CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(claim.session_id(), &healthy_id);
+    {
+        let mut state = lock_state(&kernel.inner);
+        assert!(state.claim_queue.is_empty());
+        assert!(
+            !state
+                .queued
+                .contains(&(session_id.clone(), turn_id.clone()))
+        );
+        assert_eq!(state.next_claim, 1);
+        let session = state.sessions.get_mut(&session_id).unwrap();
+        assert!(
+            session
+                .permanent_flush_error
+                .as_ref()
+                .unwrap()
+                .contains("quarantined")
+        );
+        assert!(session.flush_status.borrow().permanent_error.is_some());
+        let turn = session.turns.get(&turn_id).unwrap();
+        assert!(turn.claim.is_none());
+        assert!(turn.prepared_lane.is_none());
+    }
+    drop(lane);
+    assert_eq!(pool.available_permits(), 1);
+}
+
 fn tool_intent(turn_id: &TurnId, suffix: &str, parallel_safe: bool) -> SessionFactBody {
     SessionFactBody::ToolIntent {
         origin: rsi_agent_session_protocol::ToolOrigin::Model {

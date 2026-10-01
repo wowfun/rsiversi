@@ -6,7 +6,13 @@ suffix from an exact selected record, content kind, range and cutoff. These are
 user-data provenance, never execution authority or evidence of an external agent's
 durable acceptance. Only the source owner can reread and freeze a selection.
 
-Format 16 freezes optional `DelegationPolicy` in child Headers: selected role,
+Format 19 requires complete execution coordinates: a Local or stable SSH location
+and its target-canonical workspace path. Decoding validates both together without
+filesystem I/O; a path alone never selects an execution machine. Forks preserve
+the exact parent coordinates. These coordinates are durable identity, not a grant
+or a reconstructible execution lease.
+
+The Header freezes optional `DelegationPolicy` in child Headers: selected role,
 persona, normalized role digest and at most 64 ordered effective Tool names.
 This records a monotone restriction, not a permission grant or an executable
 generation pin. Initial structured-output contracts are optional;
@@ -75,7 +81,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 18 is accepted; all other formats are unsupported. The
+format 19 is accepted; all other formats are unsupported. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 

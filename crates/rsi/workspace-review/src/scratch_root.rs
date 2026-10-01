@@ -9,7 +9,7 @@ fn invalid(e: impl std::fmt::Display) -> ApiError {
 #[derive(Debug)]
 pub(super) struct Root {
     pub path: PathBuf,
-    _lease: File,
+    _lease: Lease,
 }
 impl Root {
     pub async fn open(path: PathBuf) -> Result<Self> {
@@ -50,7 +50,15 @@ impl Root {
                     return Err(invalid("review lease is not private"));
                 }
             }
-            lease.try_lock().map_err(|_| ApiError::Capacity)?;
+            if let Err(error) = lease.try_lock() {
+                let error: std::io::Error = error.into();
+                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    ApiError::Capacity
+                } else {
+                    invalid(error)
+                });
+            }
+            let lease = Lease(lease);
             let mut old = Vec::new();
             for entry in std::fs::read_dir(&path).map_err(invalid)?.take(65) {
                 let entry = entry.map_err(invalid)?;
@@ -109,4 +117,57 @@ pub(super) fn interval_directory(root: &Path) -> std::io::Result<tempfile::TempD
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
     builder.tempdir_in(root)
+}
+
+#[derive(Debug)]
+struct Lease(File);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lease_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_does_not_extend_root_lease_or_unlock_next_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let first = Root::open(directory.path().to_owned()).await.unwrap();
+        let Root { _lease: lease, .. } = &first;
+        let duplicate = lease.0.try_clone().unwrap();
+        assert!(matches!(
+            Root::open(directory.path().to_owned()).await,
+            Err(ApiError::Capacity)
+        ));
+        drop(first);
+        let second = Root::open(directory.path().to_owned()).await.unwrap();
+        drop(duplicate);
+        assert!(matches!(
+            Root::open(directory.path().to_owned()).await,
+            Err(ApiError::Capacity)
+        ));
+        drop(second);
+        // Recovery fails after acquisition, and must release its lease too.
+        std::fs::write(directory.path().join("unrelated"), b"keep").unwrap();
+        assert!(matches!(
+            Root::open(directory.path().to_owned()).await,
+            Err(ApiError::Invalid(_))
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .open(directory.path().join(".writer.lock"))
+            .unwrap();
+        file.try_lock().unwrap();
+        file.unlock().unwrap();
+        assert_eq!(
+            std::fs::read(directory.path().join("unrelated")).unwrap(),
+            b"keep"
+        );
+    }
 }

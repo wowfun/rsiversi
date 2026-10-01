@@ -17,6 +17,9 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }

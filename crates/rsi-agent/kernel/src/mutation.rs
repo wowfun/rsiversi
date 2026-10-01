@@ -11,6 +11,7 @@ mod tests {
         let id = SessionId::new("retained").unwrap();
         let proof = AgentMutationLease {
             inner: Weak::new(),
+            execution: None,
             session_id: id.clone(),
             turn_id: TurnId::new("turn").unwrap(),
             gate: Arc::default(),
@@ -100,6 +101,7 @@ impl ClaimMutationGate {
 }
 
 pub(super) struct AgentMutationLease {
+    execution: Option<rsi_execution::ExecutionOperation>,
     inner: Weak<KernelInner>,
     session_id: SessionId,
     turn_id: TurnId,
@@ -107,6 +109,12 @@ pub(super) struct AgentMutationLease {
 }
 
 pub(super) struct WaitMutationLease(AgentMutationLease);
+
+impl WaitMutationLease {
+    pub(super) fn parked(&mut self) {
+        self.0.execution.take();
+    }
+}
 
 impl std::ops::Deref for WaitMutationLease {
     type Target = AgentMutationLease;
@@ -373,8 +381,14 @@ impl AgentKernel {
         {
             return Err(TurnError::StaleClaim);
         }
+        let execution = if tool_settlement {
+            None
+        } else {
+            execution_admission::admit(caller.header(), caller.execution())?
+        };
         admission.active += 1;
         Ok(AgentMutationLease {
+            execution,
             inner: Arc::downgrade(&self.inner),
             session_id: caller.session_id().clone(),
             turn_id: caller.turn_id().clone(),
@@ -405,6 +419,7 @@ impl AgentKernel {
         }
         admission.active += 1;
         Ok(AgentMutationLease {
+            execution: None,
             inner: Arc::downgrade(&self.inner),
             session_id: claim.session_id().clone(),
             turn_id: claim.turn_id().clone(),

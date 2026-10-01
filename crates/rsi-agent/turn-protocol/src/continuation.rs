@@ -35,6 +35,7 @@ pub struct ContinuationLease(Arc<LiveContinuation>);
 
 struct LiveContinuation {
     seal: Arc<()>,
+    execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     composition: AgentCompositionPin,
     binding: ContinuationBinding,
@@ -57,6 +58,10 @@ impl Drop for LiveContinuation {
 }
 
 impl ContinuationLease {
+    /// Original live execution authority, absent for native-only embeddings or settlement.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        self.0.execution.as_ref()
+    }
     /// Observes revocation or last-owner release without keeping authority alive.
     #[doc(hidden)]
     pub fn disarmed_token(&self) -> CancellationToken {
@@ -162,10 +167,12 @@ impl ContinuationIssuer {
         header: SessionHeader,
         composition: AgentCompositionPin,
         binding: ContinuationBinding,
+        execution: Option<rsi_execution::ExecutionLease>,
     ) -> ContinuationLease {
         let revision = binding.revision;
         ContinuationLease(Arc::new(LiveContinuation {
             seal: self.seal.clone(),
+            execution,
             header,
             composition,
             binding,

@@ -262,12 +262,31 @@ pub struct PreparedFreshSession {
 
 #[derive(Debug)]
 struct PreparedFreshSessionInner {
+    execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     composition: AgentCompositionPin,
     baseline: DomainBaseline,
 }
 
 impl PreparedFreshSession {
+    /// Binds this submission to a live lease of its exact execution location.
+    ///
+    /// # Errors
+    /// Rejects a lease issued for a different machine.
+    pub fn with_execution(mut self, execution: rsi_execution::ExecutionLease) -> Result<Self> {
+        if execution.binding().location() != self.inner.header.coordinates().location() {
+            return Err(AgentCompositionError::InvalidInput(
+                "submission execution location differs".into(),
+            ));
+        }
+        self.inner.execution = Some(execution);
+        Ok(self)
+    }
+    /// Borrows the exact optional process-local execution owner.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        self.inner.execution.as_ref()
+    }
+
     /// Pairs a fresh header with its exact matching composition generation.
     ///
     /// # Errors
@@ -283,6 +302,7 @@ impl PreparedFreshSession {
         let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             inner: Box::new(PreparedFreshSessionInner {
+                execution: None,
                 header,
                 composition,
                 baseline,
@@ -432,6 +452,7 @@ impl AgentSessionDraft {
     pub fn freeze(&self) -> PreparedFreshSession {
         PreparedFreshSession {
             inner: Box::new(PreparedFreshSessionInner {
+                execution: None,
                 header: self.header.clone(),
                 composition: self.composition.clone(),
                 baseline: self.baseline.clone(),
@@ -517,6 +538,7 @@ impl AgentSessionDraft {
     pub fn into_fresh(self) -> PreparedFreshSession {
         PreparedFreshSession {
             inner: Box::new(PreparedFreshSessionInner {
+                execution: None,
                 header: self.header,
                 composition: self.composition,
                 baseline: self.baseline,

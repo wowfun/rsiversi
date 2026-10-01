@@ -5,11 +5,18 @@ use async_trait::async_trait;
 impl rsi_session_protocol::SessionReads for LocalSessionService {
     async fn acquire(
         &self,
+        origin: rsi_api_protocol::CallOrigin,
         target: &rsi_session_protocol::SessionTarget,
     ) -> Result<rsi_session_protocol::SessionReadLease> {
         target.validate()?;
-        self.drafts.accepting()?;
-        let handle = self.attach_local(&target.session_id).await?;
+        let scoped = Self {
+            origin,
+            ..self.clone()
+        };
+        scoped.check_origin()?;
+        scoped.drafts.accepting()?;
+        let handle = scoped.attach_local(&target.session_id).await?;
+        let admission = handle.admit()?;
         let activity = handle.begin_activity()?;
         handle.reconcile_fresh_read().await?;
         let header = handle.header_snapshot().await?;
@@ -29,7 +36,7 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
         Ok(rsi_session_protocol::SessionReadLease::new(
             (*header).clone(),
             self.projection_stopped.clone(),
-            activity,
+            (activity, admission),
         ))
     }
 }

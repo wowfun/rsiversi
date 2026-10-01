@@ -1,4 +1,4 @@
-use crate::{ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
+use crate::{ProgramError, ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
 use async_trait::async_trait;
 use rsi_agent_turn_protocol::ProgramToolCalls;
 use rsi_jobs::{Jobs, JobsContract};
@@ -91,7 +91,7 @@ impl ProgramRpc for ToolRpc {
         method: String,
         arguments: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ProgramError> {
         if method != "tool" {
             return Err("workflow methods are unavailable in run_code".into());
         }
@@ -101,12 +101,28 @@ impl ProgramRpc for ToolRpc {
             .0
             .call(call.name, call.arguments, cancellation)
             .await
-            .map_err(|error| error.to_string())?;
-        serde_json::to_value(result).map_err(|error| error.to_string())
+            .map_err(ProgramError::from)?;
+        serde_json::to_value(result).map_err(|error| ProgramError::Failed(error.to_string()))
     }
 }
 #[async_trait]
 impl ToolExecutor for Tool {
+    async fn prepare(
+        &self,
+        arguments: &Value,
+        execution: &ToolExecution,
+    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolProcess>> {
+        let arguments: Arguments = serde_json::from_value(arguments.clone())
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        if arguments.script.len() > rsi_agent_session_protocol::MAXIMUM_PROGRAM_SCRIPT_BYTES {
+            return Err(ToolError::InvalidInput("script exceeds 64 KiB".into()));
+        }
+        self.runtime
+            .prepare_process(execution)
+            .await
+            .map(Some)
+            .map_err(ToolError::from)
+    }
     async fn execute(
         &self,
         arguments: Value,
@@ -122,28 +138,33 @@ impl ToolExecutor for Tool {
             .ok_or_else(|| ToolError::Execution("program Jobs authority is absent".into()))?;
         let mut program = self
             .runtime
-            .prepare(
+            .admit(
                 arguments.script,
                 &execution,
                 scope,
                 Arc::new(ToolRpc(calls)),
+                execution.take_prepared_process()?,
             )
             .await
-            .map_err(ToolError::Execution)?;
+            .map_err(ToolError::from)?;
         program.start().map_err(ToolError::Execution)?;
         let result = tokio::select! {
             biased;
-            () = execution.cancellation.cancelled() => { program.cancel(); let _ = program.result().await; Err("program cancelled".into()) },
-            () = tokio::time::sleep(Duration::from_mins(10)) => { program.cancel(); let _ = program.result().await; Err("program deadline exceeded".into()) },
+            () = execution.cancellation.cancelled() => program.cancel_with("program cancelled").await,
+            () = tokio::time::sleep(Duration::from_mins(10)) => program.cancel_with("program deadline exceeded").await,
             result = program.result() => result,
         };
-        self.jobs
-            .wait(scope, program.job_id(), 0, 0)
-            .await
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let reported = self.jobs.wait(scope, program.job_id(), 0, 0).await;
+        if result == Err(ProgramError::OutcomeUnknown)
+            || matches!(&reported, Ok(read) if read.job.status == rsi_jobs::JobStatus::OutcomeUnknown)
+            || matches!(&reported, Err(rsi_jobs::JobsError::OutcomeUnknown))
+        {
+            return Err(ToolError::OutcomeUnknown);
+        }
+        reported.map_err(|error| ToolError::Execution(error.to_string()))?;
         match result {
             Ok(value) => ToolResult::new(json!({"value": value}), vec![], false),
-            Err(error) => ToolResult::new(json!({"error": error}), vec![], true),
+            Err(error) => ToolResult::new(json!({"error": error.to_string()}), vec![], true),
         }
     }
 }

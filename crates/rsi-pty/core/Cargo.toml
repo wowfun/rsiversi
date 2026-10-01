@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
@@ -17,6 +18,8 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["rt","sync","time"] }
 vt100.workspace = true
 [dev-dependencies]
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 [lints]
 workspace = true

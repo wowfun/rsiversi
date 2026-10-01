@@ -14,6 +14,7 @@ use std::fmt;
 mod client;
 mod local;
 mod plugin;
+mod resources;
 mod server;
 mod wire;
 pub use client::SessionFilesClient;

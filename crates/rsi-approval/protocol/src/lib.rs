@@ -96,6 +96,8 @@ impl ApprovalSubject {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalReview {
+    /// Exact target lease and optional process-plan correlation, separate from the arguments digest.
+    pub execution: Option<rsi_execution_protocol::ExecutionReview>,
     /// Canonical prepared arguments, without truncation.
     pub arguments: serde_json::Value,
     /// Absolute working directory frozen for execution.

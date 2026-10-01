@@ -13,14 +13,14 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub(super) struct Handler {
-    pub service: Arc<dyn SessionService>,
+    pub service: Arc<dyn rsi_session_protocol::SessionIngress>,
     pub operation: Operation,
 }
 #[async_trait]
 impl ApiHandler for Handler {
     async fn invoke(
         &self,
-        _: ApiContext,
+        context: ApiContext,
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> rsi_api_protocol::Result<ApiOutput> {
@@ -29,6 +29,7 @@ impl ApiHandler for Handler {
                 "Session subscription admission required".into(),
             ));
         };
+        let service = self.service.scoped(context.origin);
         match self.operation {
             Operation::Export => {
                 let request: HandleRequest<rsi_session_protocol::export::ExportOptions> =
@@ -39,7 +40,7 @@ impl ApiHandler for Handler {
                     .validate()
                     .map_err(|_| ApiError::Invalid("invalid export options".into()))?;
                 let result = async {
-                    handle(self.service.as_ref(), &request.target)
+                    handle(service.as_ref(), &request.target)
                         .await?
                         .export(request.input)
                         .await
@@ -60,17 +61,15 @@ impl ApiHandler for Handler {
                 })))
             }
             Operation::TerminalOutput => {
-                terminal_output(self.service.as_ref(), input, budget, maximum).await
+                terminal_output(service.as_ref(), input, budget, maximum).await
             }
-            Operation::GoalObserve => goal(self.service.as_ref(), input, budget, maximum).await,
-            Operation::Projections => {
-                projections(self.service.as_ref(), input, budget, maximum).await
-            }
+            Operation::GoalObserve => goal(service.as_ref(), input, budget, maximum).await,
+            Operation::Projections => projections(service.as_ref(), input, budget, maximum).await,
             Operation::Observe => {
                 let request: wire::Observe = serde_json::from_slice(input.as_bytes())
                     .map_err(|_| ApiError::Invalid("invalid Session observation request".into()))?;
                 let result = async {
-                    handle(self.service.as_ref(), &request.target)
+                    handle(service.as_ref(), &request.target)
                         .await?
                         .observe(request.input)
                         .await
@@ -98,7 +97,7 @@ impl ApiHandler for Handler {
                 let request: HandleRequest<()> = serde_json::from_slice(input.as_bytes())
                     .map_err(|_| ApiError::Invalid("invalid Session interaction request".into()))?;
                 let result = async {
-                    handle(self.service.as_ref(), &request.target)
+                    handle(service.as_ref(), &request.target)
                         .await?
                         .observe_interactions()
                         .await

@@ -102,7 +102,12 @@ impl Terminals {
             entry,
         }))
     }
-    async fn operate(&self, session: &SessionId, operation: Operation) -> Result<Reply> {
+    async fn operate(
+        &self,
+        session: &SessionId,
+        operation: Operation,
+        execution: Option<rsi_execution::ExecutionLease>,
+    ) -> Result<Reply> {
         let Some(scope) = self.scope(session, false)? else {
             return match operation {
                 Operation::List => Ok(Reply::List(vec![])),
@@ -118,7 +123,10 @@ impl Terminals {
         } else {
             None
         };
-        let result = scope.entry.scope.execute(operation).await;
+        let result = match execution {
+            Some(execution) => scope.entry.scope.execute_with(operation, execution).await,
+            None => scope.entry.scope.execute(operation).await,
+        };
         Ok(result?)
     }
     pub(super) async fn stop(&self) -> Result<()> {
@@ -196,42 +204,107 @@ impl LocalSessionHandle {
                     ));
                 }
 
-                self.prepare_workspace(&header).await?;
-                let workspace = PathBuf::from(header.canonical_cwd());
-                let process = terminals
-                    .sandbox
-                    .confine(rsi_sandbox::ProcessRequest {
-                        stdio: rsi_sandbox::ProcessStdio::Pty,
-                        mode: header.settings().sandbox(),
-                        program: "/bin/bash".into(),
-                        arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
-                        cwd: workspace.clone(),
-                        workspace: workspace.clone(),
-                    })
-                    .await
-                    .map_err(|_| {
-                        unavailable("the frozen sandbox cannot provide a controlling terminal")
-                    })?;
+                let launch = self.prepare_terminal(terminals, &header, size).await?;
                 let scope = terminals
                     .scope(&self.session_id, true)?
                     .expect("new scope requested");
                 let _mutation = scope.entry.mutation.lock().await;
-                let attachment = scope.entry.scope.create(rsi_process::PtyProcessSpec {
-                    process,
-                    size: size.native(),
-                    termination_grace_ms: 250,
-                    environment: vec![
-                        ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-                        ("HOME".into(), workspace.into_os_string()),
-                        ("SHELL".into(), "/bin/bash".into()),
-                        ("TERM".into(), "xterm-256color".into()),
-                        ("LANG".into(), "C.UTF-8".into()),
-                        ("HISTFILE".into(), "/dev/null".into()),
-                    ],
-                })?;
+                let attachment = match launch {
+                    TerminalLaunch::Native(spec) => scope.entry.scope.create(spec).await?,
+                    TerminalLaunch::Execution(spec) => {
+                        scope.entry.scope.create_execution(spec).await?
+                    }
+                };
                 Ok(Reply::Attached(attachment))
             }
-            Request::Operate { operation } => terminals.operate(&self.session_id, operation).await,
+            Request::Operate { operation } => {
+                let execution = if matches!(
+                    operation,
+                    Operation::Input { .. } | Operation::Resize { .. }
+                ) {
+                    self.execution_lease()?
+                } else {
+                    None
+                };
+                terminals
+                    .operate(&self.session_id, operation, execution)
+                    .await
+            }
+        }
+    }
+}
+enum TerminalLaunch {
+    Native(rsi_process::PtyProcessSpec),
+    Execution(rsi_process::PtyProcessSpec<rsi_execution::PreparedProcess>),
+}
+impl LocalSessionHandle {
+    async fn prepare_terminal(
+        &self,
+        terminals: &Terminals,
+        header: &super::SessionHeader,
+        size: rsi_pty_protocol::Size,
+    ) -> Result<TerminalLaunch> {
+        let workspace = PathBuf::from(header.canonical_cwd());
+        let environment = vec![
+            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+            ("HOME".into(), workspace.clone().into_os_string()),
+            ("SHELL".into(), "/bin/bash".into()),
+            ("TERM".into(), "xterm-256color".into()),
+            ("LANG".into(), "C.UTF-8".into()),
+            ("HISTFILE".into(), "/dev/null".into()),
+        ];
+        let request = rsi_sandbox::ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pty,
+            mode: header.settings().sandbox(),
+            program: PathBuf::from("/bin/bash"),
+            arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            cwd: workspace.clone(),
+            workspace,
+        };
+        if let Some(lease) = self.execution_lease()? {
+            let coordinates = lease
+                .canonicalize(header.canonical_cwd())
+                .await
+                .map_err(|_| unavailable("terminal workspace is unavailable on its target"))?;
+            if &coordinates != header.coordinates() {
+                return Err(unavailable("terminal workspace changed on its target"));
+            }
+            let program = if *lease.binding().location() == rsi_execution::ExecutionLocation::Local
+            {
+                lease
+                    .resolve_local_program(rsi_execution::ResolvedProgram {
+                        program: request.program.clone(),
+                        environment,
+                    })
+                    .await
+            } else {
+                lease.resolve_program("terminal").await
+            }
+            .map_err(|_| unavailable("terminal shell is unavailable on its target"))?;
+            let process = lease
+                .prepare(request.map_program(|_| program))
+                .await
+                .map_err(|_| {
+                    unavailable("the target sandbox cannot provide a controlling terminal")
+                })?;
+            let environment = process.environment().to_vec();
+            Ok(TerminalLaunch::Execution(rsi_process::PtyProcessSpec {
+                process,
+                environment,
+                size: size.native(),
+                termination_grace_ms: 250,
+            }))
+        } else {
+            self.prepare_workspace(header).await?;
+            let process = terminals.sandbox.confine(request).await.map_err(|_| {
+                unavailable("the frozen sandbox cannot provide a controlling terminal")
+            })?;
+            Ok(TerminalLaunch::Native(rsi_process::PtyProcessSpec {
+                process,
+                environment,
+                size: size.native(),
+                termination_grace_ms: 250,
+            }))
         }
     }
 }
@@ -268,10 +341,23 @@ mod tests {
     }
     #[async_trait]
     impl PtyScope for Scope {
+        async fn create_execution(
+            &self,
+            _: rsi_process::PtyProcessSpec<rsi_execution::PreparedProcess>,
+        ) -> rsi_pty_protocol::Result<rsi_pty_protocol::Attachment> {
+            unreachable!()
+        }
+        async fn execute_with(
+            &self,
+            _: Operation,
+            _: rsi_execution::ExecutionLease,
+        ) -> rsi_pty_protocol::Result<Reply> {
+            unreachable!()
+        }
         fn is_empty(&self) -> bool {
             self.empty.load(Ordering::Acquire)
         }
-        fn create(
+        async fn create(
             &self,
             _: rsi_process::PtyProcessSpec,
         ) -> rsi_pty_protocol::Result<rsi_pty_protocol::Attachment> {
@@ -405,7 +491,10 @@ mod tests {
                 .scopes
                 .insert(id.clone(), ScopeEntry::new(backing));
             assert_eq!(
-                registry.operate(&id, Operation::CloseAll).await.is_err(),
+                registry
+                    .operate(&id, Operation::CloseAll, None)
+                    .await
+                    .is_err(),
                 fail
             );
             assert!(registry.state.lock().unwrap().scopes.is_empty());

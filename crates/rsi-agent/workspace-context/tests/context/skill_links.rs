@@ -82,6 +82,7 @@ async fn assert_selected_views(
         .skills(
             session,
             None,
+            None,
             SkillAudience::Human,
             CancellationToken::new(),
         )
@@ -94,7 +95,13 @@ async fn assert_selected_views(
     assert_eq!(entries[0].source, expected_source);
     for audience in [SkillAudience::Human, SkillAudience::Model] {
         let SessionResourceValue::Read { resource, text } = source
-            .skills(session, Some("guide"), audience, CancellationToken::new())
+            .skills(
+                session,
+                None,
+                Some("guide"),
+                audience,
+                CancellationToken::new(),
+            )
             .await
             .unwrap()
         else {
@@ -107,6 +114,7 @@ async fn assert_selected_views(
         let snapshot = source
             .snapshot(
                 session,
+                None,
                 &WorkspaceSkillRequests::from_messages(&[&human(text)]).unwrap(),
             )
             .await
@@ -138,6 +146,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
         .skills(
             &session,
             None,
+            None,
             SkillAudience::Human,
             CancellationToken::new(),
         )
@@ -151,6 +160,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
     let SessionResourceValue::Read { text, .. } = source
         .skills(
             &session,
+            None,
             Some("guide"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -169,6 +179,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
     let SessionResourceValue::Read { resource, text } = source
         .skills(
             &session,
+            None,
             Some("guide"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -204,6 +215,7 @@ async fn file_links_dangling_links_and_cycles_do_not_hide_valid_skills() {
     let snapshot = source
         .snapshot(
             &header(temp.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("$valid $linked")]).unwrap(),
         )
         .await
@@ -230,7 +242,11 @@ async fn link_entries_count_before_alias_deduplication() {
     }
     let source = context(None, vec![root]);
     let snapshot = source
-        .snapshot(&header(temp.path()), &WorkspaceSkillRequests::default())
+        .snapshot(
+            &header(temp.path()),
+            None,
+            &WorkspaceSkillRequests::default(),
+        )
         .await
         .unwrap();
     assert!(!snapshot.complete);
@@ -276,7 +292,13 @@ async fn exact_linked_reads_distinguish_absence_and_each_invocation_restriction(
     ] {
         assert_eq!(
             source
-                .skills(&header, Some(name), audience, CancellationToken::new())
+                .skills(
+                    &header,
+                    None,
+                    Some(name),
+                    audience,
+                    CancellationToken::new()
+                )
                 .await,
             Err(WorkspaceContextError::Invalid(message.into()))
         );

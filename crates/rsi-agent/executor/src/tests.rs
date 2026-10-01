@@ -593,7 +593,7 @@ impl TurnExecution for FullBeforePublish {
 pub(super) fn claim() -> (TurnClaim, SessionFact) {
     let session_id = SessionId::new("session-terminal-retry").unwrap();
     let turn_id = TurnId::new("turn-terminal-retry").unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         session_id.clone(),
         1,
         "/tmp",
@@ -671,7 +671,7 @@ fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
 fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
     let session_id = SessionId::new("session-checkpoint-child").unwrap();
     let turn_id = TurnId::new("turn-checkpoint-child").unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         session_id.clone(),
         1,
         "/tmp",
@@ -978,7 +978,10 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     assert!(
         serde_json::to_string(
             &restored
-                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .build(
+                    rsi_ai_protocol::LanguageRequestOptions::default(),
+                    &context_test_profile()
+                )
                 .unwrap()
                 .messages()
         )
@@ -1031,7 +1034,10 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
     restored.restore(&checkpoint.bytes).unwrap();
     let messages = serde_json::to_string(
         &restored
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &context_test_profile(),
+            )
             .unwrap()
             .messages(),
     )
@@ -1371,4 +1377,32 @@ fn supersession_requires_outstanding_completed_conversation_calls() {
         }
         assert!(scan_turn(&claim, &mut state, &[marker]).is_err(), "{mode}");
     }
+}
+
+pub(crate) fn context_test_profile() -> rsi_ai_protocol::LanguageProfile {
+    rsi_ai_protocol::LanguageProfile::new(
+        128_000,
+        4_096,
+        32_768,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::Yes(
+            rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
+        ),
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn uncertain_tool_and_cleanup_failure_preserve_interruption() {
+    let DriveFailure::Turn(outcome @ TurnOutcome::Interrupted { .. }) =
+        tool_failure(&ToolError::OutcomeUnknown)
+    else {
+        panic!("uncertain Tool must interrupt");
+    };
+    assert_eq!(
+        apply_finalization_failure(outcome.clone(), "cleanup.failed", "cleanup failed", true),
+        outcome
+    );
 }

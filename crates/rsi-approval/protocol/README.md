@@ -29,3 +29,10 @@ The Tool registry owns the [request digest encoding](../../rsi-tools/core/README
 The digest binds Tool name and arguments. The executor separately freezes cwd
 and sandbox from its immutable Session Header and resolved Turn policy; they
 are displayed alongside the digest and are not additional digest inputs.
+
+When a live execution lease is present, review also carries its separately typed
+execution binding: Host epoch, location, target revision, provider generation,
+connection epoch and lease generation, plus workspace and optional prepared-plan
+sequence. The sequence is present for process-producing Tools. This metadata
+cannot recreate authority. It prevents equal Tool arguments or equal path strings
+on different machines from being represented as the same prepared execution.

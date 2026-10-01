@@ -8,12 +8,23 @@ initial acceptance cannot reconstruct the original Turn baseline and is marked
 partial. Unconfirmed controlled-work settlement is never labeled complete;
 unmanaged or external-peer background writers are outside that proof.
 
+Comparison paths are sorted once at capture. Exact Diff lookup uses that ordering
+before the one-entry patch cache, without rescanning the whole comparison.
+
 Captures enumerate tracked and nonignored untracked paths below the selected Git
-workspace. Existing dirty bytes are part of the baseline. Git executes only through
+workspace through the original claim execution lease. Missing remote authority or
+a mismatched location is rejected before capture admission. The interval retains
+its admitted operation through completion, including independently retained
+capture tasks. Each new capture
+rechecks that lease; reconnect cannot replace its provider. The source is a bounded
+repo bundle of validated relative names, versioned bytes and executable flags.
+No target Git objects, refs, config or index are imported into Local scratch. Existing dirty bytes are part of the baseline. Git executes only through
 Process and Sandbox with a fixed environment, disabled hooks/config helpers and no
 external filters. Listing reads the user's index; snapshots write a separate private
 index and object database. No user index, refs, objects or worktree writes are
-performed. Files reads use generation-bound, no-follow workspace authority and
+performed. Git inventory explicitly uses the ReadOnly source-reader view so repository
+ancestors remain visible. Files reads use the same lease's generation-bound,
+no-follow workspace authority and
 reject files that change during reading. Nested repositories, symlinks, binary or
 invalid UTF-8 text, unreadable paths, ignored paths and non-Git workspaces have
 explicit coverage limitations. Captures are not atomic filesystem snapshots.
@@ -52,3 +63,9 @@ excluded from the fixed execution environment.
 Each retained comparison caches its most recently requested file patch (at most
 4 MiB) so adjacent 64 KiB pages share one immutable Git result. Switching files
 replaces that patch; eviction or retirement releases it with the private scratch.
+
+Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
+
+The scratch writer lease explicitly unlocks on release, including failed recovery
+after lock acquisition. Its persistent lock file is never unlinked; duplicate
+descriptors cannot extend the owner lifetime. Only lock contention is capacity.

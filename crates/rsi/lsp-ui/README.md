@@ -28,3 +28,10 @@ Service UI read failures produce a bounded visible failure view with an explicit
 New language query action. Target retirement still cancels the action. A failed
 read is not reported as an empty successful query or silently retried.
 
+
+Source actions require the target's bound `SessionSourceContract`, not an unscoped
+root Session service. It checks current Use and fixes one execution lease for the
+finite action. Query workers retain that source lifetime after waiter cancellation.
+Result cursors also bind the exact execution lease generation; reconnect cannot
+reuse cached locations from another target provider. The export binder retains a
+lease across actions only while its original delegation and provider remain valid.

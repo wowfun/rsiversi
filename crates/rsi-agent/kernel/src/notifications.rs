@@ -157,6 +157,25 @@ impl KernelInner {
                     })
             })
             .collect::<Vec<_>>();
+        let retired_messages = commit
+            .sessions
+            .iter()
+            .flat_map(|append| {
+                append
+                    .controls
+                    .iter()
+                    .filter_map(|record| match record.body() {
+                        AgentControlRecordBody::MessageDiscarded { message_id, .. }
+                        | AgentControlRecordBody::MessageClaimed { message_id, .. } => {
+                            Some((append.session_id.clone(), message_id.clone()))
+                        }
+                        AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } => {
+                            Some((append.session_id.clone(), predecessor_id.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
         let program_proof = commit
             .sessions
             .iter()
@@ -174,6 +193,9 @@ impl KernelInner {
             self.revoke_program_guards(&domain_changes);
         }
         if let Ok(committed) = &result {
+            for (session, message) in &retired_messages {
+                self.execution_messages.remove(session, message);
+            }
             for watermark in &committed.sessions {
                 self.session_changes.committed(&watermark.session_id);
             }

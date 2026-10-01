@@ -95,6 +95,7 @@ impl AgentKernel {
         }
         Ok(ContributionContext {
             header: Arc::new(claim.header().clone()),
+            execution: claim.execution().cloned(),
             turn_id: claim.turn_id().clone(),
             accepted_fact_seq: claim.accepted_seq(),
             step_id,

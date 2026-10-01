@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod authority;
+pub use authority::LanguageWorkspace;
 mod json;
 mod owner;
 mod plugin;
@@ -44,6 +46,9 @@ pub enum Error {
     /// A correlated server rejection; arbitrary message/data are omitted.
     #[error("language server rejected request (code {0})")]
     Server(i32),
+    /// An accepted process operation has no verifiable acknowledgement.
+    #[error("language process outcome is unknown")]
+    OutcomeUnknown,
     /// Server, filesystem or sandbox is unavailable.
     #[error("language server or source unavailable")]
     Unavailable,
@@ -56,3 +61,34 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests;
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err transfers the provider error at this boundary"
+)]
+fn process_error(error: rsi_process::ProcessError) -> Error {
+    match error {
+        rsi_process::ProcessError::OutcomeUnknown
+        | rsi_process::ProcessError::Api(rsi_api_protocol::ApiError::OutcomeUnknown) => {
+            Error::OutcomeUnknown
+        }
+        rsi_process::ProcessError::Capacity
+        | rsi_process::ProcessError::Api(rsi_api_protocol::ApiError::Capacity) => Error::Capacity,
+        _ => Error::Unavailable,
+    }
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err transfers the provider error at this boundary"
+)]
+fn files_error(error: rsi_files_protocol::FilesError) -> Error {
+    match error {
+        rsi_files_protocol::FilesError::OutcomeUnknown => Error::OutcomeUnknown,
+        rsi_files_protocol::FilesError::Capacity => Error::Capacity,
+        _ => Error::Unavailable,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod location_tests;

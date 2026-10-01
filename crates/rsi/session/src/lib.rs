@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
+mod access;
 mod activity;
 mod commands;
 mod drafts;
@@ -51,6 +52,8 @@ use rsi_session_protocol::{
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    origin: rsi_api_protocol::CallOrigin,
+    resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
     activity: Arc<activity::Managed>,
     terminals: Option<Arc<terminal::Terminals>>,
     resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
@@ -92,6 +95,12 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Supplies target selection and revocable caller admission for this service generation.
+    #[must_use]
+    pub fn with_execution(mut self, resolver: Arc<dyn rsi_execution::ExecutionResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
     /// Supplies one generation-owned terminal registry, independent of Agent residency.
     #[must_use]
     pub fn with_terminals(
@@ -134,6 +143,8 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            origin: rsi_api_protocol::CallOrigin::Local,
+            resolver: None,
             activity: Arc::new(activity::Managed::default()),
             terminals: None,
             resources: None,
@@ -208,6 +219,13 @@ impl LocalSessionService {
                 .session_id(),
         );
         Arc::new(LocalSessionHandle {
+            origin: self.origin.clone(),
+            resolver: self.resolver.clone(),
+            coordinates: state
+                .header()
+                .expect("new handle has a Header")
+                .coordinates()
+                .clone(),
             terminals: self.terminals.clone(),
             references: self.references.clone(),
             resources: self.resources.clone(),
@@ -252,7 +270,9 @@ impl LocalSessionService {
 
 impl LocalSessionService {
     async fn attach_local(&self, session_id: &SessionId) -> Result<Arc<LocalSessionHandle>> {
+        self.check_origin()?;
         if let Some(handle) = self.drafts.get(session_id).await? {
+            let handle = self.bind_handle(&handle)?;
             match handle.header().await {
                 Ok(_) => return Ok(handle),
                 Err(SessionError::NotFound(_)) => {}
@@ -264,6 +284,7 @@ impl LocalSessionService {
             .header(session_id)
             .await
             .map_err(map_store_error)?;
+        self.admit(header.coordinates().location())?;
         Ok(self.handle_from_state(HandleState::Attached(Arc::new(header)), None))
     }
 
@@ -289,7 +310,7 @@ impl LocalSessionService {
             .get(&request.workspace_id)
             .await
             .map_err(|error| map_workspace_error(&error))?;
-        let cwd = workspace.path;
+        let _admission = self.admit(workspace.coordinates.location())?;
         let agent_preset_id = match request.agent_preset_id {
             Some(id) => id,
             None => self
@@ -312,13 +333,10 @@ impl LocalSessionService {
             Err(StoreError::NotFound(_)) => {}
             Err(error) => return Err(map_store_error(error)),
         }
-        let canonical_cwd = cwd
-            .to_str()
-            .ok_or_else(|| SessionError::Invalid("canonical workspace path is not UTF-8".into()))?;
         let header = SessionHeader::new(
             session_id,
             now_ms()?,
-            canonical_cwd,
+            workspace.coordinates,
             agent_preset_id,
             settings,
         )
@@ -339,16 +357,27 @@ impl rsi_session_protocol::SessionDraftControl for LocalSessionService {
 #[async_trait]
 impl SessionService for LocalSessionService {
     async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
-        self.store.header(session_id).await.map_err(map_store_error)
+        self.check_origin()?;
+        let header = self
+            .store
+            .header(session_id)
+            .await
+            .map_err(map_store_error)?;
+        let _admission = self.admit(header.coordinates().location())?;
+        Ok(header)
     }
     async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
         self.collect_activity().await
     }
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
+        self.check_origin()?;
         self.drafts.accepting()?;
-        self.drafts
-            .create(self.clone(), request, None)
-            .await
+        let device = match &self.origin {
+            rsi_api_protocol::CallOrigin::Local => None,
+            rsi_api_protocol::CallOrigin::Device(device) => Some(device.id.clone()),
+        };
+        let handle = self.drafts.create(self.clone(), request, device).await?;
+        self.bind_handle(&handle)
             .map(|handle| handle as Arc<dyn SessionHandle>)
     }
 
@@ -368,42 +397,29 @@ impl SessionService for LocalSessionService {
                 "recent-session limit must be within 1..={MAXIMUM_SESSIONS_PER_READ}"
             )));
         }
-        let cursor = after.map(|cursor| StoreRecentSessionCursor {
-            created_at_ms: cursor.created_at_ms,
-            session_id: cursor.session_id.clone(),
-        });
-        let page = self
-            .store
-            .list_recent_sessions(cursor.as_ref(), limit)
-            .await
-            .map_err(map_store_error)?;
-        let sessions = page
-            .sessions
-            .into_iter()
-            .map(|row| SessionSummary { header: row.header })
-            .collect();
-        Ok(RecentSessionPage {
-            sessions,
-            has_more: page.has_more,
-        })
+        self.visible_recent(after, limit).await
     }
 }
 
 #[async_trait]
 impl rsi_session_protocol::SessionIngress for LocalSessionService {
+    fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
+        Arc::new(Self {
+            origin,
+            ..self.clone()
+        })
+    }
     async fn create_from(
         &self,
         request: CreateSession,
         origin: rsi_api_protocol::CallOrigin,
     ) -> Result<Arc<dyn SessionHandle>> {
-        let device = match origin {
-            rsi_api_protocol::CallOrigin::Local => None,
-            rsi_api_protocol::CallOrigin::Device(device) => Some(device.id),
-        };
-        self.drafts
-            .create(self.clone(), request, device)
-            .await
-            .map(|handle| handle as Arc<dyn SessionHandle>)
+        Self {
+            origin,
+            ..self.clone()
+        }
+        .create(request)
+        .await
     }
 }
 
@@ -425,6 +441,9 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    origin: rsi_api_protocol::CallOrigin,
+    resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
     terminals: Option<Arc<terminal::Terminals>>,
     references: Option<Arc<rsi_agent_references::References>>,
     resources: Option<Arc<dyn rsi_agent_turn_protocol::SessionResources>>,
@@ -559,7 +578,33 @@ impl LocalSessionHandle {
         }
     }
 
-    async fn prepare_workspace(&self, header: &SessionHeader) -> Result<()> {
+    async fn prepare_workspace(
+        &self,
+        header: &SessionHeader,
+    ) -> Result<Option<rsi_execution::ExecutionLease>> {
+        let execution = self.execution_lease()?;
+        self.validate_workspace(header, execution.as_ref()).await?;
+        Ok(execution)
+    }
+
+    async fn validate_workspace(
+        &self,
+        header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
+    ) -> Result<()> {
+        if let Some(execution) = execution {
+            let coordinates = execution
+                .canonicalize(header.canonical_cwd())
+                .await
+                .map_err(|_| SessionError::Api(rsi_api_protocol::ApiError::Unavailable))?;
+            if &coordinates != header.coordinates() {
+                return Err(SessionError::Invalid(
+                    "durable Session workspace changed on its execution target".into(),
+                ));
+            }
+            return Ok(());
+        }
+        access::require_native(header.coordinates().location())?;
         let cwd = canonical_workspace_directory(Path::new(header.canonical_cwd())).await?;
         if cwd.to_str() != Some(header.canonical_cwd()) {
             return Err(SessionError::Invalid(
@@ -577,9 +622,12 @@ impl LocalSessionHandle {
         &self,
         blocks: Vec<SessionInput>,
         header: &SessionHeader,
-    ) -> Result<Vec<AgentMessageContent>> {
+    ) -> Result<(
+        Vec<AgentMessageContent>,
+        Option<rsi_execution::ExecutionLease>,
+    )> {
         validate_session_input(&blocks)?;
-        self.prepare_workspace(header).await?;
+        let execution = self.prepare_workspace(header).await?;
         let mut content = Vec::with_capacity(blocks.len());
         for block in blocks {
             content.push(match block {
@@ -604,15 +652,15 @@ impl LocalSessionHandle {
                 }
             });
         }
-        Ok(content)
+        Ok((content, execution))
     }
 
     async fn prepare_message(
         &self,
         request: SubmitInput,
         header: &SessionHeader,
-    ) -> Result<AgentMessage> {
-        let content = self.prepare_input_content(request.content, header).await?;
+    ) -> Result<(AgentMessage, Option<rsi_execution::ExecutionLease>)> {
+        let (content, execution) = self.prepare_input_content(request.content, header).await?;
         let message = AgentMessage {
             message_id: request.message_id,
             source: AgentMessageSource::Human,
@@ -626,7 +674,7 @@ impl LocalSessionHandle {
         message
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        Ok(message)
+        Ok((message, execution))
     }
 }
 
@@ -636,12 +684,14 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::terminal::Request,
     ) -> Result<rsi_session_protocol::terminal::Reply> {
+        let _admission = self.admit()?;
         self.terminal_request(request).await
     }
     async fn read_recorded_reference(
         &self,
         request: rsi_agent_session_protocol::ReferenceReadRequest,
     ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
@@ -654,6 +704,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         source: SessionId,
     ) -> Result<rsi_agent_session_protocol::FrozenReference> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
@@ -668,6 +719,7 @@ impl SessionHandle for LocalSessionHandle {
         offset: usize,
         maximum: usize,
     ) -> Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
@@ -686,12 +738,14 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_agent_session_protocol::SessionResourceRequest,
     ) -> Result<rsi_session_protocol::ResourceSnapshot> {
+        let _admission = self.admit()?;
         self.resource_read(request).await
     }
     async fn peek_job(
         &self,
         request: rsi_agent_turn_protocol::JobPreviewRequest,
     ) -> Result<rsi_agent_turn_protocol::JobPreviewPage> {
+        let _admission = self.admit()?;
         request.validate().map_err(map_turn_error)?;
         let _activity = self.begin_activity()?;
         let _permit = self
@@ -722,6 +776,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::EvidenceRead,
     ) -> Result<rsi_session_protocol::EvidencePage> {
+        let _admission = self.admit()?;
         request.validate()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
@@ -735,6 +790,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_agent_turn_protocol::TurnJobsRequest,
     ) -> Result<rsi_session_protocol::JobsSnapshot> {
+        let _admission = self.admit()?;
         request.validate().map_err(map_turn_error)?;
         let service = self
             .jobs
@@ -764,6 +820,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let request_id = request.request_id.clone();
         self.goals
@@ -777,6 +834,7 @@ impl SessionHandle for LocalSessionHandle {
             })
     }
     async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
+        let _admission = self.admit()?;
         self.goals
             .as_ref()
             .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
@@ -785,43 +843,48 @@ impl SessionHandle for LocalSessionHandle {
     }
     async fn observe_goal(&self) -> Result<rsi_session_protocol::GoalStream> {
         use futures_util::StreamExt;
+        let _admission = self.admit()?;
         let stream = self
             .goals
             .as_ref()
             .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
             .observe(self.session_id())
             .map_err(goal::session_error)?;
-        Ok(Box::pin(
-            stream.map(|item| item.map_err(goal::session_error)),
-        ))
+        Ok(self.guard_stream(stream.map(|item| item.map_err(goal::session_error))))
     }
     async fn observe_projections(&self) -> Result<rsi_session_protocol::ProjectionStream> {
-        self.projection_stream().await
+        let _admission = self.admit()?;
+        Ok(self.guard_stream(self.projection_stream().await?))
     }
     async fn draft_snapshot(&self) -> Result<rsi_session_protocol::SessionDraftView> {
+        let _admission = self.admit()?;
         self.read_draft_snapshot().await
     }
     async fn select_preset(
         &self,
         request: rsi_session_protocol::SelectDraftPreset,
     ) -> Result<rsi_session_protocol::SessionDraftView> {
+        let _admission = self.admit()?;
         self.draft_commands
             .select_preset(self.clone(), request)
             .await
     }
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView> {
+        let _admission = self.admit()?;
         self.list_commands().await
     }
     async fn execute_command(
         &self,
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        let _admission = self.admit()?;
         self.dispatch_command(invocation).await
     }
     async fn command_status(
         &self,
         request_id: &rsi_agent_session_protocol::DomainRequestId,
     ) -> Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>> {
+        let _admission = self.admit()?;
         self.lookup_command(request_id).await
     }
     async fn read_message(
@@ -829,6 +892,7 @@ impl SessionHandle for LocalSessionHandle {
         message_id: &MessageId,
         accepted_control_seq: u64,
     ) -> Result<AgentMessage> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let after = accepted_control_seq.checked_sub(1).ok_or_else(|| {
             SessionError::Invalid("acceptance control cursor must be positive".into())
@@ -853,12 +917,14 @@ impl SessionHandle for LocalSessionHandle {
         Err(SessionError::NotFound("exact message acceptance".into()))
     }
     async fn header(&self) -> Result<SessionHeader> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         self.header_snapshot().await.map(|header| (*header).clone())
     }
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         validate_session_input(&request.content)?;
         let delivery = request.delivery;
@@ -891,11 +957,11 @@ impl SessionHandle for LocalSessionHandle {
                 .await
                 .map(SubmitSession::Resume)
                 .map_err(map_turn_error)?;
-            let message = self.prepare_message(request, &header).await?;
+            let (message, execution) = self.prepare_message(request, &header).await?;
             return self
                 .turns
                 .submit_message(SubmitAgentMessage {
-                    session,
+                    session: Self::bind_submission(session, execution)?,
                     message,
                     delivery,
                 })
@@ -906,11 +972,11 @@ impl SessionHandle for LocalSessionHandle {
             return Err(SessionError::NotFound("draft lease".into()));
         };
         let session = SubmitSession::Fresh(draft.freeze());
-        let message = self.prepare_message(request, &header).await?;
+        let (message, execution) = self.prepare_message(request, &header).await?;
         let result = self
             .turns
             .submit_message(SubmitAgentMessage {
-                session,
+                session: Self::bind_submission(session, execution)?,
                 message,
                 delivery,
             })
@@ -921,6 +987,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.turns
             .message_status(self.session_id(), message_id)
@@ -933,35 +1000,48 @@ impl SessionHandle for LocalSessionHandle {
         mut request: rsi_agent_session_protocol::QueueMutationRequest,
     ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt> {
         use rsi_agent_session_protocol::QueueMutation;
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         request
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
         self.reconcile_fresh_read().await?;
-        // A committed retry is resolved before reading media that may since have become unavailable.
-        if self
+        // A committed retry is resolved before reconnecting or reading media.
+        let committed = self
             .turns
             .queue_mutation_status(self.session_id(), &request.operation_id)
             .await
             .map_err(map_turn_error)?
-            .is_none()
-            && let QueueMutation::Replace { content, .. } = &mut request.mutation
-        {
-            let header = self.header_snapshot().await?;
-            let input = std::mem::take(content)
-                .into_iter()
-                .map(|block| match block {
-                    AgentMessageContent::Text { text } => SessionInput::Text { text },
-                    AgentMessageContent::Image { media } => SessionInput::Image { media },
-                    AgentMessageContent::Reference { reference } => {
-                        SessionInput::Reference { reference }
-                    }
-                })
-                .collect();
-            *content = self.prepare_input_content(input, &header).await?;
+            .is_some();
+        let mut execution = None;
+        if !committed {
+            match &mut request.mutation {
+                QueueMutation::Replace { content, .. } => {
+                    let header = self.header_snapshot().await?;
+                    let input = std::mem::take(content)
+                        .into_iter()
+                        .map(|block| match block {
+                            AgentMessageContent::Text { text } => SessionInput::Text { text },
+                            AgentMessageContent::Image { media } => SessionInput::Image { media },
+                            AgentMessageContent::Reference { reference } => {
+                                SessionInput::Reference { reference }
+                            }
+                        })
+                        .collect();
+                    let prepared = self.prepare_input_content(input, &header).await?;
+                    *content = prepared.0;
+                    execution = prepared.1;
+                }
+                QueueMutation::ConvertToSteer { .. } => {
+                    execution = self
+                        .prepare_workspace(self.header_snapshot().await?.as_ref())
+                        .await?;
+                }
+                QueueMutation::Withdraw => {}
+            }
         }
         self.turns
-            .mutate_queue(self.session_id(), request)
+            .mutate_queue(self.session_id(), request, execution)
             .await
             .map_err(map_turn_error)
     }
@@ -969,6 +1049,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         operation: &rsi_agent_session_protocol::QueueOperationId,
     ) -> Result<Option<rsi_agent_session_protocol::QueueMutationReceipt>> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.turns
             .queue_mutation_status(self.session_id(), operation)
@@ -976,6 +1057,7 @@ impl SessionHandle for LocalSessionHandle {
             .map_err(map_turn_error)
     }
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.image
             .describe(&request.model)
@@ -992,7 +1074,7 @@ impl SessionHandle for LocalSessionHandle {
             return self
                 .turns
                 .submit_image(SubmitImage {
-                    session,
+                    session: Self::bind_submission(session, self.execution_lease()?)?,
                     turn_id: request.turn_id,
                     model: request.model,
                     request: request.request,
@@ -1008,7 +1090,7 @@ impl SessionHandle for LocalSessionHandle {
         let result = self
             .turns
             .submit_image(SubmitImage {
-                session,
+                session: Self::bind_submission(session, self.execution_lease()?)?,
                 turn_id: request.turn_id,
                 model: request.model,
                 request: request.request,
@@ -1020,6 +1102,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.turns
             .cancel_target(self.session_id(), target, reason)
@@ -1031,6 +1114,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         options: rsi_session_protocol::export::ExportOptions,
     ) -> Result<rsi_session_protocol::export::ExportStream> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         options.validate()?;
         let published = self.reconcile_fresh_read().await?;
@@ -1051,7 +1135,7 @@ impl SessionHandle for LocalSessionHandle {
         } else {
             rsi_session_export::empty((*header).clone(), options, self.projection_stopped.clone())?
         };
-        Ok(Box::pin(async_stream::try_stream! {
+        Ok(self.guard_stream(async_stream::try_stream! {
             let _permit = permit;
             while let Some(item) = futures_util::StreamExt::next(&mut source).await { yield item?; }
         }))
@@ -1062,6 +1146,7 @@ impl SessionHandle for LocalSessionHandle {
         exclusive_before_seq: Option<u64>,
         limit: usize,
     ) -> Result<SessionHistoryPage> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
             return Err(SessionError::Invalid(format!(
@@ -1091,16 +1176,18 @@ impl SessionHandle for LocalSessionHandle {
 
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
         use futures_util::StreamExt as _;
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let source = self
             .turns
             .observe_session(self.session_id(), cursor)
             .await
             .map_err(map_turn_error)?;
-        Ok(Box::pin(source.map(|item| item.map_err(map_turn_error))))
+        Ok(self.guard_stream(source.map(|item| item.map_err(map_turn_error))))
     }
 
     async fn metrics(&self) -> Result<rsi_session_protocol::MetricsRead> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let durable = self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
@@ -1132,6 +1219,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn tree_metrics(&self, refresh: bool) -> Result<rsi_session_protocol::TreeMetricsRead> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         if !self.reconcile_fresh_read().await? {
             return Ok(rsi_session_protocol::TreeMetricsRead {
@@ -1155,6 +1243,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         self.store
             .inspect_session(self.session_id())
@@ -1163,6 +1252,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let Some(questions) = &self.questions else {
             return Ok(Vec::new());
@@ -1178,6 +1268,7 @@ impl SessionHandle for LocalSessionHandle {
         id: &str,
         answer: rsi_user_questions_protocol::QuestionAnswer,
     ) -> Result<bool> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let questions = self.questions.as_ref().ok_or_else(|| {
             SessionError::Invalid("human questions are unavailable in this Host".into())
@@ -1189,6 +1280,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let sessions = self
             .turns
@@ -1204,6 +1296,7 @@ impl SessionHandle for LocalSessionHandle {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let sessions = self
             .turns
@@ -1219,9 +1312,10 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn observe_interactions(&self) -> Result<rsi_session_protocol::InteractionStream> {
+        let _admission = self.admit()?;
         let _activity = self.begin_activity()?;
         let header = self.header_snapshot().await?;
-        interactions::observe(
+        let stream = interactions::observe(
             self.session_id().clone(),
             header
                 .fork_origin()
@@ -1232,7 +1326,8 @@ impl SessionHandle for LocalSessionHandle {
             self.questions.clone(),
             self.interaction_retention.clone(),
         )
-        .await
+        .await?;
+        Ok(self.guard_stream(stream))
     }
 }
 
@@ -1279,6 +1374,12 @@ fn map_turn_error(error: TurnError) -> SessionError {
         }
         TurnError::Capacity | TurnError::ObserverCapacity | TurnError::ProjectionCapacity => {
             SessionError::Capacity
+        }
+        TurnError::ExecutionUnavailable => {
+            SessionError::Api(rsi_api_protocol::ApiError::Unavailable)
+        }
+        TurnError::ExecutionOutcomeUnknown => {
+            SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)
         }
         TurnError::ShuttingDown => SessionError::ShuttingDown,
         TurnError::QueueOperationConflict => SessionError::QueueOperationConflict,

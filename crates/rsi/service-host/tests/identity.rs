@@ -172,7 +172,7 @@ async fn corrupt_or_changed_durable_identity_is_not_replaced() {
         )
         .await
         .unwrap();
-    let original = domain.snapshot().await["deployment"].clone();
+    let original = domain.snapshot().await.unwrap()["deployment"].clone();
     identity.dispose().await;
     for value in [
         json!({"endpoint":"bad"}),
@@ -193,7 +193,7 @@ async fn corrupt_or_changed_durable_identity_is_not_replaced() {
             rsi_meta::FiberState::Failed(_)
         ));
         failed.dispose().await;
-        assert_eq!(domain.snapshot().await["deployment"], value);
+        assert_eq!(domain.snapshot().await.unwrap()["deployment"], value);
         assert!(
             runtime
                 .root()
@@ -310,7 +310,13 @@ async fn shutdown_drains_owned_identity_initialization_before_releasing_the_leas
             .is_clean()
     );
     let _cancelled_activation = activation.await.unwrap();
-    let records = facility.open(spec()).await.unwrap().snapshot().await;
+    let records = facility
+        .open(spec())
+        .await
+        .unwrap()
+        .snapshot()
+        .await
+        .unwrap();
     let endpoint = records["deployment"]["endpoint"].as_str().unwrap();
     rsi_api_protocol::EndpointId::parse(endpoint).unwrap();
     assert!(

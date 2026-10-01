@@ -1,3 +1,4 @@
+use crate::ProgramError;
 use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use rsi_jobs::{
@@ -35,31 +36,28 @@ pub trait ProgramRpc: fmt::Debug + Send + Sync + 'static {
         method: String,
         arguments: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value, String>;
+    ) -> Result<Value, ProgramError>;
 }
 
 #[derive(Debug)]
 pub(crate) struct Request {
-    pub spec: DuplexProcessSpec,
+    pub spec: Mutex<Option<DuplexProcessSpec<rsi_tools_protocol::ToolProcess>>>,
     pub script: String,
     pub rpc: Arc<dyn ProgramRpc>,
     pub start: CancellationToken,
     pub cancel: CancellationToken,
     pub cancelled_at_settlement: AtomicBool,
-    pub outcome: watch::Sender<Option<Result<Value, String>>>,
+    pub outcome: watch::Sender<Option<Result<Value, ProgramError>>>,
 }
 #[derive(Debug)]
 pub(crate) struct Producer(pub Arc<dyn DuplexProcess>);
+#[async_trait::async_trait]
 impl JobProducer for Producer {
-    fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
+    async fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
         let request = request
             .downcast_ref::<Arc<Request>>()
             .ok_or_else(|| JobsError::InvalidInput("wrong program producer request".into()))?
             .clone();
-        request
-            .spec
-            .validate()
-            .map_err(|error| JobsError::InvalidInput(error.to_string()))?;
         if request.script.len() > MAXIMUM_SCRIPT {
             return Err(JobsError::InvalidInput("script exceeds 64 KiB".into()));
         }
@@ -121,7 +119,9 @@ impl JobControl for Control {
     async fn wait(&self) -> rsi_jobs::Result<JobTerminal> {
         let result = wait_result(self.request.outcome.subscribe()).await;
         Ok(JobTerminal {
-            status: if self.request.cancelled_at_settlement.load(Ordering::Acquire) {
+            status: if result == Err(ProgramError::OutcomeUnknown) {
+                JobStatus::OutcomeUnknown
+            } else if self.request.cancelled_at_settlement.load(Ordering::Acquire) {
                 JobStatus::Cancelled
             } else if result.is_ok() {
                 JobStatus::Completed
@@ -132,13 +132,13 @@ impl JobControl for Control {
             signal: None,
             message: result
                 .err()
-                .map(|message| message.chars().take(1024).collect()),
+                .map(|message| message.to_string().chars().take(1024).collect()),
         })
     }
 }
 pub(crate) async fn wait_result(
-    mut result: watch::Receiver<Option<Result<Value, String>>>,
-) -> Result<Value, String> {
+    mut result: watch::Receiver<Option<Result<Value, ProgramError>>>,
+) -> Result<Value, ProgramError> {
     loop {
         if let Some(value) = result.borrow_and_update().clone() {
             return value;
@@ -168,21 +168,29 @@ async fn execute(
     process: Arc<dyn DuplexProcess>,
     request: &Request,
     stderr: &Mutex<Option<rsi_process::ProcessRead>>,
-) -> Result<Value, String> {
+) -> Result<Value, ProgramError> {
     if request.cancel.is_cancelled() {
         return Err("program cancelled".into());
     }
-    let process = process
-        .spawn(request.spec.clone())
-        .map_err(|error| error.to_string())?;
+    let spec = request
+        .spec
+        .lock()
+        .map_err(|_| "program plan lock poisoned")?
+        .take()
+        .ok_or("program plan was already consumed")?;
+    let process = rsi_tools_protocol::ToolProcess::spawn_duplex(spec, process.as_ref())
+        .await
+        .map_err(ProgramError::from)?;
     let result = exchange(process.stdin(), process.stdout(), request).await;
     process.terminate();
-    let settlement = process
-        .wait_settlement()
-        .await
-        .map_err(|error| error.to_string());
+    let settlement = process.wait_settlement().await.map_err(ProgramError::from);
     if let Ok(read) = process.stderr().read_from(0) {
         *stderr.lock().map_err(|_| "program output lock poisoned")? = Some(read);
+    }
+    if result == Err(ProgramError::OutcomeUnknown)
+        || matches!(settlement, Err(ProgramError::OutcomeUnknown))
+    {
+        return Err(ProgramError::OutcomeUnknown);
     }
     settlement?;
     result
@@ -191,7 +199,7 @@ async fn exchange(
     input: Arc<dyn DuplexInput>,
     output: Arc<dyn DuplexOutput>,
     request: &Request,
-) -> Result<Value, String> {
+) -> Result<Value, ProgramError> {
     write_frame(
         input.as_ref(),
         &json!({"type":"start", "script":request.script, "definitions":request.rpc.definitions(), "maximum_calls":MAXIMUM_PROGRAM_OUTSTANDING_CALLS}),
@@ -210,7 +218,8 @@ async fn exchange(
             reply = calls.next(), if !active.is_empty() => {
                 let Some((id, value)) = reply else { break Err("program RPC owner closed".into()); };
                 active.remove(&id);
-                let reply = match value { Ok(value) => json!({"type":"reply", "id":id, "value":value}), Err(error) => json!({"type":"reply", "id":id, "error":error}) };
+                if value == Err(ProgramError::OutcomeUnknown) { break Err(ProgramError::OutcomeUnknown); }
+                let reply = match value { Ok(value) => json!({"type":"reply", "id":id, "value":value}), Err(error) => json!({"type":"reply", "id":id, "error":error.to_string()}) };
                 if let Err(error) = write_frame(input.as_ref(), &reply, &request.cancel).await { break Err(error); }
             }
             frame = &mut reading => {
@@ -233,16 +242,21 @@ async fn exchange(
                         if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > MAXIMUM_RESULT) { break Err("program result exceeds 256 KiB".into()); }
                         break Ok(value);
                     }
-                    Frame::Error { message } => break Err(message.chars().take(4096).collect()),
+                    Frame::Error { message } => break Err(ProgramError::Failed(message.chars().take(4096).collect())),
                 }
             }
         }
     };
     rpc_cancel.cancel();
-    while calls.next().await.is_some() {}
+    let mut result = result;
+    while let Some((_, reply)) = calls.next().await {
+        if reply == Err(ProgramError::OutcomeUnknown) {
+            result = Err(ProgramError::OutcomeUnknown);
+        }
+    }
     result
 }
-async fn read_frame(output: Arc<dyn DuplexOutput>) -> Result<Frame, String> {
+async fn read_frame(output: Arc<dyn DuplexOutput>) -> Result<Frame, ProgramError> {
     let prefix = read_bytes(output.as_ref(), 4).await?;
     let length = usize::try_from(u32::from_be_bytes(
         prefix.try_into().map_err(|_| "invalid program prefix")?,
@@ -252,15 +266,15 @@ async fn read_frame(output: Arc<dyn DuplexOutput>) -> Result<Frame, String> {
         return Err("program frame exceeds 1 MiB".into());
     }
     serde_json::from_slice(&read_bytes(output.as_ref(), length).await?)
-        .map_err(|error| format!("invalid program frame: {error}"))
+        .map_err(|error| ProgramError::Failed(format!("invalid program frame: {error}")))
 }
-async fn read_bytes(output: &dyn DuplexOutput, length: usize) -> Result<Vec<u8>, String> {
+async fn read_bytes(output: &dyn DuplexOutput, length: usize) -> Result<Vec<u8>, ProgramError> {
     let mut bytes = Vec::with_capacity(length.min(rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES));
     while bytes.len() < length {
         let read = output
             .read((length - bytes.len()).min(rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(ProgramError::from)?;
         bytes.extend(read.bytes);
         if read.eof && bytes.len() < length {
             return Err("program ended before its final frame".into());
@@ -272,8 +286,9 @@ async fn write_frame(
     input: &dyn DuplexInput,
     value: &Value,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
-    let body = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+) -> Result<(), ProgramError> {
+    let body =
+        serde_json::to_vec(value).map_err(|error| ProgramError::Failed(error.to_string()))?;
     if body.len() > MAXIMUM_FRAME {
         return Err("program frame exceeds 1 MiB".into());
     }
@@ -284,7 +299,7 @@ async fn write_frame(
         let mut offset = 0;
         while offset < bytes.len() {
             let end = (offset + rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES).min(bytes.len());
-            let written = tokio::select! { biased; () = cancellation.cancelled() => return Err("program cancelled".into()), result = input.write(&bytes[offset..end]) => result.map_err(|error| error.to_string())? };
+            let written = tokio::select! { biased; () = cancellation.cancelled() => return Err("program cancelled".into()), result = input.write(&bytes[offset..end]) => result.map_err(ProgramError::from)? };
             if written == 0 || written > end - offset {
                 return Err("invalid program write progress".into());
             }

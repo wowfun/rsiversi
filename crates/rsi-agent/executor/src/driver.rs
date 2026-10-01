@@ -35,6 +35,7 @@ impl Driver {
             self.observer.is_some() && self.observation_recovered(&claim, stop, deadline).await;
         let start = rsi_agent_turn_protocol::ExecutionObservationStart {
             header: claim.header().clone(),
+            execution: claim.execution().cloned(),
             turn: claim.turn_id().clone(),
             claim: claim.claim_id(),
             accepted_seq: claim.accepted_seq(),
@@ -638,6 +639,7 @@ impl Driver {
         if cancellation.is_cancelled() {
             return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
         }
+        let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
         let expected_outputs = usize::from(request.count());
         let prepared = self
             .image
@@ -801,6 +803,7 @@ impl Driver {
         purpose: rsi_agent_session_protocol::ModelPurpose,
         fold: &mut ModelContextState,
         selection: &rsi_agent_session_protocol::ModelSelection,
+        profile: &rsi_ai_protocol::LanguageProfile,
         retry_attempt: u8,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
@@ -811,7 +814,8 @@ impl Driver {
                 "context builder changed the selected reasoning effort",
             ));
         }
-        let capture = evidence::Capture::new(&request)?;
+        let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
+        let capture = evidence::Capture::new(&request, profile)?;
         let prepared = match self
             .language
             .prepare(selection.model.clone(), request)
@@ -1227,7 +1231,7 @@ impl Driver {
             .tools()
             .program_role(&name)
             .unwrap_or(rsi_tools_protocol::ToolProgramRole::Unavailable);
-        let prepared = composition
+        let mut prepared = composition
             .tools()
             .prepare(
                 effect_id.as_str(),
@@ -1278,14 +1282,41 @@ impl Driver {
                 "pinned policy denied the prepared Tool call",
             ));
         }
+        let combined = combine_cancellation(cancellation, stop);
+        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default();
+        if let Some(lease) = claim.execution() {
+            extensions = extensions.with(Arc::new(lease.clone())).map_err(fatal)?;
+        }
+        let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
+        let execution_review = prepared
+            .prepare_execution(ToolStart {
+                cancellation: combined.token(),
+                policy: ToolExecutionPolicy {
+                    mode: turn_policy.sandbox,
+                    cwd: cwd.clone(),
+                    workspace: cwd,
+                },
+                sandbox: self.sandbox.clone(),
+                job_scope: None,
+                extensions,
+            })
+            .await
+            .map_err(|error| tool_failure(&error))?;
+        combined.cancel();
         let approval = if require_approval {
             let outcome = self
                 .request_tool_approval(
                     claim,
                     &effect_id,
                     &name,
-                    tool_approval_review(claim, &arguments, &identity, turn_policy)
-                        .map_err(fatal)?,
+                    tool_approval_review(
+                        claim,
+                        &arguments,
+                        &identity,
+                        turn_policy,
+                        execution_review,
+                    )
+                    .map_err(fatal)?,
                     cancellation,
                     stop,
                 )
@@ -1805,6 +1836,10 @@ impl Driver {
             }
             RetainedToolResult::Failed(failure) => {
                 let outcome = match failure.kind {
+                    RetainedToolFailureKind::OutcomeUnknown => TurnOutcome::Interrupted {
+                        effect: Some(EffectKind::Tool),
+                        reason: bounded(&failure.summary),
+                    },
                     RetainedToolFailureKind::Cancelled => {
                         if self
                             .turns
@@ -1925,6 +1960,10 @@ impl Driver {
                     apply_finalization_failure(outcome, blocker.code(), blocker.message(), false)
                 }
                 None => outcome,
+            },
+            Ok(Err(TurnFinalizationError::OutcomeUnknown)) => TurnOutcome::Interrupted {
+                effect: Some(EffectKind::Tool),
+                reason: "Background effect outcome is unknown; do not replay".into(),
             },
             Ok(Err(TurnFinalizationError::Failed { code, message })) => {
                 apply_finalization_failure(outcome, &bounded(&code), &bounded(&message), true)
@@ -2183,8 +2222,10 @@ fn tool_approval_review(
     arguments: &serde_json::Value,
     identity: &ToolResultIdentity,
     policy: ResolvedTurnPolicy,
+    execution: Option<rsi_execution::ExecutionReview>,
 ) -> serde_json::Result<rsi_approval_protocol::ApprovalReview> {
     Ok(rsi_approval_protocol::ApprovalReview {
+        execution,
         arguments: arguments.clone(),
         cwd: claim.header().canonical_cwd().to_owned(),
         sandbox: serde_json::to_value(policy.sandbox)?

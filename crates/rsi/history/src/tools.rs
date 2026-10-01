@@ -7,7 +7,6 @@ use rsi_tools_protocol::{
     ToolRegistrarContract, ToolRegistration, ToolResult, ToolTimeoutPolicy, TypedToolOutput,
 };
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
 /// Explicit history tools use the same owner and the caller's immutable workspace.
 #[derive(Clone, Debug, Default)]
@@ -98,7 +97,12 @@ impl ToolExecutor for Executor {
                 "history scope and target come from the actual caller".into(),
             ));
         }
-        object.insert("scope".into(),json!({"workspace":hex::encode(Sha256::digest(caller.header().canonical_cwd().as_bytes())),"conversation":input.conversation}));
+        let workspace =
+            rsi_workspace_protocol::WorkspaceId::from_coordinates(caller.header().coordinates());
+        object.insert(
+            "scope".into(),
+            json!({"workspace":workspace,"conversation":input.conversation}),
+        );
         if object.get("operation").and_then(Value::as_str) == Some("freeze") {
             object.insert("target".into(), json!(caller.session_id()));
         }
@@ -106,7 +110,11 @@ impl ToolExecutor for Executor {
             .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         match self
             .owner
-            .call(request, execution.cancellation.clone())
+            .call(
+                super::HistoryAuthority::Agent(caller.clone()),
+                request,
+                execution.cancellation.clone(),
+            )
             .await
         {
             Ok(mut reply) => {

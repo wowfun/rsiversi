@@ -51,6 +51,7 @@ impl WorkspaceContext for Source {
     async fn agents(
         &self,
         _: &SessionHeader,
+        _: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         _: &std::collections::BTreeSet<String>,
         _: CancellationToken,
@@ -61,6 +62,7 @@ impl WorkspaceContext for Source {
     async fn skills(
         &self,
         _: &SessionHeader,
+        _: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         _: rsi_agent_workspace_context::SkillAudience,
         _: CancellationToken,
@@ -72,6 +74,7 @@ impl WorkspaceContext for Source {
     async fn snapshot(
         &self,
         _: &SessionHeader,
+        _: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
         self.requests
@@ -236,7 +239,7 @@ impl Fixture {
         }
     }
     fn header(&self, id: &str) -> SessionHeader {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new(id).unwrap(),
             1,
             self.temp.path().to_str().unwrap(),

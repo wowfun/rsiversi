@@ -486,9 +486,14 @@ impl ParkedToolLane {
     }
 }
 
+mod preparation;
+pub use preparation::{ToolPreparation, ToolProcess};
+
 /// Execution supplied to one trusted tool body.
 #[derive(Clone, Debug)]
 pub struct ToolExecution {
+    _admission: Option<Arc<rsi_execution::ExecutionOperation>>,
+    prepared_process: Arc<Mutex<Option<ToolProcess>>>,
     /// Exact call identity.
     pub call_id: String,
     /// Cooperative cancellation token.
@@ -501,17 +506,39 @@ pub struct ToolExecution {
 }
 
 impl ToolExecution {
+    /// Borrows the exact target lease supplied by trusted orchestration, if present.
+    pub fn execution_lease(&self) -> Option<Arc<rsi_execution::ExecutionLease>> {
+        self.extension::<rsi_execution::ExecutionLease>()
+    }
+    /// Selects Files from the same tuple as workspace scope preparation.
+    pub fn files(
+        &self,
+        native: &Arc<dyn rsi_files_protocol::Files>,
+    ) -> Result<Arc<dyn rsi_files_protocol::Files>> {
+        match self.execution_lease() {
+            Some(execution) => execution.files().map_err(execution_error),
+            None => Ok(native.clone()),
+        }
+    }
+
     /// Plans a workspace-only read through the exact pinned policy and Sandbox generation.
     pub async fn workspace_read(&self) -> Result<rsi_sandbox::WorkspaceReadScope> {
         if self.cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
+        let request = rsi_sandbox::WorkspaceReadRequest {
+            mode: self.policy.mode,
+            cwd: self.policy.cwd.clone(),
+            workspace: self.policy.workspace.clone(),
+        };
+        if let Some(execution) = self.execution_lease() {
+            return execution
+                .workspace_read(request)
+                .await
+                .map_err(execution_error);
+        }
         self.sandbox
-            .workspace_read(rsi_sandbox::WorkspaceReadRequest {
-                mode: self.policy.mode,
-                cwd: self.policy.cwd.clone(),
-                workspace: self.policy.workspace.clone(),
-            })
+            .workspace_read(request)
             .await
             .map_err(ToolError::Sandbox)
     }
@@ -539,6 +566,13 @@ impl ToolExecution {
         program: PathBuf,
         arguments: Vec<String>,
     ) -> Result<ConfinedProcess> {
+        if self.execution_lease().is_some_and(|lease| {
+            *lease.binding().location() != rsi_execution::ExecutionLocation::Local
+        }) {
+            return Err(ToolError::Execution(
+                "target process requires opaque execution preparation".into(),
+            ));
+        }
         let confined = self
             .sandbox
             .confine(ProcessRequest {
@@ -551,6 +585,11 @@ impl ToolExecution {
             })
             .await
             .map_err(ToolError::Sandbox)?;
+        self.record_enforcement(confined.stamp.clone())?;
+        Ok(confined)
+    }
+
+    fn record_enforcement(&self, stamp: EnforcementStamp) -> Result<()> {
         let mut enforcement = self
             .enforcement
             .lock()
@@ -560,16 +599,24 @@ impl ToolExecution {
                 "Tool enforcement record capacity is exhausted".into(),
             ));
         }
-        enforcement.push(confined.stamp.clone());
-        Ok(confined)
+        enforcement.push(stamp);
+        Ok(())
     }
 
     /// Creates one execution and its caller-owned enforcement collector.
     pub fn from_start(call_id: String, start: ToolStart) -> Result<(Self, ToolEnforcement)> {
         start.policy.validate()?;
+        let admission = start
+            .extensions
+            .get::<rsi_execution::ExecutionLease>()
+            .map(|lease| lease.admit().map(Arc::new))
+            .transpose()
+            .map_err(execution_error)?;
         let enforcement = Arc::new(Mutex::new(Vec::new()));
         Ok((
             Self {
+                _admission: admission,
+                prepared_process: Arc::new(Mutex::new(None)),
                 call_id,
                 cancellation: start.cancellation,
                 policy: start.policy,
@@ -718,6 +765,14 @@ impl ToolResult {
 /// Trusted process-local tool body.
 #[async_trait]
 pub trait ToolExecutor: fmt::Debug + Send + Sync + 'static {
+    /// Resolves an optional process plan after policy admission, before Approval; never spawns.
+    async fn prepare(
+        &self,
+        _arguments: &Value,
+        _execution: &ToolExecution,
+    ) -> Result<Option<ToolProcess>> {
+        Ok(None)
+    }
     /// Executes one validated bounded argument value.
     async fn execute(&self, arguments: Value, execution: ToolExecution) -> Result<ToolResult>;
 }
@@ -912,6 +967,8 @@ pub enum RetainedToolFailureKind {
     Cancelled,
     /// Registration timeout won and the body settled.
     Timeout,
+    /// An admitted effect has no verifiable outcome and must not be replayed.
+    OutcomeUnknown,
     /// Tool body or result validation failed.
     Execution,
 }
@@ -934,6 +991,11 @@ pub enum RetainedToolResult {
 pub trait PreparedToolCall: fmt::Debug + Send + 'static {
     /// Returns the immutable exact retained-result identity.
     fn identity(&self) -> &ToolResultIdentity;
+    /// Fixes execution authority and an optional opaque process before requesting Approval.
+    async fn prepare_execution(
+        &mut self,
+        start: ToolStart,
+    ) -> Result<Option<rsi_execution::ExecutionReview>>;
     /// Starts the Tool at most once and retains its eventual result.
     async fn start(self: Box<Self>, start: ToolStart) -> Result<ToolResult>;
 }
@@ -971,6 +1033,9 @@ pub enum ToolError {
     /// Tool timeout won and the body has settled.
     #[error("tool call timed out")]
     Timeout,
+    /// An admitted effect may have occurred without a verifiable outcome.
+    #[error("tool outcome is unknown; do not replay")]
+    OutcomeUnknown,
     /// Tool body returned a failure.
     #[error("tool execution failed: {0}")]
     Execution(String),
@@ -1458,5 +1523,15 @@ impl<'de> Visitor<'de> for StrictValueVisitor<'_> {
             values.insert(key, value);
         }
         Ok(Value::Object(values))
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Adapter consumes the provider error at map_err without exposing backend diagnostics.
+fn execution_error(error: rsi_process::ProcessError) -> ToolError {
+    match error {
+        rsi_process::ProcessError::OutcomeUnknown => ToolError::OutcomeUnknown,
+        rsi_process::ProcessError::Capacity => ToolError::Capacity,
+        rsi_process::ProcessError::ShuttingDown => ToolError::ShuttingDown,
+        _ => ToolError::Execution("execution provider or admission is unavailable".into()),
     }
 }

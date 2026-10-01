@@ -1494,3 +1494,128 @@ async fn role_projections_match_the_sealed_catalog() {
     drop(provider);
     assert!(fiber.dispose().await.is_clean());
 }
+
+#[tokio::test]
+async fn plans_waiting_for_approval_share_the_provider_bound_and_transfer_start_admission() {
+    let (fiber, provider) = activated().await;
+    let tools = seal(&provider, vec![echo_registration("echo")]);
+    let mut held = Vec::new();
+    for index in 0..MAXIMUM_ADMITTED_TOOL_INVOCATIONS {
+        let id = format!("prepared-{index}");
+        let mut prepared = tools
+            .prepare(
+                &id,
+                ToolCall {
+                    id: id.clone(),
+                    name: "echo".into(),
+                    arguments: json!({}),
+                },
+            )
+            .unwrap();
+        let start = tool_start(CancellationToken::new());
+        assert!(
+            prepared
+                .prepare_execution(start.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        held.push((prepared, start));
+    }
+    let mut overflow = tools
+        .prepare(
+            "overflow",
+            ToolCall {
+                id: "overflow".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        overflow
+            .prepare_execution(tool_start(CancellationToken::new()))
+            .await
+            .unwrap_err(),
+        ToolError::Capacity
+    );
+    let (prepared, start) = held.pop().unwrap();
+    let identity = prepared.identity().clone();
+    prepared.start(start).await.unwrap();
+    assert_eq!(
+        overflow
+            .prepare_execution(tool_start(CancellationToken::new()))
+            .await
+            .unwrap_err(),
+        ToolError::Capacity
+    );
+    tools.commit(&identity).unwrap();
+    overflow
+        .prepare_execution(tool_start(CancellationToken::new()))
+        .await
+        .unwrap();
+    drop((overflow, held, tools, provider));
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[derive(Debug, Default)]
+struct PreparingTool {
+    entered: Notify,
+    cancelling: Notify,
+    release: Notify,
+}
+#[async_trait]
+impl ToolExecutor for PreparingTool {
+    async fn prepare(
+        &self,
+        _: &Value,
+        execution: &ToolExecution,
+    ) -> Result<Option<rsi_tools_protocol::ToolProcess>> {
+        self.entered.notify_one();
+        execution.cancellation.cancelled().await;
+        self.cancelling.notify_one();
+        self.release.notified().await;
+        Err(ToolError::Cancelled)
+    }
+    async fn execute(&self, _: Value, _: ToolExecution) -> Result<ToolResult> {
+        panic!("timed-out preparation must not execute a Tool")
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn preparation_timeout_waits_for_callback_settlement_without_holding_registry_lock() {
+    let (fiber, provider) = activated().await;
+    let body = Arc::new(PreparingTool::default());
+    let tools = seal(
+        &provider,
+        vec![ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("prepare", "", json!({})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 100 },
+            executor: body.clone(),
+        }],
+    );
+    let mut prepared = tools
+        .prepare(
+            "preparing",
+            ToolCall {
+                id: "preparing".into(),
+                name: "prepare".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap();
+    let work = tokio::spawn(async move {
+        prepared
+            .prepare_execution(tool_start(CancellationToken::new()))
+            .await
+    });
+    body.entered.notified().await;
+    assert_eq!(tools.definitions().len(), 1);
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    body.cancelling.notified().await;
+    assert!(!work.is_finished());
+    body.release.notify_one();
+    assert_eq!(work.await.unwrap().unwrap_err(), ToolError::Timeout);
+    drop((body, tools, provider));
+    assert!(fiber.dispose().await.is_clean());
+}

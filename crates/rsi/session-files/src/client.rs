@@ -5,8 +5,7 @@ use crate::{
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiError, call_json};
 use rsi_files_protocol::{
-    DirectoryPage, FileKind, FilePage, FileToken, FilesError, MAXIMUM_DIRECTORY_ENTRIES,
-    MAXIMUM_DIRECTORY_PAGE_BYTES, OpenedFile, RelativePath,
+    DirectoryPage, FileKind, FilePage, FileToken, FilesError, OpenedFile, RelativePath,
 };
 use rsi_session_protocol::SessionTarget;
 use serde::{Serialize, de::DeserializeOwned};
@@ -70,12 +69,7 @@ impl SessionFiles for SessionFilesClient {
                 },
             )
             .await?;
-        if file.path != path
-            || file.kind != kind
-            || (kind == FileKind::Directory && file.length > MAXIMUM_DIRECTORY_ENTRIES as u64)
-        {
-            return Err(malformed());
-        }
+        file.validate_for(&path, kind).map_err(|_| malformed())?;
         Ok(file)
     }
     async fn read(
@@ -85,7 +79,7 @@ impl SessionFiles for SessionFilesClient {
         offset: u64,
         maximum: usize,
     ) -> Result<FilePage> {
-        let length = file.length;
+        let expected = file.clone();
         let page: FilePage = self
             .call(
                 FilesOperation::Read,
@@ -97,18 +91,8 @@ impl SessionFiles for SessionFilesClient {
                 },
             )
             .await?;
-        let count =
-            usize::try_from((length - offset).min(maximum as u64)).map_err(|_| malformed())?;
-        if page.offset != offset
-            || page.total != length
-            || page.bytes_hex.len() != count * 2
-            || !page
-                .bytes_hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(malformed());
-        }
+        page.validate_for(&expected, offset, maximum)
+            .map_err(|_| malformed())?;
         Ok(page)
     }
     async fn list(
@@ -130,30 +114,8 @@ impl SessionFiles for SessionFilesClient {
                 },
             )
             .await?;
-        if page.offset != offset
-            || page.total as u64 != expected.length
-            || page.entries.len() > maximum
-            || offset
-                .checked_add(page.entries.len())
-                .is_none_or(|end| end > page.total)
-            || (offset < page.total && page.entries.is_empty())
-            || rsi_api_protocol::measure_json(&page, MAXIMUM_DIRECTORY_PAGE_BYTES).is_err()
-            || !page
-                .entries
-                .windows(2)
-                .all(|entries| entries[0].path < entries[1].path)
-        {
-            return Err(malformed());
-        }
-        for entry in &page.entries {
-            let bytes = entry.path.as_bytes();
-            let name = bytes.rsplit(|b| *b == b'/').next().ok_or_else(malformed)?;
-            if expected.path.join(name).map_err(|_| malformed())? != entry.path
-                || entry.name != String::from_utf8_lossy(name)
-            {
-                return Err(malformed());
-            }
-        }
+        page.validate_for(&expected, offset, maximum)
+            .map_err(|_| malformed())?;
         Ok(page)
     }
     async fn release(&self, target: SessionTarget, token: FileToken) -> Result<()> {

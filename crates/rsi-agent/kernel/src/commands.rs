@@ -113,6 +113,7 @@ struct PreparedCommandCommit {
     _admission: SubmissionAdmissionLease,
     append: AtomicSessionAppend,
     receipt: DomainMutationReceipt,
+    execution: Option<execution_admission::Reservation>,
 }
 
 impl AgentKernel {
@@ -407,12 +408,18 @@ impl AgentKernel {
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let receipt = DomainMutationReceipt::new(session_id.clone(), control.clone())?;
+        let mut execution = None;
         let mut controls = vec![control];
         if let CommandAuthorization::Continuation {
             lease,
             reservation: Some(input),
         } = &candidate.authorization
         {
+            execution = self.inner.execution_messages.reserve(
+                &session_id,
+                &input.message_id,
+                lease.execution(),
+            )?;
             let source = rsi_agent_session_protocol::ContinuationSource {
                 domain: lease.binding().domain.clone(),
                 owner: input.owner.clone(),
@@ -459,6 +466,7 @@ impl AgentKernel {
                 controls,
             },
             receipt,
+            execution,
         }))
     }
 
@@ -468,11 +476,19 @@ impl AgentKernel {
             _admission,
             append,
             receipt,
+            execution,
         } = prepared;
         let session_id = append.session_id.clone();
         candidate
             .authorization
             .validate(self, &candidate.session, &candidate.invocation)?;
+        let _execution_admission = match &candidate.authorization {
+            CommandAuthorization::Continuation {
+                lease,
+                reservation: Some(_),
+            } => execution_admission::admit(candidate.session.header(), lease.execution())?,
+            _ => None,
+        };
         let result = self
             .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                 sessions: vec![append],
@@ -515,6 +531,7 @@ impl AgentKernel {
             reservation: Some(input),
         } = &candidate.authorization
         {
+            self.inner.execution_messages.publish(execution);
             let revision = receipt.commit().updates()[0].revision();
             self.inner
                 .continuation_issuer

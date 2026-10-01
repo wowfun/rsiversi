@@ -62,3 +62,10 @@ applying the hunk to an earlier occurrence.
 `delta_exact` means the returned filesystem effect ledger has exact before/after
 byte counts; fuzzy source matching is reported independently in
 `fuzzy_matches` and does not make that ledger inexact.
+
+An SSH Tool resolves the reserved `apply_patch` selector during preparation
+and retains the opaque target plan through Approval. Local execution seals the
+contribution's configured helper and empty environment through its native lease. The SSH distribution exposes
+the same patch engine's exact marker in its immutable helper image. Ordinary
+helper lifecycle environment never enters the patch child. Native-only embeddings
+retain their explicitly supplied helper and empty environment.

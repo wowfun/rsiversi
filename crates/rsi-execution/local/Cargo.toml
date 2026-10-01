@@ -1,0 +1,28 @@
+[package]
+name = "rsi-execution-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-execution = { path = "../core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+rsi-files = { path = "../../rsi-files/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

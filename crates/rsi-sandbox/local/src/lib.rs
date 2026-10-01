@@ -57,6 +57,7 @@ impl SandboxProbe for SystemSandboxProbe {
     async fn available(&self, path: &Path, arguments: &[&str]) -> Result<bool> {
         let mut command = tokio::process::Command::new(path);
         command
+            .env_clear()
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -188,6 +189,23 @@ impl Sandbox for Service {
         rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
     }
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
+        self.confine_view(request, false)
+    }
+    async fn confine_source_reader(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
+        if request.mode != SandboxMode::ReadOnly
+            || request.stdio != rsi_sandbox::ProcessStdio::Pipes
+        {
+            return Err(SandboxError::Unsupported(request.mode));
+        }
+        self.confine_view(request, true)
+    }
+}
+impl Service {
+    fn confine_view(
+        &self,
+        request: ProcessRequest,
+        source_reader: bool,
+    ) -> Result<ConfinedProcess> {
         let (program, cwd, workspace) = validate_request(&request)?;
         if request.stdio == rsi_sandbox::ProcessStdio::Pty
             && request.mode == SandboxMode::DangerFullAccess
@@ -208,27 +226,16 @@ impl Sandbox for Service {
             .backend
             .clone()
             .ok_or(SandboxError::Unsupported(request.mode))?;
+        if source_reader && backend.kind != BackendKind::Bubblewrap {
+            return Err(SandboxError::Unsupported(request.mode));
+        }
         let target_program = program.into_os_string();
         let target_cwd = cwd.clone().into_os_string();
         let target_workspace = workspace.clone().into_os_string();
         let (bind_source, owner) = workspace_source(&request, &cwd, &workspace)?;
         let (wrapper, arguments) = match backend.kind {
             BackendKind::Bubblewrap => {
-                let mut arguments: Vec<OsString> = vec![
-                    "--die-with-parent".into(),
-                    "--new-session".into(),
-                    "--unshare-all".into(),
-                    "--share-net".into(),
-                    "--ro-bind".into(),
-                    "/".into(),
-                    "/".into(),
-                    "--tmpfs".into(),
-                    "/tmp".into(),
-                    "--proc".into(),
-                    "/proc".into(),
-                    "--dev".into(),
-                    "/dev".into(),
-                ];
+                let mut arguments = bubblewrap_prefix(source_reader);
                 if request.stdio == rsi_sandbox::ProcessStdio::Pty {
                     arguments.retain(|argument| argument != "--new-session");
                 }
@@ -277,15 +284,43 @@ impl Sandbox for Service {
             (wrapper, arguments, cwd)
         };
         validate_plan(&wrapper, &arguments, &cwd, &workspace)?;
+        let mut evidence = stamp(request.mode, Some(&backend), workspace);
+        if source_reader {
+            evidence.scratch = SandboxScratch::Host;
+            evidence.network = SandboxNetwork::Isolated;
+            evidence.validate()?;
+        }
         Ok(ConfinedProcess {
             owner,
             stdio: request.stdio,
             program: wrapper,
             arguments,
             cwd,
-            stamp: stamp(request.mode, Some(&backend), workspace),
+            stamp: evidence,
         })
     }
+}
+
+fn bubblewrap_prefix(source_reader: bool) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = vec![
+        "--die-with-parent".into(),
+        "--new-session".into(),
+        "--unshare-all".into(),
+    ];
+    if !source_reader {
+        arguments.push("--share-net".into());
+    }
+    arguments.extend(["--ro-bind".into(), "/".into(), "/".into()]);
+    if !source_reader {
+        arguments.extend(["--tmpfs".into(), "/tmp".into()]);
+    }
+    arguments.extend([
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+    ]);
+    arguments
 }
 
 /// Ordinary plugin factory for one selected local sandbox backend.

@@ -10,16 +10,26 @@ enum Reader {
     Header,
     Panic,
     Pending(Arc<Mutex<Option<CancellationToken>>>),
+    Execution(
+        rsi_execution::ExecutionBinding,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ),
 }
 #[async_trait]
 impl SessionResourceReader for Reader {
     async fn read(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
         match self {
+            Self::Execution(expected, calls) => {
+                assert_eq!(execution.unwrap().binding(), expected);
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(SessionResourceValue::List { entries: vec![] })
+            }
             Self::Header => Ok(SessionResourceValue::Sources {
                 sources: vec![ContributionId::new(header.session_id().as_str()).unwrap()],
             }),
@@ -82,6 +92,7 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
         let result = adapter
             .read(
                 context.clone(),
+                None,
                 SessionResourceRequest::Sources.validated().unwrap(),
                 runtime.execution(),
                 CancellationToken::new(),
@@ -93,6 +104,7 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
             adapter
                 .read(
                     context,
+                    None,
                     request().validated().unwrap(),
                     runtime.execution(),
                     CancellationToken::new()
@@ -104,6 +116,7 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
             adapter
                 .read(
                     Arc::new(header("beta")),
+                    None,
                     SessionResourceRequest::Sources.validated().unwrap(),
                     runtime.execution(),
                     CancellationToken::new()
@@ -121,6 +134,7 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
         adapter
             .read(
                 Arc::new(header("alpha")),
+                None,
                 request().validated().unwrap(),
                 runtime.execution(),
                 CancellationToken::new()
@@ -135,6 +149,7 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
         adapter
             .read(
                 Arc::new(header("alpha")),
+                None,
                 SessionResourceRequest::Sources.validated().unwrap(),
                 runtime.execution(),
                 stop
@@ -144,5 +159,76 @@ async fn finite_reads_fence_header_response_shape_panic_and_timeout() {
     ));
     drop(adapter);
     drop(lease);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn resource_reads_require_current_matching_execution_before_reader_io() {
+    use super::execution_fixture::{Gate, lease};
+    use rsi_execution::{ExecutionCoordinates, ExecutionLocation, ExecutionTargetId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let location = ExecutionLocation::Ssh {
+        target: ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+    };
+    let gate = Arc::new(Gate::default());
+    let execution = lease(location.clone(), gate.clone(), 1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (runtime, registration, adapter) = adapter(Reader::Execution(
+        execution.binding().clone(),
+        calls.clone(),
+    ))
+    .await;
+    let local = header("alpha");
+    let remote = Arc::new(
+        SessionHeader::new(
+            local.session_id().clone(),
+            1,
+            ExecutionCoordinates::new(location, "/remote/workspace").unwrap(),
+            local.agent_preset_id().clone(),
+            local.settings().clone(),
+        )
+        .unwrap(),
+    );
+    let read = |lease| {
+        adapter.read(
+            remote.clone(),
+            lease,
+            request().validated().unwrap(),
+            runtime.execution(),
+            CancellationToken::new(),
+        )
+    };
+    adapter
+        .read(
+            remote.clone(),
+            None,
+            SessionResourceRequest::Sources.validated().unwrap(),
+            runtime.execution(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(read(None).await.is_err());
+    assert!(
+        read(Some(lease(
+            ExecutionLocation::Local,
+            Arc::new(Gate::default()),
+            0
+        )))
+        .await
+        .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    read(Some(execution.clone())).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    gate.revoked.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        read(Some(execution)).await,
+        Err(ContributionError::Closed)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(adapter);
+    drop(registration);
     assert!(runtime.shutdown().await.is_clean());
 }

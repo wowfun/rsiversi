@@ -79,7 +79,7 @@ pub(super) async fn handle(
     Ok(handle)
 }
 fn finite<I, O, F, Fut>(
-    service: Arc<dyn SessionService>,
+    service: Arc<dyn SessionIngress>,
     scratch: Scratch,
     operation: Operation,
     call: F,
@@ -90,8 +90,8 @@ where
     F: Fn(Arc<dyn SessionHandle>, I) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = rsi_session_protocol::Result<O>> + Send + 'static,
 {
-    json_handler(move |_, request: HandleRequest<I>| {
-        let service = service.clone();
+    json_handler(move |context, request: HandleRequest<I>| {
+        let service = service.scoped(context.origin);
         let scratch = scratch.clone();
         let call = call.clone();
         async move {
@@ -118,8 +118,7 @@ impl SessionApi {
     /// Registers operations against the same service and trusted draft ingress generation.
     pub fn register(
         registrar: &dyn ApiRegistrar,
-        service: Arc<dyn SessionService>,
-        ingress: Arc<dyn SessionIngress>,
+        service: Arc<dyn SessionIngress>,
     ) -> rsi_api_protocol::Result<Self> {
         let scratch = Scratch {
             control: Arc::new(tokio::sync::Semaphore::new(2 * 1024 * 1024)),
@@ -127,8 +126,7 @@ impl SessionApi {
                 rsi_api_protocol::MAXIMUM_API_BYTES,
             )),
         };
-        let mut registrations =
-            root_operations(registrar, service.clone(), ingress, scratch.clone())?;
+        let mut registrations = root_operations(registrar, service.clone(), scratch.clone())?;
         for (operation, handler) in handle_operations(&service, &scratch) {
             registrations.push(registrar.register(operation.spec(), handler)?);
         }
@@ -164,11 +162,11 @@ impl SessionApi {
 }
 fn root_operations(
     registrar: &dyn ApiRegistrar,
-    service: Arc<dyn SessionService>,
-    ingress: Arc<dyn SessionIngress>,
+    service: Arc<dyn SessionIngress>,
     scratch: Scratch,
 ) -> rsi_api_protocol::Result<Vec<ApiRegistration>> {
     let create_scratch = scratch.clone();
+    let ingress = service.clone();
     let create = registrar.register(
         Operation::Create.spec(),
         json_handler(move |context, request: CreateSession| {
@@ -196,8 +194,8 @@ fn root_operations(
     let attach_service = service.clone();
     let attach = registrar.register(
         Operation::Attach.spec(),
-        json_handler(move |_, request: wire::Attach| {
-            let service = attach_service.clone();
+        json_handler(move |context, request: wire::Attach| {
+            let service = attach_service.scoped(context.origin);
             let scratch = attach_scratch.clone();
             async move {
                 let reservation = scratch.reserve(Operation::Attach).await?;
@@ -211,8 +209,8 @@ fn root_operations(
     let header_scratch = scratch.clone();
     let read_header = registrar.register(
         Operation::ReadHeader.spec(),
-        json_handler(move |_, request: wire::Attach| {
-            let service = header_service.clone();
+        json_handler(move |context, request: wire::Attach| {
+            let service = header_service.scoped(context.origin);
             let scratch = header_scratch.clone();
             async move {
                 let reservation = scratch.reserve(Operation::ReadHeader).await?;
@@ -222,8 +220,8 @@ fn root_operations(
     )?;
     let recent = registrar.register(
         Operation::Recent.spec(),
-        json_handler(move |_, request: wire::Recent| {
-            let service = service.clone();
+        json_handler(move |context, request: wire::Recent| {
+            let service = service.scoped(context.origin);
             let scratch = scratch.clone();
             async move {
                 let reservation = scratch.reserve(Operation::Recent).await?;
@@ -248,7 +246,7 @@ fn root_operations(
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.
 fn handle_operations(
-    service: &Arc<dyn SessionService>,
+    service: &Arc<dyn SessionIngress>,
     scratch: &Scratch,
 ) -> Vec<(Operation, Arc<dyn ApiHandler>)> {
     macro_rules! add {

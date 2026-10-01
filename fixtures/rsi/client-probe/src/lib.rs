@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub async fn run_probe() -> Result<String, JsValue> {
     let settings = serde_json::from_value(serde_json::json!({"settings_id": "standard", "system_prompt": "You are a careful coding agent.", "default_model": {"deployment": "fixture", "model": "fixture-model"}, "sandbox": "workspace-write", "require_approval": false, "turn_budget": {"maximum_elapsed_ms": 1800000, "maximum_provider_attempts": 64, "maximum_tool_calls": 256, "maximum_generated_records": 65536, "maximum_generated_record_bytes": 67108864}})).unwrap();
-    let header = rsi_agent_session_protocol::SessionHeader::new(
+    let header = rsi_agent_session_protocol::SessionHeader::new_local(
         rsi_agent_session_protocol::SessionId::new("browser-header").unwrap(),
         1_788_778_132_168,
         "/workspace",
@@ -34,6 +34,7 @@ pub async fn run_probe() -> Result<String, JsValue> {
             subject: rsi_approval_protocol::ApprovalSubject::new("session", "turn", "effect").unwrap(),
             id: "review".into(), action: "Run a command".into(), reason: "Prepared fixture".into(),
             review: Some(rsi_approval_protocol::ApprovalReview {
+            execution: None,
                 arguments: serde_json::json!({"command":"printf fixture"}), cwd: path.into(),
                 sandbox: "workspace-write".into(), request_sha256: "0".repeat(64),
             }),

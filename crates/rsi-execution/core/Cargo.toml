@@ -1,0 +1,26 @@
+[package]
+name = "rsi-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+async-trait.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-execution-protocol = { path = "../protocol" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+serde.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time", "test-util"] }

@@ -1160,8 +1160,10 @@ dependencies = [
  "futures-util",
  "rsi-agent-context",
  "rsi-agent-session-protocol",
+ "rsi-execution",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -1211,6 +1213,7 @@ dependencies = [
  "jsonschema",
  "rsi-ai-protocol",
  "rsi-approval-protocol",
+ "rsi-execution-protocol",
  "rsi-media-protocol",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -1227,8 +1230,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-execution-protocol",
  "rsi-meta-contract",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1242,6 +1248,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-jobs",
  "rsi-meta",
  "rsi-meta-contract",
@@ -1311,6 +1318,7 @@ name = "rsi-approval-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-workspace-path",
@@ -1328,6 +1336,7 @@ dependencies = [
  "futures-util",
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
@@ -1401,11 +1410,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-execution"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-api-protocol",
+ "rsi-execution-protocol",
+ "rsi-files-protocol",
+ "rsi-meta-contract",
+ "rsi-process",
+ "rsi-sandbox",
+ "serde",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-execution-protocol"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-protocol",
+ "rsi-workspace-path",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "rsi-files-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
  "hex",
+ "rsi-api-protocol",
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",
@@ -1555,6 +1591,7 @@ name = "rsi-pty-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
  "serde",
@@ -1580,8 +1617,10 @@ dependencies = [
  "futures-util",
  "rsi-agent-session-protocol",
  "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-session-protocol",
  "serde",
  "serde_json",
@@ -1604,6 +1643,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta-contract",
@@ -1624,9 +1664,12 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "jsonschema",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-workspace-path",
  "serde",
@@ -1691,9 +1734,11 @@ dependencies = [
  "async-trait",
  "hex",
  "rsi-api-protocol",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-workspace-path",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
 ]

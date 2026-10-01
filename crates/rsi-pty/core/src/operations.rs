@@ -4,7 +4,11 @@ use super::{
     Reply, Result, Scope, Sha256, Term, TermState, Terminal, lock, unavailable,
 };
 impl Scope {
-    pub(super) async fn dispatch(&self, operation: Operation) -> Result<Reply> {
+    pub(super) async fn dispatch(
+        &self,
+        operation: Operation,
+        lease: Option<rsi_execution::ExecutionLease>,
+    ) -> Result<Reply> {
         operation.validate()?;
         if self.shared.stopped.load(Ordering::Acquire) || lock(&self.inner).retired {
             return Err(unavailable());
@@ -36,7 +40,7 @@ impl Scope {
                 bytes,
             } => Ok(Reply::Input(
                 self.term(&terminal)?
-                    .input(&attachment, epoch, sequence, bytes)
+                    .input(&attachment, epoch, sequence, bytes, lease.as_ref())
                     .await?,
             )),
             Operation::Receipt {
@@ -55,11 +59,11 @@ impl Scope {
                 attachment,
                 epoch,
                 size,
-            } => Ok(Reply::Terminal(self.term(&terminal)?.resize(
-                &attachment,
-                epoch,
-                size,
-            )?)),
+            } => Ok(Reply::Terminal(
+                self.term(&terminal)?
+                    .resize(&attachment, epoch, size, lease.as_ref())
+                    .await?,
+            )),
             Operation::Detach {
                 terminal,
                 attachment,
@@ -106,7 +110,7 @@ impl Term {
         {
             return Err(unavailable());
         }
-        if state.inflight {
+        if state.inflight || state.resizing {
             return Err(PtyError::Capacity);
         }
         state.status.controller_epoch = state
@@ -159,7 +163,9 @@ impl Term {
         epoch: u64,
         sequence: u64,
         bytes: Vec<u8>,
+        lease: Option<&rsi_execution::ExecutionLease>,
     ) -> Result<InputReceipt> {
+        let process = self.process.view(lease).map_err(super::native)?;
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| PtyError::Unavailable("Tokio runtime is unavailable".into()))?;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -180,7 +186,7 @@ impl Term {
                     result: record.receipt.clone(),
                 });
             }
-            if state.inflight {
+            if state.inflight || state.resizing {
                 return Err(PtyError::Capacity);
             }
             if sequence != state.next_input {
@@ -205,7 +211,7 @@ impl Term {
         };
         let (reply, wait) = tokio::sync::oneshot::channel();
         runtime.spawn(async move {
-            let result = match guard.term.process.write(&bytes).await {
+            let result = match process.write(&bytes).await {
                 Ok(bytes) => InputState::Accepted { bytes },
                 Err(_) => InputState::Unknown,
             };
@@ -227,8 +233,7 @@ impl Term {
             drop(guard);
             let _ = reply.send(receipt);
         });
-        wait.await
-            .map_err(|_| PtyError::Io("input receipt is unknown; query its sequence".into()))
+        wait.await.map_err(|_| PtyError::OutcomeUnknown)
     }
 }
 struct InputGuard {

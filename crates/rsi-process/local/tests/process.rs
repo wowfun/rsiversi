@@ -69,6 +69,7 @@ async fn raw_tail_reads_use_global_offsets_and_report_an_expired_cursor() {
             "i=0; while [ $i -lt 65537 ]; do printf x; i=$((i+1)); done",
             65_536,
         ))
+        .await
         .unwrap();
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
     let complete = managed.stdout().read_from(0).unwrap();
@@ -113,6 +114,7 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
             "printf prefix; head -c 100000 /dev/zero; printf suffix; printf warning >&2; exit 7",
             32,
         ))
+        .await
         .unwrap();
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(7));
     let read = managed.stdout().read_from(0).unwrap();
@@ -137,14 +139,14 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
 #[tokio::test]
 async fn capture_reservation_survives_exit_until_the_handle_is_dropped() {
     let (fiber, process) = activated(json!({"maximum_capture_bytes":65536})).await;
-    let retained = process.spawn(spec("exit 0", 32_768)).unwrap();
+    let retained = process.spawn(spec("exit 0", 32_768)).await.unwrap();
     retained.wait().await.unwrap();
     assert!(matches!(
-        process.spawn(spec("exit 0", 1)),
+        process.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     drop(retained);
-    let after_compaction = process.spawn(spec("exit 0", 1)).unwrap();
+    let after_compaction = process.spawn(spec("exit 0", 1)).await.unwrap();
     after_compaction.wait().await.unwrap();
     drop(after_compaction);
     drop(process);
@@ -157,6 +159,7 @@ async fn active_capacity_releases_after_settlement_and_termination_kills_the_gro
     let (fiber, process) = activated(json!({"maximum_active_processes":1})).await;
     let managed = process
         .spawn(spec("/bin/sleep 30 & child=$!; echo $child; wait", 1024))
+        .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -169,7 +172,7 @@ async fn active_capacity_releases_after_settlement_and_termination_kills_the_gro
     .await
     .unwrap();
     assert!(matches!(
-        process.spawn(spec("exit 0", 1)),
+        process.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     let child = String::from_utf8(managed.stdout().read_from(0).unwrap().bytes)
@@ -188,7 +191,7 @@ async fn active_capacity_releases_after_settlement_and_termination_kills_the_gro
     .await
     .expect("managed process-group child must be reaped");
 
-    let replacement = process.spawn(spec("exit 0", 1)).unwrap();
+    let replacement = process.spawn(spec("exit 0", 1)).await.unwrap();
     replacement.wait().await.unwrap();
     drop((replacement, managed));
     drop(process);
@@ -201,6 +204,7 @@ async fn successful_leader_exit_closes_descendants_before_outcome_and_capacity_r
     let (fiber, process) = activated(json!({"maximum_active_processes":1})).await;
     let managed = process
         .spawn(spec("/bin/sleep 30 & child=$!; echo $child; exit 0", 1024))
+        .await
         .unwrap();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), managed.wait())
         .await
@@ -217,7 +221,7 @@ async fn successful_leader_exit_closes_descendants_before_outcome_and_capacity_r
         "wait returned while a managed descendant remained live"
     );
 
-    let replacement = process.spawn(spec("exit 0", 1)).unwrap();
+    let replacement = process.spawn(spec("exit 0", 1)).await.unwrap();
     replacement.wait().await.unwrap();
     drop((replacement, managed));
     drop(process);
@@ -230,7 +234,7 @@ async fn outcome_waits_for_blocked_stdin_delivery_to_settle() {
     let (fiber, process) = activated(json!({})).await;
     let mut request = spec("/bin/sleep 30 & child=$!; echo $child; exit 0", 1024);
     request.stdin = vec![b'x'; rsi_process::MAXIMUM_PROCESS_STDIN_BYTES];
-    let managed = process.spawn(request).unwrap();
+    let managed = process.spawn(request).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), managed.wait())
         .await
         .expect("group cleanup must unblock and join stdin delivery")
@@ -260,7 +264,7 @@ async fn escaped_stdin_reader_cannot_block_settlement_forever() {
     );
     let mut request = spec(&script, 1024);
     request.stdin = vec![b'x'; rsi_process::MAXIMUM_PROCESS_STDIN_BYTES];
-    let managed = process.spawn(request).unwrap();
+    let managed = process.spawn(request).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while marker.metadata().map_or(0, |metadata| metadata.len()) == 0 {
             tokio::task::yield_now().await;
@@ -314,7 +318,7 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
         marker.display(),
         marker.display()
     );
-    let managed = process.spawn(spec(&script, 1024)).unwrap();
+    let managed = process.spawn(spec(&script, 1024)).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while marker.metadata().map_or(0, |metadata| metadata.len()) == 0 {
             tokio::task::yield_now().await;
@@ -342,7 +346,7 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     assert!(managed.stdout().read_from(0).unwrap().full_output.is_none());
     assert!(managed.stderr().read_from(0).unwrap().full_output.is_none());
     // Retaining the failed process must not retain its disk capture quota.
-    let next = process.spawn(spec("printf recovered", 32)).unwrap();
+    let next = process.spawn(spec("printf recovered", 32)).await.unwrap();
     next.wait().await.unwrap();
     assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
     assert!(next.stderr().read_from(0).unwrap().full_output.is_some());
@@ -360,6 +364,7 @@ async fn readers_preserve_utf8_sequences_split_across_pipe_chunks_as_raw_bytes()
             "printf '\\342\\202'; /bin/sleep 0.05; printf '\\254'",
             16,
         ))
+        .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -385,14 +390,14 @@ async fn per_stream_capture_limit_rejects_limit_plus_one_before_spawn() {
     let (fiber, process) = activated(json!({})).await;
     let mut request = spec("exit 0", rsi_process::MAXIMUM_PROCESS_STREAM_BYTES);
     request.stderr_max_bytes = 1;
-    let maximum = process.spawn(request).unwrap();
+    let maximum = process.spawn(request).await.unwrap();
     maximum.wait().await.unwrap();
     drop(maximum);
 
     let mut overflow = spec("printf must-not-run", 1);
     overflow.stdout_max_bytes = rsi_process::MAXIMUM_PROCESS_STREAM_BYTES + 1;
     assert!(matches!(
-        process.spawn(overflow),
+        process.spawn(overflow).await,
         Err(ProcessError::InvalidInput(message)) if message.contains("stdout_max_bytes")
     ));
     drop(process);
@@ -408,6 +413,7 @@ async fn provider_retirement_escalates_term_to_kill_and_waits_for_reaping() {
             "trap '' TERM; printf ready; while :; do /bin/sleep 1; done",
             1024,
         ))
+        .await
         .unwrap();
     let pid = managed.pid();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -437,7 +443,7 @@ async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping(
         1024,
     );
     request.termination_grace_ms = 100;
-    let managed = process.spawn(request).unwrap();
+    let managed = process.spawn(request).await.unwrap();
     let pid = managed.pid();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while managed.stdout().read_from(0).unwrap().bytes != b"ready" {
@@ -481,7 +487,7 @@ async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping(
     let mut replacement_config = config;
     replacement_config["shutdown_timeout_ms"] = json!(1000);
     let (replacement, process) = activated(replacement_config).await;
-    let next = process.spawn(spec("printf replacement", 32)).unwrap();
+    let next = process.spawn(spec("printf replacement", 32)).await.unwrap();
     next.wait().await.unwrap();
     assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
     assert!(replacement.dispose().await.is_clean());
@@ -499,7 +505,7 @@ async fn provider_retirement_joins_every_spawn_racing_admission_publication() {
         let barrier = Arc::clone(&barrier);
         spawns.push(tokio::spawn(async move {
             barrier.wait().await;
-            process.spawn(spec("/bin/sleep 30", 1))
+            process.spawn(spec("/bin/sleep 30", 1)).await
         }));
     }
     drop(process);
@@ -554,6 +560,7 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
         .unwrap();
     let managed = process
         .spawn(spec("printf command-still-runs; exit 7", 32))
+        .await
         .unwrap();
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(7));
     let output = managed.stdout().read_from(0).unwrap();

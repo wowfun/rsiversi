@@ -21,6 +21,14 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_node(
+            std::env::var("RSI_TEST_NODE")
+                .expect("explicit absolute Node executable")
+                .into(),
+        )
+        .await
+    }
+    async fn with_node(node: std::path::PathBuf) -> Self {
         let runtime = Runtime::default();
         let mut fibers = vec![];
         for (name, factory, config) in [
@@ -43,7 +51,7 @@ impl Fixture {
             (
                 "program",
                 Arc::new(ProgramRuntimeFactory),
-                json!({"node":std::env::var("RSI_TEST_NODE").expect("explicit absolute Node executable")}),
+                json!({"node":node}),
             ),
         ] {
             fibers.push(
@@ -108,11 +116,14 @@ impl Fixture {
                 .lookup_local::<SandboxContract>()
                 .unwrap(),
         );
-        self.runtime
+        let runtime = self
+            .runtime
             .root()
             .lookup_local::<ProgramRuntimeContract>()
-            .unwrap()
-            .prepare(script.into(), &execution, &self.scope, rpc)
+            .unwrap();
+        let process = runtime.prepare_process(&execution).await.unwrap();
+        runtime
+            .admit(script.into(), &execution, &self.scope, rpc, process)
             .await
             .unwrap()
     }
@@ -135,7 +146,7 @@ impl ProgramRpc for Echo {
         method: String,
         value: Value,
         _: CancellationToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
         assert_eq!(method, "tool");
         Ok(value["arguments"].clone())
     }
@@ -232,7 +243,7 @@ impl ProgramRpc for Gate {
         _: String,
         _: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
         self.entered.notify_one();
         cancellation.cancelled().await;
         self.joined.cancel();
@@ -288,7 +299,7 @@ async fn result_and_rpc_capacity_are_enforced_and_owner_retirement_cancels_unsta
             .await
             .unwrap()
             .unwrap_err();
-        assert!(error.contains(expected), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
     }
     let program = fixture.prepare("return 42", Arc::new(Echo)).await;
     assert!(fixture.fibers.pop().unwrap().dispose().await.is_clean());
@@ -341,10 +352,12 @@ async fn tool_cancellation_during_confinement_or_after_admission_cannot_launch_n
         .unwrap();
     let script = "require('fs').writeFileSync('started', 'bad'); return 42";
     {
-        let preparing = runtime.prepare(script.into(), &execution, &fixture.scope, Arc::new(Echo));
+        let preparing = runtime.prepare_process(&execution);
         tokio::pin!(preparing);
-        assert!(futures_util::poll!(preparing.as_mut()).is_pending());
-        sandbox.entered.notified().await;
+        tokio::select! {
+            () = sandbox.entered.notified() => {}
+            result = &mut preparing => panic!("preparation passed closed confinement: {result:?}"),
+        }
         cancellation.cancel();
         sandbox.release.notify_one();
         assert!(preparing.await.is_err());
@@ -364,4 +377,72 @@ async fn tool_cancellation_during_confinement_or_after_admission_cannot_launch_n
     );
     assert!(!fixture.workspace.path().join("started").exists());
     fixture.close().await;
+}
+
+#[derive(Debug)]
+struct UncertainRpc;
+#[async_trait]
+impl ProgramRpc for UncertainRpc {
+    fn definitions(&self) -> Value {
+        json!([])
+    }
+    async fn call(
+        &self,
+        _: String,
+        _: Value,
+        _: CancellationToken,
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
+        Err(rsi_agent_program::ProgramError::OutcomeUnknown)
+    }
+}
+#[tokio::test]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn actual_node_cannot_catch_uncertain_rpc_and_continue() {
+    let fixture = Fixture::new().await;
+    let mut program = fixture.prepare(
+        "try { await tools.call('effect', {}); } catch { require('fs').writeFileSync('retried', 'unsafe'); } return 'continued';",
+        Arc::new(UncertainRpc),
+    ).await;
+    program.start().unwrap();
+    assert_eq!(
+        program.result().await.unwrap_err(),
+        rsi_agent_program::ProgramError::OutcomeUnknown
+    );
+    let read = fixture
+        .jobs
+        .wait(&fixture.scope, program.job_id(), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(read.job.status, JobStatus::OutcomeUnknown);
+    assert!(!fixture.workspace.path().join("retried").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn missing_or_non_regular_node_is_rejected_before_job_admission() {
+    let root = tempfile::tempdir().unwrap();
+    for node in [root.path().to_path_buf(), root.path().join("absent")] {
+        let fixture = Fixture::with_node(node).await;
+        let execution = fixture.execution(
+            CancellationToken::new(),
+            fixture
+                .runtime
+                .root()
+                .lookup_local::<SandboxContract>()
+                .unwrap(),
+        );
+        let runtime = fixture
+            .runtime
+            .root()
+            .lookup_local::<ProgramRuntimeContract>()
+            .unwrap();
+        let error = runtime
+            .prepare_process(&execution)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Node executable"), "{error}");
+        assert!(fixture.jobs.list(&fixture.scope).unwrap().is_empty());
+        fixture.close().await;
+    }
 }

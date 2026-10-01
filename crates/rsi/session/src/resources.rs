@@ -9,6 +9,11 @@ impl LocalSessionHandle {
         &self,
         request: SessionResourceRequest,
     ) -> Result<ResourceSnapshot> {
+        let execution = if matches!(request, SessionResourceRequest::Sources) {
+            None
+        } else {
+            self.execution_lease()?
+        };
         let request = request
             .validated()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
@@ -34,7 +39,7 @@ impl LocalSessionHandle {
             };
             let response = if let Some((header, pin)) = captured {
                 SessionResourceAdapter::new(pin)
-                    .read(header, request, &self.execution, stop.clone())
+                    .read(header, execution, request, &self.execution, stop.clone())
                     .await
                     .map_err(|error| match error {
                         rsi_agent_composition_protocol::ContributionError::Capacity => {
@@ -49,7 +54,7 @@ impl LocalSessionHandle {
                 self.resources
                     .as_ref()
                     .ok_or_else(|| SessionError::NotFound("Session resource owner".into()))?
-                    .read_resource(self.session_id(), request, stop.clone())
+                    .read_resource(self.session_id(), execution, request, stop.clone())
                     .await
                     .map_err(map_turn_error)?
             };

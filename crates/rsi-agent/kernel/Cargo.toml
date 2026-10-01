@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-process = { path = "../../rsi-process/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-execution = { path = "../../rsi-execution/core" }
 getrandom.workspace = true
 rsi-jobs = { path = "../../rsi-jobs/core" }
 async-trait.workspace = true
@@ -27,6 +30,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-agent-context = { path = "../context" }
 rsi-agent-store-sqlite = { path = "../store-sqlite", features = ["test-support"] }
 tempfile.workspace = true

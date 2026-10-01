@@ -1,5 +1,18 @@
 # rsi-agent-composition-protocol
 
+Context contributions receive the executing claim's non-durable execution lease.
+Finite resource readers receive the current caller's lease independently of the
+composition pin. The resource adapter rejects a missing remote lease, a mismatched
+location, or withdrawn admission before invoking a reader, and retains the admitted
+operation until the finite read settles. The pure Sources operation needs no
+execution lease; its caller still owns Session metadata admission. Neither Header coordinates nor a restored
+composition recreate execution authority. Local-only embeddings may omit a lease.
+
+Fresh preparation may retain an opaque Execution lease bound to the Header's
+location. The caller binds it to a frozen submission, never to the shared draft
+or composition generation. Binding validates location identity but does not
+replace the execution owner's live admission check at use time.
+
 An optional immutable `CompositionManifest` describes the flat, redacted plugin
 instances captured when a generation is built. It contains identities, effective
 enablement and implementation origin, without configuration or filesystem paths.
@@ -216,3 +229,6 @@ Delegation restricts Tool discovery and preparation. Retained result query, wait
 and commit still use the provider's exact identity protocol for recovery of already
 admitted effects; this wrapper is not an isolation boundary between trusted Rust
 holders. Models cannot call those operations or supply retained-result identities.
+
+The process-free reporting Tool requires explicit execution preparation before
+start, so its review participates in the same approval binding as other Tools.

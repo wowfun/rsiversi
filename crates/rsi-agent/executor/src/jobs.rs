@@ -84,8 +84,9 @@ mod tests {
 
     #[derive(Debug)]
     struct Completed;
+    #[async_trait::async_trait]
     impl JobProducer for Completed {
-        fn start(&self, _: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
+        async fn start(&self, _: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
             Ok(Arc::new(Self))
         }
     }
@@ -147,6 +148,7 @@ mod tests {
                     requires_report: true,
                 },
             )
+            .await
             .unwrap();
         let source = StatusSource {
             jobs: jobs.clone(),

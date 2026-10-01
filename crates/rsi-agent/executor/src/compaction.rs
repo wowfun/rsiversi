@@ -59,7 +59,7 @@ impl Driver {
             .await?;
         }
         let request = fold
-            .build(options.clone())
+            .build(options.clone(), &profile)
             .map_err(|error| failed("context.limit", error.to_string()))?;
         let result = self
             .run_model_effect(
@@ -68,6 +68,7 @@ impl Driver {
                 ModelPurpose::Conversation,
                 fold,
                 model,
+                &profile,
                 retry_attempt,
                 cancellation,
                 stop,
@@ -88,7 +89,7 @@ impl Driver {
         )
         .await?;
         let request = fold
-            .build(options.clone())
+            .build(options.clone(), &profile)
             .map_err(|error| failed("context.limit", error.to_string()))?;
         // This is the single ordinary resubmission. It cannot reopen the ordinary
         // retry series after capacity recovery, including on undispatched errors.
@@ -98,6 +99,7 @@ impl Driver {
             ModelPurpose::Conversation,
             fold,
             model,
+            &profile,
             u8::MAX,
             cancellation,
             stop,
@@ -147,6 +149,7 @@ impl Driver {
                     ModelPurpose::ContextCompaction(Box::new(planned.plan)),
                     fold,
                     model,
+                    profile,
                     u8::MAX,
                     cancellation,
                     stop,

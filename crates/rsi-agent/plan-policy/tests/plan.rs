@@ -191,7 +191,7 @@ impl Fixture {
         }
     }
     fn header(&self) -> SessionHeader {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new("plan-fixture").unwrap(),
             1,
             self.temp.path().to_str().unwrap(),

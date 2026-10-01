@@ -83,13 +83,13 @@ impl PluginFactory for Factory {
             .open(DomainSpec {
                 id: "rsi.profile-leaves".into(),
                 backend: "base".into(),
-                version: 1,
+                version: 2,
                 maximum_records: 1,
                 maximum_bytes: 256 * 1024,
             })
             .await
             .map_err(|_| activation())?;
-        let mut records = domain.snapshot().await;
+        let mut records = domain.snapshot().await.map_err(|_| activation())?;
         let document = match records.remove("grants") {
             Some(value) => {
                 serde_json::from_value::<wire::Grants>(value).map_err(|_| activation())?
@@ -121,7 +121,6 @@ impl PluginFactory for Factory {
             domain,
             state: Mutex::new(State {
                 closed: false,
-                uncertain: false,
                 document,
                 gates,
                 previews: BTreeMap::new(),
@@ -170,6 +169,11 @@ impl Gate {
             tasks: TaskTracker::new(),
         }
     }
+    fn reopen(&mut self) {
+        // Preserve already admitted work for the next revocation drain.
+        self.open = true;
+        self.tasks.reopen();
+    }
     fn close(&mut self) -> TaskTracker {
         self.open = false;
         self.tasks.close();
@@ -178,7 +182,6 @@ impl Gate {
 }
 struct State {
     closed: bool,
-    uncertain: bool,
     document: wire::Grants,
     gates: BTreeMap<Grant, Gate>,
     previews: BTreeMap<String, Proposal>,
@@ -237,12 +240,12 @@ impl Manager {
         slots: &Arc<Semaphore>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Reply<T>>,
     ) -> rsi_api_protocol::Result<BoxFuture<'static, Reply<T>>> {
+        self.domain
+            .ensure_available()
+            .map_err(rsi_storage_domain::storage_error)?;
         let state = self.state.lock().expect("Profile leaf state");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
         }
         let permit = slots
             .clone()
@@ -278,22 +281,62 @@ impl Manager {
         principal: &Principal,
         target: &wire::Target,
         operation: wire::ChangeKind,
-    ) -> Result<TaskTrackerToken, Failure> {
+    ) -> Reply<TaskTrackerToken> {
+        self.admit_scope(
+            principal,
+            wire::GrantScope::Profile {
+                target: target.clone(),
+                operation,
+            },
+        )
+    }
+    pub(crate) fn admit_scope(
+        &self,
+        principal: &Principal,
+        scope: wire::GrantScope,
+    ) -> Reply<TaskTrackerToken> {
+        self.domain
+            .ensure_available()
+            .map_err(rsi_storage_domain::storage_error)?;
         let state = self.state.lock().expect("Profile leaf grants");
         let grant = Grant {
             principal: principal.clone(),
-            target: target.clone(),
-            operation,
+            scope,
         };
-        if state.closed || state.uncertain {
-            return Err(Failure::Unauthorized);
+        if state.closed {
+            return Ok(Err(Failure::Unauthorized));
         }
-        let gate = state
+        Ok(state
             .gates
             .get(&grant)
             .filter(|gate| gate.open)
-            .ok_or(Failure::Unauthorized)?;
-        Ok(gate.tasks.token())
+            .map(|gate| gate.tasks.token())
+            .ok_or(Failure::Unauthorized))
+    }
+    pub(crate) fn admit_execution_scope(
+        &self,
+        origin: &CallOrigin,
+        scope: wire::GrantScope,
+    ) -> rsi_api_protocol::Result<TaskTrackerToken> {
+        self.domain
+            .ensure_available()
+            .map_err(rsi_storage_domain::storage_error)?;
+        match origin {
+            CallOrigin::Local => {
+                let state = self.state.lock().expect("Local scope admission");
+                if state.closed {
+                    return Err(ApiError::ShuttingDown);
+                }
+                Ok(self.tasks.token())
+            }
+            CallOrigin::Device(device) => {
+                if device.revoked.is_cancelled() {
+                    return Err(ApiError::Unauthorized);
+                }
+                self.admit_scope(&Principal::Device(device.id.clone()), scope)?
+                    .map_err(|_| ApiError::Unauthorized)
+            }
+        }
     }
     async fn close(&self) {
         {

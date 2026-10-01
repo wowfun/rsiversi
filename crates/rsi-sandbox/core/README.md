@@ -18,8 +18,9 @@ within the workspace. The scope supplies no API authorization or approval bypass
 
 An enforcement stamp is a closed semantic combination. Unconfined evidence is
 valid only for danger-full-access with host scratch and network; Bubblewrap
-evidence is restricted, uses private `/tmp`, and currently retains host
-network; Landlock evidence is restricted, uses host scratch, and currently
+evidence ordinarily uses private `/tmp` and host network. Its separate pipe-only
+source-reader view requires ReadOnly filesystem, Host scratch and Isolated
+network; no write-mode or PTY source-reader plan is supported. Landlock evidence is restricted, uses host scratch, and currently
 retains host network. Unsupported or contradictory combinations are rejected
 when durable data is decoded or revalidated.
 The stamped workspace is also revalidated as an absolute, lexically normalized
@@ -28,3 +29,8 @@ without requiring the durable path to exist or re-canonicalizing the live
 filesystem. A restricted stamp cannot name `/` or `/tmp` itself as the
 workspace, matching the request boundary shared by all local restricted
 backends.
+
+`ProcessRequest<P = PathBuf>` preserves native defaults while allowing an execution
+owner to carry its own opaque resolved-program value. Mapping the program moves
+all policy, argv and workspace fields unchanged; native Sandbox still receives
+an exact native path and owns native validation.

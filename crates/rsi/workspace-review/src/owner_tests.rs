@@ -11,23 +11,38 @@ struct Storage {
     spec: DomainSpec,
     rows: Mutex<BTreeMap<String, serde_json::Value>>,
     fail: AtomicBool,
+    fenced: AtomicBool,
 }
 #[async_trait]
 impl Domain for Storage {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        if self.fenced.load(Ordering::Acquire) {
+            Err(StorageError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
     fn spec(&self) -> &DomainSpec {
         &self.spec
     }
-    async fn snapshot(&self) -> BTreeMap<String, serde_json::Value> {
-        self.rows.lock().unwrap().clone()
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        Ok(self.rows.lock().unwrap().clone())
     }
     async fn put(
         &self,
         key: &str,
         value: serde_json::Value,
     ) -> std::result::Result<(), StorageError> {
+        self.ensure_available()?;
         self.rows.lock().unwrap().insert(key.into(), value);
         if self.fail.load(Ordering::SeqCst) {
-            Err(StorageError::Io("acknowledgement lost after write".into()))
+            self.fenced.store(true, Ordering::Release);
+            Err(StorageError::OutcomeUnknown(
+                "acknowledgement lost after write".into(),
+            ))
         } else {
             Ok(())
         }
@@ -59,7 +74,7 @@ async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<Wo
 }
 fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
     ExecutionObservationStart {
-        header: SessionHeader::new(
+        header: SessionHeader::new_local(
             SessionId::new("review-source").unwrap(),
             1,
             path.to_str().unwrap(),
@@ -74,6 +89,7 @@ fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
             .unwrap(),
         )
         .unwrap(),
+        execution: None,
         turn: TurnId::new("turn").unwrap(),
         claim: 1,
         accepted_seq: 1,
@@ -112,6 +128,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(true),
+        fenced: AtomicBool::new(false),
     });
     let path = temporary.path().join("scratch");
     let first = owner(&runtime, path.clone(), domain.clone()).await;
@@ -120,7 +137,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
     interval.begin(CancellationToken::new()).await;
     let summary = first.state.lock().unwrap().entries[&id].summary.clone();
     assert_eq!(
-        domain.snapshot().await.len(),
+        domain.rows.lock().unwrap().len(),
         1,
         "test storage wrote before losing its acknowledgement"
     );
@@ -129,12 +146,18 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         after: None,
     };
     assert!(matches!(
-        first.read(request.clone(), CancellationToken::new()).await,
-        Err(ApiError::OutcomeUnknown)
+        first
+            .read(
+                request.clone(),
+                ExecutionOperation::new(()),
+                CancellationToken::new()
+            )
+            .await,
+        Err(ApiError::Unavailable)
     ));
     assert!(matches!(
         first.admit(start(temporary.path(), false)),
-        Err(ApiError::OutcomeUnknown)
+        Err(ApiError::Unavailable)
     ));
     assert_eq!(
         std::fs::read_dir(&path).unwrap().count(),
@@ -144,10 +167,19 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
     first.close().await;
     drop(interval);
     drop(first);
-    domain.fail.store(false, Ordering::SeqCst);
-    let second = owner(&runtime, path, domain).await;
+    let recovered_domain = Arc::new(Storage {
+        spec: domain.spec.clone(),
+        rows: Mutex::new(domain.rows.lock().unwrap().clone()),
+        fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
+    });
+    let second = owner(&runtime, path, recovered_domain).await;
     let Reply::Summaries { epoch, items, .. } = second
-        .read(request, CancellationToken::new())
+        .read(
+            request,
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
         .await
         .unwrap()
     else {
@@ -163,6 +195,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
                     id,
                     offset: 0
                 },
+                ExecutionOperation::new(()),
                 CancellationToken::new()
             )
             .await
@@ -230,6 +263,7 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain).await;
     let interval = owner.admit(start(temporary.path(), false)).unwrap();
@@ -238,7 +272,11 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
         .scope
         .clone();
     let request = Request::List { scope, after: None };
-    let mut read = Box::pin(owner.read(request.clone(), CancellationToken::new()));
+    let mut read = Box::pin(owner.read(
+        request.clone(),
+        ExecutionOperation::new(()),
+        CancellationToken::new(),
+    ));
     assert!(futures_util::poll!(read.as_mut()).is_pending());
     assert_eq!(
         owner.tasks.len(),
@@ -254,7 +292,13 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
     assert!(owner.tasks.is_empty());
     assert!(matches!(read.await, Err(ApiError::ShuttingDown)));
     assert!(matches!(
-        owner.read(request, CancellationToken::new()).await,
+        owner
+            .read(
+                request,
+                ExecutionOperation::new(()),
+                CancellationToken::new()
+            )
+            .await,
         Err(ApiError::ShuttingDown)
     ));
     drop(interval);
@@ -305,6 +349,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
     let interval = owner.admit(start(&workspace, false)).unwrap();
@@ -314,7 +359,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         async move { interval.begin(CancellationToken::new()).await }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while domain.snapshot().await.is_empty() {
+        while domain.snapshot().await.unwrap().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -357,7 +402,11 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         has_more,
         ..
     } = owner
-        .read(request(0), CancellationToken::new())
+        .read(
+            request(0),
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
         .await
         .unwrap()
     else {
@@ -368,7 +417,11 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     let hidden = ready.scratch.path().join("repository-hidden");
     std::fs::rename(&private, &hidden).unwrap();
     let next = owner
-        .read(request(next_offset), CancellationToken::new())
+        .read(
+            request(next_offset),
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
         .await;
     std::fs::rename(hidden, private).unwrap();
     let Reply::Diff { offset, text, .. } = next.unwrap() else {
@@ -411,6 +464,7 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
         },
         rows: Mutex::default(),
         fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
     let interval = owner.admit(start(temporary.path(), false)).unwrap();
@@ -423,20 +477,105 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
             CancellationToken::new(),
         )
         .await;
-    let finished = domain.snapshot().await;
+    let finished = domain.snapshot().await.unwrap();
     interval.begin(CancellationToken::new()).await;
     assert!(
         !owner.state.lock().unwrap().entries[&interval.id].active,
         "late begin must not consume a resident slot again"
     );
     assert_eq!(
-        domain.snapshot().await,
+        domain.snapshot().await.unwrap(),
         finished,
         "finished evidence must not be overwritten"
     );
     assert!(interval.state.lock().await.scratch.is_none());
     owner.close().await;
     drop(interval);
+    drop(owner);
+    assert!(process.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+#[allow(dead_code)]
+mod metadata;
+
+#[tokio::test]
+async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_io() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = Runtime::default();
+    let process = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "process",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_process_local::ProcessLocalFactory),
+            ),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    let domain = Arc::new(Storage {
+        spec: DomainSpec {
+            id: "review".into(),
+            backend: "base".into(),
+            version: 1,
+            maximum_records: 8192,
+            maximum_bytes: 64 * 1024 * 1024,
+        },
+        rows: Mutex::default(),
+        fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
+    });
+    let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
+    let location = ExecutionLocation::Ssh {
+        target: rsi_execution::ExecutionTargetId::parse("b".repeat(32)).unwrap(),
+    };
+    let mut remote = start(temporary.path(), false);
+    remote.header = SessionHeader::new(
+        remote.header.session_id().clone(),
+        1,
+        rsi_execution::ExecutionCoordinates::new(
+            location.clone(),
+            temporary.path().to_str().unwrap(),
+        )
+        .unwrap(),
+        remote.header.agent_preset_id().clone(),
+        remote.header.settings().clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        owner.admit(remote.clone()),
+        Err(ApiError::Unauthorized)
+    ));
+    remote.execution = Some(metadata::lease(ExecutionLocation::Local, Arc::default(), 1));
+    assert!(matches!(
+        owner.admit(remote.clone()),
+        Err(ApiError::Unauthorized)
+    ));
+    let gate = Arc::new(metadata::Gate::default());
+    remote.execution = Some(metadata::lease(location, gate.clone(), 1));
+    gate.revoked.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner.admit(remote.clone()),
+        Err(ApiError::Unauthorized)
+    ));
+    assert!(domain.rows.lock().unwrap().is_empty());
+    assert!(owner.state.lock().unwrap().entries.is_empty());
+    assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
+    gate.revoked.store(false, Ordering::SeqCst);
+    let interval = owner
+        .admit(remote)
+        .expect("admission performs no source I/O");
+    assert_eq!(gate.active.load(Ordering::SeqCst), 1);
+    let retained = interval.clone();
+    drop(interval);
+    assert_eq!(gate.active.load(Ordering::SeqCst), 1);
+    drop(retained);
+    assert_eq!(gate.active.load(Ordering::SeqCst), 0);
+    owner.close().await;
     drop(owner);
     assert!(process.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());

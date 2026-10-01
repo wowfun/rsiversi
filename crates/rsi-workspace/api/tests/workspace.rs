@@ -1,3 +1,5 @@
+#[path = "../../../../fixtures/rsi/workspace-access/resolver.rs"]
+mod access;
 use async_trait::async_trait;
 use rsi_api_http::{HttpConfig, HttpServer, HttpServices};
 use rsi_api_http_client::{HttpClient, HttpClientConfig};
@@ -141,6 +143,12 @@ async fn server_setup(
 ) {
     for (name, factory, config) in [
         (
+            "execution",
+            Arc::new(access::Factory(Arc::new(access::Resolver::default())))
+                as Arc<dyn PluginFactory>,
+            Value::Null,
+        ),
+        (
             "storage",
             Arc::new(rsi_storage::StorageFactory) as Arc<dyn PluginFactory>,
             Value::Null,
@@ -237,6 +245,18 @@ async fn exercise_workspace(
         one
     );
     let two = workspace.get_or_create(second).await.unwrap();
+    let rsi_workspace_protocol::WorkspaceOrderSeed::Available { records } =
+        workspace.order_seed().await.unwrap()
+    else {
+        panic!("two workspaces fit")
+    };
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| &record.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [&one.id, &two.id].into_iter().collect()
+    );
     assert_eq!(workspace.get(&one.id).await.unwrap(), one);
     assert_eq!(
         workspace.status(&one.id).await.unwrap(),

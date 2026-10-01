@@ -14,6 +14,7 @@ pub trait SessionResources: fmt::Debug + Send + Sync + 'static {
     async fn read_resource(
         &self,
         session: &SessionId,
+        execution: Option<rsi_execution::ExecutionLease>,
         request: ValidatedResourceRequest,
         cancellation: CancellationToken,
     ) -> crate::Result<ValidatedResourceResponse>;

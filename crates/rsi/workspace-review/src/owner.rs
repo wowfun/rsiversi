@@ -8,12 +8,13 @@ use rsi_agent_turn_protocol::{
     ExecutionObserver,
 };
 use rsi_api_protocol::{ApiError, Result};
+use rsi_execution::{ExecutionLease, ExecutionLocation, ExecutionOperation};
 use rsi_meta::Execution;
 use rsi_storage_domain::Domain;
+use rsi_storage_domain::storage_error;
 use rsi_workspace_review_api::{
     ConversationIdentity, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
 };
-use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -54,7 +55,6 @@ struct Entry {
 #[derive(Debug)]
 struct State {
     closed: bool,
-    uncertain: bool,
     entries: BTreeMap<String, Entry>,
 }
 /// Ordinary product owner for non-authoritative interval evidence.
@@ -74,6 +74,7 @@ pub struct WorkspaceReview {
 }
 #[derive(Debug, Default)]
 struct IntervalState {
+    admission: Option<ExecutionOperation>,
     finished: bool,
     scratch: Option<Scratch>,
     before: Option<Capture>,
@@ -84,6 +85,7 @@ struct Interval {
     owner: Arc<WorkspaceReview>,
     id: String,
     workspace: PathBuf,
+    execution: Option<ExecutionLease>,
     recovered: bool,
     state: Arc<tokio::sync::Mutex<IntervalState>>,
 }
@@ -122,7 +124,7 @@ impl WorkspaceReview {
     ) -> Result<Arc<Self>> {
         let tasks = git.tasks.clone();
         let mut entries = BTreeMap::new();
-        for (key, value) in domain.snapshot().await {
+        for (key, value) in domain.snapshot().await.map_err(storage_error)? {
             let summary: Summary = serde_json::from_value(value).map_err(invalid)?;
             summary.validate()?;
             if key != summary.id {
@@ -145,7 +147,6 @@ impl WorkspaceReview {
             epoch: id()?,
             state: Mutex::new(State {
                 closed: false,
-                uncertain: false,
                 entries,
             }),
             writer: tokio::sync::Mutex::new(()),
@@ -156,12 +157,23 @@ impl WorkspaceReview {
         }))
     }
     fn admit(self: &Arc<Self>, start: ExecutionObservationStart) -> Result<Interval> {
+        let admission = match &start.execution {
+            Some(execution)
+                if execution.binding().location() == start.header.coordinates().location() =>
+            {
+                Some(execution.admit().map_err(|error| match error {
+                    rsi_process::ProcessError::Api(error) => error,
+                    rsi_process::ProcessError::Capacity => ApiError::Capacity,
+                    _ => ApiError::Unauthorized,
+                })?)
+            }
+            None if *start.header.coordinates().location() == ExecutionLocation::Local => None,
+            _ => return Err(ApiError::Unauthorized),
+        };
+        self.domain.ensure_available().map_err(storage_error)?;
         let mut state = self.state.lock().expect("review admission");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
         }
         if state.entries.len() >= 8192 || state.entries.values().filter(|e| e.active).count() >= 8 {
             return Err(ApiError::Capacity);
@@ -193,10 +205,9 @@ impl WorkspaceReview {
         }
         let workspace = PathBuf::from(start.header.canonical_cwd());
         let scope = Scope {
-            workspace: rsi_workspace_protocol::WorkspaceId::parse(hex::encode(Sha256::digest(
-                start.header.canonical_cwd().as_bytes(),
-            )))
-            .map_err(invalid)?,
+            workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(
+                start.header.coordinates(),
+            ),
             conversation: ConversationIdentity::Native(start.header.session_id().clone()),
         };
         let summary = Summary {
@@ -228,8 +239,12 @@ impl WorkspaceReview {
             owner: self.clone(),
             id,
             workspace,
+            execution: start.execution,
             recovered: start.recovered,
-            state: Arc::new(tokio::sync::Mutex::new(IntervalState::default())),
+            state: Arc::new(tokio::sync::Mutex::new(IntervalState {
+                admission,
+                ..IntervalState::default()
+            })),
         })
     }
     async fn publish(
@@ -240,21 +255,14 @@ impl WorkspaceReview {
     ) -> Result<()> {
         summary.validate()?;
         let _writer = self.writer.lock().await;
-        if self.state.lock().expect("review writer").uncertain {
-            return Err(ApiError::OutcomeUnknown);
-        }
-        if self
-            .domain
+        self.domain.ensure_available().map_err(storage_error)?;
+        self.domain
             .put(
                 &summary.id,
                 serde_json::to_value(&summary).map_err(invalid)?,
             )
             .await
-            .is_err()
-        {
-            self.state.lock().expect("review write failure").uncertain = true;
-            return Err(ApiError::OutcomeUnknown);
-        }
+            .map_err(storage_error)?;
         let mut state = self.state.lock().expect("review publication");
         state.entries.insert(
             summary.id.clone(),
@@ -273,8 +281,10 @@ impl WorkspaceReview {
     pub async fn read(
         self: &Arc<Self>,
         request: Request,
+        admission: ExecutionOperation,
         cancellation: CancellationToken,
     ) -> Result<Reply> {
+        self.domain.ensure_available().map_err(storage_error)?;
         request.validate()?;
         let stop = self.stop.child_token();
         let _guard = stop.clone().drop_guard();
@@ -282,9 +292,6 @@ impl WorkspaceReview {
             let state = self.state.lock().expect("review read admission");
             if state.closed {
                 return Err(ApiError::ShuttingDown);
-            }
-            if state.uncertain {
-                return Err(ApiError::OutcomeUnknown);
             }
             let permit = self
                 .reads
@@ -296,6 +303,7 @@ impl WorkspaceReview {
             // Registration and close share admission, so shutdown cannot miss this task.
             self.execution.spawn(self.tasks.track_future(async move {
                 let _permit = permit;
+                let _admission = admission;
                 let reply = owner.read_inner(&request, &token).await?;
                 rsi_workspace_review_api::validate_reply(&request, &reply)?;
                 Ok(reply)
@@ -308,6 +316,7 @@ impl WorkspaceReview {
         reason = "closed read variants share one authorization and admission boundary"
     )]
     async fn read_inner(&self, request: &Request, stop: &CancellationToken) -> Result<Reply> {
+        self.domain.ensure_available().map_err(storage_error)?;
         if stop.is_cancelled() {
             return Err(ApiError::ShuttingDown);
         }
@@ -381,12 +390,12 @@ impl WorkspaceReview {
                 })
             }
             Request::Diff { path, offset, .. } => {
-                let file = runtime
+                let index = runtime
                     .comparison
                     .files
-                    .iter()
-                    .find(|f| &f.path == path)
-                    .ok_or(ApiError::Unavailable)?;
+                    .binary_search_by(|file| file.path.cmp(path))
+                    .map_err(|_| ApiError::Unavailable)?;
+                let file = &runtime.comparison.files[index];
                 let text = {
                     let mut patch = runtime.patch.lock().await;
                     if let Some((cached_path, text)) = &*patch
@@ -488,7 +497,7 @@ impl Interval {
                 let before = self
                     .owner
                     .git
-                    .capture(&self.workspace, &mut scratch, stop)
+                    .capture(&self.workspace, &mut scratch, stop, self.execution.as_ref())
                     .await;
                 inner.before = Some(before);
                 inner.scratch = Some(scratch);
@@ -502,6 +511,7 @@ impl Interval {
             return;
         }
         inner.finished = true;
+        let _admission = inner.admission.take();
         if !evidence.begin_completed {
             omission(&mut inner.omissions, OmissionKind::MissingBaseline, 1);
         }
@@ -518,7 +528,7 @@ impl Interval {
                     let after = self
                         .owner
                         .git
-                        .capture(&self.workspace, &mut scratch, stop)
+                        .capture(&self.workspace, &mut scratch, stop, self.execution.as_ref())
                         .await;
                     for row in &after.omissions {
                         omission(&mut inner.omissions, row.kind, row.count);

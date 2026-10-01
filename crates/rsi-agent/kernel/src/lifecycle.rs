@@ -116,6 +116,7 @@ impl AgentKernel {
         })?;
         let kernel = Self {
             inner: Arc::new(KernelInner {
+                execution_messages: execution_admission::Messages::default(),
                 tasks: TaskTracker::new(),
                 store,
                 evidence_cache: Mutex::default(),
@@ -257,6 +258,7 @@ impl AgentKernel {
             state.queued.clear();
             (sessions, loads, finalizers)
         };
+        self.inner.execution_messages.clear();
         self.inner.process_pending_bytes.store(0, Ordering::Release);
         self.inner.process_pending_changed.notify_waiters();
         for session in sessions.values() {
@@ -744,6 +746,13 @@ impl AgentKernel {
                 let header = read_validated_header_bounded(&self.inner, &message.session_id)
                     .await
                     .map_err(turn_store_error)?;
+                let execution = self
+                    .inner
+                    .execution_messages
+                    .get(&message.session_id, &message.message_id);
+                if execution_admission::admit(&header, execution.as_ref()).is_err() {
+                    continue;
+                }
                 let path = agent_root_and_path(&header).1;
                 let suffix = message.control_seq;
                 let turn_id = message_turn_id(&message.session_id, suffix);
@@ -751,6 +760,11 @@ impl AgentKernel {
                     biased;
                     () = cancellation.cancelled() => return Ok(false),
                     result = self.prepare_resume(&message.session_id) => result?,
+                };
+                let prepared = if let Some(execution) = execution {
+                    prepared.with_execution(execution)?
+                } else {
+                    prepared
                 };
                 let claimed = self
                     .claim_message_with_lane(
@@ -833,6 +847,14 @@ impl AgentKernel {
             }
             _ => Err(TurnError::StaleClaim),
         }
+    }
+
+    pub(super) fn admit_agent_read(
+        &self,
+        caller: &AgentCallerAuthority,
+    ) -> TurnResult<Option<rsi_execution::ExecutionOperation>> {
+        self.validate_agent_caller(caller)?;
+        execution_admission::admit(caller.header(), caller.execution())
     }
 
     pub(super) fn validate_agent_caller(&self, caller: &AgentCallerAuthority) -> TurnResult<()> {
@@ -1191,6 +1213,9 @@ impl AgentKernel {
         turn_id: TurnId,
         body: SessionFactBody,
     ) -> TurnResult<(SubmittedTurn, DurabilityWait)> {
+        let execution = session_selection.execution().cloned();
+        let _execution_admission =
+            execution_admission::admit(session_selection.header(), execution.as_ref())?;
         let session_id = session_selection.session_id().clone();
         let baseline = match &session_selection {
             SubmitSession::Fresh(prepared) => {
@@ -1268,7 +1293,10 @@ impl AgentKernel {
             .expect("accepted session exists");
         session.turns.insert(
             turn_id.clone(),
-            TurnControl::new(fact.timestamp_ms(), accepted_seq),
+            TurnControl {
+                execution,
+                ..TurnControl::new(fact.timestamp_ms(), accepted_seq)
+            },
         );
         session.turn_order.push(turn_id.clone());
         publish_live_watermarks(session);
@@ -1372,6 +1400,8 @@ impl AgentKernel {
         turn_id: TurnId,
         body: SessionFactBody,
     ) -> TurnResult<SubmittedTurn> {
+        let _execution_admission =
+            execution_admission::admit(session.header(), session.execution())?;
         body.validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if let SubmitSession::Resume(prepared) = &session {

@@ -243,8 +243,8 @@ async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Val
             .ingest(ContextPage::Canonical(&[Arc::new(fact?)]))
             .map_err(encoding)?;
     }
-    let options = recorded_options(evidence)?;
-    let projected = cursor.build(options).map_err(encoding)?;
+    let (options, profile) = recorded_inputs(evidence)?;
+    let projected = cursor.build(options, &profile).map_err(encoding)?;
     let mut messages: Vec<Message> = serde_json::from_str(
         evidence["system"]["text"]
             .as_str()
@@ -280,7 +280,9 @@ async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Val
     serde_json::to_value(request).map_err(encoding)
 }
 
-fn recorded_options(evidence: &Value) -> Result<LanguageRequestOptions> {
+fn recorded_inputs(
+    evidence: &Value,
+) -> Result<(LanguageRequestOptions, rsi_ai_protocol::LanguageProfile)> {
     let configuration: Value = serde_json::from_str(
         evidence["configuration"]["text"]
             .as_str()
@@ -293,7 +295,7 @@ fn recorded_options(evidence: &Value) -> Result<LanguageRequestOptions> {
             .ok_or_else(|| invalid("missing request tools"))?,
     )
     .map_err(encoding)?;
-    LanguageRequestOptions::new(
+    let options = LanguageRequestOptions::new(
         serde_json::from_value(tools["definitions"].clone()).map_err(encoding)?,
         serde_json::from_value(tools["choice"].clone()).map_err(encoding)?,
         serde_json::from_value(tools["hosted"].clone()).map_err(encoding)?,
@@ -301,7 +303,15 @@ fn recorded_options(evidence: &Value) -> Result<LanguageRequestOptions> {
         serde_json::from_value(configuration["settings"].clone()).map_err(encoding)?,
         serde_json::from_value(configuration["extensions"].clone()).map_err(encoding)?,
     )
-    .map_err(encoding)
+    .map_err(encoding)?;
+    let profile = serde_json::from_value(
+        configuration
+            .get("language_profile")
+            .ok_or_else(|| invalid("historical language profile was not recorded"))?
+            .clone(),
+    )
+    .map_err(encoding)?;
+    Ok((options, profile))
 }
 
 #[cfg(test)]

@@ -46,19 +46,33 @@ pub enum ProcessStdio {
 
 /// Explicit process request before sandbox planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessRequest {
+pub struct ProcessRequest<P = PathBuf> {
     /// Exact pipe or controlling-terminal intent.
     pub stdio: ProcessStdio,
     /// Requested policy.
     pub mode: SandboxMode,
-    /// Absolute executable path.
-    pub program: PathBuf,
+    /// Absolute executable path, or the execution owner's resolved-program value.
+    pub program: P,
     /// Exact argv excluding `argv[0]`.
     pub arguments: Vec<String>,
     /// Canonical working directory candidate.
     pub cwd: PathBuf,
     /// Canonical workspace candidate.
     pub workspace: PathBuf,
+}
+
+impl<P> ProcessRequest<P> {
+    /// Moves the resolved program representation while preserving the exact invocation policy.
+    pub fn map_program<Q>(self, map: impl FnOnce(P) -> Q) -> ProcessRequest<Q> {
+        ProcessRequest {
+            stdio: self.stdio,
+            mode: self.mode,
+            program: map(self.program),
+            arguments: self.arguments,
+            cwd: self.cwd,
+            workspace: self.workspace,
+        }
+    }
 }
 
 /// Actually selected enforcement backend.
@@ -209,9 +223,12 @@ impl EnforcementStamp {
                     && self.network == SandboxNetwork::Host
             }
             SandboxBackend::Bubblewrap { .. } => {
-                self.requested != SandboxMode::DangerFullAccess
+                (self.requested != SandboxMode::DangerFullAccess
                     && self.scratch == SandboxScratch::PrivateTmp
-                    && self.network == SandboxNetwork::Host
+                    && self.network == SandboxNetwork::Host)
+                    || (self.requested == SandboxMode::ReadOnly
+                        && self.scratch == SandboxScratch::Host
+                        && self.network == SandboxNetwork::Isolated)
             }
             SandboxBackend::Landlock { .. } => {
                 self.requested != SandboxMode::DangerFullAccess
@@ -286,6 +303,11 @@ pub type Result<T> = std::result::Result<T, SandboxError>;
 /// Process-plan confinement service.
 #[async_trait]
 pub trait Sandbox: fmt::Debug + Send + Sync + 'static {
+    /// Confines a trusted fixed source collector without masking read-only host scratch.
+    /// Providers that cannot guarantee this view must reject it.
+    async fn confine_source_reader(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
+        Err(SandboxError::Unsupported(request.mode))
+    }
     /// Issues a workspace-only read scope using the exact requested policy.
     async fn workspace_read(&self, request: WorkspaceReadRequest) -> Result<WorkspaceReadScope>;
     /// Validates and wraps one process request.
@@ -373,6 +395,26 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn source_reader_evidence_requires_read_only_bubblewrap_and_isolated_network() {
+        let mut source = stamp(
+            SandboxMode::ReadOnly,
+            SandboxBackend::Bubblewrap {
+                sha256: "a".repeat(64),
+            },
+            SandboxFileSystem::ReadOnly,
+            SandboxScratch::Host,
+            SandboxNetwork::Isolated,
+        );
+        source.validate().unwrap();
+        source.network = SandboxNetwork::Host;
+        assert!(source.validate().is_err());
+        source.network = SandboxNetwork::Isolated;
+        source.requested = SandboxMode::WorkspaceWrite;
+        source.filesystem = SandboxFileSystem::WorkspaceWrite;
+        assert!(source.validate().is_err());
     }
 
     #[test]

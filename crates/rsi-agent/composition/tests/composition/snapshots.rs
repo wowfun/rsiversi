@@ -34,7 +34,7 @@ async fn private_session_pin_precedes_global_source_and_rejects_missing_or_misma
     )
     .await;
     let header = |session: &str, preset: &str| {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new(session).unwrap(),
             1,
             fixture.source.parent().unwrap().to_str().unwrap(),

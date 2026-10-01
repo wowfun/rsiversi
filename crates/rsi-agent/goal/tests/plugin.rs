@@ -97,7 +97,7 @@ impl Fixture {
         }
     }
     fn header(&self) -> SessionHeader {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new("goal-fixture").unwrap(),
             1,
             self.temp.path().to_str().unwrap(),
@@ -500,6 +500,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
             .unwrap(),
         );
         let context = ContributionContext {
+            execution: None,
             header: Arc::new(draft.header().clone()),
             turn_id: turn.clone(),
             accepted_fact_seq: 1,

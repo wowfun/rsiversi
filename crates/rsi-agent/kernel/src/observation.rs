@@ -172,7 +172,7 @@ pub(super) async fn observe_agent_wait_change(
     caller: &AgentCallerAuthority,
     baseline: &StoreAgentSubtreeSnapshot,
 ) -> TurnResult<Option<WaitResumeCause>> {
-    kernel.validate_agent_caller(caller)?;
+    let _execution = kernel.admit_agent_read(caller)?;
     let current = kernel
         .inner
         .store
@@ -187,7 +187,7 @@ pub(super) async fn observe_agent_wait_change(
             .zip(&baseline.descendants)
             .any(|(current, previous)| current.status.session_id != previous.status.session_id)
     {
-        kernel.validate_agent_caller(caller)?;
+        let _execution = kernel.admit_agent_read(caller)?;
         return Ok(Some(WaitResumeCause::Message));
     }
     for (current, previous) in current.descendants.iter().zip(&baseline.descendants) {
@@ -200,7 +200,7 @@ pub(super) async fn observe_agent_wait_change(
         if current.status.durable_control_seq > previous.status.durable_control_seq {
             let settled =
                 current.status.last_settled_control_seq > previous.status.durable_control_seq;
-            kernel.validate_agent_caller(caller)?;
+            let _execution = kernel.admit_agent_read(caller)?;
             return Ok(Some(if settled {
                 WaitResumeCause::Completion
             } else {
@@ -209,7 +209,7 @@ pub(super) async fn observe_agent_wait_change(
         }
     }
     let mailbox = scan_durable_messages(&kernel.inner, caller.session_id(), None).await?;
-    kernel.validate_agent_caller(caller)?;
+    let _execution = kernel.admit_agent_read(caller)?;
     Ok(mailbox
         .pending
         .iter()

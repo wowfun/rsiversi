@@ -35,9 +35,9 @@ pub const MAXIMUM_PROCESS_GRACE_MS: u64 = 60_000;
 
 /// Fully specified managed-process request after Sandbox confinement.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessSpec {
+pub struct ProcessSpec<P = ConfinedProcess> {
     /// Exact confined executable, argv, cwd, and enforcement evidence.
-    pub process: ConfinedProcess,
+    pub process: P,
     /// Exact batch bytes written to stdin before it is closed.
     pub stdin: Vec<u8>,
     /// Complete child environment; providers must not merge ambient state.
@@ -48,6 +48,20 @@ pub struct ProcessSpec {
     pub stderr_max_bytes: usize,
     /// TERM-to-KILL escalation grace.
     pub termination_grace_ms: u64,
+}
+
+impl<P> ProcessSpec<P> {
+    /// Moves the exact options into another provider's prepared-plan representation.
+    pub fn try_map_process<Q>(self, map: impl FnOnce(P) -> Result<Q>) -> Result<ProcessSpec<Q>> {
+        Ok(ProcessSpec {
+            process: map(self.process)?,
+            stdin: self.stdin,
+            environment: self.environment,
+            stdout_max_bytes: self.stdout_max_bytes,
+            stderr_max_bytes: self.stderr_max_bytes,
+            termination_grace_ms: self.termination_grace_ms,
+        })
+    }
 }
 
 impl ProcessSpec {
@@ -129,7 +143,8 @@ fn validate_process_plan(process: &ConfinedProcess) -> Result<()> {
     Ok(())
 }
 
-fn validate_environment(environment: &[(OsString, OsString)]) -> Result<()> {
+/// Validates a complete explicit child environment without reading ambient values.
+pub fn validate_environment(environment: &[(OsString, OsString)]) -> Result<()> {
     if environment.len() > MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES {
         return Err(ProcessError::InvalidInput(format!(
             "process environment exceeds {MAXIMUM_PROCESS_ENVIRONMENT_ENTRIES} entries"
@@ -367,9 +382,10 @@ impl fmt::Debug for ManagedProcess {
 }
 
 /// Bounded managed-process provider.
+#[async_trait]
 pub trait Process: fmt::Debug + Send + Sync + 'static {
     /// Spawns one fully specified confined process or rejects before publishing a handle.
-    fn spawn(&self, spec: ProcessSpec) -> Result<ManagedProcess>;
+    async fn spawn(&self, spec: ProcessSpec) -> Result<ManagedProcess>;
 }
 
 /// Nominal Local contract for [`Process`].
@@ -402,6 +418,9 @@ pub enum ProcessError {
     /// The OS rejected process creation.
     #[error("process spawn failed: {0}")]
     Spawn(String),
+    /// Process dispatch or settlement may have taken effect without a verifiable outcome.
+    #[error("process outcome is unknown; do not replay")]
+    OutcomeUnknown,
     /// An admitted process failed during wait or output drain.
     #[error("process I/O failed: {0}")]
     Io(String),

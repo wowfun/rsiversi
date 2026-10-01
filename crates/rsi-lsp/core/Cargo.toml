@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }

@@ -64,7 +64,7 @@ async fn queue_concurrent_operation_ids_serialize_through_cancelled_commit_waite
             store.pause_next_agent_commit_before_apply();
             let first = {
                 let (kernel, session, request) = (kernel.clone(), session.clone(), request.clone());
-                tokio::spawn(async move { kernel.mutate_queue(&session, request).await })
+                tokio::spawn(async move { kernel.mutate_queue(&session, request, None).await })
             };
             store.wait_until_agent_commit_is_before_apply().await;
             let first = if cancel_waiter {
@@ -78,7 +78,7 @@ async fn queue_concurrent_operation_ids_serialize_through_cancelled_commit_waite
             if change_request {
                 retry.mutation = replace("different-successor");
             }
-            let mut second = Box::pin(kernel.mutate_queue(&session, retry));
+            let mut second = Box::pin(kernel.mutate_queue(&session, retry, None));
             // Poll the competitor while the original Store commit is definitely unapplied.
             assert!(futures_util::poll!(second.as_mut()).is_pending());
             assert_eq!(store.queue_mutation_count(&session).await.unwrap(), 0);
@@ -140,7 +140,7 @@ async fn queue_successor_collision_with_submit_observes_both_commit_orders() {
         let (mutation, submitted) = if queue_first {
             let first = {
                 let (kernel, session, request) = (kernel.clone(), session.clone(), request.clone());
-                tokio::spawn(async move { kernel.mutate_queue(&session, request).await })
+                tokio::spawn(async move { kernel.mutate_queue(&session, request, None).await })
             };
             store.wait_until_agent_commit_is_before_apply().await;
             let mut second = Box::pin(kernel.submit_message(submission));
@@ -153,7 +153,7 @@ async fn queue_successor_collision_with_submit_observes_both_commit_orders() {
                 tokio::spawn(async move { kernel.submit_message(submission).await })
             };
             store.wait_until_agent_commit_is_before_apply().await;
-            let mut second = Box::pin(kernel.mutate_queue(&session, request.clone()));
+            let mut second = Box::pin(kernel.mutate_queue(&session, request.clone(), None));
             assert!(futures_util::poll!(second.as_mut()).is_pending());
             store.release_agent_commit_before_apply();
             (second.await.unwrap(), first.await.unwrap())
@@ -180,7 +180,7 @@ async fn queue_successor_collision_with_submit_observes_both_commit_orders() {
             "successor"
         );
         assert_eq!(
-            kernel.mutate_queue(&session, request).await.unwrap(),
+            kernel.mutate_queue(&session, request, None).await.unwrap(),
             mutation
         );
         assert_eq!(store.queue_mutation_count(&session).await.unwrap(), 1);
@@ -218,13 +218,13 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
         let before = store.read_controls(&session, 0, 64).await.unwrap();
         let request = edit("edit-first", "initial", "initial", replace("successor"));
         let receipt = kernel
-            .mutate_queue(&session, request.clone())
+            .mutate_queue(&session, request.clone(), None)
             .await
             .unwrap();
         assert!(matches!(receipt.outcome, Outcome::Replaced { .. }));
         assert_eq!(
             kernel
-                .mutate_queue(&session, request.clone())
+                .mutate_queue(&session, request.clone(), None)
                 .await
                 .unwrap(),
             receipt
@@ -232,7 +232,7 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
         let mut different = request.clone();
         different.mutation = replace("different");
         assert!(matches!(
-            kernel.mutate_queue(&session, different).await,
+            kernel.mutate_queue(&session, different, None).await,
             Err(TurnError::QueueOperationConflict)
         ));
         let old_cancel = kernel
@@ -265,6 +265,7 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
             .mutate_queue(
                 &session,
                 edit("stale", "initial", "initial", QueueMutation::Withdraw),
+                None,
             )
             .await
             .unwrap();
@@ -290,13 +291,17 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
             Some(receipt.clone())
         );
         assert_eq!(
-            restarted.mutate_queue(&session, request).await.unwrap(),
+            restarted
+                .mutate_queue(&session, request, None)
+                .await
+                .unwrap(),
             receipt
         );
         let withdrawn = restarted
             .mutate_queue(
                 &session,
                 edit("withdraw", "initial", "successor", QueueMutation::Withdraw),
+                None,
             )
             .await
             .unwrap();
@@ -372,7 +377,10 @@ async fn queue_conversion_requires_exact_turn_and_promotes_in_original_order() {
                 expected_turn_id: TurnId::new("unseen").unwrap(),
             },
         );
-        let rejected = kernel.mutate_queue(&session, stale.clone()).await.unwrap();
+        let rejected = kernel
+            .mutate_queue(&session, stale.clone(), None)
+            .await
+            .unwrap();
         assert!(matches!(
             rejected.outcome,
             Outcome::Rejected {
@@ -381,7 +389,7 @@ async fn queue_conversion_requires_exact_turn_and_promotes_in_original_order() {
             }
         ));
         assert_eq!(
-            kernel.mutate_queue(&session, stale).await.unwrap(),
+            kernel.mutate_queue(&session, stale, None).await.unwrap(),
             rejected
         );
         let converted = kernel
@@ -396,6 +404,7 @@ async fn queue_conversion_requires_exact_turn_and_promotes_in_original_order() {
                         expected_turn_id: claim.turn_id().clone(),
                     },
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -433,6 +442,7 @@ async fn queue_conversion_requires_exact_turn_and_promotes_in_original_order() {
                     "steering",
                     replace("promoted-edit"),
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -484,7 +494,7 @@ async fn queue_withdraw_and_replace_serialize_with_next_step_claims_without_canc
         submit(&kernel, &session, "step", MessageDelivery::Steer).await;
         let request = edit("race", "step", "step", mutation);
         let (edited, claimed) = tokio::join!(
-            kernel.mutate_queue(&session, request),
+            kernel.mutate_queue(&session, request, None),
             kernel.enter_pending_step_messages(&claim)
         );
         let receipt = edited.unwrap();
@@ -539,7 +549,7 @@ async fn queue_edits_serialize_with_next_turn_claims() {
                 step_id: StepId::new("next-step").unwrap(),
             };
             let (edited, claimed) = tokio::join!(
-                kernel.mutate_queue(&session, edit("race-next", "next", "next", mutation)),
+                kernel.mutate_queue(&session, edit("race-next", "next", "next", mutation), None),
                 kernel.claim_message(claim)
             );
             match edited.unwrap().outcome {
@@ -576,7 +586,7 @@ async fn queue_edits_and_receipt_replay_survive_many_rejections_and_recovery() {
     create(&kernel, &session, "first").await;
     let request = edit("old", "first", "first", replace("second"));
     let saved = kernel
-        .mutate_queue(&session, request.clone())
+        .mutate_queue(&session, request.clone(), None)
         .await
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
@@ -624,7 +634,10 @@ async fn queue_edits_and_receipt_replay_survive_many_rejections_and_recovery() {
             .unwrap();
     let worker = restarted.start_workers();
     assert_eq!(
-        restarted.mutate_queue(&session, request).await.unwrap(),
+        restarted
+            .mutate_queue(&session, request, None)
+            .await
+            .unwrap(),
         saved
     );
     let new = edit(
@@ -633,7 +646,10 @@ async fn queue_edits_and_receipt_replay_survive_many_rejections_and_recovery() {
         "second",
         QueueMutation::Withdraw,
     );
-    let withdrawn = restarted.mutate_queue(&session, new.clone()).await.unwrap();
+    let withdrawn = restarted
+        .mutate_queue(&session, new.clone(), None)
+        .await
+        .unwrap();
     assert_eq!(withdrawn.outcome, Outcome::Withdrawn);
     assert_eq!(
         restarted
@@ -736,6 +752,7 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
                     "agent-input",
                     QueueMutation::Withdraw,
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -755,6 +772,7 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
                     "old-position",
                     replace("new-position"),
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -871,6 +889,7 @@ async fn queue_conversion_rejects_overrides_and_recovers_unclaimed_successor() {
                         expected_turn_id: claim.turn_id().clone(),
                     },
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -897,7 +916,7 @@ async fn queue_conversion_rejects_overrides_and_recovers_unclaimed_successor() {
             },
         );
         let receipt = initial
-            .mutate_queue(&session, request.clone())
+            .mutate_queue(&session, request.clone(), None)
             .await
             .unwrap();
         initial.shutdown(worker).await.unwrap();
@@ -928,6 +947,7 @@ async fn queue_conversion_rejects_overrides_and_recovers_unclaimed_successor() {
                         expected_turn_id: claim.turn_id().clone(),
                     },
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -955,7 +975,10 @@ async fn queue_conversion_rejects_overrides_and_recovers_unclaimed_successor() {
             current
         );
         assert_eq!(
-            restarted.mutate_queue(&session, request).await.unwrap(),
+            restarted
+                .mutate_queue(&session, request, None)
+                .await
+                .unwrap(),
             receipt
         );
         restarted.shutdown(worker).await.unwrap();

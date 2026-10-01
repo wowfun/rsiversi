@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-process = { path = "../../rsi-process/core" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }

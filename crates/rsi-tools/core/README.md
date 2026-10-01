@@ -87,3 +87,22 @@ scope still pinned by an old Session.
 Registration rejects Callable definitions with human-interaction timeouts or
 exclusive-final scheduling, and requires Coordinators to be exclusive. Local
 program roles never propagate through the Portable definition adapter.
+
+`ToolError::OutcomeUnknown` is retained as its own failure category, including
+when it arrives while cancellation or timeout is settling the body. It carries
+no model-facing Tool result. Orchestrators interrupt the owning effect and may
+retire the retained failure only after that terminal evidence is durable.
+
+For Portable calls, opening a capability can still reject before sending work.
+After sending Execute, an incomplete or malformed exchange is `OutcomeUnknown`,
+including transport cancellation: transport settlement alone does not prove
+external effects were undone. Only a complete validated result establishes the
+Tool outcome. The bridge joins the transport before returning uncertainty.
+
+Explicit execution preparation holds one provider-wide invocation permit while
+awaiting Approval. Its callback runs outside registry locks, has a 30-second
+ceiling (or the smaller registration timeout), and settles cooperatively after
+cancellation. Start transfers that same permit into retained-result ownership.
+Standalone starts prepare inside the admitted settlement task, preserving a
+queryable failure even for pre-cancelled invocations. Preparation metadata and
+plans are process-local and cannot replay a retained invocation.

@@ -16,14 +16,12 @@ pub(super) fn open(
 impl Resource {
     pub(super) fn describe(&self, token: FileToken) -> OpenedFile {
         OpenedFile {
+            executable: false,
             path: RelativePath::default(),
             token,
             kind: FileKind::File,
             length: 0,
         }
-    }
-    pub(super) fn length(&self) -> u64 {
-        0
     }
     pub(super) fn read(&self, _: u64, _: usize, _: &CancellationToken) -> Result<FilePage> {
         Err(FilesError::Unsupported)

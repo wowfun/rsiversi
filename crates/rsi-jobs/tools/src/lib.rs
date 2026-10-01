@@ -286,6 +286,9 @@ where
 }
 
 fn job_read_result(read: &JobRead, wait_timed_out: bool) -> rsi_tools_protocol::Result<ToolResult> {
+    if read.job.status == rsi_jobs::JobStatus::OutcomeUnknown {
+        return Err(ToolError::OutcomeUnknown);
+    }
     let stdout = project_stream(&read.stdout);
     let stderr = project_stream(&read.stderr);
     let value = json!({
@@ -389,6 +392,7 @@ fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
 
 fn jobs_error_result(error: &JobsError) -> rsi_tools_protocol::Result<ToolResult> {
     let code = match error {
+        JobsError::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
         JobsError::Capacity => "job_capacity",
         JobsError::UnknownProducer(_) => "job_producer_unavailable",
         JobsError::ScopeClosed => "job_scope_closed",

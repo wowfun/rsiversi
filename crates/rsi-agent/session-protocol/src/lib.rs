@@ -8,6 +8,7 @@ use rsi_ai_protocol::{
     AiCapability, ImageRequest, LanguageEvent, MAX_IMAGE_OUTPUTS, ModelRef, PreparedCallSnapshot,
 };
 use rsi_approval_protocol::{ApprovalDecision, ApprovalOutcome};
+pub use rsi_execution_protocol::{ExecutionCoordinates, ExecutionLocation, ExecutionTargetId};
 use rsi_media_protocol::MediaRef;
 use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolCall, ToolResult, ToolResultIdentity};
@@ -79,7 +80,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 18;
+pub const SESSION_FORMAT_VERSION: u32 = 19;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1594,7 +1595,7 @@ pub struct SessionHeader {
     format_version: u32,
     session_id: SessionId,
     created_at_ms: u64,
-    canonical_cwd: String,
+    coordinates: ExecutionCoordinates,
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
     fork_origin: Option<ForkOrigin>,
@@ -1616,7 +1617,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             format_version: u32,
             session_id: Option<serde_json::Value>,
             created_at_ms: Option<serde_json::Value>,
-            canonical_cwd: Option<serde_json::Value>,
+            coordinates: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
             fork_origin: Option<serde_json::Value>,
@@ -1647,7 +1648,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             format_version: wire.format_version,
             session_id: decode_header_field(wire.session_id, "session_id")?,
             created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
-            canonical_cwd: decode_header_field(wire.canonical_cwd, "canonical_cwd")?,
+            coordinates: decode_header_field(wire.coordinates, "coordinates")?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
             settings: decode_header_field(wire.settings, "settings")?,
             fork_origin: wire
@@ -1696,11 +1697,35 @@ where
 }
 
 impl SessionHeader {
+    /// Creates a Header explicitly belonging to the Service's Local filesystem.
+    pub fn new_local(
+        session_id: SessionId,
+        created_at_ms: u64,
+        canonical_cwd: impl Into<String>,
+        agent_preset_id: AgentPresetId,
+        settings: FrozenAgentSettings,
+    ) -> Result<Self> {
+        let coordinates = ExecutionCoordinates::new(ExecutionLocation::Local, canonical_cwd)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        Self::new(
+            session_id,
+            created_at_ms,
+            coordinates,
+            agent_preset_id,
+            settings,
+        )
+    }
+
+    /// Returns the exact immutable execution machine and target workspace spelling.
+    pub const fn coordinates(&self) -> &ExecutionCoordinates {
+        &self.coordinates
+    }
+
     /// Creates the exact current durable header.
     pub fn new(
         session_id: SessionId,
         created_at_ms: u64,
-        canonical_cwd: impl Into<String>,
+        coordinates: ExecutionCoordinates,
         agent_preset_id: AgentPresetId,
         settings: FrozenAgentSettings,
     ) -> Result<Self> {
@@ -1708,7 +1733,7 @@ impl SessionHeader {
             format_version: SESSION_FORMAT_VERSION,
             session_id,
             created_at_ms,
-            canonical_cwd: canonical_cwd.into(),
+            coordinates,
 
             agent_preset_id,
             settings,
@@ -1732,7 +1757,7 @@ impl SessionHeader {
                 "session creation timestamp must be nonzero".into(),
             ));
         }
-        validate_canonical_path(&self.canonical_cwd)?;
+        validate_canonical_path(self.coordinates.path())?;
         self.settings.validate()?;
         if let Some(policy) = &self.delegation_policy {
             policy.validate()?;
@@ -1818,7 +1843,7 @@ impl SessionHeader {
 
     /// Returns the canonical creation-time workspace path.
     pub fn canonical_cwd(&self) -> &str {
-        &self.canonical_cwd
+        self.coordinates.path()
     }
 
     /// Returns the durable Agent preset identity selected for this session.
@@ -1885,7 +1910,7 @@ impl SessionHeader {
         Self::new(
             session_id,
             created_at_ms,
-            self.canonical_cwd.clone(),
+            self.coordinates.clone(),
             self.agent_preset_id.clone(),
             self.settings.clone().with_model_selection(selection)?,
         )?

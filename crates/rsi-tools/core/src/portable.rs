@@ -156,11 +156,13 @@ impl ToolExecutor for Executor {
             // Observe the driver's terminal before relinquishing Tool body ownership.
             while matches!(call.recv().await, Ok(Some(_))) {}
         }
-        let result = result?;
+        let result = result.map_err(|_| ToolError::OutcomeUnknown)?;
         if !result.is_error
             && let Some(output) = &self.output
         {
-            output.validate_value(&result.value)?;
+            output
+                .validate_value(&result.value)
+                .map_err(|_| ToolError::OutcomeUnknown)?;
         }
         Ok(result)
     }

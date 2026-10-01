@@ -177,7 +177,7 @@ impl ToolExecutor for ReadTool {
             Err(failure) => return error(&failure),
         };
         let owner = ReadOwner {
-            files: self.files.clone(),
+            files: execution.files(&self.files)?,
             caller: FilesCaller::default(),
         };
         let binding = FilesBinding::new(
@@ -187,7 +187,7 @@ impl ToolExecutor for ReadTool {
             scope.workspace().to_owned(),
         )
         .map_err(|_| ToolError::Execution("invalid Files invocation binding".into()))?;
-        let opened = match self
+        let opened = match owner
             .files
             .open(
                 binding.clone(),
@@ -202,7 +202,7 @@ impl ToolExecutor for ReadTool {
         };
         match self.kind {
             FileKind::File => {
-                let page = match self
+                let page = match owner
                     .files
                     .read(
                         binding,
@@ -222,7 +222,7 @@ impl ToolExecutor for ReadTool {
                 let offset = usize::try_from(arguments.offset).map_err(|_| {
                     ToolError::InvalidInput("directory offset exceeds host limits".into())
                 })?;
-                let mut page = match self
+                let mut page = match owner
                     .files
                     .list(
                         binding,
@@ -242,6 +242,9 @@ impl ToolExecutor for ReadTool {
     }
 }
 fn error(failure: &FilesError) -> rsi_tools_protocol::Result<ToolResult> {
+    if *failure == FilesError::OutcomeUnknown {
+        return Err(ToolError::OutcomeUnknown);
+    }
     if *failure == FilesError::Cancelled {
         return Err(ToolError::Cancelled);
     }

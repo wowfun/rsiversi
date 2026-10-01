@@ -348,7 +348,7 @@ impl DomainRun {
         clock: Arc<dyn Clock>,
     ) -> Self {
         let (composition, handle) = domain_composition();
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("domain-exec").unwrap(),
             42,
             "/workspace",

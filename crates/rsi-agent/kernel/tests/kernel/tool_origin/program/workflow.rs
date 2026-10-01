@@ -18,6 +18,13 @@ async fn fixture() -> Fixture {
 }
 #[allow(clippy::too_many_lines)] // The fixture issues real model authority and can lose acceptance acknowledgement.
 async fn fixture_with_accept_failure(lose_ack: bool) -> Fixture {
+    fixture_with_execution(lose_ack, None).await
+}
+#[allow(clippy::too_many_lines)] // Builds the same real workflow fixture under an optional exact execution lease.
+async fn fixture_with_execution(
+    lose_ack: bool,
+    execution: Option<rsi_execution::ExecutionLease>,
+) -> Fixture {
     let store = Arc::new(MemoryStore::new());
     let faults = Arc::new(FactReadRaceStore::new(store.clone()));
     let definition = rsi_agent_composition_protocol::DomainDefinition::new(
@@ -46,11 +53,30 @@ async fn fixture_with_accept_failure(lose_ack: bool) -> Fixture {
             .await
             .unwrap();
     let workers = kernel.start_workers();
+    let mut root_header = header("workflow-root");
+    if let Some(execution) = &execution {
+        root_header = SessionHeader::new(
+            root_header.session_id().clone(),
+            root_header.created_at_ms(),
+            rsi_execution::ExecutionCoordinates::new(
+                execution.binding().location().clone(),
+                root_header.canonical_cwd(),
+            )
+            .unwrap(),
+            root_header.agent_preset_id().clone(),
+            root_header.settings().clone(),
+        )
+        .unwrap();
+    }
+    let mut session = SubmitSession::Fresh(
+        PreparedFreshSession::new(root_header, composition.0.clone()).unwrap(),
+    );
+    if let Some(execution) = execution {
+        session = session.with_execution(execution).unwrap();
+    }
     kernel
         .submit_message(SubmitMessage {
-            session: SubmitSession::Fresh(
-                PreparedFreshSession::new(header("workflow-root"), composition.0.clone()).unwrap(),
-            ),
+            session,
             message: mailbox_message("workflow-input"),
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
@@ -1333,4 +1359,102 @@ async fn lost_live_owner_revokes_process_token_and_requires_restart_recovery() {
     )));
     let workers = cold.start_workers();
     cold.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn detached_ssh_workflow_child_and_completion_keep_creator_execution() {
+    use crate::execution_authority::tuple;
+    let location = rsi_execution::ExecutionLocation::Ssh {
+        target: rsi_execution::ExecutionTargetId::parse("b".repeat(32)).unwrap(),
+    };
+    let execution = tuple::lease(location, Arc::new(tuple::Gate::default()), 7);
+    let f = fixture_with_execution(false, Some(execution.clone())).await;
+    f.run.detach().await.unwrap();
+    end_creator(&f).await;
+    let run = f.run.clone();
+    let wait = tokio::spawn(async move {
+        run.agent(ProgramAgentRequest {
+            message: "inspect target".into(),
+            output_contract: None,
+            role: None,
+        })
+        .await
+    });
+    let child = child_claim(&f).await;
+    assert_eq!(child.execution(), Some(&execution));
+    f.kernel
+        .finish_turn(&child, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    f.run.finish(ProgramOutcome::Completed, None).await.unwrap();
+    let notice = child_claim(&f).await;
+    assert_eq!(notice.session_id(), f.root.session_id());
+    assert_eq!(notice.execution(), Some(&execution));
+    f.kernel
+        .finish_turn(&notice, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    f.kernel.shutdown(f.workers).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn revoked_workflow_denies_new_children_but_settles_without_rearming_its_notice() {
+    use crate::execution_authority::tuple;
+    let location = rsi_execution::ExecutionLocation::Ssh {
+        target: rsi_execution::ExecutionTargetId::parse("c".repeat(32)).unwrap(),
+    };
+    let gate = Arc::new(tuple::Gate::default());
+    let execution = tuple::lease(location, gate.clone(), 8);
+    let f = fixture_with_execution(false, Some(execution)).await;
+    f.run.detach().await.unwrap();
+    end_creator(&f).await;
+    gate.revoked.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        f.run
+            .agent(ProgramAgentRequest {
+                message: "forbidden".into(),
+                output_contract: None,
+                role: None
+            })
+            .await,
+        Err(TurnError::ExecutionUnavailable)
+    ));
+    assert!(matches!(
+        f.run.progress(None, "forbidden".into()).await,
+        Err(TurnError::ExecutionUnavailable)
+    ));
+    assert_eq!(
+        f.run
+            .finish(ProgramOutcome::Interrupted, None)
+            .await
+            .unwrap(),
+        ProgramOutcome::Interrupted
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            f.kernel.claim("workflow-worker", CancellationToken::new())
+        )
+        .await
+        .is_err()
+    );
+    let records = f
+        .store
+        .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!records.records.iter().any(|record| matches!(
+        record.body(),
+        AgentControlRecordBody::ProgramRun {
+            event: ProgramRunEvent::ChildAdmitted { .. },
+            ..
+        }
+    )));
+    f.kernel.shutdown(f.workers).await.unwrap();
 }

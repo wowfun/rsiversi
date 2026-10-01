@@ -241,7 +241,7 @@ async fn assert_preset_and_resident_views(
         .pin(&AgentPresetId::new("inspect").unwrap(), None)
         .await
         .unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("inspected-session").unwrap(),
         1,
         root.to_str().unwrap(),

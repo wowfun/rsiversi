@@ -85,14 +85,31 @@ async fn device_slots_cover_creating_and_ready_drafts_and_retries_share_the_firs
     preparation.release.as_ref().unwrap().add_permits(65);
     let shared = peer.await.unwrap().unwrap();
     separate.await.unwrap().unwrap();
-    assert!(Arc::ptr_eq(
-        &shared,
-        &service.create_from(first.clone(), device(1)).await.unwrap()
-    ));
-    assert!(Arc::ptr_eq(
-        &shared,
-        &service.create(first.clone()).await.unwrap()
-    ));
+    assert_eq!(
+        shared.header().await.unwrap(),
+        service
+            .create_from(first.clone(), device(1))
+            .await
+            .unwrap()
+            .header()
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        shared.header().await.unwrap(),
+        service
+            .create(first.clone())
+            .await
+            .unwrap()
+            .header()
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        preparation.calls.load(Ordering::SeqCst),
+        65,
+        "caller views share the original preparation"
+    );
     let mut conflict = first;
     conflict.agent_preset_id =
         Some(rsi_agent_session_protocol::AgentPresetId::new("other-agent").unwrap());
@@ -556,7 +573,7 @@ async fn publish_competing(
     draft: &SessionHeader,
     conflicting: bool,
 ) -> SessionHeader {
-    let durable = SessionHeader::new(
+    let durable = SessionHeader::new_local(
         draft.session_id().clone(),
         draft.created_at_ms() + u64::from(conflicting),
         draft.canonical_cwd(),
@@ -604,17 +621,27 @@ async fn workspace_read_lease_holds_actual_draft_only_until_finite_read_ends() {
         session_id: header.session_id().clone(),
         header_key: header.fingerprint().unwrap(),
     };
-    let read = service.acquire(&target).await.unwrap();
+    let read = service
+        .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+        .await
+        .unwrap();
     assert_eq!(read.header(), &header);
     tokio::time::advance(std::time::Duration::from_mins(61)).await;
     tokio::task::yield_now().await;
-    assert!(service.acquire(&target).await.is_ok());
+    assert!(
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await
+            .is_ok()
+    );
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
     drop(read);
     tokio::time::advance(std::time::Duration::from_mins(61)).await;
     tokio::task::yield_now().await;
     assert!(matches!(
-        service.acquire(&target).await,
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await,
         Err(SessionError::NotFound(_))
     ));
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
@@ -637,22 +664,71 @@ async fn workspace_read_binding_rejects_wrong_header_and_service_retirement_canc
         header_key: "x".into(),
     };
     assert!(matches!(
-        service.acquire(&target).await,
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await,
         Err(SessionError::Invalid(_))
     ));
     target.header_key = "0".repeat(64);
     assert!(matches!(
-        service.acquire(&target).await,
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await,
         Err(SessionError::NotFound(_))
     ));
     target.header_key = header.fingerprint().unwrap();
-    let read = service.acquire(&target).await.unwrap();
+    let read = service
+        .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+        .await
+        .unwrap();
     assert!(!read.retiring().is_cancelled());
     service.stop().await.unwrap();
     assert!(read.retiring().is_cancelled());
     assert!(matches!(
-        service.acquire(&target).await,
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await,
         Err(SessionError::ShuttingDown)
     ));
     drop(read);
+}
+
+#[tokio::test]
+async fn shared_draft_state_does_not_share_the_first_callers_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(false);
+    let service = service(directory.path(), preparation.clone());
+    let input = request(directory.path(), "caller-bound-draft");
+    let origin = device(1);
+    let rsi_api_protocol::CallOrigin::Device(first_device) = &origin else {
+        unreachable!()
+    };
+    let revoked = first_device.revoked.clone();
+    let first = service.create_from(input.clone(), origin).await.unwrap();
+    let second = service.create_from(input.clone(), device(2)).await.unwrap();
+    let header = first.header().await.unwrap();
+    revoked.cancel();
+    assert!(matches!(
+        first.header().await,
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+    ));
+    assert_eq!(second.header().await.unwrap(), header);
+    assert_eq!(
+        service
+            .scoped(device(2))
+            .attach(&input.session_id)
+            .await
+            .unwrap()
+            .header()
+            .await
+            .unwrap(),
+        header
+    );
+    assert_eq!(
+        service.create(input).await.unwrap().header().await.unwrap(),
+        header
+    );
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
+    service.stop().await.unwrap();
 }

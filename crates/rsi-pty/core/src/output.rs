@@ -11,6 +11,7 @@ struct SnapshotReplacement {
     followers: Vec<String>,
     permit: OwnedSemaphorePermit,
     maximum: usize,
+    retained: Vec<Arc<Snapshot>>,
 }
 impl SnapshotReplacement {
     fn reserve(
@@ -35,16 +36,21 @@ impl SnapshotReplacement {
             let entry = snapshots.entry(key).or_insert((&follower.snapshot, 0));
             entry.1 += 1;
         }
-        let credit: usize = snapshots
+        let retained: Vec<_> = snapshots
             .values()
             .filter(|(snapshot, count)| Arc::strong_count(snapshot) == *count)
-            .map(|(snapshot, _)| snapshot.permit.num_permits())
+            .map(|(snapshot, _)| Arc::clone(snapshot))
+            .collect();
+        let credit: usize = retained
+            .iter()
+            .map(|snapshot| snapshot.permit.num_permits())
             .sum();
         let permit = reserve(budget, maximum.saturating_sub(credit))?;
         Ok(Self {
             followers,
             permit,
             maximum,
+            retained,
         })
     }
     fn replace(mut self, state: &mut TermState, budget: &Arc<Semaphore>) -> Result<()> {
@@ -53,7 +59,9 @@ impl SnapshotReplacement {
             permit: reserve(budget, 0)?,
         });
         for id in &self.followers {
-            let follower = state.followers.get_mut(id).expect("reserved follower");
+            let Some(follower) = state.followers.get_mut(id) else {
+                continue;
+            };
             let previous = std::mem::replace(&mut follower.snapshot, empty.clone());
             if let Ok(previous) = Arc::try_unwrap(previous) {
                 drop(previous.text);
@@ -62,11 +70,19 @@ impl SnapshotReplacement {
             // All fallible epoch admission was checked before native resize or mutation.
             follower.reset(empty.clone())?;
         }
+        for previous in self.retained {
+            if let Ok(previous) = Arc::try_unwrap(previous) {
+                drop(previous.text);
+                self.permit.merge(previous.permit);
+            }
+        }
         let excess = self.permit.num_permits() - self.maximum;
         drop(self.permit.split(excess));
         let snapshot = snapshot(&state.parser, self.maximum, self.permit)?;
         for id in self.followers {
-            let follower = state.followers.get_mut(&id).expect("reserved follower");
+            let Some(follower) = state.followers.get_mut(&id) else {
+                continue;
+            };
             follower.end = snapshot.text.len() as u64;
             follower.oldest = follower.end;
             follower.snapshot = snapshot.clone();
@@ -204,6 +220,9 @@ impl Term {
         let mut reclaimed = false;
         loop {
             let mut state = lock(&self.inner);
+            if state.resizing {
+                return Err(PtyError::Capacity);
+            }
             if state.followers.len() >= MAXIMUM_ATTACHMENTS {
                 state.reclaim_followers(std::time::Instant::now());
                 if state.followers.len() >= MAXIMUM_ATTACHMENTS {
@@ -245,6 +264,9 @@ impl Term {
             && cursor < follower.oldest;
         if expired {
             let group = Arc::as_ptr(&follower.snapshot);
+            if state.resizing {
+                return Err(PtyError::Capacity);
+            }
             let replacement = SnapshotReplacement::reserve(
                 &state,
                 &self.shared.snapshots,
@@ -293,43 +315,65 @@ impl Term {
         let _ = tokio::time::timeout(Duration::from_millis(200), changed).await;
         self.page(attachment, epoch, cursor)
     }
-    pub(super) fn resize(&self, attachment: &str, epoch: u64, size: Size) -> Result<Terminal> {
+    pub(super) async fn resize(
+        self: &Arc<Self>,
+        attachment: &str,
+        epoch: u64,
+        size: Size,
+        lease: Option<&rsi_execution::ExecutionLease>,
+    ) -> Result<Terminal> {
         size.validate()?;
-        let mut state = lock(&self.inner);
-        Self::controller(&state, attachment, epoch)?;
-        let screen_size = Size {
-            rows: state.screen_size.rows.max(size.rows),
-            columns: state.screen_size.columns.max(size.columns),
+        let process = self.process.view(lease).map_err(native)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| unavailable())?;
+        let (screen_size, screen, replacement) = {
+            let mut state = lock(&self.inner);
+            Self::controller(&state, attachment, epoch)?;
+            if state.inflight || state.resizing {
+                return Err(PtyError::Capacity);
+            }
+            let screen_size = Size {
+                rows: state.screen_size.rows.max(size.rows),
+                columns: state.screen_size.columns.max(size.columns),
+            };
+            let screen = reserve(
+                &self.shared.screens,
+                screen_bytes(screen_size)? - state.screen.num_permits(),
+            )?;
+            // Retain the credited snapshots until ACK, even if followers detach.
+            let replacement =
+                SnapshotReplacement::reserve(&state, &self.shared.snapshots, size, None)?;
+            state.resizing = true;
+            (screen_size, screen, replacement)
         };
-        let screen = reserve(
-            &self.shared.screens,
-            screen_bytes(screen_size)? - state.screen.num_permits(),
-        )?;
-        let replacement = if state.followers.is_empty() {
-            None
-        } else {
-            Some(SnapshotReplacement::reserve(
-                &state,
-                &self.shared.snapshots,
-                size,
-                None,
-            )?)
-        };
-        self.process.resize(size.native()).map_err(native)?;
-        state.parser.screen_mut().set_size(size.rows, size.columns);
-        state.status.size = size;
-        state.screen.merge(screen);
-        state.screen_size = screen_size;
-        if let Some(replacement) = replacement {
-            self.replace_snapshot(&mut state, replacement)?;
-        }
-        let status = state.status.clone();
-        drop(state);
-        self.changed.notify_waiters();
-        Ok(status)
+        let guard = ResizeGuard(self.clone());
+        let term = self.clone();
+        runtime
+            .spawn(async move {
+                process.resize(size.native()).await.map_err(native)?;
+                let mut state = lock(&term.inner);
+                state.parser.screen_mut().set_size(size.rows, size.columns);
+                state.status.size = size;
+                state.screen.merge(screen);
+                state.screen_size = screen_size;
+                term.replace_snapshot(&mut state, replacement)?;
+                let status = state.status.clone();
+                drop(state);
+                drop(guard);
+                Ok(status)
+            })
+            .await
+            .map_err(|_| PtyError::OutcomeUnknown)?
     }
 }
 
 fn chunk_cost(bytes: usize) -> usize {
     bytes + 2 * std::mem::size_of::<Chunk>() + 2 * std::mem::size_of::<usize>()
+}
+
+struct ResizeGuard(Arc<Term>);
+impl Drop for ResizeGuard {
+    fn drop(&mut self) {
+        lock(&self.0.inner).resizing = false;
+        self.0.changed.notify_waiters();
+    }
 }

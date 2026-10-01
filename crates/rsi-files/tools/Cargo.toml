@@ -16,6 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-process = { path = "../../rsi-process/core" }
 rsi-files = { path = "../core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-tools = { path = "../../rsi-tools/core" }

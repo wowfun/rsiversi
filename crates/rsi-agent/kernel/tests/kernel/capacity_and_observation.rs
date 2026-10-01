@@ -13,6 +13,7 @@ async fn resource_read_distinguishes_caller_cancellation_from_shutdown() {
         kernel
             .read_resource(
                 &session,
+                None,
                 SessionResourceRequest::Sources.validated().unwrap(),
                 stop
             )
@@ -24,6 +25,7 @@ async fn resource_read_distinguishes_caller_cancellation_from_shutdown() {
         kernel
             .read_resource(
                 &session,
+                None,
                 SessionResourceRequest::Sources.validated().unwrap(),
                 CancellationToken::new()
             )

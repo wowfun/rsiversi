@@ -44,3 +44,7 @@ provider execution, permitting replacement of the stopped Goal. Outcome reads
 do not fabricate a discard, abandonment or refund.
 A draft published by human input still has zero automatic allocations. Its first
 automatic round uses the ordinary durable reserve transaction once idle.
+
+Execution outcome uncertainty remains a distinct error through the Goal and
+Session adapters, even when no domain-command request identity is available.
+It never becomes a definite backend rejection or authorizes replay.

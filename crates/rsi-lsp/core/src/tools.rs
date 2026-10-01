@@ -99,13 +99,20 @@ impl ToolExecutor for Executor {
         match self
             .owner
             .query(
-                caller.header().canonical_cwd().into(),
+                crate::LanguageWorkspace::new(
+                    caller.header().coordinates().clone(),
+                    caller.execution().cloned(),
+                )
+                .map_err(|_| {
+                    ToolError::InvalidInput("Language source authority unavailable".into())
+                })?,
                 query,
                 execution.cancellation.clone(),
             )
             .await
         {
             Ok(output) => self.output.result(&output),
+            Err(crate::Error::OutcomeUnknown) => Err(ToolError::OutcomeUnknown),
             Err(error) => ToolResult::new(
                 json!({"error":error.to_string()}),
                 vec![ToolContent::Text {

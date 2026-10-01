@@ -19,6 +19,7 @@ enum TestSettlement {
     OnCancel,
     IgnoreCancelUntilRelease,
     ErrorWithNul,
+    UnknownAfterCancel,
 }
 
 #[derive(Debug)]
@@ -120,6 +121,10 @@ impl JobControl for TestControl {
             TestSettlement::IgnoreCancelUntilRelease => {
                 self.release.cancelled().await;
                 Ok(Self::terminal(JobStatus::Cancelled))
+            }
+            TestSettlement::UnknownAfterCancel => {
+                self.cancelled.cancelled().await;
+                Err(JobsError::OutcomeUnknown)
             }
             TestSettlement::ErrorWithNul => Err(JobsError::Execution("producer\0failure".into())),
         }
@@ -356,8 +361,10 @@ struct TestProducer {
     starts: AtomicUsize,
 }
 
+#[async_trait::async_trait]
+
 impl JobProducer for TestProducer {
-    fn start(&self, request: &JobRequest) -> Result<Arc<dyn JobControl>> {
+    async fn start(&self, request: &JobRequest) -> Result<Arc<dyn JobControl>> {
         self.starts.fetch_add(1, Ordering::AcqRel);
         if let Some(request) = request.downcast_ref::<TestRequest>() {
             return Ok(request.0.clone());
@@ -374,8 +381,10 @@ impl JobProducer for TestProducer {
 #[derive(Debug)]
 struct FailingProducer;
 
+#[async_trait::async_trait]
+
 impl JobProducer for FailingProducer {
-    fn start(&self, _request: &JobRequest) -> Result<Arc<dyn JobControl>> {
+    async fn start(&self, _request: &JobRequest) -> Result<Arc<dyn JobControl>> {
         Err(JobsError::Execution("start rejected".into()))
     }
 }
@@ -447,7 +456,7 @@ async fn terminal_peek_preserves_unreported_finalization_and_original_scope_gene
     );
     let mut input = submission("test", "preview", control.clone());
     input.origin = Some("effect".into());
-    let id = jobs.submit(&authority, input).unwrap();
+    let id = jobs.submit(&authority, input).await.unwrap();
     wait_terminal(&jobs, &authority, &id).await;
     let original = jobs.get(&authority, &id).unwrap();
     let waits = control.wait_count.load(Ordering::Acquire);
@@ -502,7 +511,7 @@ async fn blocked_preview_does_not_block_registry_and_rechecks_revoked_scope() {
     Arc::get_mut(&mut control).unwrap().peek_gate = Some(gate.clone());
     let mut input = submission("test", "preview", control);
     input.origin = Some("effect".into());
-    let id = jobs.submit(&authority, input).unwrap();
+    let id = jobs.submit(&authority, input).await.unwrap();
     wait_terminal(&jobs, &authority, &id).await;
     let sampling = tokio::task::spawn_blocking({
         let jobs = jobs.clone();
@@ -553,6 +562,7 @@ async fn producer_wait_error_is_projected_to_a_valid_failed_terminal() {
                 TestControl::new(TestSettlement::ErrorWithNul, b"", b""),
             ),
         )
+        .await
         .unwrap();
     wait_terminal(&jobs, &authority, &id).await;
 
@@ -594,7 +604,7 @@ async fn admission_preflights_authority_producer_and_capacity_before_id_publicat
                 "unknown",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        ).await,
         Err(JobsError::UnknownProducer(name)) if name == "missing"
     ));
     assert!(matches!(
@@ -605,11 +615,12 @@ async fn admission_preflights_authority_producer_and_capacity_before_id_publicat
                 "failed-start",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        ).await,
         Err(JobsError::Execution(message)) if message == "start rejected"
     ));
     let first = jobs
         .submit(&authority, submission("test", "first", waiting.clone()))
+        .await
         .unwrap();
     assert_eq!(first, "job-1");
     assert!(matches!(
@@ -620,7 +631,8 @@ async fn admission_preflights_authority_producer_and_capacity_before_id_publicat
                 "over-capacity",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        )
+        .await,
         Err(JobsError::Capacity)
     ));
     assert_eq!(producer.starts.load(Ordering::Acquire), 1);
@@ -645,6 +657,7 @@ async fn active_reads_do_not_report_but_terminal_reads_atomically_release_output
             &authority,
             submission("test", "observable", control.clone()),
         )
+        .await
         .unwrap();
 
     let active = jobs.read(&authority, &id, 1, 0).unwrap();
@@ -701,6 +714,7 @@ async fn read_racing_settlement_returns_one_coherent_active_or_terminal_snapshot
                 requires_report: true,
             },
         )
+        .await
         .unwrap();
 
     let read = jobs.read(&authority, &id, 0, 0).unwrap();
@@ -744,6 +758,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
                 requires_report: false,
             },
         )
+        .await
         .unwrap();
 
     let reader_jobs = jobs.clone();
@@ -763,7 +778,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
         requires_report: false,
     };
     assert_eq!(
-        jobs.submit(&authority, replacement()).unwrap_err(),
+        jobs.submit(&authority, replacement()).await.unwrap_err(),
         JobsError::Capacity
     );
     control.release_read();
@@ -771,7 +786,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
     let read = reader.join().unwrap().unwrap();
     assert_eq!(read.stdout.bytes, b"stable");
     assert_eq!(read.job.status, JobStatus::Completed);
-    jobs.submit(&authority, replacement()).unwrap();
+    jobs.submit(&authority, replacement()).await.unwrap();
     drop(jobs);
     assert!(fiber.dispose().await.is_clean());
 }
@@ -798,6 +813,7 @@ async fn concurrent_terminal_read_wins_over_the_scope_finalization_snapshot() {
                 requires_report: true,
             },
         )
+        .await
         .unwrap();
     wait_terminal(&jobs, &authority, &id).await;
 
@@ -850,6 +866,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
                 requires_report: true,
             },
         )
+        .await
         .unwrap();
     wait_terminal(&jobs, &authority, &read_id).await;
     assert!(matches!(
@@ -874,6 +891,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
                 requires_report: true,
             },
         )
+        .await
         .unwrap();
     assert!(matches!(
         jobs.kill(&authority, &cancel_id).await,
@@ -903,6 +921,7 @@ async fn wait_and_kill_report_terminal_work_and_are_idempotently_observable() {
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"ok", b""),
             ),
         )
+        .await
         .unwrap();
     let waited = jobs.wait(&authority, &completed, 0, 0).await.unwrap();
     assert_eq!(waited.job.status, JobStatus::Completed);
@@ -918,6 +937,7 @@ async fn wait_and_kill_report_terminal_work_and_are_idempotently_observable() {
             &authority,
             submission("test", "cancel", cancellable.clone()),
         )
+        .await
         .unwrap();
     let killed = jobs.kill(&authority, &killed_id).await.unwrap();
     assert_eq!(killed.job.status, JobStatus::Cancelled);
@@ -947,6 +967,7 @@ async fn completed_terminal_wins_after_a_kill_request() {
             &authority,
             submission("test", "completed-wins", control.clone()),
         )
+        .await
         .unwrap();
 
     let kill = tokio::spawn({
@@ -988,6 +1009,7 @@ async fn finalization_is_scope_isolated_reports_unobserved_work_and_revokes_old_
     let active = TestControl::new(TestSettlement::OnCancel, b"active", b"");
     let active_id = jobs
         .submit(&authority, submission("test", "active", active.clone()))
+        .await
         .unwrap();
     let terminal_id = jobs
         .submit(
@@ -998,11 +1020,13 @@ async fn finalization_is_scope_isolated_reports_unobserved_work_and_revokes_old_
                 TestControl::new(TestSettlement::Immediate(JobStatus::Failed), b"", b"bad"),
             ),
         )
+        .await
         .unwrap();
     wait_terminal(&jobs, &authority, &terminal_id).await;
     let other_control = TestControl::new(TestSettlement::OnRelease, b"other", b"");
     let other_id = jobs
         .submit(&other, submission("test", "other", other_control.clone()))
+        .await
         .unwrap();
 
     let finalization = jobs.finalize_scope(&authority).await.unwrap();
@@ -1024,7 +1048,8 @@ async fn finalization_is_scope_isolated_reports_unobserved_work_and_revokes_old_
                 "stale",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        )
+        .await,
         Err(JobsError::ScopeClosed)
     ));
     assert_eq!(
@@ -1051,6 +1076,7 @@ async fn cancelled_finalization_future_cannot_abandon_the_provider_reaper() {
     let control = TestControl::new(TestSettlement::IgnoreCancelUntilRelease, b"", b"");
     let _id = jobs
         .submit(&authority, submission("test", "slow", control.clone()))
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1082,6 +1108,7 @@ async fn producer_retirement_withdraws_exact_generation_cancels_and_allows_repla
     let control = TestControl::new(TestSettlement::OnCancel, b"", b"");
     let id = jobs
         .submit(&authority, submission("test", "old", control.clone()))
+        .await
         .unwrap();
     lease.retire().await.unwrap();
     wait_terminal(&jobs, &authority, &id).await;
@@ -1097,7 +1124,7 @@ async fn producer_retirement_withdraws_exact_generation_cancels_and_allows_repla
                 "withdrawn",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        ).await,
         Err(JobsError::UnknownProducer(name)) if name == "test"
     ));
     let replacement = jobs
@@ -1112,6 +1139,7 @@ async fn producer_retirement_withdraws_exact_generation_cancels_and_allows_repla
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
         )
+        .await
         .unwrap();
     assert_eq!(replacement_id, "job-2");
     replacement.retire().await.unwrap();
@@ -1142,20 +1170,24 @@ async fn unreported_terminal_records_backpressure_and_reported_tombstones_evict_
     };
     let first = jobs
         .submit(&authority, submission("test", "first", immediate()))
+        .await
         .unwrap();
     let second = jobs
         .submit(&authority, submission("test", "second", immediate()))
+        .await
         .unwrap();
     wait_terminal(&jobs, &authority, &first).await;
     wait_terminal(&jobs, &authority, &second).await;
     assert!(matches!(
-        jobs.submit(&authority, submission("test", "blocked", immediate())),
+        jobs.submit(&authority, submission("test", "blocked", immediate()))
+            .await,
         Err(JobsError::Capacity)
     ));
 
     jobs.read(&authority, &first, 0, 0).unwrap();
     let third = jobs
         .submit(&authority, submission("test", "third", immediate()))
+        .await
         .unwrap();
     assert_eq!(third, "job-3");
     assert!(matches!(
@@ -1192,7 +1224,7 @@ async fn terminal_jobs_not_requiring_report_compact_automatically() {
         ),
     );
     request.requires_report = false;
-    let id = jobs.submit(&authority, request).unwrap();
+    let id = jobs.submit(&authority, request).await.unwrap();
     wait_terminal(&jobs, &authority, &id).await;
     let summary = jobs.get(&authority, &id).unwrap();
     assert!(summary.reported);
@@ -1223,14 +1255,14 @@ fn submission_without_an_entered_tokio_runtime_fails_without_starting_producer()
     });
     let authority = jobs.acquire_scope(scope("outside-runtime")).unwrap();
     assert!(matches!(
-        jobs.submit(
+        futures_util::FutureExt::now_or_never(jobs.submit(
             &authority,
             submission(
                 "test",
                 "outside",
                 TestControl::new(TestSettlement::Immediate(JobStatus::Completed), b"", b""),
             ),
-        ),
+        )).unwrap(),
         Err(JobsError::Execution(message)) if message == "Tokio runtime is unavailable"
     ));
     assert_eq!(producer.starts.load(Ordering::Acquire), 0);
@@ -1248,8 +1280,10 @@ struct BlockingStartProducer {
     control: Arc<TestControl>,
 }
 
+#[async_trait::async_trait]
+
 impl JobProducer for BlockingStartProducer {
-    fn start(&self, _request: &JobRequest) -> Result<Arc<dyn JobControl>> {
+    async fn start(&self, _request: &JobRequest) -> Result<Arc<dyn JobControl>> {
         self.entered.notify_one();
         let (lock, changed) = &*self.release;
         let mut released = lock.lock().unwrap();
@@ -1279,17 +1313,19 @@ async fn producer_readiness_precedes_publication_but_submit_returns_a_visible_jo
     let authority = jobs.acquire_scope(scope("publication")).unwrap();
     let submitting = jobs.clone();
     let scope = authority.clone();
-    let submit = tokio::task::spawn_blocking(move || {
-        submitting.submit(
-            &scope,
-            JobSubmission {
-                name: "publication".into(),
-                producer: "blocking".into(),
-                origin: None,
-                request: JobRequest::new(()),
-                requires_report: true,
-            },
-        )
+    let submit = tokio::spawn(async move {
+        submitting
+            .submit(
+                &scope,
+                JobSubmission {
+                    name: "publication".into(),
+                    producer: "blocking".into(),
+                    origin: None,
+                    request: JobRequest::new(()),
+                    requires_report: true,
+                },
+            )
+            .await
     });
     entered.notified().await;
     let before = jobs.list(&authority).unwrap();
@@ -1325,17 +1361,19 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
     let authority = jobs.acquire_scope(scope("race")).unwrap();
     let submitting_jobs = jobs.clone();
     let submitting_authority = authority.clone();
-    let submit = tokio::task::spawn_blocking(move || {
-        submitting_jobs.submit(
-            &submitting_authority,
-            JobSubmission {
-                name: "racing".into(),
-                producer: "blocking".into(),
-                origin: None,
-                request: JobRequest::new(()),
-                requires_report: true,
-            },
-        )
+    let submit = tokio::spawn(async move {
+        submitting_jobs
+            .submit(
+                &submitting_authority,
+                JobSubmission {
+                    name: "racing".into(),
+                    producer: "blocking".into(),
+                    origin: None,
+                    request: JobRequest::new(()),
+                    requires_report: true,
+                },
+            )
+            .await
     });
     entered.notified().await;
     let finalizing_jobs = jobs.clone();
@@ -1376,6 +1414,7 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
                 requires_report: false,
             },
         )
+        .await
         .unwrap();
     assert_eq!(next, "job-1");
 
@@ -1388,8 +1427,9 @@ struct BlockingDropProducer {
     entered: Arc<Notify>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
+#[async_trait::async_trait]
 impl JobProducer for BlockingDropProducer {
-    fn start(&self, _: &JobRequest) -> Result<Arc<dyn JobControl>> {
+    async fn start(&self, _: &JobRequest) -> Result<Arc<dyn JobControl>> {
         Err(JobsError::Execution("unused fixture".into()))
     }
 }
@@ -1441,4 +1481,201 @@ async fn producer_destruction_releases_registry_before_external_cleanup() {
             "external producer destructor held the registry mutex"
         );
     }
+}
+
+#[derive(Debug)]
+struct DelayedStart {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    control: Arc<TestControl>,
+}
+#[async_trait]
+impl JobProducer for DelayedStart {
+    async fn start(&self, _: &JobRequest) -> Result<Arc<dyn JobControl>> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(self.control.clone())
+    }
+}
+
+#[tokio::test]
+async fn cancelled_submit_waiter_retains_start_until_revocation_reaps_the_unpublished_job() {
+    let (runtime, _fiber, jobs) = activated(json!({})).await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let control = TestControl::new(TestSettlement::IgnoreCancelUntilRelease, b"", b"");
+    let lease = jobs
+        .register_producer(registration(
+            "delayed",
+            Arc::new(DelayedStart {
+                entered: entered.clone(),
+                release: release.clone(),
+                control: control.clone(),
+            }),
+        ))
+        .unwrap();
+    let scope = jobs.acquire_scope(scope("cancelled-admission")).unwrap();
+    let submitting = tokio::spawn({
+        let jobs = jobs.clone();
+        let scope = scope.clone();
+        async move {
+            jobs.submit(
+                &scope,
+                JobSubmission {
+                    name: "delayed".into(),
+                    producer: "delayed".into(),
+                    origin: None,
+                    request: JobRequest::new(()),
+                    requires_report: true,
+                },
+            )
+            .await
+        }
+    });
+    entered.notified().await;
+    submitting.abort();
+    assert!(submitting.await.unwrap_err().is_cancelled());
+    let retiring = tokio::spawn({
+        let jobs = jobs.clone();
+        let scope = scope.clone();
+        async move { jobs.finalize_scope(&scope).await }
+    });
+    while scope.is_active() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!retiring.is_finished());
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while control.cancel_count.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!retiring.is_finished());
+    control.release.cancel();
+    assert!(retiring.await.unwrap().unwrap().unreported.is_empty());
+    drop(lease);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn unknown_settlement_survives_cancellation_reporting_and_scope_finalization() {
+    let (_runtime, fiber, jobs) = activated(json!({})).await;
+    let lease = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    for report in [false, true] {
+        let authority = jobs
+            .acquire_scope(scope(if report { "reported" } else { "unreported" }))
+            .unwrap();
+        let control = TestControl::new(TestSettlement::UnknownAfterCancel, b"possible effect", b"");
+        let id = jobs
+            .submit(&authority, submission("test", "uncertain", control))
+            .await
+            .unwrap();
+        if report {
+            let read = jobs.kill(&authority, &id).await.unwrap();
+            assert_eq!(read.job.status, JobStatus::OutcomeUnknown);
+            assert!(read.job.reported);
+            let terminal = read.job.terminal.unwrap();
+            terminal.validate().unwrap();
+            assert_eq!((terminal.exit_code, terminal.signal), (None, None));
+            assert_eq!(
+                jobs.get(&authority, &id).unwrap().status,
+                JobStatus::OutcomeUnknown
+            );
+        }
+        let finalization = jobs.finalize_scope(&authority).await.unwrap();
+        assert!(finalization.outcome_unknown);
+        if report {
+            assert!(finalization.unreported.is_empty());
+        } else {
+            assert_eq!(finalization.unreported[0].status, JobStatus::OutcomeUnknown);
+        }
+    }
+    lease.retire().await.unwrap();
+    drop(jobs);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[derive(Debug)]
+struct UncertainStart {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    unpublished: bool,
+}
+#[async_trait]
+impl JobProducer for UncertainStart {
+    async fn start(&self, _: &JobRequest) -> Result<Arc<dyn JobControl>> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        if self.unpublished {
+            Ok(TestControl::new(
+                TestSettlement::UnknownAfterCancel,
+                b"",
+                b"",
+            ))
+        } else {
+            Err(JobsError::OutcomeUnknown)
+        }
+    }
+}
+#[tokio::test]
+async fn unknown_unpublished_effect_survives_lost_submit_waiter_and_revocation() {
+    let (runtime, _fiber, jobs) = activated(json!({})).await;
+    for unpublished in [false, true] {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let lease = jobs
+            .register_producer(registration(
+                "uncertain",
+                Arc::new(UncertainStart {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    unpublished,
+                }),
+            ))
+            .unwrap();
+        let authority = jobs.acquire_scope(scope("uncertain-admission")).unwrap();
+        let submitting = tokio::spawn({
+            let jobs = jobs.clone();
+            let authority = authority.clone();
+            async move {
+                jobs.submit(
+                    &authority,
+                    JobSubmission {
+                        name: "uncertain".into(),
+                        producer: "uncertain".into(),
+                        origin: None,
+                        request: JobRequest::new(()),
+                        requires_report: true,
+                    },
+                )
+                .await
+            }
+        });
+        entered.notified().await;
+        submitting.abort();
+        assert!(submitting.await.unwrap_err().is_cancelled());
+        let finalizing = tokio::spawn({
+            let jobs = jobs.clone();
+            let authority = authority.clone();
+            async move { jobs.finalize_scope(&authority).await }
+        });
+        while authority.is_active() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!finalizing.is_finished());
+        release.notify_one();
+        let report = tokio::time::timeout(Duration::from_secs(2), finalizing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(report.unreported.is_empty(), "no Job ID was published");
+        assert!(report.outcome_unknown);
+        lease.retire().await.unwrap();
+    }
+    assert!(runtime.shutdown().await.is_clean());
 }

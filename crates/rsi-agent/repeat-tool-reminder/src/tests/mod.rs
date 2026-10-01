@@ -53,6 +53,7 @@ impl Fixture {
         Self {
             reminder: Reminder { state, config },
             context: ContributionContext {
+                execution: None,
                 header: Arc::new(header("session")),
                 turn_id: TurnId::new("turn").unwrap(),
                 accepted_fact_seq: 1,
@@ -166,7 +167,7 @@ impl Fixture {
     }
 }
 fn header(id: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(id).unwrap(),
         1,
         "/workspace",

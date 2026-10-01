@@ -51,6 +51,7 @@ impl ReportTools {
 }
 #[derive(Debug)]
 struct PreparedReport {
+    execution: Option<rsi_tools_protocol::ToolPreparation>,
     report: Arc<Report>,
     identity: ToolResultIdentity,
     arguments: serde_json::Value,
@@ -60,7 +61,33 @@ impl PreparedToolCall for PreparedReport {
     fn identity(&self) -> &ToolResultIdentity {
         &self.identity
     }
-    async fn start(self: Box<Self>, start: ToolStart) -> rsi_tools_protocol::Result<ToolResult> {
+    async fn prepare_execution(
+        &mut self,
+        start: ToolStart,
+    ) -> rsi_tools_protocol::Result<Option<rsi_execution::ExecutionReview>> {
+        if self.execution.is_some() {
+            return Err(ToolError::Execution(
+                "report execution was already prepared".into(),
+            ));
+        }
+        let (execution, _) = rsi_tools_protocol::ToolExecution::from_start(
+            self.identity.call_id().to_owned(),
+            start,
+        )?;
+        let preparation = rsi_tools_protocol::ToolPreparation::new(execution, None)?;
+        let review = preparation.review()?;
+        self.execution = Some(preparation);
+        Ok(review)
+    }
+    async fn start(
+        mut self: Box<Self>,
+        start: ToolStart,
+    ) -> rsi_tools_protocol::Result<ToolResult> {
+        let (_execution, _) = self
+            .execution
+            .take()
+            .ok_or_else(|| ToolError::Execution("report execution was not prepared".into()))?
+            .start(self.identity.call_id().to_owned(), start.clone())?;
         if start.cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
@@ -138,6 +165,7 @@ impl ToolRuntime for ReportTools {
             format!("{:x}", Sha256::digest(request)),
         )?;
         Ok(Box::new(PreparedReport {
+            execution: None,
             report: Arc::clone(&self.report),
             identity,
             arguments: call.arguments,
@@ -180,5 +208,71 @@ impl ToolRuntime for ReportTools {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(identity);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[derive(Debug)]
+    struct NoSandbox;
+    #[async_trait]
+    impl rsi_sandbox::Sandbox for NoSandbox {
+        async fn workspace_read(
+            &self,
+            _: rsi_sandbox::WorkspaceReadRequest,
+        ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+            panic!("report must not read workspace")
+        }
+        async fn confine(
+            &self,
+            _: rsi_sandbox::ProcessRequest,
+        ) -> rsi_sandbox::Result<rsi_sandbox::ConfinedProcess> {
+            panic!("report must not spawn")
+        }
+    }
+    #[tokio::test]
+    async fn report_requires_preparation_and_retains_only_the_prepared_result() {
+        let report = Arc::new(Report {
+            owner: "owner".into(),
+            definition: ToolDefinition::new(
+                REPORT_RESULT_TOOL,
+                "report",
+                serde_json::json!({"type":"object"}),
+            )
+            .unwrap(),
+            contract: OutputContract::new(serde_json::json!({"type":"object"})).unwrap(),
+            retained: Mutex::default(),
+        });
+        let identity =
+            ToolResultIdentity::new("owner", "invocation", "call", "a".repeat(64)).unwrap();
+        let prepared = || {
+            Box::new(PreparedReport {
+                execution: None,
+                report: report.clone(),
+                identity: identity.clone(),
+                arguments: serde_json::json!({}),
+            })
+        };
+        let start = ToolStart {
+            cancellation: CancellationToken::new(),
+            policy: rsi_tools_protocol::ToolExecutionPolicy {
+                mode: rsi_sandbox::SandboxMode::ReadOnly,
+                cwd: "/workspace".into(),
+                workspace: "/workspace".into(),
+            },
+            sandbox: Arc::new(NoSandbox),
+            job_scope: None,
+            extensions: rsi_tools_protocol::ToolExecutionExtensions::default(),
+        };
+        assert!(matches!(
+            prepared().start(start.clone()).await,
+            Err(ToolError::Execution(_))
+        ));
+        assert!(report.retained.lock().unwrap().is_empty());
+        let mut ready = prepared();
+        ready.prepare_execution(start.clone()).await.unwrap();
+        ready.start(start).await.unwrap();
+        assert!(report.retained.lock().unwrap().contains_key(&identity));
     }
 }

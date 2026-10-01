@@ -26,6 +26,9 @@ pub const MAXIMUM_OUTPUT_PAGE_BYTES: usize = 16 * 1024;
     deny_unknown_fields
 )]
 pub enum PtyError {
+    /// An effect acknowledgement or admitted worker result was lost.
+    #[error("terminal operation outcome is unknown; refresh before retrying")]
+    OutcomeUnknown,
     /// Invalid bounded request or response.
     #[error("invalid terminal value: {0}")]
     Invalid(String),
@@ -374,7 +377,18 @@ pub trait PtyScope: fmt::Debug + Send + Sync + 'static {
     /// A true result does not fence concurrent creation; callers own that serialization.
     fn is_empty(&self) -> bool;
     /// Creates a shell only from the exact product-authenticated confined plan.
-    fn create(&self, spec: rsi_process::PtyProcessSpec) -> Result<Attachment>;
+    async fn create(&self, spec: rsi_process::PtyProcessSpec) -> Result<Attachment>;
+    /// Creates a terminal through one exact location-bound opaque plan.
+    async fn create_execution(
+        &self,
+        spec: rsi_process::PtyProcessSpec<rsi_execution::PreparedProcess>,
+    ) -> Result<Attachment>;
+    /// Dispatches with current caller authority for location-bound input and resize.
+    async fn execute_with(
+        &self,
+        operation: Operation,
+        lease: rsi_execution::ExecutionLease,
+    ) -> Result<Reply>;
     /// Dispatches one bounded operation; no durable or Session authority is inferred.
     async fn execute(&self, operation: Operation) -> Result<Reply>;
     /// Permanently retires this scope, terminating and reaping every terminal.

@@ -224,7 +224,7 @@ impl SessionService for SessionClient {
         let header = created.draft.header;
         let workspace = rsi_workspace_protocol::WorkspaceRecord {
             id: request.workspace_id,
-            path: header.canonical_cwd().into(),
+            coordinates: header.coordinates().clone(),
         };
         if header.session_id() != &request.session_id
             || workspace.validate().is_err()

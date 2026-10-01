@@ -156,9 +156,36 @@ async fn publish(execution: &dyn TurnExecution, claim: &TurnClaim, bodies: Vec<S
         .unwrap();
 }
 
+#[derive(Debug)]
+struct RecoveryTool {
+    echo: EchoTool,
+    uncertain: bool,
+}
+#[async_trait]
+impl ToolExecutor for RecoveryTool {
+    async fn execute(
+        &self,
+        arguments: Value,
+        execution: ToolExecution,
+    ) -> ToolResultType<ToolResult> {
+        let result = self.echo.execute(arguments, execution).await?;
+        if self.uncertain {
+            Err(ToolError::OutcomeUnknown)
+        } else {
+            Ok(result)
+        }
+    }
+}
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // One retained result identity crosses ambiguous settlement and recovery.
 async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
+    retained_settlement(false).await;
+}
+#[tokio::test]
+async fn a_retained_uncertain_effect_interrupts_without_reexecuting_or_publishing_a_result() {
+    retained_settlement(true).await;
+}
+#[allow(clippy::too_many_lines)] // One retained identity crosses actual start, retained recovery and durable terminal.
+async fn retained_settlement(uncertain: bool) {
     let stack = BaseStack::activate().await;
     let (callback, callbacks) = setup(&stack).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -168,9 +195,12 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
-            executor: Arc::new(EchoTool {
-                store: stack.store.clone(),
-                calls: calls.clone(),
+            executor: Arc::new(RecoveryTool {
+                echo: EchoTool {
+                    store: stack.store.clone(),
+                    calls: calls.clone(),
+                },
+                uncertain,
             }),
         })
         .unwrap();
@@ -312,7 +342,7 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
         }],
     )
     .await;
-    prepared
+    let result = prepared
         .start(rsi_tools_protocol::ToolStart {
             cancellation: CancellationToken::new(),
             policy: rsi_tools_protocol::ToolExecutionPolicy {
@@ -324,12 +354,15 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
             job_scope: None,
             extensions: rsi_tools_protocol::ToolExecutionExtensions::default(),
         })
-        .await
-        .unwrap();
-    assert!(matches!(
-        composition.tools().query(&identity).unwrap(),
-        RetainedToolResult::Returned(_)
-    ));
+        .await;
+    if uncertain {
+        assert_eq!(result.unwrap_err(), ToolError::OutcomeUnknown);
+        assert!(matches!(composition.tools().query(&identity).unwrap(),
+            RetainedToolResult::Failed(failure) if failure.kind == rsi_tools_protocol::RetainedToolFailureKind::OutcomeUnknown));
+    } else {
+        result.unwrap();
+    }
+
     execution.release(&claim).unwrap();
     drop(lease);
     let executor = stack.activate_executor("recover-settlement").await;
@@ -347,9 +380,37 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
     })
     .await
     .unwrap();
-    assert_eq!(outcome, TurnOutcome::Completed);
+    if uncertain {
+        assert!(matches!(
+            outcome,
+            TurnOutcome::Interrupted {
+                effect: Some(rsi_agent_session_protocol::EffectKind::Tool),
+                ..
+            }
+        ));
+        let facts = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64)
+            .await
+            .unwrap()
+            .facts;
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+        );
+    } else {
+        assert_eq!(outcome, TurnOutcome::Completed);
+    }
+    assert_eq!(
+        language.starts.load(Ordering::SeqCst),
+        usize::from(!uncertain)
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(callback.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        callback.calls.load(Ordering::SeqCst),
+        usize::from(!uncertain)
+    );
     assert!(matches!(
         composition.tools().query(&identity).unwrap(),
         RetainedToolResult::Absent
@@ -359,7 +420,10 @@ async fn a_retained_returned_result_settles_without_reexecuting_the_tool() {
         .read_domain_states(&submitted.session_id, None)
         .await
         .unwrap();
-    assert_eq!(callback.state.decode(&page.states[0].snapshot).unwrap(), 1);
+    assert_eq!(
+        callback.state.decode(&page.states[0].snapshot).unwrap(),
+        u64::from(!uncertain)
+    );
     drop(tool_lease);
     assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language_fiber, executor).await;

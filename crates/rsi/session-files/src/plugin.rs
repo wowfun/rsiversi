@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use rsi_api_protocol::{
     ApiClientContract, ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
 };
-use rsi_files_protocol::FilesContract;
+use rsi_execution::ExecutionResolverContract;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_session_protocol::SessionReadContract;
 use std::sync::Arc;
@@ -26,14 +26,14 @@ impl PluginFactory for SessionFilesApiFactory {
             .requiring_local::<ApiDispatchContract>()
             .requiring_local::<ConnectionDescriptionContract>()
             .requiring_local::<SessionReadContract>()
-            .requiring_local::<FilesContract>())
+            .requiring_local::<ExecutionResolverContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let registrar = plan.local::<ApiRegistrarContract>()?;
         let api = SessionFilesApi::register(
             registrar.as_ref(),
             plan.local::<SessionReadContract>()?,
-            plan.local::<FilesContract>()?,
+            plan.local::<ExecutionResolverContract>()?,
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(

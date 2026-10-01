@@ -322,6 +322,8 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             "providers",
             "session",
             "settings",
+            #[cfg(target_os = "linux")]
+            "ssh-targets",
             "ui",
             "workspace",
             "workspace_review"

@@ -15,13 +15,18 @@ use std::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Provider {
-    writes: AtomicUsize,
+    writes: Arc<AtomicUsize>,
     bad_record: bool,
 }
 #[async_trait]
 impl WorkspaceRegistry for Provider {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(&self, id: &WorkspaceId) -> Result<WorkspaceRecord> {
         Err(WorkspaceError::Unknown(id.clone()))
     }
@@ -34,12 +39,20 @@ impl WorkspaceRegistry for Provider {
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus> {
         Err(WorkspaceError::Unknown(id.clone()))
     }
-    async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord> {
+    async fn register_at(
+        &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
+        path: &Path,
+    ) -> Result<WorkspaceRecord> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.bad_record {
             Ok(WorkspaceRecord {
                 id: WorkspaceId::parse("0".repeat(64)).unwrap(),
-                path: path.into(),
+                coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                    rsi_workspace_protocol::ExecutionLocation::Local,
+                    path.to_str().unwrap(),
+                )
+                .unwrap(),
             })
         } else {
             Err(WorkspaceError::Storage(
@@ -90,7 +103,7 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
             tokio::runtime::Handle::current(),
         )));
         let provider = Arc::new(Provider {
-            writes: AtomicUsize::new(0),
+            writes: Arc::new(AtomicUsize::new(0)),
             bad_record,
         });
         let endpoint = WorkspaceApi::register(registry.as_ref(), provider.clone()).unwrap();
@@ -123,5 +136,11 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
         assert_eq!(provider.writes.load(Ordering::SeqCst), 2);
         endpoint.close().await;
         registry.close().await;
+    }
+}
+
+impl WorkspaceIngress for Provider {
+    fn scoped(&self, _: CallOrigin) -> Arc<dyn WorkspaceRegistry> {
+        Arc::new(self.clone())
     }
 }

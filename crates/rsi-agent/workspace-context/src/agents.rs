@@ -8,7 +8,8 @@ const MAXIMUM_FILES: usize = 32;
 const MAXIMUM_FILE_BYTES: usize = 64 * 1024;
 
 /// One winning definition, including a visible diagnostic for malformed sources.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceAgentDefinition {
     /// Filename-derived role name.
     pub name: String,
@@ -75,19 +76,65 @@ fn failure(path: &Path, error: impl fmt::Display) -> WorkspaceContextError {
     WorkspaceContextError::Failed(observation.diagnostic.expect("recorded failure"))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Discovery retains one bounded directory and file ownership sequence"
-)]
 pub(super) fn read_agents(
     config: &WorkspaceContextConfig,
     cwd: &Path,
     id: Option<&str>,
     reserved_names: &BTreeSet<String>,
-    mut budget: SnapshotBudget,
+    budget: SnapshotBudget,
 ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError> {
+    Ok(read_partition(
+        config,
+        cwd,
+        Selection {
+            id,
+            reserved_names,
+            project: true,
+        },
+        budget,
+        Collection::default(),
+    )?
+    .selected
+    .into_values()
+    .collect())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Collection {
+    pub(super) selected: BTreeMap<String, WorkspaceAgentDefinition>,
+    pub(super) visited: BTreeSet<String>,
+    pub(super) listed: usize,
+    pub(super) inspected: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Selection<'a> {
+    pub(super) id: Option<&'a str>,
+    pub(super) reserved_names: &'a BTreeSet<String>,
+    pub(super) project: bool,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Discovery retains one bounded directory and file ownership sequence"
+)]
+pub(super) fn read_partition(
+    config: &WorkspaceContextConfig,
+    cwd: &Path,
+    selection: Selection<'_>,
+    mut budget: SnapshotBudget,
+    collected: Collection,
+) -> Result<Collection, WorkspaceContextError> {
+    let Selection {
+        id,
+        reserved_names,
+        project,
+    } = selection;
     let mut observation = Observation::default();
-    let (root, _) = skills::project_boundary(cwd, &mut observation);
+    let root = project
+        .then(|| skills::project_boundary(cwd, &mut observation).0)
+        .flatten();
     if let Some(error) = observation.diagnostic {
         return Err(WorkspaceContextError::Failed(error));
     }
@@ -100,10 +147,12 @@ pub(super) fn read_agents(
         None => Vec::new(),
     };
     roots.extend(config.user_agent_roots.iter().cloned());
-    let mut selected = BTreeMap::new();
-    let mut visited = BTreeSet::new();
-    let mut listed = 0;
-    let mut inspected = 0;
+    let Collection {
+        mut selected,
+        mut visited,
+        mut listed,
+        mut inspected,
+    } = collected;
     for root in roots {
         budget.check()?;
         let canonical = match fs::canonicalize(&root) {
@@ -227,7 +276,12 @@ pub(super) fn read_agents(
         }
     }
     budget.check()?;
-    Ok(selected.into_values().collect())
+    Ok(Collection {
+        selected,
+        visited,
+        listed,
+        inspected,
+    })
 }
 
 #[cfg(test)]

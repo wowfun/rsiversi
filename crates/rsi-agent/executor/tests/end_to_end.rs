@@ -632,7 +632,11 @@ struct MediaFixture {
 
 #[async_trait]
 impl Media for MediaFixture {
-    async fn import_image(&self, source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image_with_options(
+        &self,
+        source: bytes::Bytes,
+        _options: rsi_media_protocol::ImageImportOptions,
+    ) -> rsi_media_protocol::Result<MediaRef> {
         let index = self.imports.fetch_add(1, Ordering::AcqRel);
         if index > 0 {
             assert_latest_is(&self.store, |body| {
@@ -1103,7 +1107,7 @@ fn header_with_budget(turn_budget: TurnBudget) -> SessionHeader {
 }
 
 fn header_for_session(session: &str, turn_budget: TurnBudget) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(session).unwrap(),
         1,
         "/workspace",
@@ -1654,3 +1658,21 @@ mod observation;
 
 #[path = "end_to_end/program.rs"]
 mod program;
+
+fn context_test_profile() -> rsi_ai_protocol::LanguageProfile {
+    rsi_ai_protocol::LanguageProfile::new(
+        128_000,
+        4_096,
+        32_768,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::Yes(
+            rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
+        ),
+        vec![],
+    )
+    .unwrap()
+}
+
+#[path = "end_to_end/execution_authority.rs"]
+mod execution_authority;

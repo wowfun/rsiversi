@@ -94,6 +94,7 @@ impl ResumeAdmissionIssuer {
         }
         Ok(PreparedResumeSession {
             inner: Box::new(PreparedResumeSessionInner {
+                execution: None,
                 header,
                 composition,
                 issuer_seal: Arc::clone(&self.seal),
@@ -147,12 +148,28 @@ pub struct PreparedResumeSession {
 }
 
 struct PreparedResumeSessionInner {
+    execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     composition: AgentCompositionPin,
     issuer_seal: Arc<()>,
 }
 
 impl PreparedResumeSession {
+    /// Binds this invocation to an exact live target owner; coordinates confer no authority.
+    pub fn with_execution(mut self, execution: rsi_execution::ExecutionLease) -> Result<Self> {
+        if execution.binding().location() != self.inner.header.coordinates().location() {
+            return Err(TurnError::Invalid(
+                "submission execution location differs".into(),
+            ));
+        }
+        self.inner.execution = Some(execution);
+        Ok(self)
+    }
+    /// Borrows the optional execution owner supplied at live ingress.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        self.inner.execution.as_ref()
+    }
+
     /// Returns the authoritative durable Header selected by preparation.
     pub const fn header(&self) -> &SessionHeader {
         &self.inner.header
@@ -179,6 +196,24 @@ pub enum SubmitSession {
 }
 
 impl SubmitSession {
+    /// Retains the caller's exact execution owner on this frozen submission only.
+    pub fn with_execution(self, execution: rsi_execution::ExecutionLease) -> Result<Self> {
+        match self {
+            Self::Fresh(prepared) => prepared
+                .with_execution(execution)
+                .map(Self::Fresh)
+                .map_err(|error| TurnError::Invalid(error.to_string())),
+            Self::Resume(prepared) => prepared.with_execution(execution).map(Self::Resume),
+        }
+    }
+    /// Borrows the execution lease independently of the immutable composition pin.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        match self {
+            Self::Fresh(prepared) => prepared.execution(),
+            Self::Resume(prepared) => prepared.execution(),
+        }
+    }
+
     /// Returns the selected session identity.
     pub const fn session_id(&self) -> &SessionId {
         match self {
@@ -357,6 +392,7 @@ pub trait SpawnRoleResolver: fmt::Debug + Send + Sync + 'static {
     async fn resolve(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         reference: &rsi_agent_session_protocol::SpawnRoleReference,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_session_protocol::SpawnRoleSeed>;
@@ -770,8 +806,9 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         &self,
         session: &SessionId,
         request: rsi_agent_session_protocol::QueueMutationRequest,
+        execution: Option<rsi_execution::ExecutionLease>,
     ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt> {
-        let _ = (session, request);
+        let _ = (session, request, execution);
         Err(TurnError::Invalid(
             "this Turn service does not support queue mutations".into(),
         ))
@@ -872,6 +909,7 @@ impl LocalContract for TurnServiceContract {
 /// Exact executor claim over one oldest nonterminal turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnClaim {
+    execution: Option<rsi_execution::ExecutionLease>,
     executor_id: String,
     claim_id: u64,
     session_id: SessionId,
@@ -884,6 +922,11 @@ pub struct TurnClaim {
 }
 
 impl TurnClaim {
+    /// Borrows the exact caller-bound provider tuple retained by this claim.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        self.execution.as_ref()
+    }
+
     /// Returns the registered executor identity.
     pub fn executor_id(&self) -> &str {
         &self.executor_id
@@ -959,6 +1002,25 @@ pub struct TurnClaimIssuer {
 }
 
 impl TurnClaimIssuer {
+    /// Binds execution only on a claim sealed by this issuer.
+    pub fn bind_execution(
+        &self,
+        mut claim: TurnClaim,
+        execution: Option<rsi_execution::ExecutionLease>,
+    ) -> Result<TurnClaim> {
+        if !self.validates(&claim) {
+            return Err(TurnError::StaleClaim);
+        }
+        match &execution {
+            Some(lease) if lease.binding().location() == claim.header.coordinates().location() => {}
+            None if *claim.header.coordinates().location()
+                == rsi_execution::ExecutionLocation::Local => {}
+            _ => return Err(TurnError::ExecutionUnavailable),
+        }
+        claim.execution = execution;
+        Ok(claim)
+    }
+
     /// Creates one issuer identity for one Turn service instance.
     pub fn new() -> Self {
         Self { seal: Arc::new(()) }
@@ -978,6 +1040,7 @@ impl TurnClaimIssuer {
         live_seq: u64,
     ) -> TurnClaim {
         TurnClaim {
+            execution: None,
             executor_id,
             claim_id,
             session_id,
@@ -1063,6 +1126,11 @@ pub struct AgentCallerAuthority {
 }
 
 impl AgentCallerAuthority {
+    /// Borrows the original caller's execution owner without resolving a replacement.
+    pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
+        self.claim.execution()
+    }
+
     /// Returns the exact started Tool effect, absent for internal claim callers.
     pub fn tool_effect_id(&self) -> Option<&EffectId> {
         self.tool_origin.as_ref().map(|(effect, _)| effect)
@@ -1486,6 +1554,9 @@ pub enum TurnFinalizationError {
     /// Registration input or identity is invalid.
     #[error("invalid turn finalizer: {0}")]
     Invalid(String),
+    /// An admitted effect has no verifiable outcome after finalization.
+    #[error("turn contains an effect whose outcome is unknown")]
+    OutcomeUnknown,
     /// One registered finalizer could not settle its owned resources.
     #[error("turn finalization failed ({code}): {message}")]
     Failed {
@@ -1530,6 +1601,12 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// The target has no current live execution admission; durable input remains waiting.
+    #[error("execution requires a live target admission")]
+    ExecutionUnavailable,
+    /// The execution authority has an uncertain effect; retry cannot infer failure.
+    #[error("execution outcome is unknown; do not replay")]
+    ExecutionOutcomeUnknown,
     /// Automatic work was deferred because the Session subtree is not idle.
     #[error("Session is busy; automatic work was not admitted")]
     SessionBusy,

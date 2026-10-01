@@ -2,10 +2,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
+mod authority;
 mod cache;
 mod plugin;
 mod source;
 mod tools;
+pub use authority::HistoryAuthority;
 pub use plugin::{HistoryApiFactory, HistoryContract, HistoryFactory};
 use rsi_acp_protocol::service::ExternalConversations;
 use rsi_agent_references::References;
@@ -40,6 +42,7 @@ pub struct ProductHistorySearch {
     external: Arc<dyn ExternalConversations>,
     workspaces: Arc<dyn WorkspaceRegistry>,
     references: Arc<References>,
+    resolver: Arc<dyn rsi_execution::ExecutionResolver>,
     cache: Arc<cache::Cache>,
     execution: Execution,
     tasks: TaskTracker,
@@ -48,24 +51,37 @@ pub struct ProductHistorySearch {
     stop: CancellationToken,
     admission: Mutex<()>,
 }
+/// Exact source and authorization providers retained by one history owner.
+#[derive(Debug)]
+pub struct HistorySources {
+    /// Durable native source.
+    pub store: Arc<dyn SessionStore>,
+    /// Current Session identity and draft lifetime provider.
+    pub sessions: Arc<dyn rsi_session_protocol::SessionService>,
+    /// External observed conversation owner.
+    pub external: Arc<dyn ExternalConversations>,
+    /// Registered coordinate authority.
+    pub workspaces: Arc<dyn WorkspaceRegistry>,
+    /// Exact reference capture owner.
+    pub references: Arc<References>,
+    /// Current execution-location admission, including offline metadata access.
+    pub resolver: Arc<dyn rsi_execution::ExecutionResolver>,
+}
 impl ProductHistorySearch {
     /// Opens the independently leased, rebuildable cache before publishing a service.
     pub async fn open(
         directory: PathBuf,
-        store: Arc<dyn SessionStore>,
-        sessions: Arc<dyn rsi_session_protocol::SessionService>,
-        external: Arc<dyn ExternalConversations>,
-        workspaces: Arc<dyn WorkspaceRegistry>,
-        references: Arc<References>,
+        sources: HistorySources,
         execution: Execution,
     ) -> Result<Arc<Self>> {
         let cache = cache::Cache::open(directory).await?;
         Ok(Arc::new(Self {
-            store,
-            sessions,
-            external,
-            workspaces,
-            references,
+            store: sources.store,
+            sessions: sources.sessions,
+            external: sources.external,
+            workspaces: sources.workspaces,
+            references: sources.references,
+            resolver: sources.resolver,
             cache: Arc::new(cache),
             execution,
             tasks: TaskTracker::new(),
@@ -81,6 +97,7 @@ impl ProductHistorySearch {
     /// Panics if an earlier panic poisoned admission state.
     pub async fn call(
         self: &Arc<Self>,
+        authority: HistoryAuthority,
         request: Request,
         cancellation: CancellationToken,
     ) -> Result<Reply> {
@@ -100,7 +117,7 @@ impl ProductHistorySearch {
             let owner = self.clone();
             self.execution.spawn(self.tasks.track_future(async move {
                 let _permit = permit;
-                let result = owner.execute(request, &worker_stop).await;
+                let result = owner.execute(authority, request, &worker_stop).await;
                 check(&worker_stop)?;
                 result
             }))
@@ -124,9 +141,14 @@ impl ProductHistorySearch {
         self.tasks.wait().await;
         self.cache.close().await;
     }
-    async fn execute(&self, request: Request, stop: &CancellationToken) -> Result<Reply> {
+    async fn execute(
+        &self,
+        authority: HistoryAuthority,
+        request: Request,
+        stop: &CancellationToken,
+    ) -> Result<Reply> {
         let scope = request.scope().clone();
-        let source = self.authorize(&scope, stop).await?;
+        let source = self.authorize(&authority, &scope, stop).await?;
         let key = cache::key(&scope);
         let reply = match &request {
             Request::Advance { .. } => {
@@ -216,7 +238,7 @@ impl ProductHistorySearch {
         check(stop)?;
         let target = target_handle.header().await.map_err(invalid)?;
         check(stop)?;
-        if target.canonical_cwd() != source.cwd {
+        if target.coordinates() != &source.coordinates {
             return Err(invalid(
                 "reference target is outside the requested workspace",
             ));
@@ -236,7 +258,7 @@ impl ProductHistorySearch {
                     .capture_observed(
                         rsi_agent_references::ObservedReferenceText {
                             source: observed,
-                            canonical_cwd: source.cwd,
+                            coordinates: source.coordinates,
                             text: original.text,
                             selection,
                         },

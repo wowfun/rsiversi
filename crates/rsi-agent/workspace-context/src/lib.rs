@@ -31,7 +31,11 @@ mod agents;
 pub use agents::WorkspaceAgentDefinition;
 mod budget;
 mod observation;
+mod project;
+mod target;
 use observation::Observation;
+pub use project::maybe_run_project_context_helper;
+pub use target::TargetWorkspaceContext;
 mod requests;
 pub mod skill_input;
 pub use requests::WorkspaceSkillRequests;
@@ -109,6 +113,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     async fn agents(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         reserved_names: &BTreeSet<String>,
         cancellation: CancellationToken,
@@ -117,6 +122,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     async fn skills(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         audience: SkillAudience,
         cancellation: CancellationToken,
@@ -125,6 +131,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     async fn snapshot(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError>;
 }
@@ -283,10 +290,13 @@ impl WorkspaceContext for LocalWorkspaceContext {
     async fn agents(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         reserved_names: &BTreeSet<String>,
         cancellation: CancellationToken,
     ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError> {
+        require_local_source(header)?;
+        let operation = admit_source(header, execution)?;
         if id.is_some_and(|id| !valid_skill_name(id)) {
             return Err(WorkspaceContextError::Invalid("invalid agent name".into()));
         }
@@ -308,6 +318,7 @@ impl WorkspaceContext for LocalWorkspaceContext {
         let reserved_names = reserved_names.clone();
         cancellation
             .run_until_cancelled(lease.run(move || {
+                let _operation = operation;
                 agents::read_agents(&config, &cwd, id.as_deref(), &reserved_names, budget)
             }))
             .await
@@ -316,10 +327,13 @@ impl WorkspaceContext for LocalWorkspaceContext {
     async fn skills(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         audience: SkillAudience,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError> {
+        require_local_source(header)?;
+        let operation = admit_source(header, execution)?;
         if id.is_some_and(|id| !valid_skill_name(id)) {
             return Err(WorkspaceContextError::Invalid("invalid skill name".into()));
         }
@@ -334,19 +348,21 @@ impl WorkspaceContext for LocalWorkspaceContext {
         let budget = SnapshotBudget::new(&config, &cwd, stop)?;
         let id = id.map(str::to_owned);
         cancellation
-            .run_until_cancelled(
-                lease.run(move || {
-                    skills::read_skills(&config, &cwd, id.as_deref(), audience, budget)
-                }),
-            )
+            .run_until_cancelled(lease.run(move || {
+                let _operation = operation;
+                skills::read_skills(&config, &cwd, id.as_deref(), audience, budget)
+            }))
             .await
             .ok_or(WorkspaceContextError::Closed)?
     }
     async fn snapshot(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
+        require_local_source(header)?;
+        let operation = admit_source(header, execution)?;
         let lease = self.owner.acquire().await?;
         let config = Arc::clone(&self.config);
         let budget = SnapshotBudget::new(
@@ -357,8 +373,43 @@ impl WorkspaceContext for LocalWorkspaceContext {
         let cwd = PathBuf::from(header.canonical_cwd());
         let invocations = requests.names().to_vec();
         lease
-            .run(move || snapshot_with_budget(&config, &cwd, &invocations, budget))
+            .run(move || {
+                let _operation = operation;
+                snapshot_with_budget(&config, &cwd, &invocations, budget)
+            })
             .await
+    }
+}
+
+fn admit_source(
+    header: &SessionHeader,
+    execution: Option<&rsi_execution::ExecutionLease>,
+) -> Result<Option<rsi_execution::ExecutionOperation>, WorkspaceContextError> {
+    match execution {
+        Some(lease) if lease.binding().location() == header.coordinates().location() => {
+            lease.admit().map(Some).map_err(|error| match error {
+                rsi_process::ProcessError::Capacity => WorkspaceContextError::Capacity,
+                _ => WorkspaceContextError::Closed,
+            })
+        }
+        None if *header.coordinates().location()
+            == rsi_agent_session_protocol::ExecutionLocation::Local =>
+        {
+            Ok(None)
+        }
+        _ => Err(WorkspaceContextError::Invalid(
+            "workspace source execution does not match its Header".into(),
+        )),
+    }
+}
+
+fn require_local_source(header: &SessionHeader) -> Result<(), WorkspaceContextError> {
+    if *header.coordinates().location() == rsi_agent_session_protocol::ExecutionLocation::Local {
+        Ok(())
+    } else {
+        Err(WorkspaceContextError::Invalid(
+            "remote workspace requires its target-bound context reader".into(),
+        ))
     }
 }
 
@@ -787,19 +838,27 @@ fn valid_skill_name(name: &str) -> bool {
 }
 
 fn render_skill_catalog(skills: &[SelectedSkill]) -> Option<String> {
-    let visible = skills
-        .iter()
-        .filter(|skill| skill.model_invocable)
-        .collect::<Vec<_>>();
+    render_skill_catalog_values(
+        skills
+            .iter()
+            .filter(|skill| skill.model_invocable)
+            .map(|skill| (skill.name.as_str(), skill.description.as_str())),
+    )
+}
+
+fn render_skill_catalog_values<'a>(
+    skills: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<String> {
+    let visible = skills.collect::<Vec<_>>();
     if visible.is_empty() {
         return None;
     }
     let mut rendered = String::from(
         "Available skills are summaries only. Use skill_read with the exact selected name to load its instructions before following them:\n<available_skills>\n",
     );
-    for skill in visible {
-        let description = skill.description.chars().take(500).collect::<String>();
-        let line = format!("- `{}`: {}\n", skill.name, description);
+    for (name, description) in visible {
+        let description = description.chars().take(500).collect::<String>();
+        let line = format!("- `{name}`: {description}\n");
         if rendered.len().saturating_add(line.len()).saturating_add(21)
             > MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
         {
@@ -878,7 +937,7 @@ impl PluginFactory for WorkspaceContextFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<WorkspaceContextConfig>()?;
         let service = Arc::new(
-            LocalWorkspaceContext::new(config)
+            TargetWorkspaceContext::new(config)
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
         );
         let supply = plan
@@ -889,7 +948,7 @@ impl PluginFactory for WorkspaceContextFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
-                    service.owner.close().await;
+                    service.local.owner.close().await;
                     Ok(())
                 })
             }),
@@ -1171,6 +1230,24 @@ fn read_instructions(
     budget: &SnapshotBudget,
     observation: &mut Observation,
 ) -> Result<Option<String>, WorkspaceContextError> {
+    let user_sections = read_user_sections(config, budget, observation)?;
+    let retained = instruction_retained_bytes(&user_sections);
+    let project_sections = read_project_sections(
+        cwd,
+        project_root,
+        project_authority,
+        retained,
+        budget,
+        observation,
+    )?;
+    Ok(render_instructions(&user_sections, &project_sections))
+}
+
+fn read_user_sections(
+    config: &WorkspaceContextConfig,
+    budget: &SnapshotBudget,
+    observation: &mut Observation,
+) -> Result<Vec<(String, String)>, WorkspaceContextError> {
     let mut user_instruction_sections = Vec::new();
     if let Some(path) = &config.user_instruction_file {
         budget.check()?;
@@ -1178,18 +1255,31 @@ fn read_instructions(
             user_instruction_sections.push((display_path(path), text));
         }
     }
-    let mut project_instruction_sections = Vec::new();
-    let mut retained = user_instruction_sections.iter().fold(
-        INSTRUCTIONS_PREAMBLE.len(),
-        |retained, (source, text)| {
+    Ok(user_instruction_sections)
+}
+
+fn instruction_retained_bytes(sections: &[(String, String)]) -> usize {
+    sections
+        .iter()
+        .fold(INSTRUCTIONS_PREAMBLE.len(), |retained, (source, text)| {
             let bytes = instruction_section_bytes(source, text);
             if retained.saturating_add(bytes) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES {
                 retained + bytes
             } else {
                 retained
             }
-        },
-    );
+        })
+}
+
+fn read_project_sections(
+    cwd: &Path,
+    project_root: Option<&Path>,
+    project_authority: Option<&ProjectAuthority>,
+    mut retained: usize,
+    budget: &SnapshotBudget,
+    observation: &mut Observation,
+) -> Result<Vec<(String, String)>, WorkspaceContextError> {
+    let mut project_instruction_sections = Vec::new();
     if let (Some(root), Some(authority)) = (project_root, project_authority) {
         for directory in directories_between(root, cwd)?.into_iter().rev() {
             budget.check()?;
@@ -1207,8 +1297,5 @@ fn read_instructions(
         }
     }
     project_instruction_sections.reverse();
-    let instructions =
-        render_instructions(&user_instruction_sections, &project_instruction_sections);
-
-    Ok(instructions)
+    Ok(project_instruction_sections)
 }

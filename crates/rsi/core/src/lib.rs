@@ -58,6 +58,7 @@ mod integration_source;
 mod local_api_client;
 mod local_host;
 mod mcp_api;
+mod mcp_ssh;
 #[cfg(unix)]
 mod native_addons;
 mod retrieval_api;
@@ -67,6 +68,7 @@ pub use native_addons::{
     NativeAddonHealth, NativeAddonInspection, NativeAddonManager, NativeAddonRefresh,
     NativeAddonUpdateError,
 };
+mod execution_access;
 mod output_read;
 #[cfg(unix)]
 mod profile_management;
@@ -75,6 +77,8 @@ mod profiles;
 #[cfg(unix)]
 mod service_bootstrap;
 mod settings;
+#[cfg(target_os = "linux")]
+mod ssh_targets;
 #[cfg(unix)]
 mod writer_lock;
 

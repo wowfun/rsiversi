@@ -1,5 +1,34 @@
 # rsi-agent-turn-protocol
 
+Finite Session resource reads carry the current caller's optional execution lease
+through generation selection to the reader. This lease is not recovered from a
+prior Turn or from durable coordinates. Remote reads require it; Local-only
+embeddings can omit it. Contribution capture instead carries the exact live claim's
+lease, so it cannot silently select a new provider during a Step.
+
+Continuation leases retain the execution lease supplied by the explicit arm
+operation. New rounds recheck that same delegation and provider; settlement-only
+leases need no live target. A pending continuation input receives the retained
+execution lease only after durable acceptance. Neither restart nor a later caller
+reconstructs or replaces an armed controller's target authority.
+
+A new queue successor carries the editing caller's execution lease. Withdrawal
+and exact receipt lookup need no target connection; a committed retry never
+rebinds the successor. Invalid edits do not publish authority. Acceptance reserves
+pending-lease capacity before commit and retains operation admission until its
+acknowledgement, including when the reply waiter is dropped.
+
+Submission and message-claim requests carry an optional process-local
+`ExecutionLease`, separate from their durable Header and prepared composition.
+Native-only embeddings may omit a Local lease. SSH requests require one whose
+location matches the Header. The Kernel preserves the exact lease through pending
+input and the resulting Turn claim; Agent caller authority inherits it. Neither
+Store recovery nor coordinates can manufacture a missing lease. Each new effect
+rechecks its live delegation. Lease equality means the same in-process owner,
+never equal serialized coordinates. Admission preserves Capacity as pre-effect
+contention and ExecutionOutcomeUnknown as a non-replayable failure; neither is
+reported as missing execution authority.
+
 `read_program` observes one run in the exact live caller's Session, including
 complete verified result data and the run control revision. `cancel_program`
 revokes that same Session's live run, without reviving the creator Tool. Neither
@@ -8,7 +37,10 @@ rendered observation within 8 KiB by default (16 KiB maximum) and bind continuat
 offsets to the returned revision; a changed run requires a fresh first page.
 
 `ExecutionObserver` is an optional, explicitly composed effect-interval observer.
-It asynchronously admits an interval bound to the exact claim, then Executor awaits
+It receives the exact claim execution lease separately from durable coordinates.
+The observer may use that revocable lease for bounded source capture; it cannot
+substitute a new provider or gain claim mutation authority. It asynchronously
+admits an interval bound to the exact claim, then Executor awaits
 its `begin` before entering any effect owner, including Job preparation and
 finalization. `end` receives both the baseline completion result and the separate
 controlled-work status after the claim driver and retained Tools settle. Initial
@@ -400,3 +432,8 @@ An already-promoted Steer remains a waking NextTurn input when replaced. The new
 acceptance retains Steer intent without rebinding to a later Turn; the old
 acceptance retains its original Turn binding for audit. Queue mutation shares
 the per-Session submission admission gate with both NextTurn and NextStep claims.
+
+A finalizer may return `OutcomeUnknown` when admitted effects cannot be confirmed.
+All hooks still settle; uncertainty takes precedence over other hook failures
+and completion blockers and causes an interrupted Turn, including when another
+owner requested cancellation. This category carries no provider diagnostic.

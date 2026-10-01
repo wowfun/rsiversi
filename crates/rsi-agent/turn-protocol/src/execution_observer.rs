@@ -6,11 +6,13 @@ use rsi_meta_contract::LocalContract;
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-/// Immutable claim coordinates without execution or mutation authority.
+/// Immutable claim coordinates and the original execution lease for source observation.
 #[derive(Clone, Debug)]
 pub struct ExecutionObservationStart {
     /// Immutable source Header.
     pub header: SessionHeader,
+    /// Original live execution authority; durable coordinates cannot reconstruct it.
+    pub execution: Option<rsi_execution::ExecutionLease>,
     /// Exact Turn.
     pub turn: TurnId,
     /// Process-local claim generation.

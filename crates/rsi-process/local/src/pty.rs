@@ -1,8 +1,9 @@
 //! Linux controlling PTYs share the ordinary Process registry and cleanup lifetime.
 use super::Service;
 use rsi_process::{ManagedPtyProcess, ProcessError, PtyProcess, PtyProcessSpec, Result};
+#[async_trait::async_trait]
 impl PtyProcess for Service {
-    fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess> {
+    async fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess> {
         spec.validate()?;
         #[cfg(target_os = "linux")]
         {
@@ -149,7 +150,7 @@ mod native {
             .await
             .map_err(|_| ProcessError::Io("PTY input capacity deadline exceeded".into()))?
         }
-        fn resize(&self, size: PtySize) -> Result<()> {
+        async fn resize(&self, size: PtySize) -> Result<()> {
             size.validate()?;
             if self.child.termination_started.load(Ordering::Acquire) {
                 return Err(ProcessError::ShuttingDown);

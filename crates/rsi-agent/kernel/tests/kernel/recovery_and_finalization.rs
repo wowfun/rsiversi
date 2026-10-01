@@ -442,7 +442,7 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
     let session = SessionId::new("session-recovery-budget-usage").unwrap();
     let turn = TurnId::new("turn-recovery-budget-usage").unwrap();
     let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
-    let bounded_header = SessionHeader::new(
+    let bounded_header = SessionHeader::new_local(
         session.clone(),
         1,
         "/workspace",
@@ -522,7 +522,7 @@ async fn recovery_preserves_a_valid_durable_budget_classification() {
     let turn = TurnId::new("turn-recovery-valid-budget").unwrap();
     let effect = EffectId::new("effect-recovery-valid-budget").unwrap();
     let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
-    let bounded_header = SessionHeader::new(
+    let bounded_header = SessionHeader::new_local(
         session.clone(),
         1,
         "/workspace",
@@ -991,4 +991,54 @@ async fn partial_recovery_restarts_after_the_last_correlated_terminal_without_re
     );
     let worker = recovered.start_workers();
     recovered.shutdown(worker).await.unwrap();
+}
+
+#[derive(Debug)]
+struct UnknownFinalizer;
+#[async_trait]
+impl TurnFinalizer for UnknownFinalizer {
+    async fn finalize(
+        &self,
+        _: &TurnFinalizationContext,
+    ) -> rsi_agent_turn_protocol::FinalizationResult<TurnFinalizationReport> {
+        Err(TurnFinalizationError::OutcomeUnknown)
+    }
+}
+#[tokio::test]
+async fn uncertain_effect_wins_over_earlier_finalizer_failure_after_all_hooks_settle() {
+    let runtime = Runtime::default();
+    let (owner, context) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
+        .await
+        .unwrap();
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let registration = context.registration_context().unwrap();
+    let failed = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &registration,
+        "first".into(),
+        Arc::new(NamedFailure("ordinary")),
+    )
+    .unwrap();
+    let unknown = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &registration,
+        "second".into(),
+        Arc::new(UnknownFinalizer),
+    )
+    .unwrap();
+    assert_eq!(
+        rsi_agent_turn_protocol::TurnFinalization::finalize(
+            &kernel,
+            &TurnFinalizationContext {
+                session_id: SessionId::new("uncertain").unwrap(),
+                turn_id: TurnId::new("turn").unwrap(),
+                job_scope: None,
+            }
+        )
+        .await,
+        Err(TurnFinalizationError::OutcomeUnknown)
+    );
+    drop((failed, unknown));
+    assert!(owner.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }

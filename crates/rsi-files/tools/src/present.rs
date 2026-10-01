@@ -114,13 +114,12 @@ struct Present {
 }
 impl Present {
     async fn length(
-        &self,
+        files: &dyn Files,
         binding: FilesBinding,
         path: RelativePath,
         execution: &ToolExecution,
     ) -> rsi_files_protocol::Result<u64> {
-        let opened = self
-            .files
+        let opened = files
             .open(
                 binding.clone(),
                 path,
@@ -129,7 +128,7 @@ impl Present {
             )
             .await?;
         let length = opened.length;
-        self.files.release(&binding, &opened.token)?;
+        files.release(&binding, &opened.token)?;
         Ok(length)
     }
 }
@@ -183,7 +182,7 @@ impl ToolExecutor for Present {
             Err(failure) => return error(&failure),
         };
         let owner = ReadOwner {
-            files: self.files.clone(),
+            files: execution.files(&self.files)?,
             caller: FilesCaller::default(),
         };
         let binding = FilesBinding::new(
@@ -198,10 +197,11 @@ impl ToolExecutor for Present {
                 Ok(path) => path,
                 Err(failure) => return error(&failure),
             };
-            file.length = match self.length(binding.clone(), path, &execution).await {
-                Ok(length) => length,
-                Err(failure) => return error(&failure),
-            };
+            file.length =
+                match Self::length(owner.files.as_ref(), binding.clone(), path, &execution).await {
+                    Ok(length) => length,
+                    Err(failure) => return error(&failure),
+                };
         }
         if let Err(failure) = declared.validate() {
             return error(&failure);

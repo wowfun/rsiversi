@@ -359,6 +359,10 @@ pub(super) fn image_operation_failure(
 
 pub(super) fn tool_failure(error: &ToolError) -> DriveFailure {
     match error {
+        ToolError::OutcomeUnknown => DriveFailure::Turn(TurnOutcome::Interrupted {
+            effect: Some(EffectKind::Tool),
+            reason: error.to_string(),
+        }),
         ToolError::Cancelled => DriveFailure::Turn(TurnOutcome::Cancelled),
         ToolError::Timeout => failed("tool.timeout", "Tool invocation timed out"),
         ToolError::Capacity => failed("tool.capacity", "Tool capacity is exhausted"),
@@ -390,10 +394,36 @@ pub(super) fn fatal(error: impl fmt::Display) -> DriveFailure {
     DriveFailure::Fatal(bounded(&error.to_string()))
 }
 
+pub(super) fn admit_claim_execution(
+    claim: &TurnClaim,
+) -> std::result::Result<Option<rsi_execution::ExecutionOperation>, Box<DriveFailure>> {
+    claim
+        .execution()
+        .map(rsi_execution::ExecutionLease::admit)
+        .transpose()
+        .map_err(|error| {
+            Box::new(match error {
+                rsi_process::ProcessError::Capacity => {
+                    failed("execution.capacity", "Execution admission is at capacity")
+                }
+                _ => DriveFailure::Turn(TurnOutcome::Interrupted {
+                    effect: None,
+                    reason: "Execution authority is unavailable".into(),
+                }),
+            })
+        })
+}
+
 pub(super) fn turn_failure(error: TurnError) -> DriveFailure {
     match error {
         TurnError::ShuttingDown => DriveFailure::Stopped,
         TurnError::Cancelled => DriveFailure::Turn(TurnOutcome::Cancelled),
+        TurnError::ExecutionUnavailable | TurnError::ExecutionOutcomeUnknown => {
+            DriveFailure::Turn(TurnOutcome::Interrupted {
+                effect: None,
+                reason: bounded(&error.to_string()),
+            })
+        }
         TurnError::BudgetExceeded {
             dimension,
             consumed,
@@ -421,6 +451,7 @@ pub(super) fn apply_finalization_failure(
             code,
             message,
         },
+        interrupted @ TurnOutcome::Interrupted { .. } => interrupted,
         TurnOutcome::Completed => TurnOutcome::Failed { code, message },
         _ if cleanup_failed => TurnOutcome::Failed { code, message },
         original => original,
@@ -511,8 +542,30 @@ pub(super) fn tool_start_extensions(
             usize::try_from(evidence_bytes).unwrap_or(usize::MAX),
         )))
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    if let Some(execution) = claim.execution() {
+        extensions = extensions
+            .with(Arc::new(execution.clone()))
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    }
     extensions = extensions
         .with(Arc::new(caller))
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
     Ok(extensions)
+}
+
+#[cfg(test)]
+mod execution_error_tests {
+    use super::*;
+    #[test]
+    fn lost_execution_authority_interrupts_without_claiming_definite_failure() {
+        for error in [
+            TurnError::ExecutionUnavailable,
+            TurnError::ExecutionOutcomeUnknown,
+        ] {
+            assert!(matches!(
+                turn_failure(error),
+                DriveFailure::Turn(TurnOutcome::Interrupted { .. })
+            ));
+        }
+    }
 }

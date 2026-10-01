@@ -21,7 +21,14 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
     let controls = store.read_controls(&session_id, 0, 8).await.unwrap();
     assert_eq!(controls.durable_seq, 1);
     assert_eq!(controls.records.len(), 1);
-    let recent = store.list_recent_sessions(None, 8).await.unwrap();
+    let recent = store
+        .list_recent_sessions(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            None,
+            8,
+        )
+        .await
+        .unwrap();
     assert_eq!(recent.sessions.len(), 1);
     assert_eq!(recent.sessions[0].header.session_id(), &session_id);
     let history = store.read_facts_before(&session_id, 0, 8).await.unwrap();

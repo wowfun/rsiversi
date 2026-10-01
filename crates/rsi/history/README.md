@@ -32,6 +32,16 @@ A malformed database or obsolete schema is rebuilt under the lease, with a new g
 without touching source truth. Cache entries cannot authorize original reads or
 supply frozen text. A validated original is always reread at its exact identity.
 
+Every operation carries either the actual API origin or the current Agent caller.
+Before source bodies or cache contents are accessed, the registered workspace's
+execution location must admit that origin. Agent requests additionally match the
+caller's exact coordinates and retain its current execution lease, never a Local
+Service grant. The accepted finite worker retains the location permit through
+actual source/cache settlement. Offline metadata authority suffices for API
+history reads; searching never connects an SSH target. A stale cache or hit grants
+no access after Use withdrawal. Freeze checks the receiving Session independently
+and requires the same admitted workspace.
+
 The `history_search` Tool derives workspace and target from AgentCallerAuthority,
 uses the same owner operations, and emits the `rsi.history` version-1 typed output.
 Its original-text window is capped at 32 KiB so worst-case JSON escaping remains

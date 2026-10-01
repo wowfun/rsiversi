@@ -119,6 +119,7 @@ async fn settlement_retention_never_arms_and_foreign_issuer_cannot_authorize_com
         fixture.store.header(&fixture.session_id).await.unwrap(),
         fixture.composition.pin.read().unwrap().clone(),
         binding,
+        None,
     );
     assert!(
         SessionContinuations::execute(
@@ -1663,7 +1664,7 @@ async fn queue_replace_does_not_resupersede_and_withdraw_wakes_existing_automati
         };
         fixture
             .kernel
-            .mutate_queue(&fixture.session_id, request)
+            .mutate_queue(&fixture.session_id, request, None)
             .await
             .unwrap();
         assert!(futures_util::poll!(idle.as_mut()).is_pending());
@@ -1686,6 +1687,7 @@ async fn queue_replace_does_not_resupersede_and_withdraw_wakes_existing_automati
                     expected_message_id: MessageId::new("edited-human").unwrap(),
                     mutation: QueueMutation::Withdraw,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -1706,5 +1708,60 @@ async fn queue_replace_does_not_resupersede_and_withdraw_wakes_existing_automati
         );
     }
     drop(lease);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn continuation_retains_arming_execution_through_reservation_and_claim() {
+    use crate::execution_authority::tuple;
+    let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    let first = arm(&fixture).await;
+    let binding = first.binding().clone();
+    drop(first);
+    let gate = Arc::new(tuple::Gate::default());
+    let execution = tuple::lease(rsi_execution::ExecutionLocation::Local, gate.clone(), 0);
+    let session = SubmitSession::Resume(
+        fixture
+            .kernel
+            .prepare_resume(&fixture.session_id)
+            .await
+            .unwrap(),
+    )
+    .with_execution(execution.clone())
+    .unwrap();
+    let lease = SessionContinuations::arm(&fixture.kernel, session, binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(lease.execution(), Some(&execution));
+    reserve(&fixture, &lease).await;
+    let executor = fixture
+        .kernel
+        .register("continuation-execution".into())
+        .unwrap();
+    let claim = fixture
+        .kernel
+        .claim("continuation-execution", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.execution(), Some(&execution));
+    fixture.kernel.release(&claim).unwrap();
+    drop(executor);
+    drop(lease);
+    gate.revoked.store(true, Ordering::SeqCst);
+    // The same frozen authority cannot arm a later controller after revocation.
+    let session = SubmitSession::Resume(
+        fixture
+            .kernel
+            .prepare_resume(&fixture.session_id)
+            .await
+            .unwrap(),
+    )
+    .with_execution(execution)
+    .unwrap();
+    assert!(matches!(
+        SessionContinuations::arm(&fixture.kernel, session, binding).await,
+        Err(TurnError::ExecutionUnavailable)
+    ));
     fixture.stop().await;
 }

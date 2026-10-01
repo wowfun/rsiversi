@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 static FILE_FIXTURES: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(rsi_files_protocol::MAXIMUM_FILE_JOBS);
 #[derive(Debug)]
-struct TestSandbox;
+pub(super) struct TestSandbox;
 #[async_trait::async_trait]
 impl Sandbox for TestSandbox {
     async fn workspace_read(
@@ -97,32 +97,34 @@ struct FailingProcess {
     joins: Arc<std::sync::atomic::AtomicUsize>,
     gate: Option<Arc<SettlementGate>>,
 }
+#[async_trait::async_trait]
 impl rsi_process::DuplexProcess for FailingProcess {
-    fn spawn(
+    async fn spawn(
         &self,
         spec: rsi_process::DuplexProcessSpec,
     ) -> rsi_process::Result<rsi_process::ManagedDuplexProcess> {
         Ok(rsi_process::ManagedDuplexProcess::new(Arc::new(
             FailedSettlement {
-                process: self.inner.spawn(spec)?,
+                process: self.inner.spawn(spec).await?,
                 joins: self.joins.clone(),
                 gate: self.gate.clone(),
             },
         )))
     }
 }
-struct Fixture {
+pub(super) struct Fixture {
+    pub(super) config: Config,
     _file_budget: tokio::sync::SemaphorePermit<'static>,
     temporary: tempfile::TempDir,
-    runtime: Runtime,
+    pub(super) runtime: Runtime,
     process: rsi_meta::FiberHandle,
-    files: Arc<rsi_files::LocalFiles>,
+    pub(super) files: Arc<rsi_files::LocalFiles>,
     service: Arc<LanguageService>,
-    workspace: PathBuf,
+    pub(super) workspace: PathBuf,
     log: PathBuf,
 }
 impl Fixture {
-    async fn new(mode: &str) -> Self {
+    pub(super) async fn new(mode: &str) -> Self {
         Self::with_settlement_failure(mode, None).await
     }
     async fn with_settlement_failure(
@@ -162,6 +164,7 @@ impl Fixture {
             .unwrap();
         let files = Arc::new(rsi_files::LocalFiles::new().unwrap());
         let config = Config {
+            remote_program: None,
             program: "/usr/bin/python3".into(),
             arguments: vec![
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -200,7 +203,7 @@ impl Fixture {
             },
         );
         let service = LanguageService::new(
-            config,
+            config.clone(),
             provider,
             Arc::new(TestSandbox),
             files.clone(),
@@ -208,6 +211,7 @@ impl Fixture {
         )
         .unwrap();
         Self {
+            config,
             _file_budget: file_budget,
             temporary,
             runtime,
@@ -218,7 +222,7 @@ impl Fixture {
             log,
         }
     }
-    fn query(operation: Operation) -> Query {
+    pub(super) fn query(operation: Operation) -> Query {
         Query {
             operation,
             path: "main.rs".into(),
@@ -245,7 +249,7 @@ impl Fixture {
         .await
         .unwrap();
     }
-    async fn close(self) {
+    pub(super) async fn close(self) {
         tokio::time::timeout(Duration::from_secs(10), self.service.close())
             .await
             .expect("LSP close deadline")
@@ -273,7 +277,7 @@ async fn under_limit_bidirectional_pipe_pressure_completes_and_reaps() {
         let result = tokio::time::timeout(
             Duration::from_secs(8),
             fixture.service.query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new(),
             ),
@@ -313,7 +317,7 @@ async fn idle_connection_answers_requests_without_a_new_query() {
     fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Hover),
             CancellationToken::new(),
         )
@@ -333,7 +337,7 @@ async fn idle_connection_answers_requests_without_a_new_query() {
     fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Definition),
             CancellationToken::new(),
         )
@@ -362,7 +366,7 @@ async fn actual_stdio_four_queries_sync_current_unicode_source_and_reject_server
         let output = fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Fixture::query(operation),
                 CancellationToken::new(),
             )
@@ -396,7 +400,11 @@ async fn actual_stdio_four_queries_sync_current_unicode_source_and_reject_server
     query.column = 4;
     fixture
         .service
-        .query(fixture.workspace.clone(), query, CancellationToken::new())
+        .query(
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
+            query,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let records = fixture.records();
@@ -418,7 +426,7 @@ async fn invalid_local_source_queries_keep_the_healthy_process() {
     fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             query.clone(),
             CancellationToken::new(),
         )
@@ -441,14 +449,22 @@ async fn invalid_local_source_queries_keep_the_healthy_process() {
         assert!(
             fixture
                 .service
-                .query(fixture.workspace.clone(), invalid, CancellationToken::new())
+                .query(
+                    LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
+                    invalid,
+                    CancellationToken::new()
+                )
                 .await
                 .is_err()
         );
     }
     fixture
         .service
-        .query(fixture.workspace.clone(), query, CancellationToken::new())
+        .query(
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
+            query,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -479,7 +495,7 @@ async fn oversized_hung_exited_and_invalid_responses_retire_actual_processes() {
             fixture
                 .service
                 .query(
-                    fixture.workspace.clone(),
+                    LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                     Fixture::query(operation),
                     CancellationToken::new()
                 )
@@ -499,7 +515,7 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
         async move {
             owner
                 .query(
-                    workspace,
+                    LanguageWorkspace::local(workspace).unwrap(),
                     Fixture::query(Operation::Definition),
                     CancellationToken::new(),
                 )
@@ -514,7 +530,7 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
         fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new()
             )
@@ -532,7 +548,7 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
         fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new()
             )
@@ -542,6 +558,10 @@ async fn dropped_waiter_keeps_real_process_owned_until_cancellation_and_retireme
     fixture.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one source boundary and pool lifetime scenario"
+)]
 async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
     let fixture = Fixture::new("normal").await;
     std::os::unix::fs::symlink("/etc/passwd", fixture.workspace.join("linked.rs")).unwrap();
@@ -551,7 +571,7 @@ async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
         fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 query.clone(),
                 CancellationToken::new()
             )
@@ -567,7 +587,11 @@ async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
     assert_eq!(
         fixture
             .service
-            .query(fixture.workspace.clone(), query, CancellationToken::new())
+            .query(
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
+                query,
+                CancellationToken::new()
+            )
             .await,
         Err(Error::Limit)
     );
@@ -586,7 +610,7 @@ async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
         fixture
             .service
             .query(
-                workspace,
+                LanguageWorkspace::local(workspace).unwrap(),
                 Fixture::query(Operation::Definition),
                 CancellationToken::new(),
             )
@@ -602,7 +626,7 @@ async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
         fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Query {
                     path: "missing.rs".into(),
                     ..Fixture::query(Operation::Hover)
@@ -616,7 +640,8 @@ async fn source_limits_symlinks_and_idle_pool_eviction_are_bounded() {
         fixture
             .service
             .query(
-                fixture.temporary.path().join(format!("pool-{index}")),
+                LanguageWorkspace::local(fixture.temporary.path().join(format!("pool-{index}")))
+                    .unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new(),
             )
@@ -745,6 +770,7 @@ async fn pinned_rust_analyzer_four_queries_under_native_read_only_sandbox() {
     let files = Arc::new(rsi_files::LocalFiles::new().unwrap());
     let options = serde_json::json!({"cargo":{"buildScripts":{"enable":false},"sysroot":null},"procMacro":{"enable":false},"checkOnSave":false});
     let config = Config {
+        remote_program: None,
         program: program.clone(),
         arguments: vec![],
         environment: [
@@ -808,7 +834,11 @@ async fn pinned_rust_analyzer_four_queries_under_native_read_only_sandbox() {
         let output = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 let output = service
-                    .query(workspace.clone(), query.clone(), CancellationToken::new())
+                    .query(
+                        LanguageWorkspace::local(workspace.clone()).unwrap(),
+                        query.clone(),
+                        CancellationToken::new(),
+                    )
                     .await
                     .unwrap();
                 let ready = match &output.result {
@@ -862,7 +892,7 @@ async fn query_error_survives_a_failed_document_close() {
         fixture
             .service
             .query(
-                fixture.workspace.clone(),
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
                 Fixture::query(Operation::Definition),
                 CancellationToken::new()
             )
@@ -878,7 +908,7 @@ async fn indexing_notifications_do_not_consume_server_request_admission() {
     fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Hover),
             CancellationToken::new(),
         )
@@ -894,7 +924,7 @@ async fn failed_settlement_is_retained_without_masking_query_failure() {
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         fixture.service.query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Hover),
             CancellationToken::new(),
         ),
@@ -907,7 +937,7 @@ async fn failed_settlement_is_retained_without_masking_query_failure() {
     let second = fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Hover),
             CancellationToken::new(),
         )
@@ -939,7 +969,7 @@ async fn dropping_close_keeps_unvisited_connections_owned_for_the_next_join() {
         fixture
             .service
             .query(
-                workspace,
+                LanguageWorkspace::local(workspace).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new(),
             )
@@ -984,7 +1014,7 @@ async fn retiring_workspace_stays_reserved_until_its_managed_process_settles() {
         fixture
             .service
             .query(
-                workspace.clone(),
+                LanguageWorkspace::local(workspace.clone()).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new(),
             )
@@ -996,7 +1026,7 @@ async fn retiring_workspace_stays_reserved_until_its_managed_process_settles() {
     let replacement = tokio::spawn(async move {
         service
             .query(
-                next,
+                LanguageWorkspace::local(next).unwrap(),
                 Fixture::query(Operation::Hover),
                 CancellationToken::new(),
             )
@@ -1010,7 +1040,7 @@ async fn retiring_workspace_stays_reserved_until_its_managed_process_settles() {
             fixture
                 .service
                 .query(
-                    workspace.clone(),
+                    LanguageWorkspace::local(workspace.clone()).unwrap(),
                     Fixture::query(Operation::Hover),
                     CancellationToken::new()
                 )
@@ -1050,7 +1080,7 @@ async fn invalid_source_still_joins_failed_idle_process() {
     fixture
         .service
         .query(
-            fixture.workspace.clone(),
+            LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
             Fixture::query(Operation::Hover),
             CancellationToken::new(),
         )
@@ -1082,7 +1112,11 @@ async fn invalid_source_still_joins_failed_idle_process() {
     assert_eq!(
         fixture
             .service
-            .query(fixture.workspace.clone(), query, CancellationToken::new())
+            .query(
+                LanguageWorkspace::local(fixture.workspace.clone()).unwrap(),
+                query,
+                CancellationToken::new()
+            )
             .await
             .unwrap_err(),
         Error::Unavailable
@@ -1097,4 +1131,20 @@ async fn invalid_source_still_joins_failed_idle_process() {
     assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 2);
     fixture.close().await;
     assert_eq!(joins.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn nested_process_api_classification_survives_language_projection() {
+    assert_eq!(
+        super::process_error(rsi_process::ProcessError::Api(
+            rsi_api_protocol::ApiError::OutcomeUnknown
+        )),
+        super::Error::OutcomeUnknown
+    );
+    assert_eq!(
+        super::process_error(rsi_process::ProcessError::Api(
+            rsi_api_protocol::ApiError::Capacity
+        )),
+        super::Error::Capacity
+    );
 }

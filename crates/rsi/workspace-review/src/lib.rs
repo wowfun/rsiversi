@@ -6,6 +6,7 @@ mod git;
 mod owner;
 mod plugin;
 mod scratch_root;
+pub use git::SOURCE_GIT_ENVIRONMENT;
 pub use owner::WorkspaceReview;
 pub use plugin::{WorkspaceReviewApiFactory, WorkspaceReviewContract, WorkspaceReviewFactory};
 

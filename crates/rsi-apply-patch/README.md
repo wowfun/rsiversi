@@ -10,3 +10,9 @@ unknown effect kinds are rejected before the response becomes a Tool result.
 Malformed model arguments return a bounded `invalid_arguments` Tool result
 before helper admission. Its diagnostic describes the expected schema without
 echoing untrusted keys or values.
+
+After helper admission, missing, malformed or incomplete settlement evidence
+returns `ToolError::OutcomeUnknown`. This includes cancellation after start.
+It interrupts the owning Turn without a model-facing error result or automatic
+replay. A complete validated helper response still reports its exact applied
+or rejected effects through the ordinary result contract.

@@ -15,7 +15,6 @@ use rsi_ui::{
 };
 use rsi_workspace_review_api::{Client, ConversationIdentity, Phase, Reply, Request, Scope};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 
 /// Ordinary read-only contribution; no product-specific renderer transport.
@@ -168,10 +167,7 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
         .map_err(error)?;
     let header = handle.header().await.map_err(error)?;
     let scope = Scope {
-        workspace: rsi_workspace_protocol::WorkspaceId::parse(hex::encode(Sha256::digest(
-            header.canonical_cwd().as_bytes(),
-        )))
-        .map_err(error)?,
+        workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
         conversation: ConversationIdentity::Native(controller.session_id().clone()),
     };
     let request = match operation {

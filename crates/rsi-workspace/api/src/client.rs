@@ -5,7 +5,7 @@ use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedAc
 use rsi_workspace_protocol::{
     MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceError, WorkspaceId,
     WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract, WorkspaceStatus,
-    validate_workspace_path,
+    validate_registration_path,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{path::Path, sync::Arc};
@@ -39,6 +39,13 @@ impl WorkspaceClient {
 }
 #[async_trait]
 impl WorkspaceRegistry for WorkspaceClient {
+    async fn order_seed(&self) -> Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        let seed: rsi_workspace_protocol::WorkspaceOrderSeed = self
+            .call(Operation::OrderSeed, &serde_json::json!({}))
+            .await?;
+        seed.validate()?;
+        Ok(seed)
+    }
     async fn get(&self, id: &WorkspaceId) -> Result<WorkspaceRecord> {
         let record: WorkspaceRecord = self
             .call(Operation::Get, &IdRequest { id: id.clone() })
@@ -63,12 +70,25 @@ impl WorkspaceRegistry for WorkspaceClient {
         page.validate(after, limit)?;
         Ok(page)
     }
-    async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord> {
-        validate_workspace_path(path)?;
+    async fn register_at(
+        &self,
+        location: &rsi_workspace_protocol::ExecutionLocation,
+        path: &Path,
+    ) -> Result<WorkspaceRecord> {
+        validate_registration_path(location, path)?;
         let record: WorkspaceRecord = self
-            .call(Operation::Register, &RegisterRequest { path: path.into() })
+            .call(
+                Operation::Register,
+                &RegisterRequest {
+                    location: location.clone(),
+                    path: path.into(),
+                },
+            )
             .await?;
         record.validate().map_err(crate::wire::invalid_record)?;
+        if record.coordinates.location() != location {
+            return Err(WorkspaceError::Api(ApiError::OutcomeUnknown));
+        }
         Ok(record)
     }
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus> {

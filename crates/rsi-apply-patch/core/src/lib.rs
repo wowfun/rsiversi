@@ -327,6 +327,28 @@ mod linux {
 
     #[async_trait]
     impl ToolExecutor for ApplyPatchTool {
+        async fn prepare(
+            &self,
+            arguments: &Value,
+            execution: &ToolExecution,
+        ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolProcess>> {
+            let Ok(arguments) = serde_json::from_value::<ApplyPatchArguments>(arguments.clone())
+            else {
+                return Ok(None);
+            };
+            if patch_engine::validate_patch_document(&arguments.patch).is_err() {
+                return Ok(None);
+            }
+            execution
+                .prepare_process(
+                    "apply_patch",
+                    self.helper.clone(),
+                    vec![],
+                    vec![APPLY_PATCH_HELPER_MARKER.into()],
+                )
+                .await
+                .map(Some)
+        }
         async fn execute(
             &self,
             arguments: Value,
@@ -344,9 +366,8 @@ mod linux {
             if let Err(failure) = patch_engine::validate_patch_document(&arguments.patch) {
                 return error_result(&failure.code, failure.message);
             }
-            let confined = execution
-                .confine(self.helper.clone(), vec![APPLY_PATCH_HELPER_MARKER.into()])
-                .await?;
+            let confined = execution.take_prepared_process()?;
+            let environment = confined.environment().to_vec();
             let evidence_bytes = execution
                 .extension::<rsi_tools_protocol::ToolEvidenceBudget>()
                 .map_or(patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES, |budget| {
@@ -354,17 +375,19 @@ mod linux {
                 })
                 .min(patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES);
             let stdin = helper_input(&arguments.patch, evidence_bytes)?;
-            let managed = match self.process.spawn(ProcessSpec {
+            let spec = ProcessSpec {
                 process: confined,
                 stdin,
-                environment: Vec::new(),
+                environment,
                 stdout_max_bytes: rsi_process::MAXIMUM_PROCESS_STREAM_BYTES,
                 stderr_max_bytes: HELPER_STDERR_CAPTURE_BYTES,
                 termination_grace_ms: HELPER_TERMINATION_GRACE_MS,
-            }) {
-                Ok(managed) => managed,
-                Err(error) => return process_error_result(&error),
             };
+            let managed =
+                match rsi_tools_protocol::ToolProcess::spawn(spec, self.process.as_ref()).await {
+                    Ok(managed) => managed,
+                    Err(error) => return process_error_result(&error),
+                };
             let waiting = managed.clone();
             let outcome = tokio::select! {
                 biased;
@@ -372,37 +395,25 @@ mod linux {
                 () = execution.cancellation.cancelled() => {
                     managed.terminate();
                     let _outcome = managed.wait().await;
-                    return unknown_effects_result(
-                        "apply-patch was interrupted after its helper started; filesystem effects are unknown and this invocation must not be replayed",
-                    );
+                    return Err(ToolError::OutcomeUnknown);
                 }
             };
             let Ok(outcome) = outcome else {
-                return unknown_effects_result(
-                    "helper wait failed after start; filesystem effects are unknown",
-                );
+                return Err(ToolError::OutcomeUnknown);
             };
             if outcome.exit_code != Some(0) || outcome.signal.is_some() {
-                return unknown_effects_result(
-                    "helper exited unexpectedly after start; filesystem effects are unknown",
-                );
+                return Err(ToolError::OutcomeUnknown);
             }
             let (Ok(stdout), Ok(stderr)) =
                 (managed.stdout().read_from(0), managed.stderr().read_from(0))
             else {
-                return unknown_effects_result(
-                    "helper output read failed after start; filesystem effects are unknown",
-                );
+                return Err(ToolError::OutcomeUnknown);
             };
             if stdout.lossy || stderr.lossy {
-                return unknown_effects_result(
-                    "helper output was truncated; filesystem effects are unknown",
-                );
+                return Err(ToolError::OutcomeUnknown);
             }
             if !stderr.bytes.is_empty() {
-                return unknown_effects_result(
-                    "helper wrote unexpected stderr; filesystem effects are unknown",
-                );
+                return Err(ToolError::OutcomeUnknown);
             }
             let response = match parse_helper_response(&stdout.bytes) {
                 Ok(response)
@@ -414,9 +425,7 @@ mod linux {
                     response
                 }
                 _ => {
-                    return unknown_effects_result(
-                        "helper response was invalid or exceeded its allowance; filesystem effects are unknown",
-                    );
+                    return Err(ToolError::OutcomeUnknown);
                 }
             };
             let is_error = response.status != patch_engine::PatchStatus::Applied;
@@ -477,6 +486,7 @@ mod linux {
 
     fn process_error_result(error: &ProcessError) -> rsi_tools_protocol::Result<ToolResult> {
         let code = match error {
+            ProcessError::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             ProcessError::Capacity => "process_capacity",
             ProcessError::ShuttingDown => "process_shutting_down",
             ProcessError::Unsupported => "process_unsupported",
@@ -496,19 +506,6 @@ mod linux {
     ) -> rsi_tools_protocol::Result<ToolResult> {
         let message = message.into();
         result_with_text(json!({"code":code,"message":message}), message, true)
-    }
-
-    fn unknown_effects_result(message: &str) -> rsi_tools_protocol::Result<ToolResult> {
-        result_with_text(
-            json!({
-                "code":"effects_unknown",
-                "message":message,
-                "effects_known":false,
-                "replay_safe":false
-            }),
-            message.to_owned(),
-            true,
-        )
     }
 
     fn result_with_text(

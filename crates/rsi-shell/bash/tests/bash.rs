@@ -561,3 +561,6 @@ async fn foreground_output_sanitizes_terminal_controls_only_in_model_text() {
     ));
     fixture.shutdown().await;
 }
+
+#[path = "bash/target.rs"]
+mod target;

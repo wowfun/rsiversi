@@ -13,7 +13,8 @@ use rsi_tools_protocol::{
 use serde_json::{Value, json};
 
 /// In-process caller classification; never accepted from a resource wire request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillAudience {
     /// Explicit human discovery or preview.
     Human,
@@ -55,7 +56,7 @@ pub(super) fn discover_selected(
     Ok(discovery.into_selected())
 }
 
-fn descriptor(skill: &SelectedSkill) -> SessionResourceDescriptor {
+pub(super) fn descriptor(skill: &SelectedSkill) -> SessionResourceDescriptor {
     SessionResourceDescriptor {
         id: skill.name.clone(),
         name: skill.name.clone(),
@@ -142,11 +143,12 @@ impl SessionResourceReader for SkillResources {
     async fn read(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
         self.0
-            .skills(header, id, SkillAudience::Human, cancellation)
+            .skills(header, execution, id, SkillAudience::Human, cancellation)
             .await
             .map_err(|error| match error {
                 WorkspaceContextError::Closed => ContributionError::Closed,
@@ -216,6 +218,7 @@ impl ToolExecutor for SkillTool {
             .0
             .skills(
                 authority.header(),
+                authority.execution(),
                 Some(&arguments.name),
                 SkillAudience::Model,
                 execution.cancellation.clone(),

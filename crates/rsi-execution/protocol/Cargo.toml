@@ -1,0 +1,19 @@
+[package]
+name = "rsi-execution-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

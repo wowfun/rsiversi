@@ -68,3 +68,18 @@ transport, and Context checks the durable active-effect bound during replay.
 Runtime retirement cancels and retires its Jobs producer, then waits up to thirty
 seconds for retained workflow owners. Timeout reports an error and leaves admitted
 owners responsible for completion; it does not assert forced task termination.
+
+Program results retain a typed `OutcomeUnknown` across Process, RPC and Jobs.
+An uncertain nested call is never returned as a catchable JavaScript error:
+the engine cancels and joins admitted RPC owners, then interrupts its owning
+Tool or workflow. A later cancellation or cleanup failure cannot turn uncertain
+effects into confirmed cancellation or an ordinary retryable script failure.
+
+Program Tools prepare the Node executable, complete environment and bootstrap argv before Approval.
+Jobs admission accepts that move-only plan separately from the script/RPC owner;
+the start latch consumes it once through the same execution tuple. A Local lease
+seals the contribution's explicit Node configuration; SSH resolves the target's
+`node` selector and environment. Native-only embeddings use that explicit
+configuration through their supplied Process and Sandbox, using asynchronous
+filesystem validation for the configured local executable. Preparation
+never canonicalizes a remote program on the Service filesystem.

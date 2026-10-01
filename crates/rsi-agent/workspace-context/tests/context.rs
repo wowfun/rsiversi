@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 fn header(cwd: &Path) -> SessionHeader {
     let cwd = fs::canonicalize(cwd).unwrap();
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("workspace-context-session").unwrap(),
         1,
         cwd.to_str().unwrap(),
@@ -31,6 +31,74 @@ fn header(cwd: &Path) -> SessionHeader {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn native_source_rejects_remote_coordinates_before_reading_a_local_namesake() {
+    use rsi_agent_session_protocol::{ExecutionCoordinates, ExecutionLocation, ExecutionTargetId};
+    use rsi_agent_workspace_context::{SkillAudience, WorkspaceContextError};
+    use tokio_util::sync::CancellationToken;
+
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    fs::write(
+        temp.path().join("AGENTS.md"),
+        "private Service instructions",
+    )
+    .unwrap();
+    let local = header(temp.path());
+    let remote = SessionHeader::new(
+        local.session_id().clone(),
+        1,
+        ExecutionCoordinates::new(
+            ExecutionLocation::Ssh {
+                target: ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+            },
+            local.canonical_cwd(),
+        )
+        .unwrap(),
+        local.agent_preset_id().clone(),
+        local.settings().clone(),
+    )
+    .unwrap();
+    let source = context(None, vec![]);
+    let requests = WorkspaceSkillRequests::default();
+    assert!(
+        source
+            .snapshot(&local, None, &requests)
+            .await
+            .unwrap()
+            .instructions
+            .is_some()
+    );
+    assert!(matches!(
+        source.snapshot(&remote, None, &requests).await,
+        Err(WorkspaceContextError::Invalid(_))
+    ));
+    assert!(matches!(
+        source
+            .skills(
+                &remote,
+                None,
+                None,
+                SkillAudience::Human,
+                CancellationToken::new()
+            )
+            .await,
+        Err(WorkspaceContextError::Invalid(_))
+    ));
+    assert!(matches!(
+        source
+            .agents(
+                &remote,
+                None,
+                None,
+                &BTreeSet::new(),
+                CancellationToken::new()
+            )
+            .await,
+        Err(WorkspaceContextError::Invalid(_))
+    ));
 }
 
 #[tokio::test]
@@ -49,6 +117,7 @@ async fn stray_agent_filenames_do_not_hide_valid_definitions() {
     let entries = source
         .agents(
             &header(temp.path()),
+            None,
             None,
             &BTreeSet::new(),
             tokio_util::sync::CancellationToken::new(),
@@ -79,6 +148,7 @@ async fn non_utf8_agent_filename_does_not_hide_valid_definitions() {
     let entries = context(None, vec![])
         .agents(
             &header(temp.path()),
+            None,
             None,
             &BTreeSet::new(),
             tokio_util::sync::CancellationToken::new(),
@@ -141,6 +211,7 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
         .skills(
             &header(temp.path()),
             None,
+            None,
             SkillAudience::Human,
             CancellationToken::new(),
         )
@@ -153,7 +224,11 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
         "path control characters must be escaped"
     );
     let snapshot = source
-        .snapshot(&header(temp.path()), &WorkspaceSkillRequests::default())
+        .snapshot(
+            &header(temp.path()),
+            None,
+            &WorkspaceSkillRequests::default(),
+        )
         .await
         .unwrap();
     assert!(!snapshot.complete);
@@ -165,7 +240,11 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
     );
     fs::remove_file(denied).unwrap();
     let recovered = source
-        .snapshot(&header(temp.path()), &WorkspaceSkillRequests::default())
+        .snapshot(
+            &header(temp.path()),
+            None,
+            &WorkspaceSkillRequests::default(),
+        )
         .await
         .unwrap();
     assert!(recovered.complete);
@@ -219,6 +298,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
         .skills(
             &session,
             None,
+            None,
             SkillAudience::Human,
             CancellationToken::new(),
         )
@@ -242,7 +322,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     ] {
         assert!(
             source
-                .skills(header, Some(name), audience, CancellationToken::new())
+                .skills(header, None, Some(name), audience, CancellationToken::new())
                 .await
                 .is_err()
         );
@@ -250,6 +330,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     let before = source
         .skills(
             &session,
+            None,
             Some("automatic"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -270,6 +351,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     let after = source
         .skills(
             &session,
+            None,
             Some("automatic"),
             SkillAudience::Model,
             CancellationToken::new(),
@@ -285,7 +367,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     cancelled.cancel();
     assert!(
         source
-            .skills(&session, None, SkillAudience::Human, cancelled)
+            .skills(&session, None, None, SkillAudience::Human, cancelled)
             .await
             .is_err()
     );
@@ -356,6 +438,7 @@ async fn selected_workspace_loads_project_and_user_sources_by_default() {
         let snapshot = source
             .snapshot(
                 &session,
+                None,
                 &WorkspaceSkillRequests::from_messages(&[&human("$project-only")]).unwrap(),
             )
             .await
@@ -402,6 +485,7 @@ async fn project_instructions_are_root_to_cwd_and_project_skill_wins_name_collis
     let snapshot = source
         .snapshot(
             &header(&cwd),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/shared")]).unwrap(),
         )
         .await
@@ -437,6 +521,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
     let agent_snapshot = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&message(
                 AgentMessageSource::Agent {
                     source_session_id: session,
@@ -453,6 +538,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
     let human_snapshot = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("\n /manual argument")]).unwrap(),
         )
         .await
@@ -474,6 +560,7 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
     let catalog = source
         .snapshot(
             &session,
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -484,6 +571,7 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
     let invoked = source
         .snapshot(
             &session,
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/large")]).unwrap(),
         )
         .await
@@ -512,6 +600,7 @@ async fn crlf_skill_frontmatter_is_discovered_and_invoked() {
     let snapshot = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/crlf")]).unwrap(),
         )
         .await
@@ -539,6 +628,7 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
     let first = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -546,6 +636,7 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
     let second = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -576,6 +667,7 @@ async fn session_unsafe_instruction_and_skill_sources_are_omitted() {
     let snapshot = source
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/unsafe")]).unwrap(),
         )
         .await
@@ -616,6 +708,7 @@ async fn project_skill_links_follow_targets_while_instructions_stay_contained() 
     let snapshot = context(None, Vec::new())
         .snapshot(
             &header(&project),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -642,6 +735,7 @@ async fn symlinked_project_skill_root_loads_external_skills() {
     let snapshot = context(None, Vec::new())
         .snapshot(
             &header(&project),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -668,6 +762,7 @@ async fn skill_entry_scan_stops_at_the_declared_bound() {
     let snapshot = context(None, vec![skills])
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -695,6 +790,7 @@ async fn later_skill_root_overflow_is_not_mistaken_for_a_complete_catalog() {
     let snapshot = context(None, vec![first, second])
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -719,6 +815,7 @@ async fn project_skill_invocation_exposes_only_a_project_relative_source() {
     let snapshot = context(None, Vec::new())
         .snapshot(
             &header(&project),
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/relative")]).unwrap(),
         )
         .await
@@ -755,6 +852,7 @@ async fn instruction_bounds_retain_the_most_specific_project_policy() {
     let snapshot = context(None, Vec::new())
         .snapshot(
             &header(&cwd),
+            None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
         .await
@@ -784,6 +882,7 @@ async fn skills_above_the_source_limit_are_omitted_from_the_catalog() {
     let snapshot = source
         .snapshot(
             &session,
+            None,
             &WorkspaceSkillRequests::from_messages(&[&human("/oversized")]).unwrap(),
         )
         .await
@@ -828,7 +927,10 @@ async fn nested_roots_precede_rsi_and_personal_roots_and_stop_at_git() {
         if let Some(path) = remove {
             fs::remove_dir_all(path).unwrap();
         }
-        let snapshot = source.snapshot(&header(&cwd), &requests).await.unwrap();
+        let snapshot = source
+            .snapshot(&header(&cwd), None, &requests)
+            .await
+            .unwrap();
         assert!(snapshot.complete);
         assert_eq!(snapshot.invocations.len(), 1);
         assert!(snapshot.invocations[0].text.contains(expected));
@@ -842,7 +944,10 @@ async fn nested_roots_precede_rsi_and_personal_roots_and_stop_at_git() {
         "NEAREST",
     );
     fs::remove_dir_all(project.join(".git")).unwrap();
-    let snapshot = source.snapshot(&header(&cwd), &requests).await.unwrap();
+    let snapshot = source
+        .snapshot(&header(&cwd), None, &requests)
+        .await
+        .unwrap();
     assert!(snapshot.invocations[0].text.contains("NEAREST"));
     assert!(!snapshot.skill_catalog.unwrap().contains("outside"));
 }
@@ -908,7 +1013,7 @@ async fn invalid_optional_body_does_not_discard_other_workspace_context() {
     let source = context(None, vec![]);
     let requests = WorkspaceSkillRequests::from_messages(&[&human("$bad $good")]).unwrap();
     let snapshot = source
-        .snapshot(&header(temp.path()), &requests)
+        .snapshot(&header(temp.path()), None, &requests)
         .await
         .unwrap();
     assert!(snapshot.complete);
@@ -945,7 +1050,7 @@ async fn instruction_byte_limit_prefers_deepest_without_reaching_the_file_count_
     }
     fs::write(cwd.join("AGENTS.md"), "DEEPEST RETAINED").unwrap();
     let snapshot = context(None, Vec::new())
-        .snapshot(&header(&cwd), &WorkspaceSkillRequests::default())
+        .snapshot(&header(&cwd), None, &WorkspaceSkillRequests::default())
         .await
         .unwrap();
     let text = snapshot.instructions.unwrap();
@@ -972,6 +1077,7 @@ async fn skill_catalog_retains_a_complete_lexical_prefix_within_its_byte_limit()
     let snapshot = context(None, vec![skills])
         .snapshot(
             &header(temporary.path()),
+            None,
             &WorkspaceSkillRequests::default(),
         )
         .await
@@ -1009,6 +1115,7 @@ async fn unavailable_agent_roots_do_not_hide_valid_user_definitions() {
     let read = || {
         source.agents(
             &header,
+            None,
             None,
             &reserved,
             tokio_util::sync::CancellationToken::new(),
@@ -1056,7 +1163,15 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
     .unwrap();
     let header = header(&nested);
     let reserved = BTreeSet::new();
-    let read = || source.agents(&header, Some("review"), &reserved, CancellationToken::new());
+    let read = || {
+        source.agents(
+            &header,
+            None,
+            Some("review"),
+            &reserved,
+            CancellationToken::new(),
+        )
+    };
     let entries = read().await.unwrap();
     let role = &entries[0].seed.as_ref().unwrap().role;
     assert_eq!(role.persona.as_deref(), Some("nearest"));
@@ -1080,6 +1195,7 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
         source
             .agents(
                 &header,
+                None,
                 Some("../escape"),
                 &BTreeSet::new(),
                 CancellationToken::new()
@@ -1098,6 +1214,7 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
             source
                 .agents(
                     &header,
+                    None,
                     Some("linked"),
                     &BTreeSet::new(),
                     CancellationToken::new()
@@ -1127,7 +1244,13 @@ async fn agent_catalog_overflow_keeps_a_bounded_prefix_and_exact_lookup() {
     let source = LocalWorkspaceContext::new(WorkspaceContextConfig::default()).unwrap();
     let header = header(temp.path());
     let entries = source
-        .agents(&header, None, &BTreeSet::new(), CancellationToken::new())
+        .agents(
+            &header,
+            None,
+            None,
+            &BTreeSet::new(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(entries.len(), 32);
@@ -1136,6 +1259,7 @@ async fn agent_catalog_overflow_keeps_a_bounded_prefix_and_exact_lookup() {
     let exact = source
         .agents(
             &header,
+            None,
             Some("role-32"),
             &BTreeSet::new(),
             CancellationToken::new(),

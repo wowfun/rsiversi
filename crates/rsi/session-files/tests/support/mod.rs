@@ -91,6 +91,7 @@ fn target() -> SessionTarget {
 }
 fn file(kind: FileKind) -> OpenedFile {
     OpenedFile {
+        executable: false,
         path: RelativePath::new(b"sub").unwrap(),
         token: "0".repeat(32).try_into().unwrap(),
         kind,

@@ -402,8 +402,13 @@ async fn portable_cancellation_fences_pre_cancelled_calls_and_settles_active_cal
             .wait(&identity, CancellationToken::new())
             .await
             .unwrap();
+        let expected = if pre_cancelled {
+            RetainedToolFailureKind::Cancelled
+        } else {
+            RetainedToolFailureKind::OutcomeUnknown
+        };
         assert!(
-            matches!(retained, RetainedToolResult::Failed(failure) if failure.kind == RetainedToolFailureKind::Cancelled)
+            matches!(retained, RetainedToolResult::Failed(failure) if failure.kind == expected)
         );
         assert_eq!(
             endpoint.calls.load(Ordering::SeqCst),

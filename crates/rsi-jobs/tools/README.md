@@ -19,6 +19,9 @@ fields remain visible to models even when the captured streams are nonempty.
 Job summaries may include the originating invocation ID for correlation. This
 string grants no authority; scope and origin admission remain with Jobs and its
 caller-owned typed extensions.
+`job_list` reports each Job's status, including `outcome_unknown`, without hiding
+its siblings or marking any Job reported. Output and kill retain their typed
+uncertainty semantics; listing is a read of known status, not a replay of work.
 Both identifier-taking schemas publish the same 256-byte `job_id` ceiling that
 the Jobs protocol enforces. The executor parses the bounded shape, and the Jobs
 provider remains the authoritative identifier-validation boundary before any

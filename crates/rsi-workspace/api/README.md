@@ -2,14 +2,14 @@
 
 The [Workspace contract](../protocol/README.md) owns the shared domain types and semantics.
 
-The ordinary endpoint plugin registers version 1 Workspace get, list, registration,
-status and deletion operations through the generic API registrar. Closed DTOs,
+The ordinary endpoint plugin registers version 2 Workspace get, list, registration,
+status, order-seed and deletion operations through the generic API registrar. Closed DTOs,
 bounds and read/mutation policy belong here. The endpoint requires a Workspace
 registry and grants no additional filesystem authority; registration requires an
 absolute path on that registry's host. Deletion removes only the registration.
 
 The ordinary client plugin requires one negotiated API client and publishes the
-Workspace registry contract. It requires all five exact operation descriptors
+Workspace registry contract. It requires all six exact operation descriptors
 before publication. Record identities, paths and page cursors are validated at the
 wire boundary; host paths remain opaque to the client OS. Failed semantic
 validation after a registration mutation reports an unknown outcome. API failures

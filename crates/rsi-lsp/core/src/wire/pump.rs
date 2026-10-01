@@ -84,14 +84,14 @@ impl Wire {
             self.process
                 .wait_settlement()
                 .await
-                .map_err(|_| Error::Unavailable)?;
+                .map_err(crate::process_error)?;
             return Err(Error::Unavailable);
         }
         self.process.terminate();
         self.process
             .wait_settlement()
             .await
-            .map_err(|_| Error::Unavailable)
+            .map_err(crate::process_error)
     }
 }
 impl Drop for Wire {
@@ -187,7 +187,7 @@ impl Pump {
         self.process
             .wait_settlement()
             .await
-            .map_err(|_| Error::Unavailable)?;
+            .map_err(crate::process_error)?;
         if panicked {
             Err(Error::Unavailable)
         } else {
@@ -326,7 +326,7 @@ impl Pump {
                 let written = input
                     .write(&bytes[offset..end])
                     .await
-                    .map_err(|_| Error::Unavailable)?;
+                    .map_err(crate::process_error)?;
                 if written == 0 || written > end - offset {
                     return Err(Error::Protocol);
                 }
@@ -620,7 +620,7 @@ impl Pump {
         tokio::select! {
             () = self.stop.cancelled(), if running => Err(Error::Cancelled),
             command = self.commands.recv(), if commands => self.command(command.ok_or(Error::Retired)?),
-            result = stdout.read(65536) => self.append(&result.map_err(|_| Error::Unavailable)?.bytes),
+            result = stdout.read(65536) => self.append(&result.map_err(crate::process_error)?.bytes),
             result = async { self.writing.as_mut().expect("pending write").future.as_mut().await }, if self.writing.is_some() => { result?; self.written(); Ok(()) },
             () = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => Err(Error::Deadline),
             () = tokio::task::yield_now(), if buffered => Ok(()),

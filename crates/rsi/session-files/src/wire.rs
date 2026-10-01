@@ -35,7 +35,7 @@ impl FilesOperation {
             Self::Release => "release",
         };
         OperationSpec {
-            id: OperationId::new("files", name, 1).expect("constant Files operation"),
+            id: OperationId::new("files", name, 2).expect("constant Files operation"),
             access: OperationAccess::Authenticated,
             class: OperationClass::Data,
             effect: OperationEffect::Read,

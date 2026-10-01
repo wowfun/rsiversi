@@ -255,7 +255,10 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
     assert!(!replay.summary_installed(&effect.unwrap()));
     let retained = serde_json::to_string(
         &replay
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &context_test_profile(),
+            )
             .unwrap(),
     )
     .unwrap();

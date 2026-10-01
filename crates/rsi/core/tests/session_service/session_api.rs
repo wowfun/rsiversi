@@ -242,7 +242,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
     rsi_session_testkit::assert_session_contract(
         session.clone(),
         create.clone(),
-        workspace.path.to_str().unwrap(),
+        workspace.coordinates.path(),
         client_runtime.execution(),
     )
     .await;

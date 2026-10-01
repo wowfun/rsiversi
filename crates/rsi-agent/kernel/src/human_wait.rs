@@ -210,6 +210,7 @@ impl AgentKernel {
             if let Err(error) = parking {
                 return Err(parked.cleanup_after_failure(error).await);
             }
+            parked.mutation.parked();
             Ok(Box::new(parked.track()))
         })
         .await

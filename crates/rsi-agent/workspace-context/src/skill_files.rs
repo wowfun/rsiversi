@@ -71,6 +71,17 @@ pub(super) struct SkillDiscovery {
 }
 
 impl SkillDiscovery {
+    pub(super) fn continuing(inspected: usize) -> Self {
+        Self {
+            inspected,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn inspected(&self) -> usize {
+        self.inspected
+    }
+
     pub(super) fn into_selected(self) -> Vec<SelectedSkill> {
         self.selected.into_values().collect()
     }

@@ -10,6 +10,9 @@ use std::{
 pub struct Config {
     /// Absolute executable, invoked without a shell.
     pub program: PathBuf,
+    /// Explicit remote executable and extra environment; absent means remote unavailable.
+    #[serde(default)]
+    pub remote_program: Option<rsi_execution::TargetProgram>,
     /// Explicit arguments.
     pub arguments: Vec<String>,
     /// Complete environment.
@@ -24,6 +27,9 @@ pub struct Config {
 impl Config {
     /// Validates operator input before any process is admitted.
     pub fn validate(&self) -> Result<()> {
+        if let Some(program) = &self.remote_program {
+            program.validate().map_err(|_| Error::Invalid)?;
+        }
         if !self.program.is_absolute()
             || self.program.as_os_str().len() > 4096
             || self.arguments.len() > 32

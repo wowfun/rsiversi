@@ -42,3 +42,10 @@ Process family provides equivalent native settlement semantics there.
 Bash is Local-program Callable. An internal call preserves ordinary approval,
 Sandbox policy, Turn Jobs ownership and process settlement; program dispatch
 does not grant a separate background Jobs lifetime.
+
+With an execution lease, Bash prepares its opaque plan before Approval. Local
+execution seals the contribution's explicit executable and scrubbed environment;
+SSH resolves the `bash` selector and environment on that target. Foreground and Jobs
+consume that exact plan once; neither can fall back to the factory's native
+Process. Native-only embeddings use the factory's explicit executable and
+scrubbed environment. The Job request retains the plan through accepted startup.

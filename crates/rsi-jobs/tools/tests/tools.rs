@@ -76,6 +76,7 @@ impl Sandbox for UnusedSandbox {
 #[derive(Clone, Debug)]
 enum TestRequest {
     Complete,
+    Unknown,
     Block,
     IgnoreCancellation(CancellationToken),
     Output {
@@ -87,12 +88,15 @@ enum TestRequest {
 #[derive(Debug)]
 struct TestProducer;
 
+#[async_trait::async_trait]
+
 impl JobProducer for TestProducer {
-    fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
+    async fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
         let request = request
             .downcast_ref::<TestRequest>()
             .ok_or_else(|| rsi_jobs::JobsError::InvalidInput("unexpected test request".into()))?;
         let settlement = match request {
+            TestRequest::Unknown => TestSettlement::Unknown,
             TestRequest::Complete | TestRequest::Output { .. } => TestSettlement::Immediate,
             TestRequest::Block => TestSettlement::Cancellation,
             TestRequest::IgnoreCancellation(release) => TestSettlement::Release(release.clone()),
@@ -114,6 +118,7 @@ impl JobProducer for TestProducer {
 #[derive(Debug)]
 enum TestSettlement {
     Immediate,
+    Unknown,
     Cancellation,
     Release(CancellationToken),
 }
@@ -153,6 +158,7 @@ impl JobControl for TestControl {
 
     async fn wait(&self) -> rsi_jobs::Result<JobTerminal> {
         match &self.settlement {
+            TestSettlement::Unknown => return Err(rsi_jobs::JobsError::OutcomeUnknown),
             TestSettlement::Immediate => {}
             TestSettlement::Cancellation => self.cancellation.cancelled().await,
             TestSettlement::Release(release) => release.cancelled().await,
@@ -168,6 +174,53 @@ impl JobControl for TestControl {
             message: None,
         })
     }
+}
+
+#[tokio::test]
+async fn listing_an_uncertain_job_preserves_healthy_siblings_and_does_not_report_it() {
+    let fixture = Fixture::activate().await;
+    let unknown = fixture.submit(TestRequest::Unknown).await;
+    let running = fixture.submit(TestRequest::Block).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture
+            .jobs
+            .list(&fixture.scope)
+            .unwrap()
+            .iter()
+            .find(|job| job.id == unknown)
+            .unwrap()
+            .status
+            != JobStatus::OutcomeUnknown
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let listed = fixture.call("job_list", json!({}), true).await.unwrap();
+    assert!(!listed.is_error);
+    let jobs = listed.value["jobs"].as_array().unwrap();
+    assert_eq!(
+        jobs.iter().find(|job| job["id"] == unknown).unwrap()["status"],
+        "outcome_unknown"
+    );
+    assert!(!fixture.jobs.get(&fixture.scope, &unknown).unwrap().reported);
+    assert_eq!(
+        jobs.iter().find(|job| job["id"] == running).unwrap()["status"],
+        "running"
+    );
+    let killed = fixture
+        .call("job_kill", json!({"job_id":running}), true)
+        .await
+        .unwrap();
+    assert_eq!(killed.value["status"], "cancelled");
+    assert!(matches!(
+        fixture
+            .call("job_output", json!({"job_id":unknown}), true)
+            .await,
+        Err(ToolError::OutcomeUnknown)
+    ));
+    fixture.shutdown().await;
 }
 
 struct Fixture {
@@ -248,7 +301,7 @@ impl Fixture {
         }
     }
 
-    fn submit(&self, request: TestRequest) -> String {
+    async fn submit(&self, request: TestRequest) -> String {
         self.jobs
             .submit(
                 &self.scope,
@@ -260,6 +313,7 @@ impl Fixture {
                     requires_report: true,
                 },
             )
+            .await
             .unwrap()
     }
 
@@ -394,7 +448,7 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
     assert!(missing.is_error);
     assert_eq!(missing.value["code"], "missing_job_scope");
 
-    let complete = fixture.submit(TestRequest::Complete);
+    let complete = fixture.submit(TestRequest::Complete).await;
     let output = fixture
         .call(
             "job_output",
@@ -414,7 +468,7 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
             && text.contains("wait timed out: false") && text.contains(&complete))
     );
 
-    let running = fixture.submit(TestRequest::Block);
+    let running = fixture.submit(TestRequest::Block).await;
     let listed = fixture.call("job_list", json!({}), true).await.unwrap();
     assert!(
         listed.value["jobs"]
@@ -441,10 +495,12 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
 async fn terminal_output_projection_is_bounded_before_the_job_is_reported() {
     let fixture = Fixture::activate().await;
     let capture_bytes = 4 * 1024 * 1024;
-    let complete = fixture.submit(TestRequest::Output {
-        stdout: Arc::from(vec![0_u8; capture_bytes]),
-        stderr: Arc::from(vec![b'x'; capture_bytes]),
-    });
+    let complete = fixture
+        .submit(TestRequest::Output {
+            stdout: Arc::from(vec![0_u8; capture_bytes]),
+            stderr: Arc::from(vec![b'x'; capture_bytes]),
+        })
+        .await;
 
     let output = fixture
         .call(
@@ -470,7 +526,7 @@ async fn terminal_output_projection_is_bounded_before_the_job_is_reported() {
 #[tokio::test(start_paused = true)]
 async fn waiting_jobs_tools_observe_cancellation_and_release_retained_results() {
     let fixture = Fixture::activate().await;
-    let running = fixture.submit(TestRequest::Block);
+    let running = fixture.submit(TestRequest::Block).await;
     let prepared = fixture
         .prepare(
             "job_output",
@@ -503,7 +559,9 @@ async fn waiting_jobs_tools_observe_cancellation_and_release_retained_results() 
     );
 
     let release = CancellationToken::new();
-    let stubborn = fixture.submit(TestRequest::IgnoreCancellation(release.clone()));
+    let stubborn = fixture
+        .submit(TestRequest::IgnoreCancellation(release.clone()))
+        .await;
     let prepared = fixture
         .prepare("job_kill", json!({"job_id":stubborn}))
         .unwrap();

@@ -334,14 +334,16 @@ async fn run_owned(
         return Err(NativeAddonBuildError::Cancelled);
     }
     let enforcement = confined.stamp.clone();
-    let managed = process.spawn(ProcessSpec {
-        process: confined,
-        stdin: Vec::new(),
-        environment,
-        stdout_max_bytes: 64 * 1024,
-        stderr_max_bytes: 64 * 1024,
-        termination_grace_ms: 100,
-    })?;
+    let managed = process
+        .spawn(ProcessSpec {
+            process: confined,
+            stdin: Vec::new(),
+            environment,
+            stdout_max_bytes: 64 * 1024,
+            stderr_max_bytes: 64 * 1024,
+            termination_grace_ms: 100,
+        })
+        .await?;
     let _terminate = TerminateOnDrop(managed.clone());
     let (mut status, outcome) = tokio::select! {
         biased;

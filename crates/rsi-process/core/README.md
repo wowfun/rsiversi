@@ -105,3 +105,22 @@ owners use it after intentional termination; they must still propagate settlemen
 failure. `wait` retains its stronger output-completeness result and may report a
 drain error even when resource settlement succeeded. Neither operation fabricates
 success for a surviving group or an OS wait failure.
+
+Process, Duplex and PTY admission are asynchronous. A provider must retain each
+accepted start through publication or cleanup even if the awaiting caller is
+cancelled. A returned error must distinguish refusal before execution from an
+unknown effect outcome. PTY resize is asynchronous and acknowledges the target
+size before an upper-layer screen publishes it. The local provider completes
+its native spawn/resize admission without yielding; its registry retains the
+child independently of the returned handle.
+
+`OutcomeUnknown` means dispatch may have started but its effect or settlement
+cannot be established. It is distinct from rejection before dispatch and from
+a known nonzero exit. Callers preserve this category and never replay the
+request automatically, including after cancellation or a lost acknowledgement.
+
+Process request specifications are generic over their prepared-plan type. Native
+providers use the default Sandbox `ConfinedProcess`; location-aware execution
+uses its own opaque plan. `try_map_process` moves the complete request into a
+provider representation without copying stdin or environment or changing bounds.
+Native validation runs after the owning execution lease has checked its plan.

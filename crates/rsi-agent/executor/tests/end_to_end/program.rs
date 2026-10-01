@@ -335,3 +335,83 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
 async fn completed_coordinator_settles_abandoned_started_call_without_cancelling_turn() {
     check_program_policy(None, true).await;
 }
+
+#[derive(Debug)]
+struct UncertainCoordinator(Arc<AtomicBool>);
+#[async_trait]
+impl ToolExecutor for UncertainCoordinator {
+    async fn execute(&self, _: Value, execution: ToolExecution) -> ToolResultType<ToolResult> {
+        let calls = execution.extension::<ProgramToolCalls>().unwrap();
+        let error = calls
+            .0
+            .call("echo".into(), json!({}), execution.cancellation)
+            .await
+            .unwrap_err();
+        assert_eq!(error, ToolError::OutcomeUnknown);
+        self.0.store(true, Ordering::SeqCst);
+        Err(error)
+    }
+}
+#[tokio::test]
+async fn nested_uncertainty_reaches_coordinator_as_typed_failure_before_turn_interruption() {
+    let stack = BaseStack::activate().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicBool::new(false));
+    let echo = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("echo", "uncertain", json!({"type":"object"}))
+                .unwrap()
+                .with_program_role(ToolProgramRole::Callable),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(super::tool_execution::UncertainTool(calls.clone())),
+        })
+        .unwrap();
+    let coordinator = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("run_code", "program", json!({"type":"object"}))
+                .unwrap()
+                .with_program_role(ToolProgramRole::Coordinator),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(UncertainCoordinator(observed.clone())),
+        })
+        .unwrap();
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_calls_script(
+            &[("program", "run_code", "{}")],
+        ))])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack.activate_language("program-uncertain", provider).await;
+    let executor = stack.activate_executor("program-uncertain-executor").await;
+    let (submitted, outcome) = stack.submit_and_wait("execute").await;
+    assert!(matches!(outcome, TurnOutcome::Interrupted { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(observed.load(Ordering::SeqCst));
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 128)
+        .await
+        .unwrap()
+        .facts;
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ToolStarted { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+    );
+    drop((echo, coordinator));
+    stack.dispose(language, executor).await;
+}

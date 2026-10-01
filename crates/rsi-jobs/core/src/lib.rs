@@ -85,6 +85,7 @@ pub struct JobScopeAuthorityState {
     provider_id: u64,
     generation: u64,
     revoked: AtomicBool,
+    outcome_unknown: AtomicBool,
 }
 
 impl JobScopeAuthorityState {
@@ -126,6 +127,7 @@ impl JobScopeAuthority {
                 provider_id,
                 generation,
                 revoked: AtomicBool::new(false),
+                outcome_unknown: AtomicBool::new(false),
             }),
         }
     }
@@ -170,6 +172,18 @@ impl JobScopeAuthority {
     #[doc(hidden)]
     pub fn revoke(&self) {
         self.state.revoke();
+    }
+
+    /// Records uncertainty for this exact provider-owned generation.
+    #[doc(hidden)]
+    pub fn mark_outcome_unknown(&self) {
+        self.state.outcome_unknown.store(true, Ordering::Release);
+    }
+
+    /// Reads the monotonic uncertainty flag, even after revocation or reporting.
+    #[doc(hidden)]
+    pub fn has_unknown_outcome(&self) -> bool {
+        self.state.outcome_unknown.load(Ordering::Acquire)
     }
 
     /// Returns whether this exact authority generation remains open.
@@ -234,6 +248,8 @@ pub enum JobStatus {
     Completed,
     /// Work settled with an execution failure.
     Failed,
+    /// Work may have taken effect, but its outcome cannot be established.
+    OutcomeUnknown,
     /// Work settled after cancellation.
     Cancelled,
 }
@@ -241,7 +257,10 @@ pub enum JobStatus {
 impl JobStatus {
     /// Returns whether this status is terminal.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::OutcomeUnknown
+        )
     }
 }
 
@@ -282,6 +301,13 @@ impl JobTerminal {
         {
             return Err(JobsError::InvalidInput(
                 "completed job cannot carry a signal or nonzero exit code".into(),
+            ));
+        }
+        if self.status == JobStatus::OutcomeUnknown
+            && (self.exit_code.is_some() || self.signal.is_some())
+        {
+            return Err(JobsError::InvalidInput(
+                "unknown job outcome cannot assert an exit code or signal".into(),
             ));
         }
         if self.message.as_ref().is_some_and(|message| {
@@ -383,6 +409,8 @@ pub struct JobRead {
 /// Scope-finalization report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobFinalization {
+    /// Any accepted work had uncertain effects, including unpublished or reported work.
+    pub outcome_unknown: bool,
     /// Jobs that required reporting and had not been observed before finalization.
     pub unreported: Vec<JobSummary>,
 }
@@ -433,9 +461,10 @@ pub trait JobControl: fmt::Debug + Send + Sync + 'static {
 }
 
 /// Trusted named work producer.
+#[async_trait]
 pub trait JobProducer: fmt::Debug + Send + Sync + 'static {
     /// Validates and starts one request, returning ownership control on success.
-    fn start(&self, request: &JobRequest) -> Result<Arc<dyn JobControl>>;
+    async fn start(&self, request: &JobRequest) -> Result<Arc<dyn JobControl>>;
 }
 
 /// One exact-name producer registration.
@@ -518,7 +547,7 @@ pub trait Jobs: fmt::Debug + Send + Sync + 'static {
     /// Acquires the live authority generation for one identity.
     fn acquire_scope(&self, id: JobScopeId) -> Result<JobScopeAuthority>;
     /// Admits one scoped request and publishes its identifier after ownership transfer.
-    fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String>;
+    async fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String>;
     /// Lists at most [`MAXIMUM_JOBS_PER_LIST`] exact-scope records oldest-first.
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>>;
     /// Gets one exact-scope record.
@@ -591,6 +620,9 @@ pub enum JobsError {
     /// Cancellation did not settle the selected work within the provider bound.
     #[error("job cancellation timed out")]
     CancellationTimeout,
+    /// Admitted producer work may have taken effect without a verifiable outcome.
+    #[error("job outcome is unknown; do not replay")]
+    OutcomeUnknown,
     /// Producer or control failed.
     #[error("job execution failed: {0}")]
     Execution(String),

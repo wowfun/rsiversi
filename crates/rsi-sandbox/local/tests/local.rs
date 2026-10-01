@@ -1066,3 +1066,178 @@ async fn pty_plan_preserves_confinement_and_pins_workspace_across_rename() {
     }
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn system_probe_does_not_inherit_parent_environment() {
+    use std::os::unix::fs::PermissionsExt as _;
+    const CHILD: &str = "RSI_SANDBOX_ENVIRONMENT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("probe");
+        std::fs::write(&path, b"#!/bin/sh\n[ -z \"${HOME+x}${NOTIFY_SOCKET+x}${WATCHDOG_USEC+x}${DBUS_SESSION_BUS_ADDRESS+x}${RSI_PROBE_SENTINEL+x}\" ] || exit 1\nexit 23\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            rsi_sandbox_local::SystemSandboxProbe
+                .available(&path, &[])
+                .await
+                .unwrap()
+        );
+        return;
+    }
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "system_probe_does_not_inherit_parent_environment",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .kill_on_drop(true);
+    for name in [
+        "HOME",
+        "NOTIFY_SOCKET",
+        "WATCHDOG_USEC",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "RSI_PROBE_SENTINEL",
+    ] {
+        command.env(name, "fixture-must-not-enter-probe");
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child probe test failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_reader_view_is_read_only_pipe_only_and_separate_from_ordinary_scratch() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bwrap = temporary.path().join("bwrap");
+    std::fs::write(&bwrap, b"probe").unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "source-reader",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(Arc::new(Probe {
+                    replace_during_probe: None,
+                    calls: Mutex::new(vec![]),
+                }))),
+            ),
+            json!({"bubblewrap":[bwrap],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let request = ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
+        mode: SandboxMode::ReadOnly,
+        program: std::fs::canonicalize("/bin/sh").unwrap(),
+        arguments: vec![],
+        cwd: temporary.path().into(),
+        workspace: temporary.path().into(),
+    };
+    let source = sandbox
+        .confine_source_reader(request.clone())
+        .await
+        .unwrap();
+    assert_eq!(source.stamp.scratch, SandboxScratch::Host);
+    assert_eq!(source.stamp.network, SandboxNetwork::Isolated);
+    assert!(
+        !source
+            .arguments
+            .iter()
+            .any(|arg| arg == "--tmpfs" || arg == "--share-net")
+    );
+    assert!(source.arguments.iter().any(|arg| arg == "--unshare-all"));
+    let ordinary = sandbox.confine(request.clone()).await.unwrap();
+    assert_eq!(ordinary.stamp.scratch, SandboxScratch::PrivateTmp);
+    assert_eq!(ordinary.stamp.network, SandboxNetwork::Host);
+    for mode in [SandboxMode::WorkspaceWrite, SandboxMode::DangerFullAccess] {
+        assert!(
+            sandbox
+                .confine_source_reader(ProcessRequest {
+                    mode,
+                    ..request.clone()
+                })
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        sandbox
+            .confine_source_reader(ProcessRequest {
+                stdio: rsi_sandbox::ProcessStdio::Pty,
+                ..request
+            })
+            .await
+            .is_err()
+    );
+    drop(sandbox);
+    assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires native Linux Bubblewrap user and network namespaces"]
+async fn native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("child");
+    std::fs::create_dir(&workspace).unwrap();
+    let marker = temporary.path().join("ancestor");
+    std::fs::write(&marker, b"ancestor\n").unwrap();
+    let new_file = temporary.path().join("must-not-create");
+    let host_network = std::fs::read_link("/proc/self/ns/net").unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "native-source-reader",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::default().require_restricted_backend()),
+            ),
+            json!({"bubblewrap":["/usr/bin/bwrap"],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let plan = sandbox.confine_source_reader(ProcessRequest { stdio: rsi_sandbox::ProcessStdio::Pipes, mode: SandboxMode::ReadOnly,
+        program: std::fs::canonicalize("/bin/sh").unwrap(),
+        arguments: vec!["-c".into(), "cat \"$1\"; if printf changed >\"$1\"; then exit 42; fi; if printf changed >\"$2\"; then exit 43; fi; readlink /proc/self/ns/net".into(), "source-fixture".into(), marker.to_str().unwrap().into(), new_file.to_str().unwrap().into()],
+        cwd: workspace.clone(), workspace }).await.unwrap();
+    let output = std::process::Command::new(&plan.program)
+        .args(&plan.arguments)
+        .current_dir(&plan.cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("ancestor\n"));
+    assert_ne!(
+        stdout.lines().nth(1).unwrap(),
+        host_network.to_str().unwrap()
+    );
+    assert_eq!(std::fs::read(&marker).unwrap(), b"ancestor\n");
+    assert!(!new_file.exists());
+    drop(sandbox);
+    assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}

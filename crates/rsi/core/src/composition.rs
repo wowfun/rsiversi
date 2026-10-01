@@ -163,6 +163,7 @@ pub struct StandardCodingTools {
     bash_producer: BashJobProducerFactory,
     bash_tool: BashToolFactory,
     apply_patch: ApplyPatchToolFactory,
+    execution_programs: std::collections::BTreeMap<String, rsi_execution::ResolvedProgram>,
 }
 
 /// Pure standard Host/Profile preview and the exact owner-generation identity.
@@ -194,9 +195,26 @@ impl StandardCodingTools {
         {
             let bash_tool = BashToolFactory::new(bash, child_environment)
                 .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+            let execution_programs = std::collections::BTreeMap::from([
+                (
+                    "bash".into(),
+                    rsi_execution::ResolvedProgram {
+                        program: bash_tool.executable().to_owned(),
+                        environment: bash_tool.environment_with_bash_defaults(),
+                    },
+                ),
+                (
+                    "apply_patch".into(),
+                    rsi_execution::ResolvedProgram {
+                        program: helper.clone(),
+                        environment: Vec::new(),
+                    },
+                ),
+            ]);
             let apply_patch = ApplyPatchToolFactory::new(helper)
                 .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
             Ok(Self {
+                execution_programs,
                 bash_producer: BashJobProducerFactory,
                 bash_tool,
                 apply_patch,
@@ -1450,6 +1468,8 @@ impl StandardComposition {
             crate::ProfileCatalog::new(paths.clone(), self.applications.clone()),
             local_api.map(str::to_owned),
         )?;
+        #[cfg(target_os = "linux")]
+        crate::ssh_targets::register(&mut builder)?;
         builder.register_linked(
             "rsi.inspector.api",
             env!("CARGO_PKG_VERSION"),
@@ -1457,6 +1477,14 @@ impl StandardComposition {
             inspector.clone(),
         )?;
         register_contracts(&mut builder)?;
+        crate::execution_access::register(
+            &mut builder,
+            self.coding_tools
+                .as_ref()
+                .map_or_else(std::collections::BTreeMap::new, |tools| {
+                    tools.execution_programs.clone()
+                }),
+        )?;
         #[cfg(not(unix))]
         register(
             &mut builder,
@@ -1995,6 +2023,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<JobsContract>()?;
     builder.register_local_contract::<ProjectionRegistryContract>()?;
     builder.register_local_contract::<WorkspaceRegistryContract>()?;
+    builder.register_local_contract::<rsi_workspace_protocol::WorkspaceIngressContract>()?;
     builder.register_local_contract::<ToolCatalogProviderContract>()?;
     builder.register_local_contract::<ToolRegistrarContract>()?;
     builder.register_local_contract::<AgentCompositionContract>()?;
@@ -2234,6 +2263,9 @@ impl TurnFinalizer for SessionJobsFinalizer {
                 message: error.to_string(),
             }
         })?;
+        if finalization.outcome_unknown {
+            return Err(TurnFinalizationError::OutcomeUnknown);
+        }
         if finalization.unreported.is_empty() {
             return Ok(TurnFinalizationReport::complete());
         }
@@ -2320,6 +2352,36 @@ fn register_preset_settings(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_execution_catalog_uses_the_bash_owners_scrubbed_environment() {
+        let coding = super::StandardCodingTools::new(
+            "/bin/bash".into(),
+            std::env::current_exe().unwrap(),
+            vec![
+                ("DEEPSEEK_API_KEY".into(), "test-secret".into()),
+                ("LD_PRELOAD".into(), "test-loader".into()),
+                ("VISIBLE".into(), "yes".into()),
+            ],
+        )
+        .unwrap();
+        let environment = &coding.execution_programs["bash"].environment;
+        assert_eq!(
+            *environment,
+            coding.bash_tool.environment_with_bash_defaults()
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, _)| key == "DEEPSEEK_API_KEY" || key == "LD_PRELOAD")
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| key == "VISIBLE" && value == "yes")
+        );
+    }
+
     use super::*;
     use rsi_meta_profile::{
         ProfileCompiler, ProfileEnvironment, ProfileLimits, ProfileProgram, ProfileResolver,

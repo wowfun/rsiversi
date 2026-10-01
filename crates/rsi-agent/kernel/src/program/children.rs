@@ -1,5 +1,9 @@
 use super::*;
 impl LiveRun {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One parent admission owns child identity, execution reservation and the atomic two-Session commit."
+    )]
     pub(super) async fn admit_child(&self, request: ProgramAgentRequest) -> TurnResult<u32> {
         rsi_agent_session_protocol::validate_turn_text(&request.message).map_err(session_error)?;
         if let Some(role) = &request.role {
@@ -12,7 +16,7 @@ impl LiveRun {
             .submission_admission
             .acquire(&self.descriptor.session_id)
             .await?;
-        self.active().await?;
+        let execution = self.active().await?;
         let state = self.state().await?;
         let ordinal = u32::try_from(state.children.len() + 1).map_err(session_error)?;
         let child_id = self
@@ -21,6 +25,11 @@ impl LiveRun {
             .map_err(session_error)?;
         let message_id =
             MessageId::new(format!("{}-initial", child_id.as_str())).map_err(session_error)?;
+        let execution_reservation = self.kernel.inner.execution_messages.reserve(
+            &child_id,
+            &message_id,
+            self.execution.as_ref(),
+        )?;
         let (prepared, root) = self
             .prepare_child(ordinal, &child_id, &message_id, &request)
             .await?;
@@ -70,6 +79,7 @@ impl LiveRun {
         self.kernel
             .owned_commit(async move {
                 let _admission = admission;
+                let _execution = execution;
                 kernel
                     .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                         sessions: vec![
@@ -88,6 +98,10 @@ impl LiveRun {
                     })
                     .await?
                     .map_err(turn_store_error)?;
+                kernel
+                    .inner
+                    .execution_messages
+                    .publish(execution_reservation);
                 // The exact pin is retained by the run and selected again for initial claim.
                 drop(prepared);
                 kernel.request_ready_scan();

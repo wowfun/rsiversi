@@ -21,6 +21,7 @@ async fn pending_reviews_share_a_byte_budget_released_by_answer_and_drop() {
     let large = |index| {
         let mut request = request(&format!("large-{index}"));
         request.review = Some(rsi_approval_protocol::ApprovalReview {
+            execution: None,
             arguments: serde_json::json!({"text": "x".repeat(4 * 1024 * 1024 - 64)}),
             cwd: std::env::temp_dir().to_string_lossy().into_owned(),
             sandbox: "read-only".into(),

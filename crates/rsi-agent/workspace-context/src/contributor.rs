@@ -75,7 +75,7 @@ impl ContextContributor for Contributor {
         let requests = pending_requests(context, &previous).await?;
         let snapshot = self
             .source
-            .snapshot(&context.header, &requests)
+            .snapshot(&context.header, context.execution.as_ref(), &requests)
             .await
             .map_err(workspace_error)?;
         if !snapshot.complete {

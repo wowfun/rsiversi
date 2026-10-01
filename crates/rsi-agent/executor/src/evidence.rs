@@ -23,7 +23,10 @@ pub(super) struct Capture {
     manifest: Vec<EvidenceContentCount>,
 }
 impl Capture {
-    pub(super) fn new(request: &LanguageRequest) -> std::result::Result<Self, DriveFailure> {
+    pub(super) fn new(
+        request: &LanguageRequest,
+        profile: &rsi_ai_protocol::LanguageProfile,
+    ) -> std::result::Result<Self, DriveFailure> {
         let system = request
             .messages()
             .iter()
@@ -40,7 +43,7 @@ impl Capture {
             }
         }
         Ok(Self {
-            configuration: serde_json::json!({"settings":request.settings(),"response_format":request.response_format(),"extensions":request.extensions()}),
+            configuration: serde_json::json!({"settings":request.settings(),"response_format":request.response_format(),"extensions":request.extensions(),"language_profile":profile}),
             system: serde_json::to_string(&system).map_err(fatal)?,
             tools: serde_json::to_string(&serde_json::json!({"definitions":request.tools(),"hosted":request.hosted_tools(),"choice":request.tool_choice()})).map_err(fatal)?,
             manifest: counts.into_iter().map(|(kind,(count,bytes))|EvidenceContentCount {kind,count,bytes}).collect(),
@@ -249,7 +252,7 @@ mod tests {
                 .unwrap(),
         ])
         .unwrap();
-        let evidence = Capture::new(&request)
+        let evidence = Capture::new(&request, &crate::tests::context_test_profile())
             .unwrap()
             .finish(context.snapshot())
             .unwrap();
@@ -316,7 +319,7 @@ mod tests {
         ])
         .unwrap();
         let request = LanguageRequest::new(vec![message; rsi_ai_protocol::MAX_MESSAGES]).unwrap();
-        let capture = Capture::new(&request).unwrap();
+        let capture = Capture::new(&request, &crate::tests::context_test_profile()).unwrap();
         assert_eq!(capture.manifest.len(), 1);
         assert_eq!(
             capture.manifest[0].count as usize,

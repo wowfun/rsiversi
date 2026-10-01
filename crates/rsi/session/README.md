@@ -51,6 +51,33 @@ Meta. All clients of that generation receive the same service. The standard
 Host's approval broker is also an ordinary plugin; the launcher neither
 constructs Session adapters nor registers a second broker per client.
 
+Trusted ingress binds a service view to the actual authenticated caller for all
+operations, including streams and Header reads. Returned handles retain that
+caller and consult Execution admission for every new operation. Reconciliation
+of an existing draft shares its state, not the original caller's authority.
+Recent enumeration applies a retained visibility grant inside the Store's
+creation-ordered page query. Activity visibility uses batched scalar summaries,
+without decoding full Headers. Storage and authority failures remain explicit.
+Stream publication checks current authorization for each item and releases that
+short-lived admission before yielding ownership to a consumer. A suspended
+consumer cannot hold the shared operation pool; the next item rechecks revocation.
+Remote metadata reads require Use but remain available while disconnected.
+Execution coordinates never authorize an operation or select a Local fallback.
+Resource list/body reads resolve one current-caller execution lease and pass it
+through the draft or resident composition to the reader. The immutable Sources
+catalog remains a metadata read and does not require an online target.
+Draft creation accepts a registered SSH workspace after current-caller Use
+admission. It freezes coordinates without resolving a connection or touching the
+Service filesystem. First input acquires the live target lease; a disconnected
+draft cannot start work.
+Input preparation acquires one current-caller execution lease before checking the
+workspace and carries that same lease into the prepared submission. It never
+resolves a newer provider between path validation and Turn admission. The selected
+provider canonicalizes the durable coordinates; Session submission does not
+re-register a removed Workspace or consult a different filesystem.
+The standard factory requires the product Execution resolver; an explicitly
+constructed native-only service without that capability rejects SSH coordinates.
+
 `LocalSessionService` is constructed from already-owned capabilities. Draft
 creation resolves a registered WorkspaceId, freezes the canonical workspace and settings,
 rejects a durable identity collision and retains the actual Agent draft payload,
@@ -79,7 +106,8 @@ the same byte lease. Its observer holds live services and identities, never a
 fresh composition pin. Native filesystem work remains outside shared protocol
 consumers.
 
-The same service generation also publishes `SessionReadContract`. A finite read
+The same service generation also publishes `SessionReadContract`. It binds the
+actual ingress origin before attachment and rechecks location admission. A finite read
 acquires the existing draft activity owner, reconciles against the Store and
 compares the current Header under that activity. Durable reads need no Agent pin;
 expired drafts are rejected and service retirement cancels leases. The owning
@@ -121,8 +149,9 @@ Live terminals are retained by one registry owned by the Session service
 generation. Creation checks the persisted Header and freezes its authorization;
 subsequent operations use the typed live scope without Store reads or Header
 fingerprints. Creation revalidates its canonical workspace and confines an explicit PTY-intent Bash
-plan. The child receives a fixed environment (PATH, workspace HOME, SHELL, TERM,
-LANG and disabled HISTFILE), without ambient credentials or shell startup files.
+plan. Local shells receive fixed PATH, workspace HOME, SHELL, TERM, LANG and
+disabled HISTFILE. SSH shells receive target account HOME and the target's fixed
+program environment. Neither inherits Service credentials or shell startup files.
 Retiring this service retires all scopes even while detached handles remain.
 The registry neither pins an Agent composition nor writes terminal state to Store.
 Closing the last terminal releases its empty scope after admitted operations finish;
@@ -161,3 +190,14 @@ A new queue replacement transfers its owned content through normal input admissi
 and back into the unchanged request before Kernel submission. Validation does not
 clone the full replacement payload; committed retries still resolve their receipt
 before reading media or workspace state.
+
+Terminal creation resolves one execution lease for the authenticated caller,
+verifies the durable workspace through that lease, and freezes the terminal
+program/environment and restricted plan. Remote shells use the target's
+`terminal` selector; native-only embeddings retain their explicit Local path.
+The retained scope is Session-owned. Each input and resize selects the current
+caller's lease and the PTY owner rejects a different provider or connection epoch.
+Other bounded terminal operations use the Session's metadata admission and remain
+available without reconnecting; private output pumping never publishes to a caller
+without a separately admitted request. Creator revocation does not lend that
+creator's authority to another authorized attachment.

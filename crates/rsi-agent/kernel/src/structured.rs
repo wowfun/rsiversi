@@ -129,7 +129,7 @@ impl AgentKernel {
         caller: &AgentCallerAuthority,
         locator: &rsi_agent_session_protocol::AgentResultLocator,
     ) -> TurnResult<rsi_agent_turn_protocol::AgentResult> {
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         if locator.fact_seq == 0 {
             return Err(TurnError::Invalid(
                 "result Fact sequence must be positive".into(),
@@ -191,7 +191,7 @@ impl AgentKernel {
         let result = self
             .verify_structured_result(&header, locator, reference)
             .await?;
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         Ok(result)
     }
     pub(super) async fn verify_structured_result(

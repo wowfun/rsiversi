@@ -786,6 +786,7 @@ pub(super) fn record_budget_usage(
 
 pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        execution: turn.execution.clone(),
         initial_messages: turn.initial_messages.clone(),
         claim_composition: turn.claim_composition.clone(),
         program_roles: turn.program_roles.clone(),

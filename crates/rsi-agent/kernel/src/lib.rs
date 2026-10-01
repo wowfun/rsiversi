@@ -225,6 +225,7 @@ impl fmt::Debug for AgentKernel {
 }
 
 struct KernelInner {
+    execution_messages: execution_admission::Messages,
     tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
     evidence_cache: Mutex<evidence::Cache>,
@@ -625,6 +626,7 @@ struct LiveWatermarks {
 }
 
 struct TurnControl {
+    execution: Option<rsi_execution::ExecutionLease>,
     initial_messages: BTreeSet<MessageId>,
     claim_composition: Option<AgentCompositionPin>,
     program_roles: Arc<BTreeMap<String, rsi_tools_protocol::ToolProgramRole>>,
@@ -720,6 +722,7 @@ enum ActiveEffect {
 impl TurnControl {
     fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            execution: None,
             initial_messages: BTreeSet::new(),
             claim_composition: None,
             program_roles: Arc::new(BTreeMap::new()),
@@ -873,6 +876,7 @@ mod elapsed;
 mod ending;
 mod evidence;
 mod execution;
+mod execution_admission;
 mod finalization;
 mod human_wait;
 mod jobs;
@@ -1180,3 +1184,7 @@ impl KernelWorkers {
 }
 
 mod ready;
+
+#[cfg(test)]
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+mod execution_fixture;

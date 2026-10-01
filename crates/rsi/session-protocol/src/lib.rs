@@ -34,6 +34,9 @@ mod model_selection;
 pub use model_selection::{ModelAvailability, ModelSelectionRead};
 pub use reads::{SessionReadContract, SessionReadLease, SessionReads, SessionTarget};
 
+mod source;
+pub use source::{SessionSource, SessionSourceContract, SessionSourceLease};
+
 mod interactions;
 mod jobs;
 pub use jobs::{JobsCollection, JobsRetention, JobsSnapshot};
@@ -571,6 +574,8 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
 /// Trusted server ingress to the same draft owner used by ordinary local callers.
 #[async_trait]
 pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
+    /// Binds every service operation and returned handle to this authenticated caller.
+    fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService>;
     /// Creates or reconciles a live draft with an authenticated, non-serialized origin.
     async fn create_from(
         &self,

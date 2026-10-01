@@ -25,6 +25,11 @@ It contains no registry implementation, policy, approval, durable logging,
 provider wire, or plugin lifecycle. Tool start carries the exact sandbox
 planner and an optional typed Jobs scope supplied by the orchestrator; these
 are invocation authorities, not registry-owned services or ambient lookups.
+An orchestrator may also supply the claim's sealed `ExecutionLease` through the
+typed extension map. A Tool start admits that exact lease and retains the operation
+through body settlement. Workspace reads and the matching Files reader come from
+that tuple; a native provider is used only by native-only embeddings without a
+lease. Remote process calls cannot use the legacy native confinement method.
 `ToolExecution::workspace_read()` asks that same pinned Sandbox generation for
 an immutable workspace read scope using the resolved policy. It accepts no model
 paths or mode overrides, rejects already-cancelled execution, and adds no process
@@ -145,3 +150,13 @@ value. Callable permits the Agent executor to dispatch an internal program call;
 Coordinator permits the outer program to request such calls. This metadata is
 never a model-authored field, and it does not extend the Portable ABI. Policy,
 approval, durable provenance and run ownership remain Agent responsibilities.
+
+Process-producing Tools implement a bounded preparation callback. The orchestrator
+runs it after policy admission and before Approval. Preparation resolves the exact
+program and complete environment, fixes one opaque process plan, and returns
+non-authorizing execution review metadata separately from the request digest.
+The prepared call retains that plan. Start rejects a changed policy, lease or
+native Sandbox; body code consumes the plan once. A standalone Runtime caller
+that omits explicit preparation gets the same preparation before body execution.
+No process is spawned during preparation. Jobs may retain the move-only plan
+and consume it exactly once through its original tuple.

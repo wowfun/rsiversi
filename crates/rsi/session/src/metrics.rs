@@ -282,7 +282,7 @@ mod tests {
     use rsi_agent_store_protocol::AppendBatch;
 
     fn header() -> SessionHeader {
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new("metrics").unwrap(),
             1,
             "/workspace",

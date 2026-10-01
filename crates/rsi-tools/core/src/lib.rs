@@ -545,6 +545,8 @@ impl ToolRuntime for Registry {
             request_sha256,
         )?;
         Ok(Box::new(Prepared {
+            preparation_admission: None,
+            execution: None,
             provider: Arc::clone(&self.provider),
             entry,
             call,
@@ -626,6 +628,8 @@ impl Registry {
 
 #[derive(Debug)]
 struct Prepared {
+    preparation_admission: Option<OwnedSemaphorePermit>,
+    execution: Option<rsi_tools_protocol::ToolPreparation>,
     provider: Arc<ProviderState>,
     entry: Entry,
     call: ToolCall,
@@ -638,7 +642,43 @@ impl PreparedToolCall for Prepared {
         &self.identity
     }
 
-    async fn start(self: Box<Self>, start: ToolStart) -> Result<ToolResult> {
+    async fn prepare_execution(
+        &mut self,
+        start: ToolStart,
+    ) -> Result<Option<rsi_execution::ExecutionReview>> {
+        if self.execution.is_some() {
+            return Err(ToolError::Execution(
+                "Tool execution was already prepared".into(),
+            ));
+        }
+        {
+            let inner = lock_provider(&self.provider);
+            if !inner.accepting {
+                return Err(ToolError::ShuttingDown);
+            }
+            if self.entry.retirement.is_cancelled() {
+                return Err(ToolError::Withdrawn(self.call.name.clone()));
+            }
+        }
+        let admission = self
+            .provider
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ToolError::Capacity)?;
+        let prepared =
+            prepare_execution(&self.entry, &self.call, start, &self.provider.shutdown).await?;
+        let review = prepared.review()?;
+        self.execution = Some(prepared);
+        self.preparation_admission = Some(admission);
+        Ok(review)
+    }
+
+    async fn start(mut self: Box<Self>, start: ToolStart) -> Result<ToolResult> {
+        let preparation = self.execution.take();
+        if let Some(preparation) = &preparation {
+            preparation.validate_start(&start)?;
+        }
         let receiver = {
             let mut inner = lock_provider(&self.provider);
             if !inner.accepting {
@@ -652,9 +692,15 @@ impl PreparedToolCall for Prepared {
                     "Tool invocation identity was already started".into(),
                 ));
             }
-            let admission = Arc::clone(&self.provider.admission)
-                .try_acquire_owned()
-                .map_err(|_| ToolError::Capacity)?;
+            let admission = match self.preparation_admission.take() {
+                Some(admission) => admission,
+                None => self
+                    .provider
+                    .admission
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ToolError::Capacity)?,
+            };
             inner
                 .retained
                 .insert(self.identity.clone(), RetainedEntry::Pending);
@@ -676,7 +722,7 @@ impl PreparedToolCall for Prepared {
             *inner.active_by_owner.entry(owner_id).or_default() += 1;
             tokio::spawn(async move {
                 let mut active = active;
-                let result = settle(entry, call, start, shutdown).await;
+                let result = settle(entry, call, start, shutdown, preparation).await;
                 let retained = Arc::new(match &result {
                     Ok(result) => RetainedToolResult::Returned(result.clone()),
                     Err(error) => RetainedToolResult::Failed(retained_failure(error)),
@@ -694,6 +740,48 @@ impl PreparedToolCall for Prepared {
     }
 }
 
+async fn prepare_execution(
+    entry: &Entry,
+    call: &ToolCall,
+    mut start: ToolStart,
+    shutdown: &CancellationToken,
+) -> Result<rsi_tools_protocol::ToolPreparation> {
+    let cancellation = start.cancellation.clone();
+    if cancellation.is_cancelled() || entry.retirement.is_cancelled() || shutdown.is_cancelled() {
+        return Err(ToolError::Cancelled);
+    }
+    let owned_cancellation = CancellationToken::new();
+    start.cancellation = owned_cancellation.clone();
+    let (execution, _) = ToolExecution::from_start(call.id.clone(), start)?;
+    {
+        let future = AssertUnwindSafe(
+            entry
+                .definition
+                .executor
+                .prepare(&call.arguments, &execution),
+        )
+        .catch_unwind();
+        tokio::pin!(future);
+        let timeout_ms = match entry.definition.timeout {
+            rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } => {
+                timeout_ms.min(30_000)
+            }
+            rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction => 30_000,
+        };
+        let stopped = tokio::select! {
+            biased;
+            result = &mut future => return rsi_tools_protocol::ToolPreparation::new(execution.clone(), unwind_tool(result)?),
+            () = cancellation.cancelled() => ToolError::Cancelled,
+            () = entry.retirement.cancelled() => ToolError::Cancelled,
+            () = shutdown.cancelled() => ToolError::Cancelled,
+            () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => ToolError::Timeout,
+        };
+        owned_cancellation.cancel();
+        let _settled = unwind_tool(future.await);
+        Err(stopped)
+    }
+}
+
 enum ToolCompletion {
     Body(std::result::Result<Result<ToolResult>, Box<dyn std::any::Any + Send>>),
     Cancelled,
@@ -705,11 +793,16 @@ async fn settle(
     call: ToolCall,
     start: ToolStart,
     shutdown: CancellationToken,
+    preparation: Option<rsi_tools_protocol::ToolPreparation>,
 ) -> Result<ToolResult> {
     let cancellation = start.cancellation.clone();
     if cancellation.is_cancelled() || entry.retirement.is_cancelled() || shutdown.is_cancelled() {
         return Err(ToolError::Cancelled);
     }
+    let preparation = match preparation {
+        Some(preparation) => preparation,
+        None => prepare_execution(&entry, &call, start.clone(), &shutdown).await?,
+    };
     let owned_cancellation = CancellationToken::new();
     let execution_start = ToolStart {
         cancellation: owned_cancellation.clone(),
@@ -718,7 +811,7 @@ async fn settle(
         job_scope: start.job_scope,
         extensions: start.extensions,
     };
-    let (execution, enforcement) = ToolExecution::from_start(call.id, execution_start)?;
+    let (execution, enforcement) = preparation.start(call.id, execution_start)?;
     let future = AssertUnwindSafe(entry.definition.executor.execute(call.arguments, execution))
         .catch_unwind();
     tokio::pin!(future);
@@ -762,8 +855,14 @@ fn settle_body(
     body: std::result::Result<Result<ToolResult>, Box<dyn std::any::Any + Send>>,
     enforcement: ToolEnforcement,
 ) -> Result<ToolResult> {
+    unwind_tool(body).and_then(|result| enforcement.attach(result))
+}
+
+fn unwind_tool<T>(
+    body: std::result::Result<Result<T>, Box<dyn std::any::Any + Send>>,
+) -> Result<T> {
     match body {
-        Ok(result) => result.and_then(|result| enforcement.attach(result)),
+        Ok(result) => result,
         Err(payload) => {
             if let Err(recursive_payload) =
                 std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload)))
@@ -772,7 +871,7 @@ fn settle_body(
             {
                 std::mem::forget(final_payload);
             }
-            Err(ToolError::Execution("Tool body panicked".into()))
+            Err(ToolError::Execution("Tool callback panicked".into()))
         }
     }
 }
@@ -869,6 +968,10 @@ fn validate_definition(definition: &ToolRegistration) -> Result<()> {
 
 fn retained_failure(error: &ToolError) -> RetainedToolFailure {
     match error {
+        ToolError::OutcomeUnknown => RetainedToolFailure {
+            kind: RetainedToolFailureKind::OutcomeUnknown,
+            summary: "Tool outcome is unknown; do not replay".into(),
+        },
         ToolError::Cancelled => RetainedToolFailure {
             kind: RetainedToolFailureKind::Cancelled,
             summary: "Tool invocation was cancelled".into(),

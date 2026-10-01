@@ -136,12 +136,14 @@ const MAXIMUM_RESULTS: usize = 64;
 struct Binding {
     session: String,
     workspace: PathBuf,
+    execution_generation: u64,
     provider: Weak<rsi_lsp::LanguageService>,
 }
 impl Binding {
     fn matches(&self, other: &Self) -> bool {
         self.session == other.session
             && self.workspace == other.workspace
+            && self.execution_generation == other.execution_generation
             && self.provider.ptr_eq(&other.provider)
     }
 }
@@ -209,90 +211,98 @@ async fn read(
     let controller = context
         .lookup_local::<rsi_client::SessionControllerContract>()
         .ok_or(UiError::Retired)?;
-    let sessions = context
-        .lookup_local::<rsi_session_protocol::SessionContract>()
-        .ok_or(UiError::Retired)?;
+    let source = Arc::new(
+        context
+            .lookup_local::<rsi_session_protocol::SessionSourceContract>()
+            .ok_or(UiError::Retired)?
+            .acquire()
+            .await
+            .map_err(error)?,
+    );
+    if source.header().session_id() != controller.session_id() {
+        return Err(UiError::Retired);
+    }
     let service = context
         .lookup_local::<LanguageContract>()
         .ok_or(UiError::Retired)?;
-    let header = sessions
-        .attach(controller.session_id())
-        .await
-        .map_err(error)?
-        .header()
-        .await
-        .map_err(error)?;
+    let header = source.header();
+    let authority = protocol::LanguageWorkspace::new(
+        header.coordinates().clone(),
+        Some(source.execution().clone()),
+    )
+    .map_err(error)?
+    .retaining(source.clone());
     let binding = Binding {
         session: controller.session_id().as_str().into(),
         workspace: header.canonical_cwd().into(),
+        execution_generation: source.execution().binding().lease_generation(),
         provider: Arc::downgrade(&service),
     };
-    match action {
-        Action::Start => {
-            if !input.fields.is_empty() {
-                return Err(error("Unexpected language fields"));
+    let work = async {
+        match action {
+            Action::Start => {
+                if !input.fields.is_empty() {
+                    return Err(error("Unexpected language fields"));
+                }
+                Ok(start())
             }
-            Ok(start())
+            Action::Query { operation } => {
+                if input.fields.len() != 3 {
+                    return Err(error("Language query requires file, line and column"));
+                }
+                let field = |name: &str| {
+                    input
+                        .fields
+                        .get(name)
+                        .ok_or_else(|| error("Missing language input"))
+                };
+                let query = Query {
+                    operation,
+                    path: field("path")?.clone(),
+                    line: field("line")?.parse().map_err(|_| error("Invalid line"))?,
+                    column: field("column")?
+                        .parse()
+                        .map_err(|_| error("Invalid column"))?,
+                };
+                let output = service.query(authority, query.clone(), stop).await;
+                query_view(results, binding, output, query)
+            }
+            Action::Repeat { query } => {
+                if !input.fields.is_empty() {
+                    return Err(error("Unexpected language fields"));
+                }
+                let output = service.query(authority, query.clone(), stop).await;
+                query_view(results, binding, output, query)
+            }
+            Action::Page { result, offset } => {
+                if !input.fields.is_empty() || offset > 128 {
+                    return Err(error("Invalid language result cursor"));
+                }
+                let output = results
+                    .lock()
+                    .expect("language results")
+                    .get(&binding, &result)?;
+                if !matches!(&output.result, QueryResult::Locations{ locations } if offset < locations.len())
+                {
+                    return Err(error("Invalid language result cursor"));
+                }
+                Ok(result_view(&output, &result, offset))
+            }
+            Action::Open { location } => {
+                if !input.fields.is_empty() {
+                    return Err(error("Opening a location accepts no editable fields"));
+                }
+                protocol::relative(&location.path).map_err(error)?;
+                location.range.validate().map_err(error)?;
+                let source = service
+                    .current_file(authority, location.path.clone(), stop)
+                    .await
+                    .map_err(error)?;
+                current_view(&location, &source)
+            }
         }
-        Action::Query { operation } => {
-            if input.fields.len() != 3 {
-                return Err(error("Language query requires file, line and column"));
-            }
-            let field = |name: &str| {
-                input
-                    .fields
-                    .get(name)
-                    .ok_or_else(|| error("Missing language input"))
-            };
-            let query = Query {
-                operation,
-                path: field("path")?.clone(),
-                line: field("line")?.parse().map_err(|_| error("Invalid line"))?,
-                column: field("column")?
-                    .parse()
-                    .map_err(|_| error("Invalid column"))?,
-            };
-            let output = service
-                .query(header.canonical_cwd().into(), query.clone(), stop)
-                .await;
-            query_view(results, binding, output, query)
-        }
-        Action::Repeat { query } => {
-            if !input.fields.is_empty() {
-                return Err(error("Unexpected language fields"));
-            }
-            let output = service
-                .query(binding.workspace.clone(), query.clone(), stop)
-                .await;
-            query_view(results, binding, output, query)
-        }
-        Action::Page { result, offset } => {
-            if !input.fields.is_empty() || offset > 128 {
-                return Err(error("Invalid language result cursor"));
-            }
-            let output = results
-                .lock()
-                .expect("language results")
-                .get(&binding, &result)?;
-            if !matches!(&output.result, QueryResult::Locations{ locations } if offset < locations.len())
-            {
-                return Err(error("Invalid language result cursor"));
-            }
-            Ok(result_view(&output, &result, offset))
-        }
-        Action::Open { location } => {
-            if !input.fields.is_empty() {
-                return Err(error("Opening a location accepts no editable fields"));
-            }
-            protocol::relative(&location.path).map_err(error)?;
-            location.range.validate().map_err(error)?;
-            let source = service
-                .current_file(header.canonical_cwd().into(), location.path.clone(), stop)
-                .await
-                .map_err(error)?;
-            current_view(&location, &source)
-        }
-    }
+    };
+    tokio::select! { biased; () = source.retiring().cancelled() => Err(UiError::Retired), result = work => result }
 }
 fn query_view(
     results: &Mutex<Results>,
@@ -434,6 +444,7 @@ mod tests {
         let binding = Binding {
             session: "s".into(),
             workspace: "/workspace".into(),
+            execution_generation: 1,
             provider: Weak::new(),
         };
         let output = |line: u32| {
@@ -480,6 +491,9 @@ mod tests {
         assert!(results.get(&other, &key).is_err());
         other = binding.clone();
         other.workspace = "/other".into();
+        assert!(results.get(&other, &key).is_err());
+        other = binding.clone();
+        other.execution_generation = 2;
         assert!(results.get(&other, &key).is_err());
         for _ in 0..MAXIMUM_RESULTS - 1 {
             results.insert(binding.clone(), output(200)).unwrap();

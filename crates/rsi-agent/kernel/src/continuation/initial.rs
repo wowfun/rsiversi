@@ -91,9 +91,14 @@ impl AgentKernel {
             .snapshot()
             .sha256()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let prepared = prepared
+        let mut prepared = prepared
             .with_baseline(baseline)
             .map_err(turn_composition_error)?;
+        if let Some(execution) = lease.execution() {
+            prepared = prepared
+                .with_execution(execution.clone())
+                .map_err(turn_composition_error)?;
+        }
         let admission = self
             .inner
             .submission_admission

@@ -9,7 +9,7 @@ use rsi_workspace_review_api::OmissionKind;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-fn command(root: &Path, args: &[&str]) {
+pub(super) fn command(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("/usr/bin/git")
         .current_dir(root)
         .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
@@ -56,6 +56,13 @@ impl rsi_sandbox::Sandbox for TestSandbox {
     ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
         rsi_sandbox::WorkspaceReadScope::new(request, rsi_sandbox::SandboxGeneration::default())
     }
+    async fn confine_source_reader(
+        &self,
+        request: rsi_sandbox::ProcessRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::ConfinedProcess> {
+        assert_eq!(request.mode, SandboxMode::ReadOnly);
+        self.confine(request).await
+    }
     async fn confine(
         &self,
         request: rsi_sandbox::ProcessRequest,
@@ -94,6 +101,14 @@ impl rsi_sandbox::Sandbox for CountedSandbox {
         request: rsi_sandbox::WorkspaceReadRequest,
     ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
         self.inner.workspace_read(request).await
+    }
+    async fn confine_source_reader(
+        &self,
+        request: rsi_sandbox::ProcessRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::ConfinedProcess> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.confine_source_reader(request).await
     }
     async fn confine(
         &self,
@@ -210,7 +225,7 @@ async fn scenario(native: bool) {
     );
     drop(held);
     let before_calls = process_calls.load(std::sync::atomic::Ordering::Relaxed);
-    let before = git.capture(&workspace, &mut scratch, &stop).await;
+    let before = git.capture(&workspace, &mut scratch, &stop, None).await;
     assert_eq!(
         process_calls.load(std::sync::atomic::Ordering::Relaxed) - before_calls,
         4,
@@ -221,7 +236,7 @@ async fn scenario(native: bool) {
     std::fs::rename(workspace.join("rename.txt"), workspace.join("renamed.txt")).unwrap();
     std::fs::remove_file(workspace.join("deleted.txt")).unwrap();
     std::fs::write(workspace.join(":(glob)literal.txt"), "independent writer\n").unwrap();
-    let after = git.capture(&workspace, &mut scratch, &stop).await;
+    let after = git.capture(&workspace, &mut scratch, &stop, None).await;
     assert!(after.omissions.is_empty(), "{:?}", after.omissions);
     let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap();
     assert_eq!(comparison.files.len(), 4, "{:?}", comparison.files);
@@ -257,7 +272,7 @@ async fn scenario(native: bool) {
         "private captures must not change the user's index, objects, refs or config"
     );
     std::fs::write(workspace.join("tracked.txt"), [0, 1, 2]).unwrap();
-    let binary = git.capture(&workspace, &mut scratch, &stop).await;
+    let binary = git.capture(&workspace, &mut scratch, &stop, None).await;
     assert!(
         binary
             .omissions
@@ -271,7 +286,7 @@ async fn scenario(native: bool) {
     );
     std::fs::write(workspace.join("large.txt"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
     std::os::unix::fs::symlink("/etc/passwd", workspace.join("linked.txt")).unwrap();
-    let limited = git.capture(&workspace, &mut scratch, &stop).await;
+    let limited = git.capture(&workspace, &mut scratch, &stop, None).await;
     assert!(
         limited
             .omissions
@@ -297,7 +312,7 @@ async fn scenario(native: bool) {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(
-        git.capture(&workspace, &mut scratch, &cancelled)
+        git.capture(&workspace, &mut scratch, &cancelled, None)
             .await
             .omissions
             .iter()

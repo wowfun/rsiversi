@@ -19,6 +19,16 @@ unconfined. This family builds process plans; the process owner remains
 responsible for spawning, cancellation, output bounds, and recording the stamp
 in Agent facts.
 
+`confine_source_reader` is a separate pipe-only ReadOnly plan for trusted, fixed
+source collectors. The Linux provider requires its verified Bubblewrap backend,
+keeps the host scratch namespace visible read-only, and isolates networking.
+This permits ancestor instructions and explicitly discovered directory links in
+`/tmp` to remain visible. Its evidence is ReadOnly + Host scratch + Isolated
+network. It rejects write modes, PTY intent, dangerous workspace roots and
+unsupported backends. Ordinary `confine` plans retain their private scratch and
+host network semantics. This interface does not infer a source-reader exception
+from an arbitrary executable; the consumer owns selection of its fixed collector.
+
 Workspace reads use a separate, process-local `WorkspaceReadScope`. The Sandbox
 provider binds the exact mode, cwd, workspace and its opaque generation. All
 three existing modes allow read-only access inside that workspace; the file
@@ -41,7 +51,7 @@ workspace whose live canonical path names the system temporary root is rejected
 in either restricted mode because its later bind
 would erase that boundary. Bubblewrap also rejects the logical or canonical
 filesystem root because a later root rebind would erase its private `/tmp`, `/proc`, and `/dev` mounts,
-while a workspace below `/tmp` is rebound after tmpfs creation. Current plans retain host network access and never claim filesystem
+while a workspace below `/tmp` is rebound after tmpfs creation. Ordinary plans retain host network access and never claim filesystem
 confidentiality or network restriction.
 
 Restricted plans do not impose memory, CPU, process-count, or scratch-size

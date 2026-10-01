@@ -6,8 +6,9 @@ Files reader. It does not call the human Files API.
 The existing Tool catalog gate, resolved Turn policy and approval owner remain
 in force. A read-only operation does not imply approval exemption.
 
-Every invocation obtains `ToolExecution::workspace_read()` from its exact pinned
-Sandbox. The resulting scope fixes mode, cwd, workspace and Sandbox generation;
+Every invocation obtains `ToolExecution::workspace_read()` and `files()` from its
+exact execution tuple. Native-only embeddings use their explicitly supplied
+Sandbox and Files providers. The resulting scope fixes mode, cwd, workspace and Sandbox generation;
 model input cannot select a root, policy mode, provider or generation. All three
 existing modes permit these workspace-only reads. Arguments accept either a UTF-8 `path` or exact `path_hex`, never both.
 Relative paths start at that

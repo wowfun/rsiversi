@@ -10,7 +10,9 @@ group, drains stdout and stderr concurrently into exact-capacity byte tails,
 settles stdin delivery while the managed group is live, aborts an incomplete
 writer after that group is gone, and reaps the direct child. A leader that exits while
 descendants remain causes the provider to close the group before publishing a
-terminal outcome. `terminate` is idempotent and sends TERM to the managed
+terminal outcome. Opaque plan resources are released at settlement before
+publishing that outcome; retained output handles keep capture ownership, not an
+already-settled native plan. `terminate` is idempotent and sends TERM to the managed
 group, waits the caller-supplied grace, then sends KILL if the group is still
 live. Provider retirement closes admission, waits for every in-flight spawn to
 publish into provider ownership, starts termination for every live group, and
@@ -75,7 +77,10 @@ The same provider also publishes the sibling duplex capability. Both spawn paths
 use the same validated confined-plan admission, process registry, capture budget,
 identity-fenced TERM/KILL and reaping mechanics. Duplex stdout waits for free queue
 space before reading another bounded pipe chunk. Its explicit stdin port serializes
-one write and closes on termination or direct-child exit. The stdout task publishes
+one write and closes on termination or direct-child exit. Each native pipe write
+waits at most 500 ms and either reports its exact accepted prefix or Capacity
+before accepting bytes. The writer remains usable after backpressure. Its task,
+not the RPC waiter, owns this deadline and any accepted input. The stdout task publishes
 its own EOF or error promptly, independently of child and stderr settlement.
 Task cancellation or panic publishes a stream error after buffered bytes;
 whole-process failures remain observable through `wait`. The reaper retains

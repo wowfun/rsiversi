@@ -58,3 +58,19 @@ that work, including child-process readiness, do not establish Jobs publication.
 Only successful `submit` establishes an identifier visible to list/read. Consumers
 without that receipt must observe the Jobs registry independently. Reservations
 keep unpublished work owned if publication fails.
+
+Producer start and Jobs submit are asynchronous. After capacity admission, the
+provider owns start, publication and any unpublished reaping in a retained task.
+Dropping the submit waiter does not release a reservation or abandon the work.
+Producer panics during future construction or polling settle as execution errors.
+Registry locks cover only preflight/publication and never span producer awaits.
+
+An uncertain producer start returns `JobsError::OutcomeUnknown`. An uncertain
+control settlement becomes terminal `JobStatus::OutcomeUnknown`, with no invented
+exit code or signal. Reporting and finalization preserve that classification;
+model-facing consumers must not turn it into an ordinary error result or retry.
+
+Scope finalization also reports a monotonic `outcome_unknown` bit. It includes
+uncertain unpublished starts and already reported or evicted jobs, so dropping
+a submit waiter or collecting output cannot erase uncertainty. The bit lives
+with the exact scope generation and adds no provider-wide identity tombstones.

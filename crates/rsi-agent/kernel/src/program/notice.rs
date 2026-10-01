@@ -1,6 +1,31 @@
 use super::*;
 use rsi_agent_session_protocol::ProgramCompletionSource;
 impl LiveRun {
+    pub(super) fn reserve_notice_execution(
+        &self,
+        append: &AtomicSessionAppend,
+    ) -> TurnResult<Option<execution_admission::Reservation>> {
+        Ok(
+            if let Some(message) = append
+                .controls
+                .iter()
+                .find_map(|record| match record.body() {
+                    AgentControlRecordBody::MessageAccepted { message, .. } => {
+                        Some(&message.message_id)
+                    }
+                    _ => None,
+                })
+            {
+                self.kernel.inner.execution_messages.reserve(
+                    &self.descriptor.session_id,
+                    message,
+                    self.execution.as_ref(),
+                )?
+            } else {
+                None
+            },
+        )
+    }
     pub(super) async fn terminal_append(
         &self,
         state: &RunState,

@@ -29,6 +29,7 @@ impl PluginFactory for SessionFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<rsi_pty_protocol::PtyProviderContract>()
             .requiring_local::<rsi_sandbox::SandboxContract>()
             .requiring_local::<TurnServiceContract>()
@@ -65,6 +66,7 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_execution(plan.local::<rsi_execution::ExecutionResolverContract>()?)
         .with_terminals(
             plan.local::<rsi_pty_protocol::PtyProviderContract>()?,
             plan.local::<rsi_sandbox::SandboxContract>()?,

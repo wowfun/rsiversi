@@ -34,7 +34,7 @@ independent of terminal durability and optional checkpoint maintenance; it does
 not certify arbitrary work outside the registered effect owners.
 
 Request evidence is extracted from the single semantic LanguageRequest supplied
-to Prepare and the actual returned snapshot. Deduplication retains at most 64
+to Prepare, the language profile used to build it, and the actual returned snapshot. Deduplication retains at most 64
 metadata entries across its sessions, never section bodies. Eviction leaves
 unmatched sections inline; later published evidence repopulates their metadata.
 Capture derives digests from its owned
@@ -269,3 +269,15 @@ the executor settles that call under its original timeout and cancellation befor
 publishing the coordinator result. Coordinator completion alone does not cancel
 the nested effect or the Turn. Queued calls that have not started receive a closed
 dispatcher; actual Turn cancellation and Host stop remain authoritative.
+
+An uncertain Tool effect produces `Interrupted` with Tool effect kind and no
+Tool result Fact. Retained recovery preserves this classification and never
+invokes the Tool again. Pre-terminal finalizers can report the same uncertainty
+for background work; it takes precedence over ordinary completion blockers,
+cleanup errors and cancellation once all admitted cleanup has settled.
+
+Each model or image attempt admits the original claim's execution delegation
+before provider preparation and retains that finite operation through settlement.
+Revocation prevents the next attempt without preventing publication of an already
+accepted result. Unavailable delegation interrupts the Turn; the executor never
+substitutes a current provider or retries a request under different authority.

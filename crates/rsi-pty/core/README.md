@@ -29,3 +29,19 @@ success while the first admitted close is still reaping its process. This gate
 also orders scope retirement after already admitted close work.
 Cleanup retains terminals until native reaping finishes. Cancelling a close
 waiter leaves that ownership available to the next close or retirement call.
+
+Create retains a scope-owned task through asynchronous native admission and
+publication, independently of its waiter. Resize reserves replacement capacity
+before asynchronous native I/O and publishes the new parser size only after ACK.
+One pending input or resize excludes another controller effect and takeover.
+Detach remains available; the admitted resize still settles and updates the
+actual terminal dimensions. New attachments and expired-cursor snapshot renewal
+report Capacity until resize settlement; ordinary output pages remain readable.
+No synchronous state lock spans native I/O.
+
+A location-bound terminal retains an Execution resource, not a permanent input
+view under its creator's grant. Its private bounded output pump continues as part
+of the admitted terminal lifetime. Each input or resize acquires a view from the
+operation's current lease, requiring the original provider and connection epoch.
+Native-only scopes retain their explicit Process path. Approval, Session identity
+and caller grant selection remain outside this projection owner.

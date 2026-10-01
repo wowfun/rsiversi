@@ -1,4 +1,6 @@
-use crate::{Config, Error, Output, Query, Result, protocol, source, wire::Connection};
+use crate::{
+    Config, Error, LanguageWorkspace, Output, Query, Result, protocol, source, wire::Connection,
+};
 use rsi_files_protocol::Files;
 use rsi_meta::Execution;
 use rsi_process::{DuplexProcess, DuplexProcessSpec};
@@ -14,13 +16,14 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+type PoolKey = (PathBuf, u64);
 type Slot = Arc<AsyncMutex<Option<Connection>>>;
 #[derive(Debug, Default)]
 struct State {
     closed: bool,
-    slots: BTreeMap<PathBuf, Slot>,
-    live: BTreeSet<PathBuf>,
-    retiring: BTreeMap<PathBuf, Arc<AsyncMutex<Connection>>>,
+    slots: BTreeMap<PoolKey, Slot>,
+    live: BTreeSet<PoolKey>,
+    retiring: BTreeMap<PoolKey, Arc<AsyncMutex<Connection>>>,
 }
 struct Source {
     text: String,
@@ -29,6 +32,7 @@ struct Source {
 }
 struct QueryWork {
     workspace: PathBuf,
+    authority: LanguageWorkspace,
     query: Query,
     language: String,
     stop: CancellationToken,
@@ -86,14 +90,23 @@ impl LanguageService {
     /// Panics if an earlier panic poisoned provider state.
     pub async fn query(
         self: &Arc<Self>,
-        workspace: PathBuf,
+        authority: LanguageWorkspace,
         query: Query,
         cancellation: CancellationToken,
     ) -> Result<Output> {
         query.validate()?;
-        if !workspace.is_absolute() {
-            return Err(Error::Invalid);
+        let admission = authority.admit()?;
+        if authority.execution().is_some_and(|lease| {
+            matches!(
+                lease.binding().location(),
+                rsi_execution::ExecutionLocation::Ssh { .. }
+            )
+        }) && self.config.remote_program.is_none()
+        {
+            return Err(Error::Unsupported);
         }
+        let workspace = authority.path().to_owned();
+        let key = authority.key();
         let extension = std::path::Path::new(&query.path)
             .extension()
             .and_then(|s| s.to_str())
@@ -114,7 +127,7 @@ impl LanguageService {
             if state.closed {
                 return Err(Error::Retired);
             }
-            if state.retiring.contains_key(&workspace) {
+            if state.retiring.contains_key(&key) {
                 return Err(Error::Capacity);
             }
             let permit = self
@@ -122,14 +135,16 @@ impl LanguageService {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| Error::Capacity)?;
-            let slot = state.slots.entry(workspace.clone()).or_default().clone();
+            let slot = state.slots.entry(key).or_default().clone();
             let mut connection = slot.try_lock_owned().map_err(|_| Error::Capacity)?;
             self.execution.spawn(self.tasks.track_future(async move {
                 let _permit = permit;
+                let _admission = admission;
                 owner
                     .execute_query(
                         QueryWork {
                             workspace,
+                            authority,
                             query,
                             language,
                             stop: work_stop,
@@ -150,7 +165,7 @@ impl LanguageService {
             Ok(())
         }
     }
-    fn forget(&self, workspace: &std::path::Path) {
+    fn forget(&self, workspace: &PoolKey) {
         let mut state = self.state.lock().expect("language slot cleanup");
         state.slots.remove(workspace);
         state.live.remove(workspace);
@@ -161,48 +176,49 @@ impl LanguageService {
         work: QueryWork,
         connection: &mut Option<Connection>,
     ) -> Result<Output> {
-        self.retire_failed(&work.workspace, connection).await?;
+        self.retire_failed(&work.authority.key(), connection)
+            .await?;
         let source = tokio::select! { biased;
             () = work.stop.cancelled() => Err(Error::Cancelled),
-            result = timeout_at(work.deadline, self.source(&work.workspace, &work.query, &work.stop)) => result.unwrap_or(Err(Error::Deadline)),
+            result = timeout_at(work.deadline, self.source(&work.authority, &work.query, &work.stop)) => result.unwrap_or(Err(Error::Deadline)),
         };
         let source = match source {
             Ok(source) => source,
             Err(error) => {
                 // Preserve the source error while still joining an idle failure
                 // that occurred during source validation.
-                let _cleanup = self.retire_failed(&work.workspace, connection).await;
+                let _cleanup = self.retire_failed(&work.authority.key(), connection).await;
                 if connection.is_none() {
-                    self.forget(&work.workspace);
+                    self.forget(&work.authority.key());
                 }
                 return Err(error);
             }
         };
         if let Err(error) = self.check_work(&work) {
             if connection.is_none() {
-                self.forget(&work.workspace);
+                self.forget(&work.authority.key());
             }
             return Err(error);
         }
         // Only authoritative, valid source may evict an idle process. Admitted
         // cleanup stays owned even after the caller's deadline or cancellation.
-        let retired = match self.evict_idle(&work.workspace) {
+        let retired = match self.evict_idle(&work.authority.key()) {
             Ok(retired) => retired,
             Err(error) => {
-                self.forget(&work.workspace);
+                self.forget(&work.authority.key());
                 return Err(error);
             }
         };
         for (workspace, previous) in retired {
             if let Err(error) = self.join_retirement(&workspace, &previous).await {
-                self.forget(&work.workspace);
+                self.forget(&work.authority.key());
                 return Err(error);
             }
         }
         if connection.as_ref().is_some_and(Connection::failed) {
             let failed = connection.take().expect("failed connection");
-            if let Err(error) = self.retire(&work.workspace, failed).await {
-                self.forget(&work.workspace);
+            if let Err(error) = self.retire(&work.authority.key(), failed).await {
+                self.forget(&work.authority.key());
                 return Err(error);
             }
         }
@@ -214,16 +230,16 @@ impl LanguageService {
             if let Some(failed) = connection.take() {
                 // Primary query classification remains authoritative. Failed cleanup
                 // withdraws admission and stays observable through provider close.
-                let _cleanup = self.retire(&work.workspace, failed).await;
+                let _cleanup = self.retire(&work.authority.key(), failed).await;
             }
-            self.forget(&work.workspace);
+            self.forget(&work.authority.key());
         }
         result
     }
 
     async fn retire_failed(
         &self,
-        workspace: &std::path::Path,
+        workspace: &PoolKey,
         connection: &mut Option<Connection>,
     ) -> Result<()> {
         if connection.as_ref().is_some_and(Connection::failed) {
@@ -236,7 +252,7 @@ impl LanguageService {
         }
         Ok(())
     }
-    async fn retire(&self, workspace: &std::path::Path, connection: Connection) -> Result<()> {
+    async fn retire(&self, workspace: &PoolKey, connection: Connection) -> Result<()> {
         let retained = Arc::new(AsyncMutex::new(connection));
         self.state
             .lock()
@@ -247,7 +263,7 @@ impl LanguageService {
     }
     async fn join_retirement(
         &self,
-        workspace: &std::path::Path,
+        workspace: &PoolKey,
         retained: &Arc<AsyncMutex<Connection>>,
     ) -> Result<()> {
         let result = retained.lock().await.close().await;
@@ -269,8 +285,8 @@ impl LanguageService {
 
     fn evict_idle(
         &self,
-        workspace: &std::path::Path,
-    ) -> Result<Vec<(PathBuf, Arc<AsyncMutex<Connection>>)>> {
+        workspace: &PoolKey,
+    ) -> Result<Vec<(PoolKey, Arc<AsyncMutex<Connection>>)>> {
         let mut state = self.state.lock().expect("language pool replacement");
         let mut retired = Vec::new();
         if state.live.contains(workspace) {
@@ -302,14 +318,16 @@ impl LanguageService {
     }
     async fn source(
         &self,
-        workspace: &std::path::Path,
+        authority: &LanguageWorkspace,
         query: &Query,
         stop: &CancellationToken,
     ) -> Result<Source> {
+        let workspace = authority.path();
         let text = source::read(
             &self.files,
             &self.sandbox,
             workspace,
+            authority.execution(),
             &query.path,
             stop.clone(),
         )
@@ -319,6 +337,91 @@ impl LanguageService {
             uri: protocol::file_uri(workspace, &query.path)?,
             text,
         })
+    }
+    async fn start_process(&self, work: &QueryWork) -> Result<rsi_process::ManagedDuplexProcess> {
+        let workspace = &work.workspace;
+        let process = if let Some(execution) = work.authority.execution() {
+            let program = match execution.binding().location() {
+                rsi_execution::ExecutionLocation::Local => {
+                    execution
+                        .resolve_local_program(rsi_execution::ResolvedProgram {
+                            program: self.config.program.clone(),
+                            environment: self
+                                .config
+                                .environment
+                                .iter()
+                                .map(|(k, v)| (k.into(), v.into()))
+                                .collect(),
+                        })
+                        .await
+                }
+                rsi_execution::ExecutionLocation::Ssh { .. } => {
+                    execution
+                        .resolve_target_program(
+                            self.config
+                                .remote_program
+                                .clone()
+                                .ok_or(Error::Unsupported)?,
+                        )
+                        .await
+                }
+            }
+            .map_err(crate::process_error)?;
+            self.check_work(work)?;
+            let process = execution
+                .prepare(ProcessRequest {
+                    program,
+                    arguments: self.config.arguments.clone(),
+                    cwd: workspace.to_owned(),
+                    workspace: workspace.to_owned(),
+                    stdio: ProcessStdio::Pipes,
+                    mode: SandboxMode::ReadOnly,
+                })
+                .await
+                .map_err(crate::process_error)?;
+            let environment = process.environment().to_vec();
+            self.check_work(work)?;
+            execution
+                .spawn_duplex(DuplexProcessSpec {
+                    process,
+                    environment,
+                    stdout_buffer_bytes: 1024 * 1024,
+                    stderr_max_bytes: 32768,
+                    termination_grace_ms: 200,
+                })
+                .await
+                .map_err(crate::process_error)?
+        } else {
+            let process = self
+                .sandbox
+                .confine(ProcessRequest {
+                    program: self.config.program.clone(),
+                    arguments: self.config.arguments.clone(),
+                    cwd: workspace.to_owned(),
+                    workspace: workspace.to_owned(),
+                    stdio: ProcessStdio::Pipes,
+                    mode: SandboxMode::ReadOnly,
+                })
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            self.check_work(work)?;
+            self.process
+                .spawn(DuplexProcessSpec {
+                    process,
+                    environment: self
+                        .config
+                        .environment
+                        .iter()
+                        .map(|(k, v)| (k.into(), v.into()))
+                        .collect(),
+                    stdout_buffer_bytes: 1024 * 1024,
+                    stderr_max_bytes: 32768,
+                    termination_grace_ms: 200,
+                })
+                .await
+                .map_err(crate::process_error)?
+        };
+        Ok(process)
     }
     async fn run(
         &self,
@@ -335,34 +438,7 @@ impl LanguageService {
             ..
         } = work;
         if connection.is_none() {
-            let confined = self
-                .sandbox
-                .confine(ProcessRequest {
-                    program: self.config.program.clone(),
-                    arguments: self.config.arguments.clone(),
-                    cwd: workspace.to_owned(),
-                    workspace: workspace.to_owned(),
-                    stdio: ProcessStdio::Pipes,
-                    mode: SandboxMode::ReadOnly,
-                })
-                .await
-                .map_err(|_| Error::Unavailable)?;
-            self.check_work(work)?;
-            let process = self
-                .process
-                .spawn(DuplexProcessSpec {
-                    process: confined,
-                    environment: self
-                        .config
-                        .environment
-                        .iter()
-                        .map(|(k, v)| (k.into(), v.into()))
-                        .collect(),
-                    stdout_buffer_bytes: 1024 * 1024,
-                    stderr_max_bytes: 32768,
-                    termination_grace_ms: 200,
-                })
-                .map_err(|_| Error::Unavailable)?;
+            let process = self.start_process(work).await?;
             *connection = Some(Connection::new(
                 process,
                 &self.config,
@@ -409,14 +485,13 @@ impl LanguageService {
     /// Panics if an earlier panic poisoned provider state.
     pub async fn current_file(
         self: &Arc<Self>,
-        workspace: PathBuf,
+        authority: LanguageWorkspace,
         path: String,
         cancellation: CancellationToken,
     ) -> Result<String> {
         protocol::relative(&path)?;
-        if !workspace.is_absolute() {
-            return Err(Error::Invalid);
-        }
+        let admission = authority.admit()?;
+        let workspace = authority.path().to_owned();
         let stop = self.stop.child_token();
         let _cancel = stop.clone().drop_guard();
         let owner = self.clone();
@@ -431,7 +506,7 @@ impl LanguageService {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| Error::Capacity)?;
-            self.execution.spawn(self.tasks.track_future(async move{let _permit=permit;tokio::select!{biased;()=worker_stop.cancelled()=>Err(Error::Cancelled),result=timeout(Duration::from_secs(30),source::read(&owner.files,&owner.sandbox,&workspace,&path,worker_stop.clone()))=>result.unwrap_or(Err(Error::Deadline))}}))
+            self.execution.spawn(self.tasks.track_future(async move{let _permit=permit;let _admission=admission;tokio::select!{biased;()=worker_stop.cancelled()=>Err(Error::Cancelled),result=timeout(Duration::from_secs(30),source::read(&owner.files,&owner.sandbox,&workspace,authority.execution(),&path,worker_stop.clone()))=>result.unwrap_or(Err(Error::Deadline))}}))
         };
         tokio::select! {biased;()=cancellation.cancelled()=>Err(Error::Cancelled),()=self.stop.cancelled()=>Err(Error::Retired),result=task=>result.map_err(|_|Error::Unavailable)?}
     }

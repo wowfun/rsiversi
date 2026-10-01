@@ -218,7 +218,6 @@ impl Files for LocalFiles {
         kind: FileKind,
         cancellation: CancellationToken,
     ) -> Result<OpenedFile> {
-        let opened_path = path.clone();
         let resource = self
             .run(cancellation.clone(), move |stopped| {
                 let permit = Arc::clone(&TOKENS)
@@ -246,14 +245,9 @@ impl Files for LocalFiles {
         let next = state.next.checked_add(1).ok_or(FilesError::Capacity)?;
         state.next = next;
         let token = FileToken::try_from(format!("{:016x}{next:016x}", self.generation))?;
-        let length = resource.data.length();
+        let opened = resource.data.describe(token.clone());
         state.tokens.insert(token.clone(), Arc::new(resource));
-        Ok(OpenedFile {
-            path: opened_path,
-            token,
-            kind,
-            length,
-        })
+        Ok(opened)
     }
 
     async fn read(

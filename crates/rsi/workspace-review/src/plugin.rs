@@ -105,6 +105,7 @@ impl PluginFactory for WorkspaceReviewApiFactory {
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<WorkspaceReviewContract>()
             .requiring_local::<ApiRegistrarContract>()
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<rsi_workspace_protocol::WorkspaceRegistryContract>()
             .requiring_local::<rsi_agent_store_protocol::SessionStoreContract>()
             .requiring_local::<rsi_acp_protocol::service::ExternalConversationsContract>())
@@ -115,25 +116,28 @@ impl PluginFactory for WorkspaceReviewApiFactory {
         let workspaces = plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?;
         let external = plan.local::<rsi_acp_protocol::service::ExternalConversationsContract>()?;
         let registrar = plan.local::<ApiRegistrarContract>()?;
+        let execution = plan.local::<rsi_execution::ExecutionResolverContract>()?;
         let mut registrations = Vec::new();
         for spec in rsi_workspace_review_api::operations() {
-            let (owner, store, workspaces, external) = (
+            let (owner, store, workspaces, external, execution) = (
                 owner.clone(),
                 store.clone(),
                 workspaces.clone(),
                 external.clone(),
+                execution.clone(),
             );
             let expected = spec.clone();
             registrations.push(
                 registrar
                     .register(
                         spec,
-                        json_handler(move |_, request: Request| {
-                            let (owner, store, workspaces, external, expected) = (
+                        json_handler(move |context, request: Request| {
+                            let (owner, store, workspaces, external, execution, expected) = (
                                 owner.clone(),
                                 store.clone(),
                                 workspaces.clone(),
                                 external.clone(),
+                                execution.clone(),
                                 expected.clone(),
                             );
                             async move {
@@ -148,29 +152,35 @@ impl PluginFactory for WorkspaceReviewApiFactory {
                                     .get(&scope.workspace)
                                     .await
                                     .map_err(|_| ApiError::Unavailable)?;
-                                let cwd = match &scope.conversation {
+                                let admission = execution
+                                    .admit(&context.origin, workspace.coordinates.location())?;
+                                let coordinates = match &scope.conversation {
                                     ConversationIdentity::Native(id) => store
                                         .header(id)
                                         .await
                                         .map_err(|_| ApiError::Unavailable)?
-                                        .canonical_cwd()
-                                        .to_owned(),
+                                        .coordinates()
+                                        .clone(),
                                     ConversationIdentity::External(id) => {
-                                        external
-                                            .view(id)
-                                            .await
-                                            .map_err(|_| ApiError::Unavailable)?
-                                            .snapshot
-                                            .cwd
+                                        rsi_workspace_protocol::ExecutionCoordinates::new(
+                                            rsi_workspace_protocol::ExecutionLocation::Local,
+                                            external
+                                                .view(id)
+                                                .await
+                                                .map_err(|_| ApiError::Unavailable)?
+                                                .snapshot
+                                                .cwd,
+                                        )
+                                        .map_err(|_| ApiError::Unavailable)?
                                     }
                                 };
-                                if workspace.path.to_str() != Some(&cwd) {
+                                if workspace.coordinates != coordinates {
                                     return Err(ApiError::Invalid(
                                         "review source outside workspace".into(),
                                     ));
                                 }
                                 owner
-                                    .read(request, CancellationToken::new())
+                                    .read(request, admission, CancellationToken::new())
                                     .await
                                     .map(Ok::<_, Never>)
                             }

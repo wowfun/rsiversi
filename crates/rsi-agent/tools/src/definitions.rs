@@ -80,12 +80,19 @@ impl Definitions {
     async fn load(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         stop: CancellationToken,
     ) -> ContributionResult<Vec<WorkspaceAgentDefinition>> {
         let mut entries = self
             .source
-            .agents(header, id, &self.inline.keys().cloned().collect(), stop)
+            .agents(
+                header,
+                execution,
+                id,
+                &self.inline.keys().cloned().collect(),
+                stop,
+            )
             .await
             .map_err(source_error)?;
         for (name, role) in self
@@ -234,6 +241,7 @@ impl SpawnRoleResolver for Definitions {
     async fn resolve(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         reference: &SpawnRoleReference,
         cancellation: CancellationToken,
     ) -> rsi_agent_turn_protocol::Result<SpawnRoleSeed> {
@@ -243,7 +251,7 @@ impl SpawnRoleResolver for Definitions {
             ));
         }
         let entry = self
-            .load(header, Some(&reference.name), cancellation)
+            .load(header, execution, Some(&reference.name), cancellation)
             .await
             .map_err(|e| match e {
                 ContributionError::Capacity => TurnError::Capacity,
@@ -268,10 +276,11 @@ impl SessionResourceReader for Definitions {
     async fn read(
         &self,
         header: &SessionHeader,
+        execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
-        let entries = self.load(header, id, cancellation).await?;
+        let entries = self.load(header, execution, id, cancellation).await?;
         let value = if id.is_some() {
             let entry = entries
                 .into_iter()
@@ -301,7 +310,15 @@ impl ContextContributor for Definitions {
         context: &ContributionContext,
         cancellation: CancellationToken,
     ) -> ContributionResult<ContributionOutput> {
-        let entries = match self.load(&context.header, None, cancellation.clone()).await {
+        let entries = match self
+            .load(
+                &context.header,
+                context.execution.as_ref(),
+                None,
+                cancellation.clone(),
+            )
+            .await
+        {
             Ok(entries) => entries,
             Err(error @ (ContributionError::Capacity | ContributionError::Closed)) => {
                 return Err(error);
@@ -367,6 +384,7 @@ mod tests {
         async fn agents(
             &self,
             header: &SessionHeader,
+            execution: Option<&rsi_execution::ExecutionLease>,
             id: Option<&str>,
             reserved: &BTreeSet<String>,
             cancellation: CancellationToken,
@@ -376,27 +394,33 @@ mod tests {
             if let Some(error) = self.fault.lock().unwrap().clone() {
                 return Err(error);
             }
-            self.inner.agents(header, id, reserved, cancellation).await
+            self.inner
+                .agents(header, execution, id, reserved, cancellation)
+                .await
         }
         async fn skills(
             &self,
             header: &SessionHeader,
+            execution: Option<&rsi_execution::ExecutionLease>,
             id: Option<&str>,
             audience: rsi_agent_workspace_context::SkillAudience,
             cancellation: CancellationToken,
         ) -> Result<SessionResourceValue, rsi_agent_workspace_context::WorkspaceContextError>
         {
-            self.inner.skills(header, id, audience, cancellation).await
+            self.inner
+                .skills(header, execution, id, audience, cancellation)
+                .await
         }
         async fn snapshot(
             &self,
             header: &SessionHeader,
+            execution: Option<&rsi_execution::ExecutionLease>,
             requests: &rsi_agent_workspace_context::WorkspaceSkillRequests,
         ) -> Result<
             rsi_agent_workspace_context::WorkspaceContextSnapshot,
             rsi_agent_workspace_context::WorkspaceContextError,
         > {
-            self.inner.snapshot(header, requests).await
+            self.inner.snapshot(header, execution, requests).await
         }
     }
     #[derive(Debug, Default)]
@@ -427,7 +451,7 @@ mod tests {
     async fn mention_history_only_reads_the_suffix_and_resets_on_rewind() {
         use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, StepId, TurnId};
         let temporary = tempfile::tempdir().unwrap();
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("mentions").unwrap(),
             1,
             temporary.path().to_str().unwrap(),
@@ -470,6 +494,7 @@ mod tests {
             vec![Arc::new(fact)],
         ));
         let mut context = ContributionContext {
+            execution: None,
             header: Arc::new(header),
             turn_id: TurnId::new("turn").unwrap(),
             accepted_fact_seq: 1,
@@ -532,7 +557,7 @@ mod tests {
             )
             .unwrap();
         }
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("catalog").unwrap(),
             1,
             std::fs::canonicalize(temporary.path())
@@ -576,13 +601,14 @@ mod tests {
             ),
         };
         let entries = definitions
-            .load(&header, None, CancellationToken::new())
+            .load(&header, None, None, CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(entries.len(), 64);
         assert_eq!(source.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(entries.iter().all(|entry| entry.seed.is_some()));
         let context = ContributionContext {
+            execution: None,
             header: Arc::new(header.clone()),
             turn_id: rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
             accepted_fact_seq: 1,
@@ -605,6 +631,7 @@ mod tests {
             let spawn = definitions
                 .resolve(
                     &header,
+                    None,
                     &SpawnRoleReference {
                         provider: "rsi.agents".into(),
                         name: "role-00".into(),
@@ -639,7 +666,7 @@ mod tests {
             ),
         };
         let entries = collision
-            .load(&header, None, CancellationToken::new())
+            .load(&header, None, None, CancellationToken::new())
             .await
             .unwrap();
         let entry = entries
@@ -656,6 +683,7 @@ mod tests {
             collision
                 .resolve(
                     &header,
+                    None,
                     &SpawnRoleReference {
                         provider: "rsi.agents".into(),
                         name: "role-32".into()

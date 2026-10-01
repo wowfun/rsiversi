@@ -8,6 +8,7 @@ pub(crate) async fn read(
     files: &Arc<dyn Files>,
     sandbox: &Arc<dyn Sandbox>,
     workspace: &Path,
+    execution: Option<&rsi_execution::ExecutionLease>,
     path: &str,
     stop: CancellationToken,
 ) -> Result<String> {
@@ -15,14 +16,25 @@ pub(crate) async fn read(
     if stop.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let scope = sandbox
-        .workspace_read(WorkspaceReadRequest {
-            cwd: workspace.to_owned(),
-            workspace: workspace.to_owned(),
-            mode: SandboxMode::ReadOnly,
-        })
-        .await
-        .map_err(|_| Error::Unavailable)?;
+    let request = WorkspaceReadRequest {
+        cwd: workspace.to_owned(),
+        workspace: workspace.to_owned(),
+        mode: SandboxMode::ReadOnly,
+    };
+    let scope = if let Some(execution) = execution {
+        execution
+            .workspace_read(request)
+            .await
+            .map_err(crate::process_error)?
+    } else {
+        sandbox
+            .workspace_read(request)
+            .await
+            .map_err(|_| Error::Unavailable)?
+    };
+    let files = execution
+        .map_or_else(|| Ok(files.clone()), rsi_execution::ExecutionLease::files)
+        .map_err(crate::process_error)?;
     let caller = FilesCaller::default();
     let _lease = CallerLease {
         files: files.clone(),
@@ -38,7 +50,7 @@ pub(crate) async fn read(
             stop.clone(),
         )
         .await
-        .map_err(|_| Error::Unavailable)?;
+        .map_err(crate::files_error)?;
     let result = async {
         if opened.length > MAXIMUM as u64 {
             return Err(Error::Limit);
@@ -56,7 +68,7 @@ pub(crate) async fn read(
                     stop.clone(),
                 )
                 .await
-                .map_err(|_| Error::Unavailable)?;
+                .map_err(crate::files_error)?;
             let data = hex::decode(page.bytes_hex).map_err(|_| Error::Protocol)?;
             if data.is_empty() || page.offset != offset || page.total != opened.length {
                 return Err(Error::Unavailable);
@@ -67,6 +79,9 @@ pub(crate) async fn read(
             offset += data.len() as u64;
             bytes.extend(data);
         }
+        files
+            .describe(&binding, &opened.token)
+            .map_err(crate::files_error)?;
         String::from_utf8(bytes).map_err(|_| Error::Invalid)
     }
     .await;

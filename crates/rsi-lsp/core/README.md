@@ -95,3 +95,19 @@ query is still an error and retires that connection.
 
 An idle protocol-pump panic publishes connection failure, closes request admission,
 and terminates and joins the Process without waiting for another query or close.
+
+Location-aware queries carry immutable execution coordinates plus the exact live
+lease. Source reads, configured program resolution, confinement and Duplex spawn
+all use that lease. A missing SSH lease or mismatched location is rejected before
+pool admission or filesystem I/O. The pool key includes workspace and exact lease
+generation, so equal path strings and replacement target epochs cannot reuse a
+server or its creator's delegation. New query operations recheck current admission;
+cleanup remains possible after withdrawal. Native standalone queries are explicitly
+Local and retain their existing configured providers.
+
+`remote_program` is optional explicit operator configuration, independent of the
+Local executable/environment. It chooses a target absolute command or basename and
+extra environment; the target supplies its own account HOME and fixed PATH. Missing
+remote configuration is Unsupported, with no Local fallback. The same bounded
+arguments, language mappings and initialization settings apply on the selected
+target. A location viewer needs only the lease's Files capability, not a server.

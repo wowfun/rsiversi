@@ -138,6 +138,7 @@ async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
             stderr_max_bytes: 32,
             termination_grace_ms: 50,
         })
+        .await
         .unwrap();
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
     let tail = managed.stdout().read_from(0).unwrap();

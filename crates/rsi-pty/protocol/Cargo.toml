@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-process = { path = "../../rsi-process/core" }

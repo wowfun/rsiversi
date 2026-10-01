@@ -1,5 +1,74 @@
 #![cfg(unix)]
 use async_trait::async_trait;
+#[allow(dead_code)]
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+mod metadata;
+use rsi_api_protocol::CallOrigin;
+use rsi_execution::{
+    ExecutionAdmission, ExecutionLease, ExecutionLocation, ExecutionOperation, ExecutionProvider,
+    ExecutionResolver,
+};
+#[derive(Debug)]
+struct Resolver {
+    provider: Mutex<ExecutionProvider>,
+    allowed: Arc<AtomicBool>,
+}
+#[derive(Debug)]
+struct Access {
+    allowed: Arc<AtomicBool>,
+    revoked: CancellationToken,
+}
+impl ExecutionAdmission for Access {
+    fn admit(
+        &self,
+        _kind: rsi_execution::ExecutionAdmissionKind,
+    ) -> rsi_process::Result<ExecutionOperation> {
+        if !self.allowed.load(Ordering::SeqCst) || self.revoked.is_cancelled() {
+            return Err(rsi_process::ProcessError::ShuttingDown);
+        }
+        Ok(ExecutionOperation::new(()))
+    }
+}
+impl ExecutionResolver for Resolver {
+    fn visibility(
+        &self,
+        _: &rsi_api_protocol::CallOrigin,
+    ) -> rsi_api_protocol::Result<rsi_execution::ExecutionVisibility> {
+        panic!("unexpected enumeration in focused resolver fixture")
+    }
+
+    fn admit(
+        &self,
+        origin: &CallOrigin,
+        _: &ExecutionLocation,
+    ) -> rsi_api_protocol::Result<ExecutionOperation> {
+        if !self.allowed.load(Ordering::SeqCst)
+            || matches!(origin, CallOrigin::Device(device) if device.revoked.is_cancelled())
+        {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(ExecutionOperation::new(()))
+    }
+    fn lease(
+        &self,
+        origin: CallOrigin,
+        location: &ExecutionLocation,
+    ) -> rsi_api_protocol::Result<ExecutionLease> {
+        let _permit = self.admit(&origin, location)?;
+        self.provider
+            .lock()
+            .unwrap()
+            .lease(Arc::new(Access {
+                allowed: self.allowed.clone(),
+                revoked: match origin {
+                    CallOrigin::Local => CancellationToken::new(),
+                    CallOrigin::Device(device) => device.revoked,
+                },
+            }))
+            .map_err(|_| ApiError::Unauthorized)
+    }
+}
+
 use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId};
 use rsi_api::ApiRegistry;
 use rsi_api_http::{HttpConfig, HttpServer, HttpServices};
@@ -24,15 +93,16 @@ use tokio_util::sync::CancellationToken;
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OTHER_TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 #[derive(Debug)]
 struct Authentication(CancellationToken);
 impl DeviceAuthentication for Authentication {
     fn authenticate(&self, token: &SecretValue) -> rsi_api_protocol::Result<AuthenticatedDevice> {
-        if token.expose_secret() != TOKEN || self.0.is_cancelled() {
+        if ![TOKEN, OTHER_TOKEN].contains(&token.expose_secret()) || self.0.is_cancelled() {
             return Err(ApiError::Unauthorized);
         }
         Ok(AuthenticatedDevice {
-            id: DeviceId::from_bytes([1; 16]),
+            id: DeviceId::from_bytes([if token.expose_secret() == TOKEN { 1 } else { 2 }; 16]),
             revoked: self.0.clone(),
         })
     }
@@ -55,8 +125,13 @@ impl Drop for Activity {
 impl SessionReads for Reads {
     async fn acquire(
         &self,
+        origin: CallOrigin,
         target: &SessionTarget,
     ) -> rsi_session_protocol::Result<SessionReadLease> {
+        assert!(
+            matches!(origin, CallOrigin::Device(_)),
+            "HTTP origin was replaced with Local"
+        );
         self.calls.fetch_add(1, Ordering::SeqCst);
         target.validate()?;
         if !self.available.load(Ordering::SeqCst)
@@ -110,9 +185,10 @@ impl Files for Reader {
             .read(binding, token, offset, maximum, cancellation.clone())
             .await?;
         if self.gate.load(Ordering::SeqCst) {
-            *self.cancellation.lock().unwrap() = Some(cancellation);
+            *self.cancellation.lock().unwrap() = Some(cancellation.clone());
             self.entered.add_permits(1);
-            std::future::pending::<()>().await;
+            cancellation.cancelled().await;
+            return Err(FilesError::Cancelled);
         }
         Ok(page)
     }
@@ -139,6 +215,7 @@ struct Harness {
     auth: Arc<Authentication>,
     reads: Arc<Reads>,
     reader: Arc<Reader>,
+    resolver: Arc<Resolver>,
     api: Option<SessionFilesApi>,
     registry: Arc<ApiRegistry>,
     connection: rsi_api::ConnectionApi,
@@ -154,7 +231,7 @@ impl Harness {
         let root = temporary.path().canonicalize().unwrap();
         std::fs::write(root.join("file"), b"hello\0\xffworld").unwrap();
         std::fs::create_dir(root.join("sub")).unwrap();
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("files-http").unwrap(),
             1,
             root.to_str().unwrap(),
@@ -182,10 +259,18 @@ impl Harness {
             entered: Semaphore::new(0),
             cancellation: Mutex::new(None),
         });
+        let resolver = Arc::new(Resolver {
+            provider: Mutex::new(metadata::provider_with_files(
+                ExecutionLocation::Local,
+                reader.clone(),
+                0,
+            )),
+            allowed: Arc::new(AtomicBool::new(true)),
+        });
         let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
         let registry = Arc::new(ApiRegistry::new(execution.clone()));
         let api =
-            SessionFilesApi::register(registry.as_ref(), reads.clone(), reader.clone()).unwrap();
+            SessionFilesApi::register(registry.as_ref(), reads.clone(), resolver.clone()).unwrap();
         let endpoint = EndpointId::from_bytes([2; 16]);
         let epoch = HostEpoch::from_bytes([3; 16]);
         let connection = rsi_api::ConnectionApi::register(
@@ -242,6 +327,7 @@ impl Harness {
             auth,
             reads,
             reader,
+            resolver,
             api: Some(api),
             registry,
             connection,
@@ -268,7 +354,7 @@ impl Harness {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()
-            .post(format!("{}/api/v1/files/{operation}/1", self.origin))
+            .post(format!("{}/api/v1/files/{operation}/2", self.origin))
             .header("content-type", "application/json")
             .header("x-rsi-wire-version", "1")
             .header("x-rsi-host-epoch", self.epoch.as_str())
@@ -462,7 +548,7 @@ async fn endpoint_replacement_releases_old_generation_tokens_before_new_reader_a
         SessionFilesApi::register(
             harness.registry.as_ref(),
             harness.reads.clone(),
-            harness.reader.clone(),
+            harness.resolver.clone(),
         )
         .unwrap(),
     );
@@ -484,5 +570,128 @@ async fn endpoint_replacement_releases_old_generation_tokens_before_new_reader_a
             .await
             .unwrap();
     }
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn fresh_file_requests_recheck_use_and_reject_replacement_provider_without_losing_cleanup() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::start().await;
+    let file = harness
+        .client
+        .open(
+            harness.target(),
+            RelativePath::new(b"file").unwrap(),
+            FileKind::File,
+        )
+        .await
+        .unwrap();
+    harness.resolver.allowed.store(false, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .client
+            .read(harness.target(), file.clone(), 0, 5)
+            .await,
+        Err(SessionFilesError::Api(ApiError::Unauthorized))
+    );
+    assert_eq!(
+        harness
+            .client
+            .open(
+                harness.target(),
+                RelativePath::new(b"file").unwrap(),
+                FileKind::File
+            )
+            .await,
+        Err(SessionFilesError::Api(ApiError::Unauthorized))
+    );
+    harness.resolver.allowed.store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .client
+            .read(harness.target(), file.clone(), 0, 5)
+            .await
+            .unwrap()
+            .bytes_hex,
+        hex::encode("hello")
+    );
+    *harness.resolver.provider.lock().unwrap() =
+        metadata::provider_with_files(ExecutionLocation::Local, harness.reader.clone(), 0);
+    assert_eq!(
+        harness
+            .client
+            .read(harness.target(), file.clone(), 0, 5)
+            .await,
+        Err(SessionFilesError::Files(FilesError::Binding))
+    );
+    harness
+        .client
+        .release(harness.target(), file.token)
+        .await
+        .unwrap();
+    // The old resource's capacity and native token both settle on release.
+    for _ in 0..MAXIMUM_FILE_TOKENS {
+        harness
+            .client
+            .open(
+                harness.target(),
+                RelativePath::new(b"file").unwrap(),
+                FileKind::File,
+            )
+            .await
+            .unwrap();
+    }
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn file_tokens_are_principal_bound_and_cleanup_needs_no_new_use_grant() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::start().await;
+    let other_transport = Arc::new(
+        HttpClient::connect(
+            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            HttpClientConfig {
+                origin: harness.origin.clone(),
+                endpoint_id: EndpointId::from_bytes([2; 16]),
+                credential: CredentialRef::new("test.files", "other").unwrap(),
+                tls_ca: None,
+                allow_loopback_http: true,
+            },
+            SecretValue::new(OTHER_TOKEN).unwrap(),
+        )
+        .await
+        .unwrap(),
+    );
+    let other = SessionFilesClient::new(other_transport.clone()).unwrap();
+    let file = harness
+        .client
+        .open(
+            harness.target(),
+            RelativePath::new(b"file").unwrap(),
+            FileKind::File,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        other.read(harness.target(), file.clone(), 0, 1).await,
+        Err(SessionFilesError::Files(FilesError::Binding))
+    );
+    assert_eq!(
+        other.release(harness.target(), file.token.clone()).await,
+        Err(SessionFilesError::Files(FilesError::Binding))
+    );
+    harness.resolver.allowed.store(false, Ordering::SeqCst);
+    harness
+        .client
+        .release(harness.target(), file.token.clone())
+        .await
+        .unwrap();
+    harness.resolver.allowed.store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness.client.read(harness.target(), file, 0, 1).await,
+        Err(SessionFilesError::Files(FilesError::Unavailable))
+    );
+    other_transport.close().await;
     harness.close().await;
 }

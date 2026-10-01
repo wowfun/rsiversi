@@ -276,7 +276,7 @@ impl ProcessOutput for Tail {
 #[cfg(unix)]
 #[derive(Debug)]
 struct ChildState {
-    _plan_owner: Option<rsi_sandbox::ProcessPlanOwner>,
+    plan_owner: Mutex<Option<rsi_sandbox::ProcessPlanOwner>>,
     pid: u32,
     grace: Duration,
     runtime: tokio::runtime::Handle,
@@ -307,6 +307,14 @@ impl ChildState {
         if current.is_some() {
             return;
         }
+        // Reaping and pipe settlement precede finish. Captured-output handles may
+        // outlive this point but must not retain an execution admission permit.
+        let owner = self
+            .plan_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(owner);
         *current = Some(outcome);
         drop(current);
         self.release_active();
@@ -441,8 +449,10 @@ impl rsi_process::ProcessOutputCache for Service {
     }
 }
 
+#[async_trait::async_trait]
+
 impl Process for Service {
-    fn spawn(&self, spec: ProcessSpec) -> Result<ManagedProcess> {
+    async fn spawn(&self, spec: ProcessSpec) -> Result<ManagedProcess> {
         spec.validate()?;
         #[cfg(unix)]
         {
@@ -536,7 +546,7 @@ impl Service {
         plan_owner: Option<rsi_sandbox::ProcessPlanOwner>,
     ) -> (Arc<ChildState>, bool) {
         let state = Arc::new(ChildState {
-            _plan_owner: plan_owner,
+            plan_owner: Mutex::new(plan_owner),
             pid,
             grace: Duration::from_millis(grace),
             runtime: runtime.clone(),
@@ -1095,7 +1105,7 @@ mod tests {
         groups: Arc<dyn ProcessGroups>,
     ) -> Arc<ChildState> {
         Arc::new(ChildState {
-            _plan_owner: None,
+            plan_owner: Mutex::new(None),
             pid,
             grace: Duration::from_millis(1),
             runtime: tokio::runtime::Handle::current(),
@@ -1167,7 +1177,7 @@ mod tests {
             },
             groups.clone(),
         );
-        let managed = service.spawn(immediate_process()).unwrap();
+        let managed = service.spawn(immediate_process()).await.unwrap();
 
         let waiting = tokio::spawn({
             let managed = managed.clone();
@@ -1185,7 +1195,7 @@ mod tests {
         assert!(groups.terminated.load(Ordering::Acquire));
         assert!(groups.killed.load(Ordering::Acquire));
 
-        let replacement = service.spawn(immediate_process()).unwrap();
+        let replacement = service.spawn(immediate_process()).await.unwrap();
         assert_eq!(replacement.wait().await.unwrap().exit_code, Some(0));
         drop((replacement, managed));
         assert!(service.shutdown().await.is_ok());
@@ -1208,6 +1218,7 @@ mod tests {
                 termination_grace_ms: 1,
             },
         )
+        .await
         .unwrap();
         groups.wait_until_terminated().await;
         assert_eq!(

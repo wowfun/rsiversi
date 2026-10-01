@@ -144,6 +144,9 @@ pub struct GoalSnapshot {
 /// Closed controller error classes; reply uncertainty never means command rejection.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum GoalError {
+    /// Execution may have had an effect without a domain-command receipt.
+    #[error("Execution outcome is unknown; reconcile before continuing")]
+    ExecutionOutcomeUnknown,
     /// Automatic allocation was deferred without spending a round.
     #[error("Session is busy; Goal allocation was deferred")]
     Busy,

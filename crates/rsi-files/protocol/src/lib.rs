@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+mod validation;
 
 /// Preferred exact file page size.
 pub const PREFERRED_FILE_PAGE_BYTES: usize = 16 * 1024;
@@ -41,7 +42,10 @@ pub enum FilesError {
     /// Binding does not match the token's admitted caller.
     #[error("Files binding changed")]
     Binding,
-    /// Missing, expired or released token/object.
+    /// The relative name is absent below a successfully opened root.
+    #[error("Files path does not exist")]
+    Missing,
+    /// Unavailable provider/root, expired or released token/object.
     #[error("Files object unavailable")]
     Unavailable,
     /// Object changed since the captured version.
@@ -56,6 +60,9 @@ pub enum FilesError {
     /// Platform cannot supply the promised filesystem confinement.
     #[error("Files unsupported on this platform")]
     Unsupported,
+    /// An admitted operation has no verifiable acknowledgement.
+    #[error("Files outcome is unknown")]
+    OutcomeUnknown,
     /// Native filesystem rejected this operation.
     #[error("Files I/O failed")]
     Io,
@@ -111,6 +118,12 @@ impl FilesBinding {
     /// Owning caller generation for lifecycle cleanup.
     pub fn caller(&self) -> &FilesCaller {
         &self.caller
+    }
+    /// Scopes a trusted in-process binding without changing its subject or paths.
+    #[must_use]
+    pub fn with_caller(mut self, caller: FilesCaller) -> Self {
+        self.caller = caller;
+        self
     }
 
     /// Exact native root selected by the trusted caller.
@@ -224,6 +237,9 @@ pub struct OpenedFile {
     pub token: FileToken,
     /// Regular file or directory.
     pub kind: FileKind,
+    /// Whether the captured regular file has any executable permission bit.
+    /// Directories report false; changes belong to the same version as its bytes.
+    pub executable: bool,
     /// File bytes or directory entries at capture.
     pub length: u64,
 }

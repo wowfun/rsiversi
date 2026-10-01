@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 fn header(id: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(id).unwrap(),
         1,
         "/workspace",
@@ -323,6 +323,20 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
         header_sha256: source.fingerprint().unwrap(),
     };
     let owner = References::new(store.clone(), runtime.execution().clone());
+    let mut remote = serde_json::to_value(&target).unwrap();
+    remote["coordinates"]["location"] = serde_json::json!({"kind":"ssh","target":"a".repeat(32)});
+    assert!(
+        owner
+            .capture_selected(
+                binding.clone(),
+                serde_json::from_value(remote).unwrap(),
+                selection.clone(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err(),
+        "equal path on another machine must not authorize the original"
+    );
     let frozen = owner
         .capture_selected(
             binding.clone(),
@@ -371,7 +385,7 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
                 .is_err()
         );
     }
-    let foreign = SessionHeader::new(
+    let foreign = SessionHeader::new_local(
         SessionId::new("foreign").unwrap(),
         1,
         "/foreign",
@@ -437,11 +451,33 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
         id: "external-id".into(),
         epoch: 3,
     };
+    let remote_coordinates = rsi_agent_session_protocol::ExecutionCoordinates::new(
+        rsi_agent_session_protocol::ExecutionLocation::Ssh {
+            target: serde_json::from_value(serde_json::json!("a".repeat(32))).unwrap(),
+        },
+        "/workspace",
+    )
+    .unwrap();
+    assert!(
+        owner
+            .capture_observed(
+                ObservedReferenceText {
+                    source: source.clone(),
+                    coordinates: remote_coordinates,
+                    text: "observed".into(),
+                    selection: selection.clone(),
+                },
+                header("target"),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
     let frozen = owner
         .capture_observed(
             ObservedReferenceText {
                 source: source.clone(),
-                canonical_cwd: "/workspace".into(),
+                coordinates: header("target").coordinates().clone(),
                 text: "observed".into(),
                 selection: selection.clone(),
             },
@@ -456,7 +492,11 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
             .capture_observed(
                 ObservedReferenceText {
                     source,
-                    canonical_cwd: "/different".into(),
+                    coordinates: rsi_agent_session_protocol::ExecutionCoordinates::new(
+                        rsi_agent_session_protocol::ExecutionLocation::Local,
+                        "/different"
+                    )
+                    .unwrap(),
                     text: "observed".into(),
                     selection
                 },

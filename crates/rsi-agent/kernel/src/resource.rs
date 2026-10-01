@@ -10,6 +10,7 @@ impl SessionResources for AgentKernel {
     async fn read_resource(
         &self,
         session: &SessionId,
+        execution: Option<rsi_execution::ExecutionLease>,
         request: ValidatedResourceRequest,
         cancellation: CancellationToken,
     ) -> TurnResult<ValidatedResourceResponse> {
@@ -26,6 +27,7 @@ impl SessionResources for AgentKernel {
             SessionResourceAdapter::new(pin)
                 .read(
                     header,
+                    execution,
                     request,
                     &rsi_meta::Execution::native(tokio::runtime::Handle::current()),
                     stop.clone(),

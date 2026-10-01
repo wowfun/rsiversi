@@ -2,6 +2,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 mod control;
+mod error;
+pub use error::ProgramError;
 mod runtime;
 mod tool;
 mod workflow;
@@ -13,11 +15,15 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_process::{DuplexProcessContract, DuplexProcessSpec};
-use rsi_tools_protocol::ToolExecution;
+use rsi_tools_protocol::{ToolExecution, ToolProcess};
 pub use runtime::ProgramRpc;
 use serde::Deserialize;
 use serde_json::Value;
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 pub use tool::ProgramToolsFactory;
 
@@ -63,60 +69,96 @@ pub struct ProgramRuntime {
     cancellation: CancellationToken,
 }
 impl ProgramRuntime {
-    /// Confines and admits work to an exact Jobs scope, without starting Node.
+    /// Resolves and confines the exact Node bootstrap before requesting Approval.
     ///
     /// # Errors
-    /// Rejects oversized scripts, unavailable executables, confinement or Job admission failure.
-    pub async fn prepare(
+    /// Rejects missing target dependencies, cancellation or confinement failures.
+    pub async fn prepare_process(
         &self,
-        script: String,
         execution: &ToolExecution,
-        scope: &JobScopeAuthority,
-        rpc: Arc<dyn ProgramRpc>,
-    ) -> Result<AdmittedProgram, String> {
-        self.prepare_owned(
-            script,
-            execution,
-            scope,
-            rpc,
-            execution.cancellation.clone(),
-        )
-        .await
-    }
-    /// Confines a workflow Job using a separate run-generation cancellation owner.
-    ///
-    /// # Errors
-    /// Uses the same script, confinement and Jobs admission boundaries as `prepare`.
-    pub async fn prepare_owned(
-        &self,
-        script: String,
-        execution: &ToolExecution,
-        scope: &JobScopeAuthority,
-        rpc: Arc<dyn ProgramRpc>,
-        cancellation: CancellationToken,
-    ) -> Result<AdmittedProgram, String> {
-        if script.len() > rsi_agent_session_protocol::MAXIMUM_PROGRAM_SCRIPT_BYTES {
-            return Err("script exceeds 64 KiB".into());
-        }
+    ) -> Result<ToolProcess, ProgramError> {
         if execution.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
             return Err("program preparation cancelled".into());
         }
-        let node = std::fs::canonicalize(&self.configuration.node)
-            .map_err(|error| format!("Node executable is unavailable: {error}"))?;
-        if !node.is_file() {
-            return Err("Node executable is not a regular file".into());
-        }
-        let confined = execution
-            .confine(
+        let node = if execution.execution_lease().is_some() {
+            self.configuration.node.clone()
+        } else {
+            let node = tokio::fs::canonicalize(&self.configuration.node)
+                .await
+                .map_err(|error| format!("Node executable is unavailable: {error}"))?;
+            if !tokio::fs::metadata(&node)
+                .await
+                .map_err(|error| format!("Node executable is unavailable: {error}"))?
+                .is_file()
+            {
+                return Err("Node executable is not a regular file".into());
+            }
+            node
+        };
+        let plan = execution
+            .prepare_process(
+                "node",
                 node,
+                self.configuration
+                    .environment
+                    .iter()
+                    .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                    .collect(),
                 vec![
                     "--input-type=commonjs".into(),
                     "--eval".into(),
                     include_str!("node.cjs").into(),
                 ],
             )
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
+        if execution.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
+            return Err("program preparation cancelled".into());
+        }
+        Ok(plan)
+    }
+
+    /// Admits a reviewed process to an exact Jobs scope, without starting Node.
+    ///
+    /// # Errors
+    /// Rejects oversized scripts, unavailable executables, confinement or Job admission failure.
+    pub async fn admit(
+        &self,
+        script: String,
+        execution: &ToolExecution,
+        scope: &JobScopeAuthority,
+        rpc: Arc<dyn ProgramRpc>,
+        process: ToolProcess,
+    ) -> Result<AdmittedProgram, ProgramError> {
+        self.admit_owned(
+            script,
+            execution,
+            scope,
+            rpc,
+            execution.cancellation.clone(),
+            process,
+        )
+        .await
+    }
+    /// Admits a reviewed workflow plan with a separate run-generation cancellation owner.
+    ///
+    /// # Errors
+    /// Uses the same script, confinement and Jobs admission boundaries as `admit`.
+    #[allow(clippy::too_many_arguments)] // One admission binds script, reviewed plan, Jobs, RPC and cancellation ownership.
+    pub async fn admit_owned(
+        &self,
+        script: String,
+        execution: &ToolExecution,
+        scope: &JobScopeAuthority,
+        rpc: Arc<dyn ProgramRpc>,
+        cancellation: CancellationToken,
+        process: ToolProcess,
+    ) -> Result<AdmittedProgram, ProgramError> {
+        if script.len() > rsi_agent_session_protocol::MAXIMUM_PROGRAM_SCRIPT_BYTES {
+            return Err("script exceeds 64 KiB".into());
+        }
+        if execution.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
+            return Err("program preparation cancelled".into());
+        }
         if execution.cancellation.is_cancelled()
             || cancellation.is_cancelled()
             || self.cancellation.is_cancelled()
@@ -125,18 +167,13 @@ impl ProgramRuntime {
         }
         let (outcome, result) = tokio::sync::watch::channel(None);
         let request = Arc::new(runtime::Request {
-            spec: DuplexProcessSpec {
-                process: confined,
-                environment: self
-                    .configuration
-                    .environment
-                    .iter()
-                    .map(|(name, value)| (OsString::from(name), OsString::from(value)))
-                    .collect(),
+            spec: Mutex::new(Some(DuplexProcessSpec {
+                environment: process.environment().to_vec(),
+                process,
                 stdout_buffer_bytes: runtime::MAXIMUM_FRAME,
                 stderr_max_bytes: 64 * 1024,
                 termination_grace_ms: 500,
-            },
+            })),
             script,
             rpc,
             cancelled_at_settlement: std::sync::atomic::AtomicBool::new(false),
@@ -158,7 +195,8 @@ impl ProgramRuntime {
                     requires_report: true,
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .await
+            .map_err(ProgramError::from)?;
         Ok(AdmittedProgram {
             id,
             request,
@@ -172,7 +210,7 @@ impl ProgramRuntime {
 pub struct AdmittedProgram {
     id: String,
     request: Arc<runtime::Request>,
-    result: tokio::sync::watch::Receiver<Option<Result<Value, String>>>,
+    result: tokio::sync::watch::Receiver<Option<Result<Value, ProgramError>>>,
     started: bool,
 }
 impl AdmittedProgram {
@@ -199,11 +237,18 @@ impl AdmittedProgram {
     pub fn cancel(&self) {
         self.request.cancel.cancel();
     }
+    pub(crate) async fn cancel_with(&self, reason: &str) -> Result<Value, ProgramError> {
+        self.cancel();
+        match self.result().await {
+            Err(ProgramError::OutcomeUnknown) => Err(ProgramError::OutcomeUnknown),
+            _ => Err(reason.into()),
+        }
+    }
     /// Waits for the bounded complete result or terminal diagnostic.
     ///
     /// # Errors
     /// Reports script, protocol, cancellation or process-settlement failure.
-    pub async fn result(&self) -> Result<Value, String> {
+    pub async fn result(&self) -> Result<Value, ProgramError> {
         runtime::wait_result(self.result.clone()).await
     }
 }

@@ -158,6 +158,12 @@ impl TurnFinalization for AgentKernel {
                 .await
         }))
         .await;
+        if results
+            .iter()
+            .any(|result| matches!(result, Ok(Err(TurnFinalizationError::OutcomeUnknown))))
+        {
+            return Err(TurnFinalizationError::OutcomeUnknown);
+        }
         for (entry, result) in finalizers.iter().zip(&results) {
             match result {
                 Ok(Err(error)) => return Err(error.clone()),

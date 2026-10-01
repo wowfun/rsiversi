@@ -19,6 +19,38 @@ registers a typed `rsi.workspace-context` domain and returns the actual entered
 text with its state proposal. The executor commits the whole stage through the
 generic Kernel boundary.
 
+The native `LocalWorkspaceContext` source accepts only Local coordinates. It
+rejects a remote Header before filesystem discovery even if the same path exists
+on the Service. Target selection must supply a reader bound to the executing
+lease; a remote path spelling never authorizes this native source.
+Every source entry receives the current execution lease. Local-only embeddings may
+omit it. Native jobs retain its operation admission inside the blocking task, so a
+cancelled waiter cannot release admission while filesystem work is still running.
+
+The target adapter invokes the receipt-verified helper's fixed project-context
+entry under a ReadOnly plan from that same lease. The request contains only bounded
+selection names and remaining budgets; cwd comes from the confined process. It
+does not transmit the Session, model configuration, user source paths or user text.
+The entry reuses this package's project discovery and source validation, without
+configured user roots. The Service reads its own configured user sources and merges
+structured sections and selected metadata before rendering and hashing. Target
+project definitions retain precedence over Service user definitions; both share
+the 256-entry scan and existing render limits. A failure on either side withholds
+the combined observation. The native adapter remains Local-only.
+The fixed entry uses Sandbox's source-reader view: host scratch is visible
+read-only and networking is isolated. Ordinary private `/tmp` would hide project
+ancestors and selected directory-link targets. Requests and responses use bounded
+Duplex chunks rather than a batch tail, so a valid large response cannot silently
+lose its prefix at the ordinary 4 MiB capture limit.
+
+Project-context requests are at most 512 KiB and responses at most 16 MiB of JSON;
+unknown fields, malformed selections and invalid returned metadata are rejected.
+Selected Agent seeds must bind the returned source text by its SHA-256 digest.
+The four shared observation lanes also bound remote observations. Remote wire
+buffers are bounded separately from local snapshot accounting. JSON decoding and
+merged structures allocate outside that accounting; there is no enforced 64 MiB
+per-remote-observation or 256 MiB process memory limit.
+
 The state carries a Session-and-Turn-bound Fact cursor. A complete snapshot advances the
 cursor and digests atomically with its inputs; an incomplete snapshot advances
 neither. Each new Turn starts at its exact acceptance, so a claim-filtered scan
@@ -41,7 +73,7 @@ explicit resource read errors include this detail without source contents or
 raw operating-system error text. Diagnostic storage shares the snapshot scratch
 budget; the incomplete-observation latch and last-good state rules are unchanged.
 
-All instances and generations share four process-wide blocking lanes. Each job
+All instances and generations share four process-wide blocking lanes. Each local job
 reserves a conservative 16 MiB aggregate envelope, including configuration,
 paths, invocation names, selected metadata, source/render scratch and results;
 aggregate process admission is therefore 64 MiB. This is a capacity policy, not
@@ -195,3 +227,6 @@ a diagnostic and cannot spawn. Direct Human `@name` mentions exclude escaped
 text, code, email addresses, bare URL handles and file locators; they request model
 orchestration. A leading `@example.com` is a valid dotted role name, not an email
 address with a local part.
+
+The target collector explicitly requests Execution source-reader preparation;
+its fixed marker selects parsing behavior, not a different Sandbox implicitly.

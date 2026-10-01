@@ -124,7 +124,7 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
 }
 
 fn contribution_budget_header() -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("contribution-budget").unwrap(),
         1,
         "/workspace",

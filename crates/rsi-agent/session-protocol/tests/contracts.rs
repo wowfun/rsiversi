@@ -242,7 +242,7 @@ fn agent_preset_id_round_trips_only_the_safe_directory_grammar() {
 
 #[test]
 fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("session-1").unwrap(),
         1,
         "/workspace",
@@ -297,7 +297,7 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
         "the current durable format must not widen an omitted frozen budget"
     );
     assert!(
-        SessionHeader::new(
+        SessionHeader::new_local(
             SessionId::new("session-1").unwrap(),
             1,
             "relative/path",
@@ -309,8 +309,32 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
 }
 
 #[test]
+fn header_coordinates_bind_machine_without_native_path_interpretation() {
+    let local = SessionHeader::new_local(
+        SessionId::new("coordinates").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("code-agent").unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let mut wire = serde_json::to_value(&local).unwrap();
+    wire["coordinates"]["location"] = json!({"kind":"ssh","target":"a".repeat(32)});
+    let remote: SessionHeader = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(local.canonical_cwd(), remote.canonical_cwd());
+    assert_ne!(local.coordinates(), remote.coordinates());
+    assert_ne!(local.fingerprint().unwrap(), remote.fingerprint().unwrap());
+    wire["coordinates"]["path"] = json!("C:\\workspace");
+    assert!(serde_json::from_value::<SessionHeader>(wire).is_err());
+    let mut legacy = serde_json::to_value(&local).unwrap();
+    legacy.as_object_mut().unwrap().remove("coordinates");
+    legacy["canonical_cwd"] = json!("/workspace");
+    assert!(serde_json::from_value::<SessionHeader>(legacy).is_err());
+}
+
+#[test]
 fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_format() {
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("workspace-default").unwrap(),
         1,
         "/workspace",
@@ -319,9 +343,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 18);
+    assert_eq!(current["format_version"], 19);
     assert!(current.get("workspace_trust").is_none());
-    for version in [16, 15, 14, 1] {
+    for version in [18, 17, 16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -473,7 +497,7 @@ fn maximum_escaped_header_stays_inside_its_framing_bound() {
         false,
     )
     .unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("s".repeat(MAXIMUM_AGENT_IDENTIFIER_BYTES)).unwrap(),
         1,
         format!("/{}", "\u{1}".repeat(MAXIMUM_WORKSPACE_PATH_BYTES - 1)),
@@ -806,7 +830,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     .validate()
     .expect("all completed turns may resolve to an empty first-turn prefix");
 
-    let child = SessionHeader::new(
+    let child = SessionHeader::new_local(
         SessionId::new("session-child").unwrap(),
         2,
         "/workspace",

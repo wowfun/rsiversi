@@ -17,8 +17,6 @@ rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 rsi-workspace-review-api = { path = "../workspace-review-api" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
 tokio.workspace = true
 [lints]
 workspace = true

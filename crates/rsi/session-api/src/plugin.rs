@@ -20,18 +20,13 @@ pub struct SessionApiFactory;
 impl PluginFactory for SessionApiFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(prepare(config)?
-            .requiring_local::<SessionContract>()
             .requiring_local::<SessionIngressContract>()
             .requiring_local::<ApiRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let registrar = plan.local::<ApiRegistrarContract>()?;
-        let api = SessionApi::register(
-            registrar.as_ref(),
-            plan.local::<SessionContract>()?,
-            plan.local::<SessionIngressContract>()?,
-        )
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let api = SessionApi::register(registrar.as_ref(), plan.local::<SessionIngressContract>()?)
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
             "retire Session API",
             Box::new(move || {

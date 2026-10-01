@@ -27,9 +27,9 @@ impl PtySize {
 }
 /// Exact controlling-terminal process request with no ambient environment merge.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PtyProcessSpec {
+pub struct PtyProcessSpec<P = ConfinedProcess> {
     /// Restricted Sandbox plan with explicit PTY intent.
-    pub process: ConfinedProcess,
+    pub process: P,
     /// Complete child environment.
     pub environment: Vec<(OsString, OsString)>,
     /// Initial terminal dimensions.
@@ -37,6 +37,18 @@ pub struct PtyProcessSpec {
     /// TERM-to-KILL escalation grace in milliseconds.
     pub termination_grace_ms: u64,
 }
+impl<P> PtyProcessSpec<P> {
+    /// Moves the exact options into another provider's prepared-plan representation.
+    pub fn try_map_process<Q>(self, map: impl FnOnce(P) -> Result<Q>) -> Result<PtyProcessSpec<Q>> {
+        Ok(PtyProcessSpec {
+            process: map(self.process)?,
+            environment: self.environment,
+            size: self.size,
+            termination_grace_ms: self.termination_grace_ms,
+        })
+    }
+}
+
 impl PtyProcessSpec {
     /// Validates framing and the supported restricted Linux backend.
     pub fn validate(&self) -> Result<()> {
@@ -51,6 +63,8 @@ impl PtyProcessSpec {
             ));
         }
         if self.process.stdio != rsi_sandbox::ProcessStdio::Pty
+            || self.process.stamp.scratch != rsi_sandbox::SandboxScratch::PrivateTmp
+            || self.process.stamp.network != rsi_sandbox::SandboxNetwork::Host
             || !matches!(
                 self.process.stamp.backend,
                 rsi_sandbox::SandboxBackend::Bubblewrap { .. }
@@ -83,7 +97,7 @@ pub trait PtyControl: fmt::Debug + Send + Sync + 'static {
     /// Returns accepted bytes from one write. Cancellation leaves receipt unknown.
     async fn write(&self, bytes: &[u8]) -> Result<usize>;
     /// Changes dimensions and notifies the controlling terminal.
-    fn resize(&self, size: PtySize) -> Result<()>;
+    async fn resize(&self, size: PtySize) -> Result<()>;
     /// Begins TERM/KILL and closes blocked I/O admission.
     fn terminate(&self);
     /// Waits for direct-child reaping, group settlement and reader closure.
@@ -117,8 +131,8 @@ impl ManagedPtyProcess {
         self.0.0.write(bytes).await
     }
     /// Resizes the controlling terminal.
-    pub fn resize(&self, size: PtySize) -> Result<()> {
-        self.0.0.resize(size)
+    pub async fn resize(&self, size: PtySize) -> Result<()> {
+        self.0.0.resize(size).await
     }
     /// Requests termination.
     pub fn terminate(&self) {
@@ -130,9 +144,10 @@ impl ManagedPtyProcess {
     }
 }
 /// Local-only native PTY provider, sharing Process admission and retirement.
+#[async_trait]
 pub trait PtyProcess: fmt::Debug + Send + Sync + 'static {
     /// Admits one exact restricted PTY plan.
-    fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess>;
+    async fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess>;
 }
 /// Typed native PTY authority, never exposed by the output cache API.
 #[derive(Debug)]
@@ -140,4 +155,46 @@ pub struct PtyProcessContract;
 impl LocalContract for PtyProcessContract {
     const KEY: &'static str = "rsi.process.pty";
     type Service = dyn PtyProcess;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pty_cannot_consume_the_pipe_only_source_reader_view() {
+        use rsi_sandbox::{
+            EnforcementStamp, ProcessStdio, SandboxBackend, SandboxFileSystem, SandboxMode,
+            SandboxNetwork, SandboxScratch,
+        };
+        let mut spec = PtyProcessSpec {
+            process: ConfinedProcess {
+                owner: None,
+                stdio: ProcessStdio::Pty,
+                program: "/wrapper".into(),
+                arguments: vec![],
+                cwd: "/workspace".into(),
+                stamp: EnforcementStamp {
+                    requested: SandboxMode::ReadOnly,
+                    backend: SandboxBackend::Bubblewrap {
+                        sha256: "a".repeat(64),
+                    },
+                    workspace: "/workspace".into(),
+                    filesystem: SandboxFileSystem::ReadOnly,
+                    scratch: SandboxScratch::Host,
+                    network: SandboxNetwork::Isolated,
+                },
+            },
+            environment: vec![],
+            size: PtySize {
+                columns: 80,
+                rows: 24,
+            },
+            termination_grace_ms: 100,
+        };
+        spec.process.stamp.validate().unwrap();
+        assert!(matches!(spec.validate(), Err(ProcessError::Unsupported)));
+        spec.process.stamp.scratch = SandboxScratch::PrivateTmp;
+        spec.process.stamp.network = SandboxNetwork::Host;
+        spec.validate().unwrap();
+    }
 }

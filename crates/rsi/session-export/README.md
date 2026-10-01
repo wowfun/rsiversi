@@ -21,9 +21,12 @@ not an Assistant answer. Child Sessions are exported separately.
 Request and response diagnostics select the same latest completed Conversation
 effect within the accepted watermark. Request evidence resolves exact section
 references and verifies their digests. Semantic message reconstruction uses the
-current pure Context projection and recorded options, is always approximate and
+current pure Context projection, recorded options and recorded language profile,
+is always approximate and
 identifies its implementation and limitations. Missing evidence or reconstruction
 capacity produces an explicit unavailable diagnostic, never fabricated input.
+Missing historical language profiles likewise make reconstruction unavailable;
+export never consults a current provider or invents historical image capability.
 Response output is reconstructed from normalized durable events, not raw HTTP.
 Neither diagnostic contains credentials or claims exact provider wire replay.
 

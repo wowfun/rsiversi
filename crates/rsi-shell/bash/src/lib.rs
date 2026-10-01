@@ -128,8 +128,8 @@ impl BashToolFactory {
         &self.bash
     }
 
-    #[cfg(target_os = "linux")]
-    fn environment_with_bash_defaults(&self) -> Vec<(OsString, OsString)> {
+    /// Returns the scrubbed complete child environment, including noninteractive Bash defaults.
+    pub fn environment_with_bash_defaults(&self) -> Vec<(OsString, OsString)> {
         let mut environment = self
             .environment
             .iter()
@@ -265,12 +265,13 @@ mod linux {
     };
     use rsi_process::{ManagedProcess, Process, ProcessOutcome, ProcessRead, ProcessSpec};
     use rsi_tools_protocol::{
-        ToolContent, ToolDefinition, ToolExecution, ToolExecutor, ToolRegistration, ToolResult,
+        ToolContent, ToolDefinition, ToolExecution, ToolExecutor, ToolProcess, ToolRegistration,
+        ToolResult,
     };
     use serde::Deserialize;
     use serde_json::json;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     pub(super) fn activate_producer(mut plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -362,6 +363,32 @@ mod linux {
         run_in_background: bool,
     }
 
+    impl BashArguments {
+        fn invalid_reason(&self) -> Option<String> {
+            if self.command.is_empty()
+                || self.command.len() > MAXIMUM_BASH_COMMAND_BYTES
+                || self.command.contains('\0')
+            {
+                Some(format!(
+                    "command must be nonempty, NUL-free UTF-8 within {MAXIMUM_BASH_COMMAND_BYTES} bytes"
+                ))
+            } else if self
+                .timeout_ms
+                .is_some_and(|timeout| timeout == 0 || timeout > MAXIMUM_BASH_TIMEOUT_MS)
+            {
+                Some(format!(
+                    "timeout_ms must be within 1..={MAXIMUM_BASH_TIMEOUT_MS}"
+                ))
+            } else if self.run_in_background && self.timeout_ms.is_some() {
+                Some(
+                    "background Bash does not accept timeout_ms; use job_output or job_kill".into(),
+                )
+            } else {
+                None
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct BashTool {
         services: Arc<BashServices>,
@@ -369,6 +396,32 @@ mod linux {
 
     #[async_trait]
     impl ToolExecutor for BashTool {
+        async fn prepare(
+            &self,
+            arguments: &Value,
+            execution: &ToolExecution,
+        ) -> rsi_tools_protocol::Result<Option<ToolProcess>> {
+            let Ok(arguments) = serde_json::from_value::<BashArguments>(arguments.clone()) else {
+                return Ok(None);
+            };
+            if arguments.invalid_reason().is_some() {
+                return Ok(None);
+            }
+            execution
+                .prepare_process(
+                    "bash",
+                    self.services.bash.clone(),
+                    self.services.environment.clone(),
+                    vec![
+                        "--noprofile".into(),
+                        "--norc".into(),
+                        "-c".into(),
+                        arguments.command,
+                    ],
+                )
+                .await
+                .map(Some)
+        }
         #[allow(clippy::too_many_lines)]
         async fn execute(
             &self,
@@ -379,31 +432,8 @@ mod linux {
                 Ok(arguments) => arguments,
                 Err(result) => return Ok(*result),
             };
-            if arguments.command.is_empty()
-                || arguments.command.len() > MAXIMUM_BASH_COMMAND_BYTES
-                || arguments.command.contains('\0')
-            {
-                return error_result(
-                    "invalid_arguments",
-                    format!(
-                        "command must be nonempty, NUL-free UTF-8 within {MAXIMUM_BASH_COMMAND_BYTES} bytes"
-                    ),
-                );
-            }
-            if arguments
-                .timeout_ms
-                .is_some_and(|timeout| timeout == 0 || timeout > MAXIMUM_BASH_TIMEOUT_MS)
-            {
-                return error_result(
-                    "invalid_arguments",
-                    format!("timeout_ms must be within 1..={MAXIMUM_BASH_TIMEOUT_MS}"),
-                );
-            }
-            if arguments.run_in_background && arguments.timeout_ms.is_some() {
-                return error_result(
-                    "invalid_arguments",
-                    "background Bash does not accept timeout_ms; use job_output or job_kill",
-                );
+            if let Some(reason) = arguments.invalid_reason() {
+                return error_result("invalid_arguments", reason);
             }
             let scope = execution.job_scope().cloned();
             if arguments.run_in_background && scope.is_none() {
@@ -412,21 +442,12 @@ mod linux {
                     "background Bash requires live turn-scoped Jobs authority",
                 );
             }
-            let confined = execution
-                .confine(
-                    self.services.bash.clone(),
-                    vec![
-                        "--noprofile".into(),
-                        "--norc".into(),
-                        "-c".into(),
-                        arguments.command.clone(),
-                    ],
-                )
-                .await?;
+            let process = execution.take_prepared_process()?;
+            let environment = process.environment().to_vec();
             let spec = ProcessSpec {
-                process: confined,
+                process,
                 stdin: Vec::new(),
-                environment: self.services.environment.clone(),
+                environment,
                 stdout_max_bytes: BASH_STREAM_CAPTURE_BYTES,
                 stderr_max_bytes: BASH_STREAM_CAPTURE_BYTES,
                 termination_grace_ms: BASH_TERMINATION_GRACE_MS,
@@ -438,10 +459,12 @@ mod linux {
                     origin: execution
                         .extension::<rsi_jobs::JobOrigin>()
                         .map(|origin| origin.as_str().to_owned()),
-                    request: JobRequest::new(BashJobRequest { spec }),
+                    request: JobRequest::new(BashJobRequest {
+                        spec: Mutex::new(Some(spec)),
+                    }),
                     requires_report: true,
                 };
-                let id = match self.services.jobs.submit(&scope, submission) {
+                let id = match self.services.jobs.submit(&scope, submission).await {
                     Ok(id) => id,
                     Err(error) => return jobs_error_result(&error),
                 };
@@ -457,7 +480,10 @@ mod linux {
                     biased;
                     read = self.services.jobs.wait(&scope, &id, 0, 0) => ("exited", read),
                     () = execution.cancellation.cancelled() => {
-                        let _settled = self.services.jobs.kill(&scope, &id).await;
+                        let settled = self.services.jobs.kill(&scope, &id).await;
+                        if matches!(&settled, Ok(read) if read.job.status == JobStatus::OutcomeUnknown) || matches!(settled, Err(JobsError::OutcomeUnknown)) {
+                            return Err(ToolError::OutcomeUnknown);
+                        }
                         return Err(ToolError::Cancelled);
                     }
                     () = tokio::time::sleep(Duration::from_millis(timeout)) =>
@@ -467,6 +493,9 @@ mod linux {
                     Ok(read) => read,
                     Err(error) => return jobs_error_result(&error),
                 };
+                if read.job.status == JobStatus::OutcomeUnknown {
+                    return Err(ToolError::OutcomeUnknown);
+                }
                 let terminal = read.job.terminal.as_ref().ok_or_else(|| {
                     ToolError::Execution("foreground Bash lacks terminal status".into())
                 })?;
@@ -490,7 +519,7 @@ mod linux {
             }
 
             let timeout = arguments.timeout_ms.unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
-            let managed = match self.services.process.spawn(spec) {
+            let managed = match ToolProcess::spawn(spec, self.services.process.as_ref()).await {
                 Ok(managed) => managed,
                 Err(error) => return process_error_result(&error),
             };
@@ -502,7 +531,9 @@ mod linux {
                 outcome = waiting.wait() => ("exited", outcome),
                 () = execution.cancellation.cancelled() => {
                     managed.terminate();
-                    let _outcome = managed.wait().await;
+                    if matches!(managed.wait().await, Err(ProcessError::OutcomeUnknown)) {
+                        return Err(ToolError::OutcomeUnknown);
+                    }
                     return Err(ToolError::Cancelled);
                 }
                 () = &mut sleep => {
@@ -520,7 +551,7 @@ mod linux {
 
     #[derive(Debug)]
     struct BashJobRequest {
-        spec: ProcessSpec,
+        spec: Mutex<Option<ProcessSpec<ToolProcess>>>,
     }
 
     #[derive(Debug)]
@@ -528,14 +559,23 @@ mod linux {
         process: Arc<dyn Process>,
     }
 
+    #[async_trait::async_trait]
+
     impl JobProducer for BashProducer {
-        fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
+        async fn start(&self, request: &JobRequest) -> rsi_jobs::Result<Arc<dyn JobControl>> {
             let request = request.downcast_ref::<BashJobRequest>().ok_or_else(|| {
                 JobsError::InvalidInput("Bash producer received the wrong request type".into())
             })?;
-            let process = self
-                .process
-                .spawn(request.spec.clone())
+            let spec = request
+                .spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| {
+                    JobsError::InvalidInput("Bash prepared request was already consumed".into())
+                })?;
+            let process = ToolProcess::spawn(spec, self.process.as_ref())
+                .await
                 .map_err(map_process)?;
             Ok(Arc::new(BashJobControl {
                 process,
@@ -630,14 +670,8 @@ mod linux {
         managed: &ManagedProcess,
         outcome: &ProcessOutcome,
     ) -> rsi_tools_protocol::Result<ToolResult> {
-        let stdout = managed
-            .stdout()
-            .read_from(0)
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let stderr = managed
-            .stderr()
-            .read_from(0)
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let stdout = managed.stdout().read_from(0).map_err(process_failure)?;
+        let stderr = managed.stderr().read_from(0).map_err(process_failure)?;
         foreground_output(status, &stdout, &stderr, outcome)
     }
 
@@ -714,6 +748,7 @@ mod linux {
 
     fn jobs_error_result(error: &JobsError) -> rsi_tools_protocol::Result<ToolResult> {
         let code = match error {
+            JobsError::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             JobsError::Capacity => "job_capacity",
             JobsError::UnknownProducer(_) => "job_producer_unavailable",
             JobsError::ScopeClosed => "job_scope_closed",
@@ -727,8 +762,16 @@ mod linux {
         error_result(code, error.to_string())
     }
 
+    fn process_failure(error: ProcessError) -> ToolError {
+        match error {
+            ProcessError::OutcomeUnknown => ToolError::OutcomeUnknown,
+            other => ToolError::Execution(other.to_string()),
+        }
+    }
+
     fn process_error_result(error: &ProcessError) -> rsi_tools_protocol::Result<ToolResult> {
         let code = match error {
+            ProcessError::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             ProcessError::Capacity => "process_capacity",
             ProcessError::ShuttingDown => "process_shutting_down",
             ProcessError::Unsupported => "process_unsupported",
@@ -744,6 +787,7 @@ mod linux {
 
     fn map_process(error: ProcessError) -> JobsError {
         match error {
+            ProcessError::OutcomeUnknown => JobsError::OutcomeUnknown,
             ProcessError::Capacity => JobsError::Capacity,
             ProcessError::ShuttingDown => JobsError::ShuttingDown,
             ProcessError::InvalidInput(message) => JobsError::InvalidInput(message),

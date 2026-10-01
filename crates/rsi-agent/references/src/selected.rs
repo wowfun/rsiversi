@@ -130,7 +130,7 @@ pub struct ObservedReferenceText {
     /// Observed provenance (native is rejected).
     pub source: ReferenceSource,
     /// Canonical workspace established by the source owner.
-    pub canonical_cwd: String,
+    pub coordinates: rsi_agent_session_protocol::ExecutionCoordinates,
     /// Exact original field obtained from the journal.
     pub text: String,
     /// Validated original coordinate, cutoff and encoded bytes.
@@ -153,7 +153,7 @@ impl References {
             let header = store.header(&source.session_id).await?;
             check(&stop)?;
             if header.fingerprint().map_err(invalid)? != source.header_sha256
-                || header.canonical_cwd() != target.canonical_cwd()
+                || header.coordinates() != target.coordinates()
             {
                 return Err(invalid("selected source Header or workspace mismatch"));
             }
@@ -203,7 +203,7 @@ impl References {
         cancellation: CancellationToken,
     ) -> Result<FrozenReference> {
         target.validate().map_err(invalid)?;
-        if original.source.native().is_some() || original.canonical_cwd != target.canonical_cwd() {
+        if original.source.native().is_some() || &original.coordinates != target.coordinates() {
             return Err(invalid("observed source kind or workspace mismatch"));
         }
         let envelope = envelope(original.source, &target, original.selection, &original.text)?;

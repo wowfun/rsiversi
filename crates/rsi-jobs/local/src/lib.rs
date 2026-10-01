@@ -403,8 +403,7 @@ impl Jobs for Service {
         Ok(authority)
     }
 
-    #[allow(clippy::too_many_lines)] // Admission, publication, and unpublished ownership form one linearization protocol.
-    fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String> {
+    async fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String> {
         validate_job_identifier("job name", &submission.name)?;
         validate_job_identifier("job producer name", &submission.producer)?;
         if let Some(origin) = &submission.origin {
@@ -413,6 +412,7 @@ impl Jobs for Service {
         let executor = tokio::runtime::Handle::try_current()
             .map_err(|_| JobsError::Execution("Tokio runtime is unavailable".into()))?;
 
+        let owner = self.self_weak.upgrade().ok_or(JobsError::ShuttingDown)?;
         let (producer, producer_generation, reservation) = {
             let mut registry = lock(&self.registry);
             self.validate_scope(&registry, scope)?;
@@ -432,91 +432,22 @@ impl Jobs for Service {
             )
         };
 
-        let started =
-            std::panic::catch_unwind(AssertUnwindSafe(|| producer.start(&submission.request)));
-        let control = match started {
-            Ok(Ok(control)) => control,
-            Ok(Err(error)) => {
-                self.release_reservation(reservation, true);
-                return Err(error);
-            }
-            Err(_) => {
-                self.release_reservation(reservation, true);
-                return Err(JobsError::Execution("job producer panicked".into()));
-            }
-        };
-
-        let publication = {
-            let mut registry = lock(&self.registry);
-            release_reservation_count(&mut registry, reservation);
-            let admission_error = if !self.accepting.load(Ordering::Acquire) {
-                Some(JobsError::ShuttingDown)
-            } else if !scope_is_current(&registry, self.provider_id, scope) {
-                Some(JobsError::ScopeClosed)
-            } else if registry
-                .producers
-                .get(&submission.producer)
-                .is_none_or(|entry| entry.generation != producer_generation)
-            {
-                Some(JobsError::UnknownProducer(submission.producer.clone()))
-            } else {
-                None
-            };
-            if let Some(error) = admission_error {
-                Err(error)
-            } else {
-                next_generation(&self.next_id, "job identity exhausted").map(|sequence| {
-                    let id = format!("job-{sequence}");
-                    registry.insert_record(
-                        &id,
-                        JobRecord {
-                            sequence,
-                            scope: scope.clone(),
-                            name: submission.name,
-                            producer: submission.producer,
-                            origin: submission.origin,
-                            producer_generation,
-                            status: JobStatus::Running,
-                            control: Some(control.clone()),
-                            terminal: None,
-                            requires_report: submission.requires_report,
-                            reported: false,
-                            readers: 0,
-                            stream_ends: [0, 0],
-                            settled: Arc::new(Notify::new()),
-                        },
-                    );
-                    id
-                })
-            }
-        };
-        self.changed.notify_waiters();
-
-        let id = match publication {
-            Ok(id) => id,
-            Err(error) => {
-                let _ = contained_cancel(&control);
-                spawn_unpublished_reaper(
-                    &executor,
-                    self.self_weak
-                        .upgrade()
-                        .expect("live Jobs service owns itself during submission"),
-                    reservation,
-                    control,
-                );
-                return Err(error);
-            }
-        };
-        let service = self.self_weak.clone();
-        let watcher_control = control;
-        let watcher_id = id.clone();
-        executor.spawn(async move {
-            let terminal = contained_wait(watcher_control.clone()).await;
-            if let Some(service) = service.upgrade() {
-                service.settle(&watcher_id, &watcher_control, terminal);
-            }
-        });
-        Ok(id)
+        let scope = scope.clone();
+        // This task owns the reservation before the first asynchronous suspension.
+        executor
+            .spawn(async move {
+                owner
+                    .complete_submission(
+                        scope,
+                        submission,
+                        producer,
+                        producer_generation,
+                        reservation,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|_| JobsError::Execution("job admission task failed".into()))?
     }
 
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>> {
@@ -627,8 +558,10 @@ impl Jobs for Service {
         let _read_lease = JobReadLease { service: self, id };
         let (mut stdout, mut stderr) = if let Some(control) = &control {
             (
-                contained_read(control, JobStream::Stdout, stdout_offset)?,
-                contained_read(control, JobStream::Stderr, stderr_offset)?,
+                contained_read(control, JobStream::Stdout, stdout_offset)
+                    .map_err(|error| self.read_failure(scope, id, error))?,
+                contained_read(control, JobStream::Stderr, stderr_offset)
+                    .map_err(|error| self.read_failure(scope, id, error))?,
             )
         } else {
             (
@@ -649,8 +582,10 @@ impl Jobs for Service {
             });
         }
         if !terminal && let Some(control) = &control {
-            stdout = contained_read(control, JobStream::Stdout, stdout_offset)?;
-            stderr = contained_read(control, JobStream::Stderr, stderr_offset)?;
+            stdout = contained_read(control, JobStream::Stdout, stdout_offset)
+                .map_err(|error| self.read_failure(scope, id, error))?;
+            stderr = contained_read(control, JobStream::Stderr, stderr_offset)
+                .map_err(|error| self.read_failure(scope, id, error))?;
         }
         let job = self
             .report_job_inner(id, false, Some([stdout.next_offset, stderr.next_offset]))?
@@ -714,8 +649,8 @@ impl Jobs for Service {
         let Some(service) = self.self_weak.upgrade() else {
             return Err(JobsError::ShuttingDown);
         };
-        let generation = scope.generation();
-        let mut reaper = tokio::spawn(async move { service.finalize_generation(generation).await });
+        let authority = scope.clone();
+        let mut reaper = tokio::spawn(async move { service.finalize_generation(authority).await });
         match tokio::time::timeout(
             Duration::from_millis(self.config.shutdown_timeout_ms),
             &mut reaper,
@@ -805,6 +740,9 @@ impl Service {
             scope_generation: record.scope.generation(),
             producer_generation: record.producer_generation,
         };
+        if terminal.status == JobStatus::OutcomeUnknown {
+            record.scope.mark_outcome_unknown();
+        }
         record.status = terminal.status;
         record.terminal = Some(terminal);
         record.stream_ends = stream_ends;
@@ -853,6 +791,17 @@ impl Service {
                 contained_cancel(&control)?;
             }
             notified.await;
+        }
+    }
+
+    fn read_failure(&self, scope: &JobScopeAuthority, id: &str, error: JobsError) -> JobsError {
+        let registry = lock(&self.registry);
+        if visible_record(&registry, scope, id)
+            .is_ok_and(|record| record.status == JobStatus::OutcomeUnknown)
+        {
+            JobsError::OutcomeUnknown
+        } else {
+            error
         }
     }
 
@@ -967,7 +916,8 @@ impl Service {
             .map_err(|_| JobsError::CancellationTimeout)
     }
 
-    async fn finalize_generation(&self, generation: u64) -> Result<JobFinalization> {
+    async fn finalize_generation(&self, scope: JobScopeAuthority) -> Result<JobFinalization> {
+        let generation = scope.generation();
         loop {
             let notified = self.changed.notified();
             if lock(&self.registry)
@@ -992,7 +942,10 @@ impl Service {
                 unreported.push(job);
             }
         }
-        Ok(JobFinalization { unreported })
+        Ok(JobFinalization {
+            unreported,
+            outcome_unknown: scope.has_unknown_outcome(),
+        })
     }
 
     fn withdraw_all(&self) {
@@ -1265,6 +1218,12 @@ async fn contained_wait(control: Arc<dyn JobControl>) -> JobTerminal {
     match AssertUnwindSafe(control.wait()).catch_unwind().await {
         Ok(Ok(terminal)) if terminal.validate().is_ok() => terminal,
         Ok(Ok(_)) => failed_terminal("job control returned an invalid terminal value"),
+        Ok(Err(JobsError::OutcomeUnknown)) => JobTerminal {
+            status: JobStatus::OutcomeUnknown,
+            exit_code: None,
+            signal: None,
+            message: None,
+        },
         Ok(Err(error)) => failed_terminal(&error.to_string()),
         Err(_) => failed_terminal("job control panicked"),
     }
@@ -1294,9 +1253,12 @@ fn spawn_unpublished_reaper(
     service: Arc<Service>,
     reservation: Reservation,
     control: Arc<dyn JobControl>,
+    scope: JobScopeAuthority,
 ) {
     executor.spawn(async move {
-        let _terminal = contained_wait(control).await;
+        if contained_wait(control).await.status == JobStatus::OutcomeUnknown {
+            scope.mark_outcome_unknown();
+        }
         service.settle_unpublished(reservation);
     });
 }
@@ -1305,6 +1267,109 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Service {
+    async fn complete_submission(
+        &self,
+        scope: JobScopeAuthority,
+        submission: JobSubmission,
+        producer: Arc<dyn JobProducer>,
+        producer_generation: u64,
+        reservation: Reservation,
+    ) -> Result<String> {
+        let executor = tokio::runtime::Handle::current();
+        let started = AssertUnwindSafe(async { producer.start(&submission.request).await })
+            .catch_unwind()
+            .await;
+        let control = match started {
+            Ok(Ok(control)) => control,
+            Ok(Err(error)) => {
+                if error == JobsError::OutcomeUnknown {
+                    scope.mark_outcome_unknown();
+                }
+                self.release_reservation(reservation, true);
+                return Err(error);
+            }
+            Err(_) => {
+                self.release_reservation(reservation, true);
+                return Err(JobsError::Execution("job producer panicked".into()));
+            }
+        };
+
+        let publication = {
+            let mut registry = lock(&self.registry);
+            release_reservation_count(&mut registry, reservation);
+            let admission_error = if !self.accepting.load(Ordering::Acquire) {
+                Some(JobsError::ShuttingDown)
+            } else if !scope_is_current(&registry, self.provider_id, &scope) {
+                Some(JobsError::ScopeClosed)
+            } else if registry
+                .producers
+                .get(&submission.producer)
+                .is_none_or(|entry| entry.generation != producer_generation)
+            {
+                Some(JobsError::UnknownProducer(submission.producer.clone()))
+            } else {
+                None
+            };
+            if let Some(error) = admission_error {
+                Err(error)
+            } else {
+                next_generation(&self.next_id, "job identity exhausted").map(|sequence| {
+                    let id = format!("job-{sequence}");
+                    registry.insert_record(
+                        &id,
+                        JobRecord {
+                            sequence,
+                            scope: scope.clone(),
+                            name: submission.name,
+                            producer: submission.producer,
+                            origin: submission.origin,
+                            producer_generation,
+                            status: JobStatus::Running,
+                            control: Some(control.clone()),
+                            terminal: None,
+                            requires_report: submission.requires_report,
+                            reported: false,
+                            readers: 0,
+                            stream_ends: [0, 0],
+                            settled: Arc::new(Notify::new()),
+                        },
+                    );
+                    id
+                })
+            }
+        };
+        self.changed.notify_waiters();
+
+        let id = match publication {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = contained_cancel(&control);
+                spawn_unpublished_reaper(
+                    &executor,
+                    self.self_weak
+                        .upgrade()
+                        .expect("live Jobs service owns itself during submission"),
+                    reservation,
+                    control,
+                    scope,
+                );
+                return Err(error);
+            }
+        };
+        let service = self.self_weak.clone();
+        let watcher_control = control;
+        let watcher_id = id.clone();
+        executor.spawn(async move {
+            let terminal = contained_wait(watcher_control.clone()).await;
+            if let Some(service) = service.upgrade() {
+                service.settle(&watcher_id, &watcher_control, terminal);
+            }
+        });
+        Ok(id)
+    }
 }
 
 #[cfg(test)]

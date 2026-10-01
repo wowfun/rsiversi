@@ -156,6 +156,17 @@ pub(super) fn config_retained_bytes(
 }
 
 impl JobLease {
+    pub(super) async fn run_async<T: Send + 'static>(
+        self,
+        operation: impl std::future::Future<Output = Result<T, WorkspaceContextError>> + Send + 'static,
+    ) -> Result<T, WorkspaceContextError> {
+        let (result, lease) = tokio::spawn(async move { (operation.await, self) })
+            .await
+            .map_err(|_| WorkspaceContextError::Failed("workspace source task failed".into()))?;
+        drop(lease);
+        result
+    }
+
     pub(super) async fn run<T: Send + 'static>(
         self,
         operation: impl FnOnce() -> Result<T, WorkspaceContextError> + Send + 'static,

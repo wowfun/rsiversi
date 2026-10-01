@@ -93,7 +93,10 @@ async fn load_endpoint(
         })
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
-    let mut snapshot = domain.snapshot().await;
+    let mut snapshot = domain
+        .snapshot()
+        .await
+        .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
     if snapshot.len() > 1 || snapshot.keys().any(|key| key != "deployment") {
         return Err(MetaError::Activation(
             "service identity contains unexpected records".into(),

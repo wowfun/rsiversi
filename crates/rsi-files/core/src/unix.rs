@@ -62,6 +62,14 @@ fn io(error: std::io::Error) -> FilesError {
         _ => FilesError::Io,
     }
 }
+#[allow(clippy::needless_pass_by_value)]
+fn relative_open_error(error: std::io::Error) -> FilesError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        FilesError::Missing
+    } else {
+        io(error)
+    }
+}
 #[derive(Debug)]
 struct Entry {
     name: OsString,
@@ -89,7 +97,8 @@ pub(super) fn open(
     let root = open_absolute_directory_no_follow(binding.workspace()).map_err(io)?;
     let (object, version) = match kind {
         FileKind::File => {
-            let file = open_relative_file_no_follow(&root, native(&path)).map_err(io)?;
+            let file =
+                open_relative_file_no_follow(&root, native(&path)).map_err(relative_open_error)?;
             let metadata = file.metadata().map_err(io)?;
             if !metadata.is_file() {
                 return Err(FilesError::Invalid);
@@ -97,7 +106,8 @@ pub(super) fn open(
             (Object::File(file), Version::from(metadata))
         }
         FileKind::Directory => {
-            let directory = open_relative_directory_no_follow(&root, native(&path)).map_err(io)?;
+            let directory = open_relative_directory_no_follow(&root, native(&path))
+                .map_err(relative_open_error)?;
             let version = directory_version(&directory)?;
             let mut entries = Vec::new();
             let mut bytes = 0_usize;
@@ -151,6 +161,7 @@ impl Resource {
                 Object::Directory(..) => FileKind::Directory,
             },
             length: self.length(),
+            executable: matches!(self.object, Object::File(_)) && self.version.mode & 0o111 != 0,
         }
     }
     pub(super) fn length(&self) -> u64 {

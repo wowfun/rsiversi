@@ -136,7 +136,7 @@ async fn producer_rejects_changed_header_before_emitting_start() {
     let store = Arc::new(MemoryStore::new());
     let header = header();
     append(&store, &header, 0, vec![accepted("private")]).await;
-    let changed = SessionHeader::new(
+    let changed = SessionHeader::new_local(
         header.session_id().clone(),
         2,
         "/changed",
@@ -237,6 +237,33 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn session_activity_summaries(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<Vec<Option<rsi_agent_store_protocol::StoreActivityRow>>>
+    {
+        self.inner.session_activity_summaries(sessions).await
+    }
+
+    async fn list_session_activity(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreActivityPage> {
+        self.inner
+            .list_session_activity(locations, coordinates, after, limit)
+            .await
+    }
+    async fn session_order_seed(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreOrderSeed> {
+        self.inner.session_order_seed(locations, coordinates).await
+    }
+
     async fn list_program_notices(
         &self,
         after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
@@ -368,10 +395,13 @@ impl SessionStore for PausedStore {
     }
     async fn list_recent_sessions(
         &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
     ) -> StoreResult<StoreRecentSessionPage> {
-        self.inner.list_recent_sessions(after, limit).await
+        self.inner
+            .list_recent_sessions(locations, after, limit)
+            .await
     }
     async fn list_open_sessions(
         &self,

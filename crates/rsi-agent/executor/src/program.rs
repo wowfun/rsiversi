@@ -63,7 +63,7 @@ impl ProgramToolDispatcher for Dispatch {
                 mpsc::error::TrySendError::Closed(_) => ToolError::Cancelled,
             })?;
         // Executor owns the request after admission, including when this waiter disappears.
-        tokio::select! { ()=cancellation.cancelled()=>Err(ToolError::Cancelled), result=result=>result.unwrap_or(Err(ToolError::Cancelled)) }
+        result.await.unwrap_or(Err(ToolError::OutcomeUnknown))
     }
 }
 impl Driver {
@@ -178,9 +178,17 @@ impl Driver {
                     let _ = request.reply.send(Ok(result));
                 }
                 Err(failure) => {
-                    let _ = request.reply.send(Err(ToolError::Execution(
-                        "program Tool execution failed; see its durable evidence".into(),
-                    )));
+                    let error = match &failure {
+                        DriveFailure::Turn(TurnOutcome::Interrupted { .. })
+                        | DriveFailure::SettledTool {
+                            outcome: TurnOutcome::Interrupted { .. },
+                            ..
+                        } => ToolError::OutcomeUnknown,
+                        _ => ToolError::Execution(
+                            "program Tool execution failed; see its durable evidence".into(),
+                        ),
+                    };
+                    let _ = request.reply.send(Err(error));
                     receiver.close();
                     combined.cancel();
                     let _ = run.await;

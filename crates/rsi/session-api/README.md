@@ -12,7 +12,12 @@ their API failure category. Clients may show setup without treating data or Stor
 failures as missing configuration.
 
 
-The current Session format is 18. Operations negotiate their own versions:
+The endpoint consumes only trusted `SessionIngress`, binding finite operations and
+subscriptions to the authenticated `ApiContext.origin`. It never falls through to
+the unscoped Local Session service. Handles recheck location Use for new operations;
+stream frames recheck before publication without retaining draft or composition pins.
+
+The current Session format is 19. Operations negotiate their own versions:
 create and inspect v7; attach, recent, draft-snapshot, select-preset and observe v6;
 history and read-message v5; submit v4. Message-status is v3. Interactions, questions
 and answer-question are v2 for typed closed reviews; older closed decoders are not

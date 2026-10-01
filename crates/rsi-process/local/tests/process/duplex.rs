@@ -53,6 +53,7 @@ async fn stdout_half_close_is_observable_before_child_exit_without_releasing_adm
     let (fiber, batch, duplex) = owners(json!({"maximum_active_processes":1})).await;
     let managed = duplex
         .spawn(duplex_spec("printf ready; exec 1>&-; read token || :", 128))
+        .await
         .unwrap();
     let output = managed.stdout();
     let bytes = tokio::time::timeout(Duration::from_secs(2), async {
@@ -74,13 +75,13 @@ async fn stdout_half_close_is_observable_before_child_exit_without_releasing_adm
             .is_err()
     );
     assert!(matches!(
-        batch.spawn(spec("exit 0", 1)),
+        batch.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     managed.stdin().close().await.unwrap();
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
     assert!(output.read(1).await.unwrap().eof);
-    let next = batch.spawn(spec("exit 0", 1)).unwrap();
+    let next = batch.spawn(spec("exit 0", 1)).await.unwrap();
     next.wait().await.unwrap();
     assert!(fiber.dispose().await.is_clean());
 }
@@ -88,7 +89,10 @@ async fn stdout_half_close_is_observable_before_child_exit_without_releasing_adm
 #[tokio::test]
 async fn persistent_binary_echo_is_lossless_through_a_tiny_backpressured_queue() {
     let (fiber, _, process) = owners(json!({})).await;
-    let managed = process.spawn(duplex_spec("exec /bin/cat", 257)).unwrap();
+    let managed = process
+        .spawn(duplex_spec("exec /bin/cat", 257))
+        .await
+        .unwrap();
     let expected: Vec<_> = (0..768 * 1024)
         .map(|i| u8::try_from(i % 251).unwrap())
         .collect();
@@ -126,29 +130,32 @@ async fn persistent_binary_echo_is_lossless_through_a_tiny_backpressured_queue()
 async fn duplex_and_batch_share_slots_and_capture_retention_including_the_write_buffer() {
     let (fiber, batch, duplex) =
         owners(json!({"maximum_active_processes":1,"maximum_capture_bytes":67584})).await;
-    let managed = duplex.spawn(duplex_spec("exec /bin/cat", 1024)).unwrap();
+    let managed = duplex
+        .spawn(duplex_spec("exec /bin/cat", 1024))
+        .await
+        .unwrap();
     let output = managed.stdout();
     assert!(matches!(
-        batch.spawn(spec("exit 0", 1)),
+        batch.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     managed.stdin().close().await.unwrap();
     managed.wait().await.unwrap();
     // Reaping returns process admission; retained protocol ports still own all 64 KiB+2 KiB capture.
     assert!(matches!(
-        batch.spawn(spec("exit 0", 1)),
+        batch.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     drop(managed);
     assert!(matches!(
-        batch.spawn(spec("exit 0", 1)),
+        batch.spawn(spec("exit 0", 1)).await,
         Err(ProcessError::Capacity)
     ));
     drop(output);
-    let next = batch.spawn(spec("exit 0", 1)).unwrap();
+    let next = batch.spawn(spec("exit 0", 1)).await.unwrap();
     next.wait().await.unwrap();
     drop(next);
-    let batch_active = batch.spawn(spec("exec /bin/cat", 1)).unwrap();
+    let batch_active = batch.spawn(spec("exec /bin/cat", 1)).await.unwrap();
     batch_active.wait().await.unwrap();
     drop(batch_active);
     assert!(fiber.dispose().await.is_clean());
@@ -158,6 +165,7 @@ async fn termination_unblocks_unread_output_and_reaps_the_child() {
     let (fiber, _, duplex) = owners(json!({})).await;
     let managed = duplex
         .spawn(duplex_spec("while :; do printf 0123456789; done", 64))
+        .await
         .unwrap();
     let first = managed.stdout().read(1).await.unwrap();
     assert_eq!(first.bytes, b"0");
@@ -199,6 +207,7 @@ async fn provider_retirement_closes_input_even_when_a_reply_waiter_was_dropped()
     let (fiber, _, duplex) = owners(json!({})).await;
     let managed = duplex
         .spawn(duplex_spec("trap '' TERM; exec /bin/sleep 60", 128))
+        .await
         .unwrap();
     let stdin = managed.stdin();
     let writing = tokio::spawn(async move {
@@ -228,7 +237,10 @@ async fn provider_retirement_closes_input_even_when_a_reply_waiter_was_dropped()
 #[tokio::test]
 async fn overlapping_read_rejects_and_cancellation_returns_its_admission() {
     let (fiber, _, duplex) = owners(json!({})).await;
-    let managed = duplex.spawn(duplex_spec("exec /bin/cat", 64)).unwrap();
+    let managed = duplex
+        .spawn(duplex_spec("exec /bin/cat", 64))
+        .await
+        .unwrap();
     let output = managed.stdout();
     let mut reading = Box::pin(output.read(64));
     assert!(
@@ -256,7 +268,7 @@ async fn stderr_drain_timeout_is_reported_by_wait_independently_of_stdout_eof() 
     let script = r#"exec /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/sleep", "2"], start_new_session=True, stdout=subprocess.DEVNULL)'"#;
     let mut spec = duplex_spec(script, 128);
     spec.termination_grace_ms = 50;
-    let managed = duplex.spawn(spec).unwrap();
+    let managed = duplex.spawn(spec).await.unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(1), managed.wait()).await;
     assert!(
         matches!(outcome, Ok(Err(ProcessError::Io(_)))),
@@ -275,6 +287,7 @@ async fn dropping_the_last_duplex_handle_terminates_while_retained_ports_remain_
             "read word; printf \"%s\" \"$word\"; exec /bin/sleep 60",
             128,
         ))
+        .await
         .unwrap();
     let kept = process.clone();
     let output = process.stdout();
@@ -292,7 +305,7 @@ async fn dropping_the_last_duplex_handle_terminates_while_retained_ports_remain_
     );
     let next = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            match batch.spawn(spec("exit 0", 1)) {
+            match batch.spawn(spec("exit 0", 1)).await {
                 Ok(next) => break next,
                 // EOF precedes full reaping; the last handle is intentionally gone,
                 // so observe admission with bounded backoff instead of a busy loop.

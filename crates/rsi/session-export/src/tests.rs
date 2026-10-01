@@ -10,7 +10,7 @@ use rsi_session_protocol::Result;
 mod seams;
 
 pub(super) fn header() -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("export-test").unwrap(),
         1,
         "/workspace",
@@ -59,7 +59,7 @@ fn snapshot() -> PreparedCallSnapshot {
 pub(super) fn evidence() -> RequestEvidence {
     let options = LanguageRequest::new(vec![Message::user_text("fixture").unwrap()]).unwrap();
     RequestEvidence::Available {
-        configuration:EvidencePart::inline(json!({"settings":options.settings(),"response_format":options.response_format(),"extensions":options.extensions()}).to_string()),
+        configuration:EvidencePart::inline(json!({"settings":options.settings(),"response_format":options.response_format(),"extensions":options.extensions(),"language_profile":rsi_ai_protocol::LanguageProfile::new(128_000,4096,16_384,rsi_ai_protocol::ToolDialect::Responses,false,rsi_ai_protocol::ImageToolResultCapability::Unknown,vec![]).unwrap()}).to_string()),
         system:EvidencePart::inline(serde_json::to_string(&vec![Message::system_text("recorded instructions").unwrap()]).unwrap()),
         tools:EvidencePart::inline(json!({"definitions":options.tools(),"choice":options.tool_choice(),"hosted":options.hosted_tools()}).to_string()),
         manifest:vec![EvidenceContentCount { kind:EvidenceContentKind::Text,count:1,bytes:4 }],

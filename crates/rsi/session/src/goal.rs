@@ -98,6 +98,11 @@ impl LocalSessionHandle {
         };
         let service = self.continuation_service()?;
         if armed {
+            let execution = self
+                .prepare_workspace(session.header())
+                .await
+                .map_err(goal_error)?;
+            let session = Self::bind_submission(session, execution).map_err(goal_error)?;
             service.arm(session, binding).await.map_err(turn_error)
         } else {
             service
@@ -199,7 +204,9 @@ impl GoalSession for LocalSessionHandle {
         if draft.revision() != invocation.expected_revision {
             return Err(GoalError::Busy);
         }
-        self.prepare_workspace(&header).await.map_err(goal_error)?;
+        self.validate_workspace(&header, lease.execution())
+            .await
+            .map_err(goal_error)?;
         let result = self
             .continuation_service()?
             .reserve_initial(lease, draft.freeze(), invocation, input)
@@ -331,8 +338,9 @@ fn goal_error(error: SessionError) -> GoalError {
 
 fn turn_error(error: TurnError) -> GoalError {
     match error {
-        TurnError::ContinuationDisarmed => GoalError::Disarmed,
+        TurnError::ContinuationDisarmed | TurnError::ExecutionUnavailable => GoalError::Disarmed,
         TurnError::SessionBusy => GoalError::Busy,
+        TurnError::ExecutionOutcomeUnknown => GoalError::ExecutionOutcomeUnknown,
         TurnError::DomainOutcomeUnknown { request_id } => GoalError::OutcomeUnknown(request_id),
         TurnError::CommandRevisionConflict { expected, actual } => {
             GoalError::RevisionConflict { expected, actual }
@@ -352,6 +360,9 @@ fn turn_error(error: TurnError) -> GoalError {
 pub(super) fn session_error(error: GoalError) -> SessionError {
     match error {
         GoalError::Unavailable => SessionError::NotFound("Goal controller or state".into()),
+        GoalError::ExecutionOutcomeUnknown => {
+            SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)
+        }
         GoalError::Capacity | GoalError::Busy => SessionError::Capacity,
         GoalError::ShuttingDown => SessionError::ShuttingDown,
         GoalError::Invalid(message) => SessionError::Invalid(message),
@@ -368,6 +379,16 @@ pub(super) fn session_error(error: GoalError) -> SessionError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn execution_uncertainty_survives_goal_and_session_projection() {
+        assert!(matches!(
+            super::session_error(super::turn_error(
+                rsi_agent_turn_protocol::TurnError::ExecutionOutcomeUnknown
+            )),
+            rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)
+        ));
+    }
+
     #[test]
     fn goal_contention_remains_a_retryable_session_error() {
         assert!(matches!(

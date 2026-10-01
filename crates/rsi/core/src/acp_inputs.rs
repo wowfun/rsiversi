@@ -251,7 +251,7 @@ impl PrivateInputs {
                 .collect::<Vec<_>>();
             mcp.configure(config).await.map_err(|_| Failure::Backend)?;
             for id in ids {
-                mcp.refresh(&id, cancellation.clone())
+                mcp.refresh(&id, None, cancellation.clone())
                     .await
                     .map_err(|_| Failure::Backend)?;
             }
@@ -516,6 +516,7 @@ fn configuration(
             );
         }
         config.servers.push(rsi_mcp::ServerConfig {
+            resource_templates: false,
             id: server.name,
             enabled: true,
             tools: vec![],

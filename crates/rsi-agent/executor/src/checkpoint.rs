@@ -277,7 +277,7 @@ mod tests {
     fn request(session: &str, turn: usize) -> CheckpointRequest {
         let session_id = SessionId::new(session).unwrap();
         let turn_id = TurnId::new(format!("turn-{turn}")).unwrap();
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             session_id.clone(),
             1,
             "/tmp",

@@ -41,3 +41,13 @@ admitted intervals, and separate API read permits prevent UI polling from losing
 a baseline. A single bounded cached patch per comparison avoids rerunning Git
 on every page. Ambient global Git settings remain excluded from launch authority. Bounds
 and cancellation may produce partial observations, which remain visible.
+
+An interval retains its exact claim execution lease for source capture. Review
+imports a bounded bundle of validated relative names, versioned bytes and file
+modes into Local private scratch; it does not import remote `.git` metadata, refs
+or executable configuration. The executable bit belongs to the Files open version,
+not a second path-based stat on the Service. This also closes the native race
+between reading bytes and reopening a different inode for its mode. DSH
+`packages/deliverables/workspace-changes/src/git.ts` provides bounded subprocess
+and private snapshot patterns, but its direct Node filesystem scratch operations
+do not establish RSI remote-source authority.

@@ -213,7 +213,7 @@ async fn scenario(
     });
     let language_fiber = stack.activate_language("test.language", language).await;
     // The fresh Session captures its catalog before a replacement removes the policy.
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("files-session").unwrap(),
         1,
         root.to_str().unwrap(),

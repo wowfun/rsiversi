@@ -14,7 +14,7 @@ impl ProgramRun for LiveRun {
             .submission_admission
             .acquire(&self.descriptor.session_id)
             .await?;
-        self.active().await?;
+        let execution = self.active().await?;
         self.kernel.validate_agent_caller(caller)?;
         if caller.session_id() != &self.descriptor.session_id
             || caller.turn_id() != &self.descriptor.creator_turn_id
@@ -60,6 +60,7 @@ impl ProgramRun for LiveRun {
         self.kernel
             .owned_commit(async move {
                 let _admission = admission;
+                let _execution = execution;
                 let _source = source;
                 kernel
                     .inner
@@ -172,6 +173,7 @@ impl ProgramRun for LiveRun {
                     .filter(|_| outcome == ProgramOutcome::Completed),
             )
             .await?;
+        let notice_execution = self.reserve_notice_execution(&append)?;
         let kernel = self.kernel.clone();
         let session = self.descriptor.session_id.clone();
         let run_id = self.descriptor.run_id.clone();
@@ -188,6 +190,7 @@ impl ProgramRun for LiveRun {
                         .map_err(turn_store_error)?;
                 }
                 kernel.commit_program_append(append).await?;
+                kernel.inner.execution_messages.publish(notice_execution);
                 cancellation.cancel();
                 let mut registry = kernel
                     .inner
@@ -265,7 +268,7 @@ impl LiveRun {
             .submission_admission
             .acquire(&self.descriptor.session_id)
             .await?;
-        self.active().await?;
+        let execution = self.active().await?;
         if matches!(event, ProgramRunEvent::Started | ProgramRunEvent::Detached)
             && (self.creator_cancellation.is_cancelled() || self.turn_cancellation.is_cancelled())
         {
@@ -282,6 +285,7 @@ impl LiveRun {
         self.kernel
             .owned_commit(async move {
                 let _admission = admission;
+                let _execution = execution;
                 kernel.commit_program_append(append).await
             })
             .await

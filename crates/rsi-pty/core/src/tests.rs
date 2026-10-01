@@ -1,5 +1,5 @@
 use super::*;
-use rsi_process::{ProcessOutcome, PtyControl, PtyRead, PtySize};
+use rsi_process::{ManagedPtyProcess, ProcessOutcome, PtyControl, PtyRead, PtySize};
 use rsi_pty_protocol::MAXIMUM_INPUT_BYTES;
 
 #[test]
@@ -20,6 +20,9 @@ struct Fake {
     hold: AtomicBool,
     fail_write: AtomicBool,
     fail_resize: AtomicBool,
+    hold_resize: AtomicBool,
+    resize_entered: Notify,
+    resize_release: Notify,
 }
 #[async_trait]
 impl PtyControl for Fake {
@@ -47,8 +50,12 @@ impl PtyControl for Fake {
         }
         Ok(bytes.len())
     }
-    fn resize(&self, size: PtySize) -> rsi_process::Result<()> {
+    async fn resize(&self, size: PtySize) -> rsi_process::Result<()> {
         size.validate()?;
+        self.resize_entered.notify_one();
+        if self.hold_resize.load(Ordering::Acquire) {
+            self.resize_release.notified().await;
+        }
         if self.fail_resize.load(Ordering::Acquire) {
             Err(rsi_process::ProcessError::Io("resize fixture".into()))
         } else {
@@ -74,15 +81,21 @@ impl PtyControl for Fake {
         }
     }
 }
+#[async_trait::async_trait]
 impl PtyProcess for Fake {
-    fn spawn(&self, _: PtyProcessSpec) -> rsi_process::Result<ManagedPtyProcess> {
+    async fn spawn(&self, _: PtyProcessSpec) -> rsi_process::Result<ManagedPtyProcess> {
         unreachable!("fixture installs a managed process")
     }
 }
 fn fixture() -> (Arc<Scope>, Arc<Term>, Arc<Fake>) {
+    fixture_with_process(None)
+}
+fn fixture_with_process(
+    provider: Option<Arc<dyn PtyProcess>>,
+) -> (Arc<Scope>, Arc<Term>, Arc<Fake>) {
     let process = Arc::new(Fake::default());
     let shared = Arc::new(Shared {
-        processes: process.clone(),
+        processes: provider.unwrap_or_else(|| process.clone()),
         generation: "test".into(),
         next: AtomicU64::new(1),
         stopped: AtomicBool::new(false),
@@ -101,7 +114,7 @@ fn fixture() -> (Arc<Scope>, Arc<Term>, Arc<Fake>) {
     let parser = vt100::Parser::new(24, 80, 1000);
     let term = Arc::new(Term {
         shared: shared.clone(),
-        process: ManagedPtyProcess::new(process.clone()),
+        process: TermProcess::Native(ManagedPtyProcess::new(process.clone())),
         inner: Mutex::new(TermState {
             screen_size: size,
             status: Terminal {
@@ -124,6 +137,7 @@ fn fixture() -> (Arc<Scope>, Arc<Term>, Arc<Fake>) {
             screen: reserve(&shared.screens, screen_bytes(size).unwrap()).unwrap(),
             next_input: 1,
             inflight: false,
+            resizing: false,
             receipts: VecDeque::new(),
         }),
         changed: Notify::new(),
@@ -131,7 +145,8 @@ fn fixture() -> (Arc<Scope>, Arc<Term>, Arc<Fake>) {
         _slot: reserve(&shared.slots, 1).unwrap(),
     });
     lock(&shared.terminals).push(Arc::downgrade(&term));
-    let scope = Arc::new(Scope {
+    let scope = Arc::new_cyclic(|weak| Scope {
+        self_weak: weak.clone(),
         closing: tokio::sync::Mutex::new(()),
         creating: Creations::default(),
         shared,
@@ -189,8 +204,10 @@ async fn takeover_fences_writes_resize_and_delayed_detach_without_stopping_shell
             Size {
                 rows: 30,
                 columns: 100
-            }
-        ),
+            },
+            None
+        )
+        .await,
         Err(PtyError::StaleController)
     );
     // Reacquire the same attachment; an old detach must not revoke its newer epoch.
@@ -364,7 +381,7 @@ async fn maximum_styled_screen_snapshot_stays_within_preallocation_bound() {
         rows: 200,
         columns: 500,
     };
-    term.resize("writer", 1, size).unwrap();
+    term.resize("writer", 1, size, None).await.unwrap();
     for row in 1..=200 {
         for column in (1..=500).step_by(2) {
             term.feed(
@@ -539,9 +556,11 @@ async fn create_without_runtime_fails_before_native_spawn_or_reservation() {
     let before = term.shared.screens.available_permits();
     let caller = scope.clone();
     assert!(matches!(
-        std::thread::spawn(move || caller.create(spec))
-            .join()
-            .unwrap(),
+        std::thread::spawn(
+            move || futures_util::FutureExt::now_or_never(caller.create(spec)).unwrap()
+        )
+        .join()
+        .unwrap(),
         Err(PtyError::Unavailable(_))
     ));
     assert_eq!(term.shared.screens.available_permits(), before);
@@ -558,7 +577,9 @@ async fn shrinking_screen_keeps_retained_scrollback_and_cell_capacity_charged() 
             rows: 24,
             columns: 500,
         },
+        None,
     )
+    .await
     .unwrap();
     let charged = SCREEN_BYTES - term.shared.screens.available_permits();
     term.resize(
@@ -568,7 +589,9 @@ async fn shrinking_screen_keeps_retained_scrollback_and_cell_capacity_charged() 
             rows: 1,
             columns: 1,
         },
+        None,
     )
+    .await
     .unwrap();
     assert_eq!(
         SCREEN_BYTES - term.shared.screens.available_permits(),
@@ -582,7 +605,9 @@ async fn shrinking_screen_keeps_retained_scrollback_and_cell_capacity_charged() 
             rows: 200,
             columns: 1,
         },
+        None,
     )
+    .await
     .unwrap();
     assert_eq!(
         SCREEN_BYTES - term.shared.screens.available_permits(),
@@ -662,7 +687,7 @@ async fn exhausted_snapshot_budget_still_allows_refresh_and_resize() {
         rows: 200,
         columns: 500,
     };
-    term.resize("writer", 1, size).unwrap();
+    term.resize("writer", 1, size, None).await.unwrap();
     for _ in 0..3 {
         term.attach().unwrap();
     }
@@ -678,7 +703,7 @@ async fn exhausted_snapshot_budget_still_allows_refresh_and_resize() {
     let page = term.read("writer", 2, cursor).await.unwrap();
     assert!(page.reset);
     assert!(!page.text.is_empty());
-    term.resize("writer", 1, size).unwrap();
+    term.resize("writer", 1, size, None).await.unwrap();
     // Resize shares one snapshot; refreshing any member safely resets that group.
     let before = term.shared.snapshots.available_permits();
     let (epoch, cursor) = {
@@ -691,7 +716,7 @@ async fn exhausted_snapshot_budget_still_allows_refresh_and_resize() {
         term.feed(&vec![b'y'; 65536]).unwrap();
     }
     assert!(term.read("writer", epoch, cursor).await.unwrap().reset);
-    term.resize("writer", 1, size).unwrap();
+    term.resize("writer", 1, size, None).await.unwrap();
     assert_eq!(term.shared.snapshots.available_permits(), 0);
     drop(remaining);
     scope.retire().await.unwrap();
@@ -727,40 +752,34 @@ fn spawn_spec() -> PtyProcessSpec {
 
 #[derive(Debug)]
 struct GatedSpawn {
-    entered: std::sync::mpsc::SyncSender<()>,
-    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
     child: Arc<Fake>,
 }
+#[async_trait::async_trait]
 impl PtyProcess for GatedSpawn {
-    fn spawn(&self, _: PtyProcessSpec) -> rsi_process::Result<ManagedPtyProcess> {
-        self.entered.send(()).unwrap();
-        lock(&self.release).recv().unwrap();
+    async fn spawn(&self, _: PtyProcessSpec) -> rsi_process::Result<ManagedPtyProcess> {
+        self.entered.notify_one();
+        self.release.notified().await;
         Ok(ManagedPtyProcess::new(self.child.clone()))
     }
 }
 #[tokio::test]
 async fn slow_spawn_releases_registry_locks_and_retirement_owns_its_child() {
-    let (mut scope, term, _) = fixture();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let child = Arc::new(Fake::default());
+    let (scope, term, _) = fixture_with_process(Some(Arc::new(GatedSpawn {
+        entered: entered.clone(),
+        release: release.clone(),
+        child: child.clone(),
+    })));
     scope.retire().await.unwrap();
     drop(term);
-    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let child = Arc::new(Fake::default());
-    let scope_mut = Arc::get_mut(&mut scope).unwrap();
-    let shared = Arc::get_mut(&mut scope_mut.shared).unwrap();
-    shared.processes = Arc::new(GatedSpawn {
-        entered: entered_tx,
-        release: Mutex::new(release_rx),
-        child: child.clone(),
-    });
-    lock(&scope_mut.inner).retired = false;
+    lock(&scope.inner).retired = false;
     let caller = scope.clone();
-    let runtime = tokio::runtime::Handle::current();
-    let spawning = std::thread::spawn(move || {
-        let _entered = runtime.enter();
-        caller.create(spawn_spec())
-    });
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let spawning = tokio::spawn(async move { caller.create(spawn_spec()).await });
+    entered.notified().await;
     assert!(scope.inner.try_lock().is_ok(), "spawn holds its scope lock");
     assert!(
         scope.shared.terminals.try_lock().is_ok(),
@@ -776,9 +795,9 @@ async fn slow_spawn_releases_registry_locks_and_retirement_owns_its_child() {
         result = &mut retiring => panic!("retired before admitted spawn settled: {result:?}"),
         () = std::future::ready(()) => {},
     }
-    release_tx.send(()).unwrap();
+    release.notify_one();
     assert!(matches!(
-        spawning.join().unwrap(),
+        spawning.await.unwrap(),
         Err(PtyError::Unavailable(_))
     ));
     retiring.await.unwrap();
@@ -807,8 +826,10 @@ async fn rejected_resize_preserves_the_old_snapshot_and_reservations() {
             Size {
                 rows: 200,
                 columns: 500
-            }
-        ),
+            },
+            None
+        )
+        .await,
         Err(PtyError::Io(_))
     ));
     assert_eq!(term.shared.snapshots.available_permits(), budget);
@@ -821,8 +842,10 @@ async fn rejected_resize_preserves_the_old_snapshot_and_reservations() {
             Size {
                 rows: 200,
                 columns: 500
-            }
-        ),
+            },
+            None
+        )
+        .await,
         Err(PtyError::Capacity)
     );
     {
@@ -941,4 +964,123 @@ async fn close_all_waits_for_all_native_reapers_concurrently() {
     }
     closing.await.unwrap();
     other_scope.retire().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_resize_waiter_keeps_old_dimensions_until_ack_and_retains_snapshot_credit() {
+    let (scope, term, process) = fixture();
+    process.hold_resize.store(true, Ordering::Release);
+    let original = lock(&term.inner).status.size;
+    let requested = Size {
+        rows: 30,
+        columns: 100,
+    };
+    let resizing = tokio::spawn({
+        let term = term.clone();
+        async move { term.resize("writer", 1, requested, None).await }
+    });
+    process.resize_entered.notified().await;
+    assert_eq!(lock(&term.inner).status.size, original);
+    assert_eq!(term.attach(), Err(PtyError::Capacity));
+    assert_eq!(
+        op(
+            &scope,
+            Operation::Takeover {
+                terminal: "pty".into(),
+                attachment: "writer".into()
+            }
+        )
+        .await,
+        Err(PtyError::Capacity)
+    );
+    resizing.abort();
+    assert!(resizing.await.unwrap_err().is_cancelled());
+    op(
+        &scope,
+        Operation::Detach {
+            terminal: "pty".into(),
+            attachment: "writer".into(),
+            epoch: 1,
+        },
+    )
+    .await
+    .unwrap();
+    let occupied = reserve(
+        &term.shared.snapshots,
+        term.shared.snapshots.available_permits(),
+    )
+    .unwrap();
+    process.resize_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let changed = term.changed.notified();
+            if !lock(&term.inner).resizing {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(lock(&term.inner).status.size, requested);
+    drop(occupied);
+    assert_eq!(term.shared.snapshots.available_permits(), SNAPSHOT_BYTES);
+    scope.retire().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_create_waiter_does_not_release_the_inflight_child_during_retirement() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let child = Arc::new(Fake::default());
+    let (scope, term, _) = fixture_with_process(Some(Arc::new(GatedSpawn {
+        entered: entered.clone(),
+        release: release.clone(),
+        child: child.clone(),
+    })));
+    scope.close_all(false).await.unwrap();
+    drop(term);
+    let caller = scope.clone();
+    let creating = tokio::spawn(async move { caller.create(spawn_spec()).await });
+    entered.notified().await;
+    creating.abort();
+    assert!(creating.await.unwrap_err().is_cancelled());
+    assert_eq!(scope.creating.active.load(Ordering::Acquire), 1);
+    let caller = scope.clone();
+    let retiring = tokio::spawn(async move { caller.retire().await });
+    tokio::task::yield_now().await;
+    assert!(!retiring.is_finished());
+    release.notify_one();
+    retiring.await.unwrap().unwrap();
+    assert!(child.stopped.load(Ordering::Acquire));
+    assert_eq!(scope.shared.slots.available_permits(), 256);
+}
+
+mod execution;
+
+#[tokio::test]
+async fn admitted_creation_panic_is_unknown_and_releases_capacity_without_replay() {
+    #[derive(Debug, Default)]
+    struct PanicProvider(AtomicUsize);
+    #[async_trait]
+    impl PtyProcess for PanicProvider {
+        async fn spawn(&self, _: PtyProcessSpec) -> rsi_process::Result<ManagedPtyProcess> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("lost admitted creation result");
+        }
+    }
+    let provider = Arc::new(PanicProvider::default());
+    let (scope, term, _) = fixture_with_process(Some(provider.clone()));
+    let before = term.shared.slots.available_permits();
+    assert_eq!(
+        scope.create(spawn_spec()).await,
+        Err(PtyError::OutcomeUnknown)
+    );
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert_eq!(term.shared.slots.available_permits(), before);
+    assert_eq!(
+        native(rsi_process::ProcessError::OutcomeUnknown),
+        PtyError::OutcomeUnknown
+    );
+    scope.retire().await.unwrap();
 }

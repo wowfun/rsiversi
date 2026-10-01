@@ -7,8 +7,9 @@ impl TurnService for AgentKernel {
         &self,
         session: &SessionId,
         request: rsi_agent_session_protocol::QueueMutationRequest,
+        execution: Option<rsi_execution::ExecutionLease>,
     ) -> TurnResult<rsi_agent_session_protocol::QueueMutationReceipt> {
-        self.mutate_queue_owned(session, request).await
+        self.mutate_queue_owned(session, request, execution).await
     }
     async fn queue_mutation_status(
         &self,
@@ -119,7 +120,7 @@ impl TurnService for AgentKernel {
         caller: &AgentCallerAuthority,
         scope: AgentListScope,
     ) -> TurnResult<Vec<AgentNode>> {
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         let snapshot = self
             .inner
             .store
@@ -149,7 +150,7 @@ impl TurnService for AgentKernel {
             })
             .collect::<Vec<_>>();
         nodes.sort_by(|left, right| left.path.cmp(&right.path));
-        self.validate_agent_caller(caller)?;
+        let _execution = self.admit_agent_read(caller)?;
         Ok(nodes)
     }
 
@@ -166,7 +167,7 @@ impl TurnService for AgentKernel {
             ));
         }
         let deadline = Instant::now() + timeout;
-        self.validate_agent_caller(caller)?;
+        let execution = self.admit_agent_read(caller)?;
         let baseline = self
             .inner
             .store
@@ -174,6 +175,7 @@ impl TurnService for AgentKernel {
             .await
             .map_err(turn_store_error)?;
         baseline.validate().map_err(turn_store_error)?;
+        drop(execution);
         if baseline.descendants.is_empty()
             || baseline
                 .descendants
@@ -191,7 +193,7 @@ impl TurnService for AgentKernel {
                 Ok(Err(error)) => Err(error),
                 Err(_) => Ok(AgentWaitResult::TimedOut),
             };
-            self.validate_agent_caller(caller)?;
+            let _execution = self.admit_agent_read(caller)?;
             return result;
         }
         let timeout_ms = u64::try_from(timeout.as_millis())
@@ -804,6 +806,13 @@ impl AgentKernel {
         source: Option<(&AgentCallerAuthority, &CancellationToken)>,
         admission: SubmissionAdmissionLease,
     ) -> TurnResult<MessageReceipt> {
+        let execution = request
+            .session
+            .execution()
+            .cloned()
+            .or_else(|| source.and_then(|(caller, _)| caller.execution().cloned()));
+        let execution_admission =
+            execution_admission::admit(request.session.header(), execution.as_ref())?;
         let session_id = request.session.session_id().clone();
         let requested_header = request.session.header().clone();
         let root_session_id = agent_root_and_path(&requested_header).0;
@@ -819,6 +828,7 @@ impl AgentKernel {
         }
 
         self.fence_pending_terminal(&session_id).await?;
+        let observed_execution = self.inner.execution_messages.snapshot(&session_id);
         let durable_header = match read_validated_header_bounded(&self.inner, &session_id).await {
             Ok(header) => Some(header),
             Err(StoreError::NotFound(_)) if matches!(&request.session, SubmitSession::Fresh(_)) => {
@@ -853,6 +863,12 @@ impl AgentKernel {
                 durable_fact_seq: 0,
             }
         };
+        self.inner.execution_messages.retain_pending(
+            &session_id,
+            &scan.pending,
+            &observed_execution,
+        );
+        drop(observed_execution);
         if let Some(entry) = scan.selected {
             if let SubmitSession::Fresh(prepared) = &request.session {
                 self.validate_fresh_baseline(prepared).await?;
@@ -865,6 +881,15 @@ impl AgentKernel {
                     session: session_id.to_string(),
                     message: request.message.message_id.to_string(),
                 });
+            }
+            if entry.state == MessageState::Pending {
+                let reservation = self.inner.execution_messages.reserve(
+                    &session_id,
+                    &entry.message.message_id,
+                    execution.as_ref(),
+                )?;
+                self.inner.execution_messages.publish(reservation);
+                self.request_ready_scan();
             }
             return Ok(message_receipt(&session_id, scan.durable_fact_seq, &entry));
         }
@@ -1001,9 +1026,15 @@ impl AgentKernel {
         let source_lease = source
             .map(|(caller, cancellation)| self.admit_agent_mutation(caller, cancellation))
             .transpose()?;
+        let execution_reservation = self.inner.execution_messages.reserve(
+            &session_id,
+            &request.message.message_id,
+            execution.as_ref(),
+        )?;
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admission = admission;
+            let _execution_admission = execution_admission;
             let _source_lease = source_lease;
             let commit = kernel
                 .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
@@ -1029,6 +1060,10 @@ impl AgentKernel {
                     TurnError::Invariant("message commit returned no target watermark".into())
                 })?;
             drop(fresh_reservation);
+            kernel
+                .inner
+                .execution_messages
+                .publish(execution_reservation);
             kernel.request_ready_scan();
             Ok(MessageReceipt {
                 session_id,
@@ -1061,6 +1096,11 @@ impl AgentKernel {
             .submission_admission
             .acquire_pair(&session_id, parent_session_id.as_ref())
             .await?;
+        let execution = self
+            .inner
+            .execution_messages
+            .get(&session_id, &request.message_id);
+        let execution_admission = execution_admission::admit(&header, execution.as_ref())?;
         let resume_admission = self.reserve_resume_submission(&request.session).await?;
 
         let wait = {
@@ -1368,6 +1408,7 @@ impl AgentKernel {
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admissions = admissions;
+            let _execution_admission = execution_admission;
             kernel
                 .inner
                 .commit_agent(AtomicAgentCommit {
@@ -1407,11 +1448,12 @@ impl AgentKernel {
                     )
                     .map_err(turn_kernel_error)?;
                 }
-                session
+                let turn = session
                     .turns
                     .get_mut(&request.turn_id)
-                    .expect("committed Turn is installed")
-                    .prepared_lane = lane;
+                    .expect("committed Turn is installed");
+                turn.prepared_lane = lane;
+                turn.execution = execution;
                 session.durable_seq = final_fact_seq;
                 session.flush_status.send_replace(FlushStatus {
                     durable_seq: final_fact_seq,
@@ -1475,6 +1517,7 @@ impl AgentKernel {
                 .cancellation
                 .run_until_cancelled(resolver.resolve(
                     request.caller.header(),
+                    request.caller.execution(),
                     reference,
                     request.cancellation.clone(),
                 ))

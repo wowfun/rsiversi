@@ -34,6 +34,7 @@ impl AgentKernel {
         &self,
         session: &SessionId,
         request: QueueMutationRequest,
+        execution: Option<rsi_execution::ExecutionLease>,
     ) -> TurnResult<QueueMutationReceipt> {
         let fingerprint = request
             .fingerprint()
@@ -131,6 +132,21 @@ impl AgentKernel {
             },
         };
         let now = self.inner.clock.now_ms().max(1);
+        let (execution_admission, execution_reservation) = if rejection.is_none()
+            && let Some(successor) = request.mutation.new_message_id()
+        {
+            let header = read_validated_header_bounded(&self.inner, session)
+                .await
+                .map_err(turn_store_error)?;
+            let admission = execution_admission::admit(&header, execution.as_ref())?;
+            let reservation =
+                self.inner
+                    .execution_messages
+                    .reserve(session, successor, execution.as_ref())?;
+            (admission, reservation)
+        } else {
+            (None, None)
+        };
         let mut controls = Vec::with_capacity(3);
         let next_seq = watermarks
             .durable_control_seq
@@ -241,6 +257,7 @@ impl AgentKernel {
         let session = session.clone();
         self.owned_commit(async move {
             let _admission = admission;
+            let _execution_admission = execution_admission;
             let _payload = payload_permit;
             let _validation = validation_lease;
             kernel
@@ -258,6 +275,10 @@ impl AgentKernel {
                 })
                 .await?
                 .map_err(turn_store_error)?;
+            kernel
+                .inner
+                .execution_messages
+                .publish(execution_reservation);
             kernel.request_ready_scan();
             Ok(receipt)
         })

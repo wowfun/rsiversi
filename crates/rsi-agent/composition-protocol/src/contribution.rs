@@ -79,6 +79,8 @@ pub trait ContributionFactReader: fmt::Debug + Send + Sync {
 pub struct ContributionContext {
     /// Frozen execution Header.
     pub header: Arc<SessionHeader>,
+    /// Exact non-durable execution authority captured from the live claim.
+    pub execution: Option<rsi_execution::ExecutionLease>,
     /// Exact executing Turn.
     pub turn_id: TurnId,
     /// Exact acceptance Fact sequence; later queued acceptances may precede this Step.

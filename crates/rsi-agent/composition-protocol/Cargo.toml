@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-process = { path = "../../rsi-process/core" }
+rsi-execution = { path = "../../rsi-execution/core" }
 futures-util.workspace = true
 async-trait.workspace = true
 rsi-agent-context = { path = "../context" }
@@ -22,6 +24,7 @@ thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 tokio = { workspace = true, features = ["test-util"] }

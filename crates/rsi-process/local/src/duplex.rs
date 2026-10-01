@@ -1,8 +1,9 @@
 //! Lossless bounded protocol pipes on the same process registry as batch jobs.
 use super::*;
 use rsi_process::{DuplexProcess, DuplexProcessSpec, ManagedDuplexProcess};
+#[async_trait::async_trait]
 impl DuplexProcess for Service {
-    fn spawn(&self, spec: DuplexProcessSpec) -> Result<ManagedDuplexProcess> {
+    async fn spawn(&self, spec: DuplexProcessSpec) -> Result<ManagedDuplexProcess> {
         spec.validate()?;
         #[cfg(unix)]
         {
@@ -91,9 +92,13 @@ mod native {
             };
             let result = tokio::select! {biased;
                 ()=stop.cancelled()=>Err(ProcessError::Io("duplex write interrupted; accepted prefix is unknown".into())),
-                result=stdin.write(&bytes)=>result.map_err(|error|ProcessError::Io(error.to_string())).and_then(|size|if size==0 {Err(ProcessError::Io("duplex input closed during write".into()))} else {Ok(size)}),
+                // Tokio's single write is cancellation-safe: Pending has accepted no bytes.
+                // Never replace it with write_all, which may hide an accepted prefix.
+                result=tokio::time::timeout(std::time::Duration::from_millis(500), stdin.write(&bytes))=>result.map_err(|_|ProcessError::Capacity).and_then(|result|result.map_err(|error|ProcessError::Io(error.to_string())).and_then(|size|if size==0 {Err(ProcessError::Io("duplex input closed during write".into()))} else {Ok(size)})),
             };
-            let failed = result.is_err();
+            let failed = result
+                .as_ref()
+                .is_err_and(|error| !matches!(error, ProcessError::Capacity));
             drop(permit);
             let _ = reply.send(result);
             if failed {

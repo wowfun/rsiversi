@@ -1,5 +1,34 @@
 # rsi-agent-kernel
 
+Claim issuance validates the execution binding and claim horizon before consuming
+the queue entry or installing an executor owner. An invalid binding quarantines that Session, reports a permanent observation
+error, and releases its unused prepared tree lane. Other Sessions continue claiming.
+No effect is started for the quarantined Turn; restart uses ordinary interruption
+recovery. Queue entries are removed only after successful issuance or quarantine.
+
+Execution admission belongs to the exact pending message or accepted Turn, not a
+mutable Session-wide caller slot. A bounded live registry retains up to 4,096
+pending-message leases, grouped by Session so pending-input reconciliation visits
+only that Session's entries. Capacity remains shared across Sessions and retained
+unpublished reservations. Successful mailbox publication transfers its reservation
+to that registry. Promotion keeps the input Pending and retains its lease; only
+claim, discard or successor retirement releases that entry. Claiming transfers the exact lease into Turn control. A retry
+of an already claimed message cannot replace that Turn's authority. SSH ready
+messages without a current live lease remain waiting after restart. Explicit
+resubmission of the same pending input can supply fresh authority without
+duplicating its durable acceptance. Claims and their Agent callers retain the
+same provider generation through settlement.
+Public mailbox claims consume the pending input's retained execution lease, never
+one substituted on the resume token. Continuation arm captures its caller's lease;
+both the first reservation and later atomic reserve commands publish that lease
+with their pending message after acknowledgement. Rechecking a revoked lease
+cannot silently substitute a fresh connection or native execution.
+Detached Programs retain the creator claim's execution lease independently of
+that claim's Tool lifetime. New child admissions and live run mutations recheck
+it; accepted children and completion notices inherit it through the bounded
+pending-input registry. Cancellation and durable settlement remain available
+after delegation revocation. The durable Program descriptor cannot recreate it.
+
 Program retirement revokes the live process token before Kernel admission closes.
 If shutdown prevents terminal publication, startup records interruption instead of
 replaying Node or unclaimed program work. Cancellation and startup discard pending
@@ -556,3 +585,18 @@ admission. Running Turns and permanent flush failures are not evictable; startup
 repair settles unfinished durable Turns before the service is exposed. A cold
 Session therefore has no live conversion target. Receipt replay, replacement and
 withdrawal do not load a new Agent composition or reserve resident capacity.
+
+New Agent mutations retain the original claim's current Execution admission
+through their owned commit. Exact Tool-result settlement and terminal cleanup
+remain available after revocation; they record already accepted work. A detached Program's
+terminal commit may retain its notice with the original revoked lease; the scheduler
+cannot claim it until that same authority is usable, or an explicit discard removes
+it. The pending-lease bound and shutdown cleanup still apply. Reconciliation captures
+the pending index before reading durable state and prunes only unchanged entries
+from that observation; concurrent child publication cannot be erased by a stale
+Store snapshot. Wait parking
+retains admission only through its finite park transition, then releases it before
+idle observation. Wait cleanup retains its existing lifecycle proof, not a new
+business grant. Agent reads check current execution admission before I/O and before
+publication. Quiescence clears pending input leases after accepted tasks drain,
+so a retained Kernel handle cannot keep a stopped provider connection alive.

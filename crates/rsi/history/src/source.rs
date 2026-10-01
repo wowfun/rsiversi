@@ -10,7 +10,8 @@ use sha2::{Digest as _, Sha256};
 
 pub(super) struct Source {
     pub identity: ReferenceSource,
-    pub cwd: String,
+    pub coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+    _admission: rsi_execution::ExecutionOperation,
 }
 pub(super) struct Original {
     pub text: String,
@@ -157,6 +158,7 @@ fn external_texts(kind: RecordKind, value: &Value) -> Vec<(ReferenceContentKind,
 impl ProductHistorySearch {
     pub(super) async fn authorize(
         &self,
+        authority: &super::HistoryAuthority,
         scope: &Scope,
         stop: &CancellationToken,
     ) -> Result<Source> {
@@ -166,6 +168,7 @@ impl ProductHistorySearch {
             .await
             .map_err(invalid)?;
         check(stop)?;
+        let admission = authority.admit(self.resolver.as_ref(), &workspace.coordinates)?;
         let source = match &scope.conversation {
             ConversationIdentity::Native(id) => {
                 let header = self.store.header(id).await.map_err(invalid)?;
@@ -176,7 +179,8 @@ impl ProductHistorySearch {
                             header_sha256: header.fingerprint().map_err(invalid)?,
                         },
                     },
-                    cwd: header.canonical_cwd().into(),
+                    coordinates: header.coordinates().clone(),
+                    _admission: admission,
                 }
             }
             ConversationIdentity::External(id) => {
@@ -187,12 +191,17 @@ impl ProductHistorySearch {
                         id: id.as_str().into(),
                         epoch: view.snapshot.epoch,
                     },
-                    cwd: view.snapshot.cwd,
+                    coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                        rsi_workspace_protocol::ExecutionLocation::Local,
+                        view.snapshot.cwd,
+                    )
+                    .map_err(invalid)?,
+                    _admission: admission,
                 }
             }
         };
         check(stop)?;
-        if workspace.path.to_str() != Some(&source.cwd) {
+        if workspace.coordinates != source.coordinates {
             return Err(invalid("history source is outside the requested workspace"));
         }
         Ok(source)

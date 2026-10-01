@@ -443,6 +443,7 @@ async fn named_spawn_resolves_once_and_retries_use_the_durable_seed() {
         async fn resolve(
             &self,
             _: &SessionHeader,
+            _: Option<&rsi_execution::ExecutionLease>,
             _: &SpawnRoleReference,
             _: CancellationToken,
         ) -> rsi_agent_turn_protocol::Result<SpawnRoleSeed> {

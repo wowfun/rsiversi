@@ -94,6 +94,7 @@ impl TurnExecution for AgentKernel {
         }))
     }
 
+    #[allow(clippy::too_many_lines)] // Select and seal the exact Turn, executor lane and execution tuple under one state cut.
     async fn claim(
         &self,
         executor_id: &str,
@@ -112,10 +113,9 @@ impl TurnExecution for AgentKernel {
                     .ok_or(TurnError::StaleClaim)?;
                 let candidates = state.claim_queue.len();
                 for _ in 0..candidates {
-                    let Some((session_id, turn_id)) = state.claim_queue.pop_front() else {
+                    let Some((session_id, turn_id)) = state.claim_queue.front().cloned() else {
                         break;
                     };
-                    state.queued.remove(&(session_id.clone(), turn_id.clone()));
                     let claimable = state.sessions.get(&session_id).is_some_and(|session| {
                         session.permanent_flush_error.is_none()
                             && session.oldest_claimable() == Some(&turn_id)
@@ -125,8 +125,49 @@ impl TurnExecution for AgentKernel {
                                 .is_some_and(|turn| turn.claim.is_none())
                     });
                     if !claimable {
+                        state.claim_queue.pop_front();
+                        state.queued.remove(&(session_id, turn_id));
                         continue;
                     }
+                    let claim_id = state
+                        .next_claim
+                        .checked_add(1)
+                        .ok_or_else(|| TurnError::Invariant("claim identity exhausted".into()))?;
+                    let session = &state.sessions[&session_id];
+                    let live_seq = session.live_seq().map_err(turn_kernel_error)?;
+                    let turn = &session.turns[&turn_id];
+                    let claim = self.inner.claim_issuer.bind_execution(
+                        self.inner.claim_issuer.issue(
+                            executor_id.into(),
+                            claim_id,
+                            session_id.clone(),
+                            turn_id.clone(),
+                            session.header.clone(),
+                            turn.accepted_at_ms,
+                            turn.accepted_seq,
+                            live_seq,
+                        ),
+                        turn.execution.clone(),
+                    );
+                    let claim = match claim {
+                        Ok(claim) => claim,
+                        Err(error) => {
+                            // A broken binding is a Session failure, not an executor failure.
+                            let session = state.sessions.get_mut(&session_id).unwrap();
+                            session.permanent_flush_error =
+                                Some(format!("claim issuance quarantined Session: {error}"));
+                            session.flush_status.send_replace(FlushStatus {
+                                durable_seq: session.durable_seq,
+                                permanent_error: session.permanent_flush_error.clone(),
+                            });
+                            for turn in session.turns.values_mut() {
+                                turn.prepared_lane.take();
+                            }
+                            state.claim_queue.pop_front();
+                            state.queued.remove(&(session_id, turn_id));
+                            continue;
+                        }
+                    };
                     let prepared_lane = state
                         .sessions
                         .get_mut(&session_id)
@@ -142,7 +183,8 @@ impl TurnExecution for AgentKernel {
                         let root = agent_root_and_path(&state.sessions[&session_id].header).0;
                         let pool = ready::tree_pool(&mut state, &root);
                         let Ok(permit) = Arc::clone(&pool).try_acquire_owned() else {
-                            enqueue(&mut state, session_id, turn_id);
+                            state.claim_queue.pop_front();
+                            state.claim_queue.push_back((session_id, turn_id));
                             continue;
                         };
                         Arc::new(TreeClaimLane {
@@ -150,22 +192,17 @@ impl TurnExecution for AgentKernel {
                             permit: Mutex::new(Some(permit)),
                         })
                     };
-                    state.next_claim = state
-                        .next_claim
-                        .checked_add(1)
-                        .ok_or_else(|| TurnError::Invariant("claim identity exhausted".into()))?;
-                    let claim_id = state.next_claim;
+                    state.claim_queue.pop_front();
+                    state.queued.remove(&(session_id.clone(), turn_id.clone()));
+                    state.next_claim = claim_id;
                     let session = state
                         .sessions
                         .get_mut(&session_id)
                         .expect("claimable session was observed");
-                    let live_seq = session.live_seq().map_err(turn_kernel_error)?;
                     let turn = session
                         .turns
                         .get_mut(&turn_id)
                         .expect("claimable turn was observed");
-                    let accepted_at_ms = turn.accepted_at_ms;
-                    let accepted_seq = turn.accepted_seq;
                     turn.claim = Some(ClaimOwner {
                         jobs: None,
                         mutations: Arc::new(mutation::ClaimMutationGate::default()),
@@ -175,16 +212,7 @@ impl TurnExecution for AgentKernel {
                         live_seq,
                         tree_lane,
                     });
-                    return Ok(Some(self.inner.claim_issuer.issue(
-                        executor_id.into(),
-                        claim_id,
-                        session_id,
-                        turn_id,
-                        session.header.clone(),
-                        accepted_at_ms,
-                        accepted_seq,
-                        live_seq,
-                    )));
+                    return Ok(Some(claim));
                 }
                 if !state.accepting {
                     return Ok(None);

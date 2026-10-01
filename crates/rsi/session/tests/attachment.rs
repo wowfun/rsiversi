@@ -44,6 +44,9 @@ use std::sync::{
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+#[path = "attachment/access.rs"]
+mod access;
+
 #[path = "attachment/drafts.rs"]
 mod drafts;
 
@@ -260,6 +263,11 @@ struct UnavailableWorkspace;
 
 #[async_trait]
 impl WorkspaceRegistry for UnavailableWorkspace {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         panic!("durable attachment must not look up a workspace")
     }
@@ -271,7 +279,11 @@ impl WorkspaceRegistry for UnavailableWorkspace {
         panic!("not used")
     }
 
-    async fn get_or_create(&self, _path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+    async fn register_at(
+        &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
+        _path: &Path,
+    ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         panic!("durable attachment must not register a workspace")
     }
 
@@ -292,6 +304,11 @@ struct RejectingWorkspace {
 
 #[async_trait]
 impl WorkspaceRegistry for RejectingWorkspace {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         AvailableWorkspace::at(&std::env::current_dir().unwrap())
             .get(id)
@@ -308,7 +325,11 @@ impl WorkspaceRegistry for RejectingWorkspace {
         })
     }
 
-    async fn get_or_create(&self, _path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+    async fn register_at(
+        &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
+        _path: &Path,
+    ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         self.registrations.fetch_add(1, Ordering::AcqRel);
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
@@ -406,6 +427,7 @@ struct CompetingImagePublicationTurns {
 
 #[derive(Debug)]
 struct ConcurrentResumeTurns {
+    expected_execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     resume_issuer: ResumeAdmissionIssuer,
     composition: AgentCompositionPin,
@@ -431,6 +453,10 @@ impl TurnService for ConcurrentResumeTurns {
 
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
         assert!(matches!(&request.session, SubmitSession::Resume(_)));
+        assert_eq!(
+            request.session.execution(),
+            self.expected_execution.as_ref()
+        );
         Ok(MessageReceipt {
             session_id: request.session.session_id().clone(),
             message_id: request.message.message_id,
@@ -496,7 +522,7 @@ impl TurnService for CompetingPublicationTurns {
             assert!(matches!(&request.session, SubmitSession::Fresh(_)));
             let original = request.session.header();
             let header = if self.change_created_at {
-                SessionHeader::new(
+                SessionHeader::new_local(
                     original.session_id().clone(),
                     original.created_at_ms() + 1,
                     original.canonical_cwd(),
@@ -692,6 +718,11 @@ fn workspace_id() -> WorkspaceId {
 
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if !self.available.load(Ordering::SeqCst) || id != &workspace_id() {
@@ -699,7 +730,11 @@ impl WorkspaceRegistry for AvailableWorkspace {
         }
         Ok(WorkspaceRecord {
             id: id.clone(),
-            path: self.path.clone(),
+            coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                rsi_workspace_protocol::ExecutionLocation::Local,
+                self.path.to_str().unwrap(),
+            )
+            .unwrap(),
         })
     }
     async fn list(
@@ -713,10 +748,18 @@ impl WorkspaceRegistry for AvailableWorkspace {
         })
     }
 
-    async fn get_or_create(&self, path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+    async fn register_at(
+        &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
+        path: &Path,
+    ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         Ok(WorkspaceRecord {
             id: WorkspaceId::parse("a".repeat(64)).unwrap(),
-            path: path.to_path_buf(),
+            coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                rsi_workspace_protocol::ExecutionLocation::Local,
+                path.to_str().unwrap(),
+            )
+            .unwrap(),
         })
     }
 
@@ -752,7 +795,11 @@ struct UnavailableMedia;
 
 #[async_trait]
 impl Media for UnavailableMedia {
-    async fn import_image(&self, _source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image_with_options(
+        &self,
+        _source: bytes::Bytes,
+        _options: rsi_media_protocol::ImageImportOptions,
+    ) -> rsi_media_protocol::Result<MediaRef> {
         panic!("not used")
     }
 
@@ -1294,7 +1341,7 @@ async fn assert_competing_image_publication(concurrent: bool) {
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
     let turns = Arc::new(CompetingImagePublicationTurns {
         store: store.clone(),
-        competing_header: SessionHeader::new(
+        competing_header: SessionHeader::new_local(
             session_id.clone(),
             1,
             cwd.to_str().unwrap(),
@@ -1366,7 +1413,7 @@ async fn assert_competing_image_publication(concurrent: bool) {
 async fn attached_handle_does_not_serialize_independent_resume_preparation() {
     let store = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-concurrent-resume").unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         session_id.clone(),
         1,
         std::env::current_dir()
@@ -1410,6 +1457,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
         .await
         .unwrap();
     let turns = Arc::new(ConcurrentResumeTurns {
+        expected_execution: None,
         header,
         resume_issuer: ResumeAdmissionIssuer::new(),
         composition,
@@ -1498,7 +1546,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
     let session_id = SessionId::new("session-failing-resume-preset").unwrap();
     let turn_id = TurnId::new("turn-existing-resume-preset").unwrap();
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         session_id.clone(),
         1,
         cwd.to_str().unwrap(),
@@ -1585,7 +1633,7 @@ async fn attach_and_history_need_only_the_durable_store() {
     let session_id = SessionId::new("session-store-only-attach").unwrap();
     let turn_id = TurnId::new("turn-existing").unwrap();
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         session_id.clone(),
         1,
         cwd.to_str().unwrap(),
@@ -1643,6 +1691,7 @@ async fn attach_and_history_need_only_the_durable_store() {
 
     let read = rsi_session_protocol::SessionReads::acquire(
         &application,
+        rsi_api_protocol::CallOrigin::Local,
         &rsi_session_protocol::SessionTarget {
             session_id: session_id.clone(),
             header_key: header.fingerprint().unwrap(),
@@ -1674,7 +1723,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
     let root = SessionId::new("session-approval-root").unwrap();
     let child = SessionId::new("session-approval-child").unwrap();
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         root.clone(),
         1,
         cwd.to_str().unwrap(),

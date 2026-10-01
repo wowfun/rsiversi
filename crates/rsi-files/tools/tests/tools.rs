@@ -607,3 +607,74 @@ async fn present_releases_each_metadata_token_before_opening_the_next_file() {
     drop(tools);
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+mod execution_fixture;
+
+#[tokio::test]
+async fn target_tuple_reads_never_use_native_providers_and_revocation_precedes_io() {
+    let _scenario = SCENARIOS.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("cwd")).unwrap();
+    std::fs::write(root.join("cwd/file"), "target").unwrap();
+    let (runtime, tools) = fixture_with_inspection(true).await;
+    let native = Arc::new(Planner::default());
+    let target = Arc::new(Planner::default());
+    let files = Arc::new(rsi_files::LocalFiles::new().unwrap());
+    let gate = Arc::new(execution_fixture::Gate::default());
+    let location = rsi_execution::ExecutionLocation::Ssh {
+        target: rsi_execution::ExecutionTargetId::parse("11111111111111111111111111111111")
+            .unwrap(),
+    };
+    let lease = execution_fixture::lease_with_readers(
+        location.clone(),
+        gate.clone(),
+        1,
+        Some((target.clone(), files.clone())),
+    );
+    let bound = || {
+        let mut start = start(&root, SandboxMode::ReadOnly, native.clone());
+        start.extensions = start.extensions.with(Arc::new(lease.clone())).unwrap();
+        start
+    };
+    let read = call(tools.as_ref(), "file_read", json!({"path":"file"}), bound())
+        .await
+        .unwrap();
+    assert_eq!(read.value["bytes_hex"], hex::encode("target"));
+    let list = call(tools.as_ref(), "directory_list", json!({}), bound())
+        .await
+        .unwrap();
+    assert_eq!(list.value["entries"][0]["name"], "file");
+    let present = call(
+        tools.as_ref(),
+        "present",
+        json!({"files":[{"path":"file"}]}),
+        bound(),
+    )
+    .await
+    .unwrap();
+    assert!(!present.is_error);
+    assert_eq!(target.scopes.lock().unwrap().len(), 3);
+    assert!(native.scopes.lock().unwrap().is_empty());
+    gate.revoked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        call(tools.as_ref(), "file_read", json!({"path":"file"}), bound())
+            .await
+            .unwrap_err(),
+        rsi_tools_protocol::ToolError::ShuttingDown
+    );
+    assert_eq!(target.scopes.lock().unwrap().len(), 3);
+
+    // A foreign process cannot escape to the native legacy Sandbox, even with a live lease.
+    let inert = execution_fixture::lease(location, Arc::new(execution_fixture::Gate::default()), 2);
+    let mut started = start(&root, SandboxMode::ReadOnly, native.clone());
+    started.extensions = started.extensions.with(Arc::new(inert)).unwrap();
+    let (execution, _) =
+        rsi_tools_protocol::ToolExecution::from_start("legacy".into(), started).unwrap();
+    assert!(execution.confine("/bin/sh".into(), vec![]).await.is_err());
+    assert!(native.scopes.lock().unwrap().is_empty());
+    drop((execution, tools, lease));
+    files.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}

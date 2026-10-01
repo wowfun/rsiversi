@@ -27,6 +27,7 @@ pub(super) enum CompletionRoute {
 #[derive(Debug)]
 pub(super) struct LiveRun {
     kernel: AgentKernel,
+    execution: Option<rsi_execution::ExecutionLease>,
     descriptor: ProgramRunDescriptor,
     script: Arc<[u8]>,
     state: AsyncMutex<Option<(rsi_agent_store_protocol::StoreProgramHead, Arc<RunState>)>>,
@@ -113,10 +114,11 @@ impl AgentKernel {
             .submission_admission
             .acquire(header.session_id())
             .await?;
-        self.validate_agent_caller(&request.caller)?;
+        let _execution = self.admit_agent_read(&request.caller)?;
         self.validate_program_guard(&descriptor).await?;
         let run = Arc::new(LiveRun {
             kernel: self.clone(),
+            execution: request.caller.execution().cloned(),
             descriptor,
             script,
             state: AsyncMutex::new(None),
@@ -417,9 +419,11 @@ impl LiveRun {
             })
             .await
     }
-    async fn active(&self) -> TurnResult<()> {
+    async fn active(&self) -> TurnResult<Option<rsi_execution::ExecutionOperation>> {
         self.live()?;
-        self.kernel.validate_program_guard(&self.descriptor).await
+        let admission = execution_admission::admit(&self.header, self.execution.as_ref())?;
+        self.kernel.validate_program_guard(&self.descriptor).await?;
+        Ok(admission)
     }
 }
 impl AgentKernel {

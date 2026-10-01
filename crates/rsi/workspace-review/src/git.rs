@@ -1,3 +1,4 @@
+use rsi_execution::{ExecutionLease, ExecutionLocation, ResolvedProgram};
 use rsi_files_protocol::{FileKind, Files, FilesBinding, FilesCaller, FilesError, RelativePath};
 use rsi_process::{ManagedProcess, Process, ProcessSpec};
 use rsi_sandbox::{ProcessRequest, ProcessStdio, Sandbox, SandboxMode, WorkspaceReadRequest};
@@ -14,6 +15,19 @@ pub(super) type Result<T> = std::result::Result<T, OmissionKind>;
 const FILE_BYTES: usize = 4 * 1024 * 1024;
 const CAPTURE_BYTES: usize = 128 * 1024 * 1024;
 const INTERVAL_SCRATCH: u32 = 512 * 1024 * 1024;
+/// Fixed Git environment required by workspace inventory on every execution target.
+/// Target policy supplies its own HOME and PATH separately.
+pub const SOURCE_GIT_ENVIRONMENT: &[(&str, &str)] = &[
+    ("LC_ALL", "C"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_SYSTEM", "/dev/null"),
+    ("GIT_CONFIG_COUNT", "0"),
+    ("GIT_ATTR_NOSYSTEM", "1"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_LITERAL_PATHSPECS", "1"),
+];
 #[derive(Debug)]
 pub(super) struct Git {
     pub process: Arc<dyn Process>,
@@ -83,6 +97,15 @@ impl Drop for Terminate {
         self.0.terminate();
     }
 }
+struct CallerLease {
+    files: Arc<dyn Files>,
+    caller: FilesCaller,
+}
+impl Drop for CallerLease {
+    fn drop(&mut self) {
+        self.files.release_caller(&self.caller);
+    }
+}
 impl Git {
     async fn run(
         &self,
@@ -95,52 +118,29 @@ impl Git {
         if stop.is_cancelled() {
             return Err(OmissionKind::Deadline);
         }
-        let mut arguments: Vec<String> = [
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.untrackedCache=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.quotePath=false",
-            "-c",
-            "gc.auto=0",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        arguments.extend(args.iter().map(|s| (*s).to_owned()));
-        let process = self
-            .sandbox
-            .confine(ProcessRequest {
-                stdio: ProcessStdio::Pipes,
-                mode: if scratch.is_some() {
-                    SandboxMode::WorkspaceWrite
-                } else {
-                    SandboxMode::ReadOnly
-                },
-                program: self.program.clone(),
-                arguments,
-                cwd: cwd.to_owned(),
-                workspace: cwd.to_owned(),
-            })
-            .await
-            .map_err(|_| OmissionKind::Git)?;
-        let mut environment: Vec<_> = [
-            ("PATH", "/usr/bin:/bin"),
-            ("LC_ALL", "C"),
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_CONFIG_SYSTEM", "/dev/null"),
-            ("GIT_ATTR_NOSYSTEM", "1"),
-            ("GIT_OPTIONAL_LOCKS", "0"),
-            ("GIT_TERMINAL_PROMPT", "0"),
-            ("GIT_LITERAL_PATHSPECS", "1"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.into(), v.into()))
-        .collect();
+        let arguments = arguments(args);
+        let request = ProcessRequest {
+            stdio: ProcessStdio::Pipes,
+            mode: if scratch.is_some() {
+                SandboxMode::WorkspaceWrite
+            } else {
+                SandboxMode::ReadOnly
+            },
+            program: self.program.clone(),
+            arguments,
+            cwd: cwd.to_owned(),
+            workspace: cwd.to_owned(),
+        };
+        let process = if scratch.is_some() {
+            self.sandbox.confine(request).await
+        } else {
+            self.sandbox.confine_source_reader(request).await
+        }
+        .map_err(|_| OmissionKind::Git)?;
+        let mut environment: Vec<_> = std::iter::once(("PATH", "/usr/bin:/bin"))
+            .chain(SOURCE_GIT_ENVIRONMENT.iter().copied())
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
         if let Some(scratch) = scratch {
             environment.push((
                 "GIT_DIR".into(),
@@ -162,21 +162,84 @@ impl Git {
                 stderr_max_bytes: 8192,
                 termination_grace_ms: 200,
             })
+            .await
             .map_err(|_| OmissionKind::Git)?;
-        let guard = Terminate(process.clone());
-        let outcome = tokio::select! {biased;()=stop.cancelled()=>{process.terminate();let _=process.wait().await;return Err(OmissionKind::Deadline);},outcome=process.wait()=>outcome.map_err(|_|OmissionKind::Git)?};
-        let output = process
-            .stdout()
-            .read_from(0)
-            .map_err(|_| OmissionKind::Git)?;
-        drop(guard);
-        if outcome.exit_code != Some(0) {
-            return Err(OmissionKind::Git);
+        collected(process, stop).await
+    }
+    async fn source_listing(
+        &self,
+        workspace: &Path,
+        execution: Option<&ExecutionLease>,
+        stop: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        const ARGS: &[&str] = &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".",
+        ];
+        let Some(execution) = execution else {
+            return self.run(workspace, None, ARGS, vec![], stop).await;
+        };
+        if stop.is_cancelled() {
+            return Err(OmissionKind::Deadline);
         }
-        if output.lossy || output.oldest_offset != 0 || output.next_offset > FILE_BYTES as u64 {
-            return Err(OmissionKind::Limit);
+        let program = match execution.binding().location() {
+            ExecutionLocation::Local => {
+                execution
+                    .resolve_local_program(ResolvedProgram {
+                        program: self.program.clone(),
+                        environment: std::iter::once(("PATH", "/usr/bin:/bin"))
+                            .chain(SOURCE_GIT_ENVIRONMENT.iter().copied())
+                            .map(|(key, value)| (key.into(), value.into()))
+                            .collect(),
+                    })
+                    .await
+            }
+            ExecutionLocation::Ssh { .. } => execution.resolve_program("review_git").await,
         }
-        Ok(output.bytes)
+        .map_err(|_| OmissionKind::Unreadable)?;
+        if SOURCE_GIT_ENVIRONMENT.iter().any(|(key, value)| {
+            !program
+                .environment()
+                .iter()
+                .any(|(actual_key, actual_value)| actual_key == key && actual_value == value)
+        }) {
+            return Err(OmissionKind::Unreadable);
+        }
+        if stop.is_cancelled() {
+            return Err(OmissionKind::Deadline);
+        }
+        let process = execution
+            .prepare_source_reader(ProcessRequest {
+                stdio: ProcessStdio::Pipes,
+                mode: SandboxMode::ReadOnly,
+                program,
+                arguments: arguments(ARGS),
+                cwd: workspace.to_owned(),
+                workspace: workspace.to_owned(),
+            })
+            .await
+            .map_err(|_| OmissionKind::Unreadable)?;
+        let environment = process.environment().to_vec();
+        if stop.is_cancelled() {
+            return Err(OmissionKind::Deadline);
+        }
+        let process = execution
+            .spawn(ProcessSpec {
+                process,
+                stdin: vec![],
+                environment,
+                stdout_max_bytes: FILE_BYTES,
+                stderr_max_bytes: 8192,
+                termination_grace_ms: 200,
+            })
+            .await
+            .map_err(|_| OmissionKind::Unreadable)?;
+        collected(process, stop).await
     }
     pub async fn initialize(&self, base: &Path, stop: &CancellationToken) -> Result<Scratch> {
         let mut scratch = Scratch {
@@ -209,33 +272,13 @@ impl Git {
         workspace: &Path,
         scratch: &mut Scratch,
         stop: &CancellationToken,
+        execution: Option<&ExecutionLease>,
     ) -> Capture {
         let mut capture = Capture::default();
-        let listing = match self
-            .run(
-                workspace,
-                None,
-                &[
-                    "ls-files",
-                    "-z",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "--",
-                    ".",
-                ],
-                vec![],
-                stop,
-            )
-            .await
-        {
+        let listing = match self.source_listing(workspace, execution, stop).await {
             Ok(bytes) => bytes,
             Err(reason) => {
-                capture.omit(if reason == OmissionKind::Git {
-                    OmissionKind::NonGit
-                } else {
-                    reason
-                });
+                capture.omit(reason);
                 return capture;
             }
         };
@@ -263,14 +306,32 @@ impl Git {
             names.insert(path.to_owned());
         }
         let caller = FilesCaller::default();
-        let scope = self
-            .sandbox
-            .workspace_read(WorkspaceReadRequest {
-                mode: SandboxMode::ReadOnly,
-                cwd: workspace.to_owned(),
-                workspace: workspace.to_owned(),
-            })
-            .await;
+        let request = WorkspaceReadRequest {
+            mode: SandboxMode::ReadOnly,
+            cwd: workspace.to_owned(),
+            workspace: workspace.to_owned(),
+        };
+        let scope = match execution {
+            Some(execution) => execution
+                .workspace_read(request)
+                .await
+                .map_err(|_| OmissionKind::Unreadable),
+            None => self
+                .sandbox
+                .workspace_read(request)
+                .await
+                .map_err(|_| OmissionKind::Unreadable),
+        };
+        let Ok(files) = execution.map_or_else(|| Ok(self.files.clone()), ExecutionLease::files)
+        else {
+            capture.omit(OmissionKind::Unreadable);
+            capture.listed_complete = false;
+            return capture;
+        };
+        let _caller = CallerLease {
+            files: files.clone(),
+            caller: caller.clone(),
+        };
         if scope.is_err() {
             capture.listed_complete = false;
             capture.omit(OmissionKind::Unreadable);
@@ -283,14 +344,6 @@ impl Git {
             workspace.to_owned(),
         )
         .expect("trusted canonical workspace");
-        let mode_root = match ModeRoot::open(workspace).await {
-            Ok(root) => root,
-            Err(reason) => {
-                capture.listed_complete = false;
-                capture.omit(reason);
-                return capture;
-            }
-        };
         let mut bytes = 0;
         let mut batch = Vec::new();
         let mut batch_bytes = 0;
@@ -305,15 +358,13 @@ impl Git {
                 capture.omit(OmissionKind::Unreadable);
                 continue;
             };
-            let opened = match self
-                .files
+            let opened = match files
                 .open(binding.clone(), relative, FileKind::File, stop.clone())
                 .await
             {
                 Ok(file) => file,
-                // Git also lists tracked deletions. Files open maps absence to
-                // Unavailable; it is an observed deletion, not an unreadable file.
-                Err(FilesError::Unavailable) => continue,
+                // Git also lists tracked deletions; only Missing proves absence.
+                Err(FilesError::Missing) => continue,
                 Err(_) => {
                     capture.excluded.insert(path);
                     capture.omit(OmissionKind::Unreadable);
@@ -326,8 +377,12 @@ impl Git {
                     return Err(OmissionKind::Limit);
                 }
                 bytes += length;
-                let mode = file_mode(&mode_root, &path).await?;
-                let data = self.read_file(&binding, &opened, stop).await?;
+                let mode = if opened.executable {
+                    0o100_755
+                } else {
+                    0o100_644
+                };
+                let data = Self::read_file(files.as_ref(), &binding, &opened, stop).await?;
                 if data.contains(&0) || std::str::from_utf8(&data).is_err() {
                     return Err(OmissionKind::Binary);
                 }
@@ -338,7 +393,7 @@ impl Git {
                 Ok((data, mode))
             }
             .await;
-            let _ = self.files.release(&binding, &opened.token);
+            let _ = files.release(&binding, &opened.token);
             match result {
                 Ok((data, mode)) => {
                     batch_bytes += data.len();
@@ -358,7 +413,6 @@ impl Git {
         if !batch.is_empty() {
             self.import(scratch, &mut capture, batch, stop).await;
         }
-        self.files.release_caller(&caller);
         capture
     }
     async fn import(
@@ -412,7 +466,7 @@ impl Git {
         }
     }
     async fn read_file(
-        &self,
+        files: &dyn Files,
         binding: &FilesBinding,
         opened: &rsi_files_protocol::OpenedFile,
         stop: &CancellationToken,
@@ -423,8 +477,7 @@ impl Git {
             if stop.is_cancelled() {
                 return Err(OmissionKind::Deadline);
             }
-            let page = self
-                .files
+            let page = files
                 .read(
                     binding.clone(),
                     opened.token.clone(),
@@ -444,7 +497,7 @@ impl Git {
             }
             bytes.extend(chunk);
         }
-        self.files
+        files
             .describe(binding, &opened.token)
             .map_err(|_| OmissionKind::Unreadable)?;
         Ok(bytes)
@@ -640,54 +693,53 @@ impl Drop for Scratch {
         });
     }
 }
-async fn file_mode(root: &ModeRoot, path: &str) -> Result<u32> {
-    #[cfg(unix)]
-    {
-        let root = root.0.clone();
-        let path = path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::PermissionsExt as _;
-            let file = rsi_files_native_fs::open_relative_file_no_follow(&root, Path::new(&path))
-                .map_err(|_| OmissionKind::Unreadable)?;
-            let mode = file
-                .metadata()
-                .map_err(|_| OmissionKind::Unreadable)?
-                .permissions()
-                .mode();
-            Ok(if mode & 0o111 == 0 {
-                0o100_644
-            } else {
-                0o100_755
-            })
-        })
-        .await
-        .map_err(|_| OmissionKind::Unreadable)?
+
+async fn collected(process: ManagedProcess, stop: &CancellationToken) -> Result<Vec<u8>> {
+    let guard = Terminate(process.clone());
+    let outcome = tokio::select! {biased;()=stop.cancelled()=>{process.terminate();let _=process.wait().await;return Err(OmissionKind::Deadline);},outcome=process.wait()=>outcome.map_err(|_|OmissionKind::Git)?};
+    let output = process
+        .stdout()
+        .read_from(0)
+        .map_err(|_| OmissionKind::Git)?;
+    drop(guard);
+    if outcome.exit_code != Some(0) {
+        let stderr = process
+            .stderr()
+            .read_from(0)
+            .map_err(|_| OmissionKind::Git)?;
+        if outcome.exit_code == Some(128)
+            && stderr.bytes.starts_with(b"fatal: not a git repository")
+        {
+            return Err(OmissionKind::NonGit);
+        }
+        return Err(OmissionKind::Git);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (root, path);
-        Ok(0o100_644)
+    if output.lossy || output.oldest_offset != 0 || output.next_offset > FILE_BYTES as u64 {
+        return Err(OmissionKind::Limit);
     }
+    Ok(output.bytes)
 }
 
-struct ModeRoot(#[cfg(unix)] Arc<cap_std::fs::Dir>);
-impl ModeRoot {
-    async fn open(workspace: &Path) -> Result<Self> {
-        #[cfg(unix)]
-        {
-            let workspace = workspace.to_owned();
-            tokio::task::spawn_blocking(move || {
-                rsi_files_native_fs::open_absolute_directory_no_follow(&workspace)
-                    .map(|file| Self(Arc::new(file)))
-                    .map_err(|_| OmissionKind::Unreadable)
-            })
-            .await
-            .map_err(|_| OmissionKind::Unreadable)?
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = workspace;
-            Ok(Self())
-        }
-    }
+fn arguments(args: &[&str]) -> Vec<String> {
+    let mut arguments: Vec<String> = [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "gc.auto=0",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    arguments.extend(args.iter().map(|s| (*s).to_owned()));
+    arguments
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "lease_tests.rs"]
+mod lease_tests;
