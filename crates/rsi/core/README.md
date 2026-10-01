@@ -25,6 +25,46 @@ provider convergence remains a repairable management diagnostic.
 The ordinary [navigation owner](../navigation/README.md) stores title/archive
 metadata in backend `base` and serves authenticated bounded Session queries.
 
+Execution admission reserves separate pools of 64 scopes and 64 backend operations
+for Local and for SSH. Publication checks retain the current grant without
+reserving effect capacity, including after an idle stream read.
+
+Mutations serialize per target. A slow handshake, identity read or disconnect
+does not block unrelated targets. A separate short publication gate protects
+registry budgets and durable candidate writes. Configuration/Manage/Use admission
+precedes target contention checks; unauthorized callers do not observe Busy.
+Contention reports Busy rather
+than exhausting target capacity. Revision and connection CAS remain protected
+until the admitted operation finishes, independently of its waiter.
+
+On Linux the SSH target owner stores at most 64 bounded candidates in the separate
+`rsi.ssh-targets` Storage domain. A configuration-admitted human may submit at most
+four untrusted candidates; submission only reserves an identity. Subsequent edits
+require the exact target-management scope (Local administration is intrinsic).
+Listing reveals only the caller's candidates and explicitly granted targets.
+Catalog reads snapshot candidate records and live connection handles under the
+target-state lock, then evaluate current grants after releasing it. Grant checks
+and response projection never hold that state lock.
+Only Local may confirm an exact public-key fingerprint and a private identity file.
+Trust binds the candidate revision, endpoint and identity digest. Editing an endpoint
+withdraws trust and the current connection. Identity bytes never enter Storage or
+API responses; connection preparation copies the verified bounded file into private
+connection-owned storage. Replacing that file requires another Local confirmation.
+
+Connection requests require target Use independently of configuration or management
+grants. They check the installed helper against the adjacent distribution receipt,
+then publish one new connection epoch after initialization. Target edits and connection
+publication share a bounded writer; a lost API waiter does not abandon accepted work.
+Connection epochs increase within a Host and start from a nonzero 63-bit seed
+derived from its fresh Host identity. This removes deterministic unit-name reuse
+after an unclean restart while retaining the stable Service artifact-cache namespace.
+A colliding existing unit still rejects launch; it is never taken over.
+Cold restore restores candidates and Local trust, never a connection. Disconnecting
+is explicit and different from revoking a grant. A withdrawn provider cannot issue
+new leases; previously issued leases retain their exact provider, while each new
+effect checks the live Use gate. The wire contract belongs to
+[configuration API](../configuration-api/README.md).
+
 The native Application bootstrap publishes its immutable role catalog source to
 descendant presentation Profiles before starting the Application. Descendants use
 the ordinary Profile update owner; they do not mutate the catalog or start a
@@ -685,3 +725,12 @@ Local browser launch is single-flight within one Service owner: concurrent and
 later calls share its first successfully authorized managed credential. A failed
 attempt may retry; a successful credential is never silently rotated by another
 call on that owner. Revocation remains effective until an explicit owner restart.
+
+The execution resolver publishes one common lease boundary for Local and SSH.
+Its Local provider freezes the Host's Sandbox, Process, Duplex, PTY and Files
+capabilities together with explicitly captured program/environment selections.
+SSH selection delegates to the target owner without substituting Local resources.
+Each lease retains its authenticated origin, rejects revoked devices and retires
+with its provider owner; queued and accepted operations keep their existing bounded
+permits through settlement. Session and workspace ingress must pass the lease
+as live runtime authority, independently of durable coordinates.
