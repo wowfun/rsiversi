@@ -218,6 +218,10 @@ generations during simultaneous switches; each pane admits one switch at a time.
 History is a bounded separate page, preserving live observation. Workspace,
 recent-Session and model catalog next-page actions replace their bounded page;
 they do not accumulate an unbounded client catalog.
+Workspace ordering separately reads the registry's atomic complete order seed.
+Its 1,024-record / 128 KiB limit bounds the complete tree; oversized membership
+preserves ordinary pages while device ordering pauses. Reaching the last page
+never authorizes reconciliation of a partial membership.
 
 Inputs enter a closed Rust command grammar with non-queued admission. The application
 admits at most eight commands globally and one submission awaiting a receipt per
@@ -456,6 +460,8 @@ delivery action; stale or absent delivery tickets do not block their preparation
 Queue preparation accepts only its queue payload. Mixed composer text, images or
 references are rejected rather than silently discarded.
 
+Directory dialogs and workspace registration explicitly retain the selected
+execution location. Remote paths never pass through a Local registration default.
 Directory dialogs use the composed shared picker client. Closing a list cancels
 its exact ephemeral read identity; late results cannot replace a later selection.
 A creation is sent once and its outcome remains explicit. Closing the application
@@ -479,3 +485,36 @@ Queue projection caches are bound to the queue lifetime/revision and displayed
 Turn. Unrelated streamed facts reuse the sorted actions, immutable JSON and
 encoded size. Changed slots or Turn bindings invalidate that cache; queue bytes
 remain included in the same pane/frame budget and exact patch comparison.
+
+Submission-owner retention follows explicit durable control evidence. Observed
+message claim, discard or predecessor replacement, or an exact claimed/discarded
+receipt, releases that pending ID. Absence from a pending snapshot cannot settle an
+unknown dispatch;
+receiving a completion on screen is not itself evidence. In-flight submission
+permits and unresolved identities remain retained across attachment switches.
+This permits continued navigation after 64 fully settled conversations while
+preserving admission bounds and unknown-result reconciliation.
+
+## Resource panel ownership
+
+`PanelRegistry` retains independently cancellable resource views. A view ID is
+monotone within one application and is distinct from a document pane or tab ID.
+Every action/read must still match the current view ticket and the original
+Session attachment. Moving, selecting or floating a tab does not replace that
+view. Closing cancels and releases only that entry. Session detach closes every
+entry from its exact attachment, and application shutdown drains all entries.
+Settings reads/editing have an independent modal owner.
+
+The registry admits at most 16 views and four floating views per Session, with
+64 entries across the application. Capacity rejection preserves existing entries;
+there is no authority eviction to make room. Restored or duplicated coordinates
+must pass the ordinary open path and acquire a new view. Undo after close does
+not revive a cancelled lease. Stored layouts never contain tickets, UI leases,
+terminal writer grants or cancellation state.
+
+A saved resource coordinate contains the stable bundle/surface name or exact
+Session source, never a presentation reference, ticket or terminal attachment.
+Reopening resolves that coordinate against the current attachment and obtains a
+new presentation. Remote catalog pagination updates its existing view. A saved
+remote surface is selected through the current Session export scope and goes
+through the same Service selection validation as an ordinary catalog selection.

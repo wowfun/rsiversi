@@ -84,6 +84,9 @@ nodes or the Worker's restricted Markdown event stream, using only its closed
 element set. HTML and remote Markdown images remain inert text.
 Attachment replacement disables that pane's input until its new view arrives;
 typing cannot enter the retiring attachment between navigation and delivery.
+Passive inline-card visibility updates pause during replacement. An in-flight
+update rejected for the retiring attachment does not become a user action error;
+the replacement frame supplies a fresh visibility observation.
 Clearing a pane also invalidates the cached pending-interaction projection;
 reopening an unchanged question or approval rebuilds its actionable controls.
 Approval details are identified by both the owning Session and request ID, so
@@ -365,6 +368,8 @@ External panes keep their switch guard through same-generation frames; only a
 confirmed new binding clears it. Both buttons and keyboard submission respect it.
 
 File previews use the [Files contribution contract](../../crates/rsi/session-files-ui/README.md#rich-file-previews).
+SVG zoom uses the intrinsic dimensions validated from its encoded source, because
+WebKit can report the responsive display size through `naturalWidth`.
 The independently admitted `rsi.file-preview` renderer builds code and Markdown
 DOM from bounded source windows. Its bundled Shiki grammars use the JavaScript
 regex engine; large inputs retain plain source. HTML uses immutable sandbox
@@ -448,16 +453,44 @@ Expanding a summary retains its screen position and pauses automatic following.
 Stop sends the displayed Turn identity with its attachment generation, preserving
 queued input and the draft. It cannot cancel a newer Turn or a pending submission.
 
-Device layout uses a separate IndexedDB database, `rsi.presentation`, scoped by
-authenticated endpoint and principal. Closed, validated records contain only panel
-widths and collapse state, at most 4 KiB each, 64 records and 256 KiB total. Widths
-are clamped to supported ranges; invalid or unavailable storage uses defaults.
-Least-recently-used eviction applies only to these layout records. No credentials,
-Session content or submission records enter this store.
+Device presentation uses IndexedDB `rsi.presentation` schema 2, separately scoped
+by endpoint and authenticated principal. Three object stores have independent
+origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
+128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
+Record wrappers count toward each budget. A semantic intent reads the latest
+revision and applies in the same read-write transaction. Writes preserve
+unrelated records without rewriting them. Bucket accounting validates every
+record's envelope and byte size; full content validation and Dock history replay
+occur when that record is read or changed. Unread records confer no authority.
+Each intent validates the freshly read history once. Its internally generated
+result crosses the incremental state and record-budget checks without replaying
+that history again. Independent `boundedRecords` inputs still receive full
+content validation. LRU ordering is computed only when a write needs eviction.
+An unchanged Dock intent still validates the selected document and bucket bounds,
+but preserves its revision and LRU position without a write or notification.
+Malformed selected content fails closed. Layout patches preserve
+unrelated fields; expansion toggles preserve unrelated groups. Order moves use
+complete membership and exact coordinate/pin/archive partitions; previous, next,
+first and last operate across page boundaries. Updated mode clears that scope's
+saved manual order. Reconciliation preserves absent IDs because the visible
+catalog cannot distinguish a revoked member from a deleted one. Returning members
+recover their saved position. At the 1024-ID bound, reconciliation rejects rather
+than silently discarding positions; Updated mode explicitly resets the order.
+Reading never writes or evicts. BroadcastChannel messages
+only invalidate reads, and focus always rereads storage. Only committed values
+are reported as saved; aborts retain the prior durable revision and show a notice.
+An invalid layout can fall back locally without opening or changing drafts.
+Schema-1 layout records upgrade transactionally into revisioned records. The
+original object store is retained as `legacy-layouts-v1` for explicit recovery.
+If its complete bounded collection cannot be validated, the new layouts store
+starts empty; invalid legacy values never become active records or prevent later
+opens. Neither
+presentation records nor channel messages contain credentials, history or input.
 
 Vendor provenance covers every vendored file except its manifest. License details
 read the revision from that manifest. Product adapters own button geometry; the
-pinned vendor bytes and their upstream licenses remain unchanged.
+pinned vendor sources retain their upstream licenses; each adaptation is recorded
+with its source and adapted hashes in the provenance manifest.
 
 Composer keys and the one-time legacy-key migration follow the
 [client preferences contract](../../crates/rsi/client-preferences/README.md).
@@ -466,15 +499,25 @@ keyboard users. Gesture handling captures the action revision before draft stora
 flush; a later frame cannot reinterpret that action. Worker and Desktop confirm
 successful frame presentation to GUI Rust before it admits that revision.
 
+Workspace ancestry treats backslashes in absolute POSIX paths as literal filename
+characters; Windows drive and UNC paths use their own separators.
+
 ### Conversation layout
 
-The device layout record is version 2: navigation is expanded, rail or hidden;
+The device layout record is version 3: navigation is expanded, rail or hidden;
 widths clamp to 264–420 px (default 280) and the rail is 56 px. Below 1024 px,
 automatic rail presentation does not overwrite the stored preference; mobile
-uses a drawer. Resources start closed. Legacy closed navigation becomes rail.
+uses a 280 px overlay. Resources start closed; their desktop width is a viewport
+fraction, default 45%, clamped by 300 px, 70% and a 400 px conversation minimum.
+Resize controls track viewport changes before applying keyboard or pointer deltas.
+Below 768 px resources use fullscreen without changing the saved desktop mode.
+Obsolete pixel layout records reset independently of composer drafts.
 Sign out remains reachable in the header at every supported viewport width.
+When the conversation column is at most 560 px wide, its tabs move into the
+conversation menu so the global controls and conversation options remain distinct.
+The compact menu also closes the selected additional conversation surface.
 The layout owns the four detail modes and at most 16 recently used Workspace
-expansion exceptions. Records retain the 4 KiB, 64-record, 256 KiB limits and
+expansion exceptions. Layout records retain the 32 KiB, 64-record, 2 MiB limits and
 never share a database or transaction with drafts.
 
 Transcript width is centered and the composer is 32 px wider, limited by the
@@ -519,3 +562,76 @@ connection can still use in-memory layout settings.
 Connection and preference alerts occupy their own flow rows. While an alert is
 visible, the connected toolbar also reserves a row so it cannot overlap alert
 text or block its controls, including at narrow viewport widths.
+
+Changing a navigation scope to manual, or clearing its order for updated mode,
+commits its preference and order intents together across the two object stores.
+A failed record or quota check aborts both; notification failure after commit does
+not downgrade the durable receipt. The shared Host pin/archive metadata remains
+outside this device transaction.
+
+Navigation view and Session/workspace order are device preferences. Manual moves
+use complete membership before reading 64 ordered summaries; first use initializes
+from the full seed's activity order. Session moves stay within exact execution
+coordinates and pin/archive partitions. Workspace moves stay within the same
+execution location and immediate path parent. An incomplete workspace catalog
+cannot prune or reorder saved membership. Keyboard Alt+Up/Down/Home/End and explicit
+first/last controls share the same semantic move as drag/drop. A too-large Session
+seed preserves saved order and displays updated results with a visible pause notice.
+
+Navigation presentation schedules explicit commands and automatic summary reads
+through one bounded 32-command lane. It waits for the prior command acknowledgment
+before dispatching the next; obsolete summary tickets are discarded before dispatch.
+Connection replacement invalidates queued work. Rust remains the ticket and
+authorization owner, and the lane never retries a rejected or uncertain mutation.
+
+The directory dialog selects Local or one caller-visible SSH target. Changing
+location discards the old browsing window; every status, list, create and workspace
+registration carries the selected location. SSH availability comes from current
+Use admission, independently of Local configuration access. Folder creation is
+single-shot, and an uncertain result requires explicit parent readback.
+
+Docked resource tabs use the separately pinned DSH dockkit closure at
+`4878cdabd87d4041bdaff61d04c966883b9fd07a`; earlier vendored files keep their
+original revisions. Per-file provenance records source and adapted SHA-256.
+RSI owns the layout adapter, resource authorities, persistence and Session
+selection. The adapter admits two horizontal panes, a 20–80 percent split,
+16 tabs and four floats per Session. Closing or moving the final tab out of a
+pane merges the empty pane as part of the same undoable intent. Explicitly
+splitting may leave an empty destination until the next move. At narrow widths,
+a single displayed strip combines docked tabs without changing the saved tree.
+Float rectangles are clamped to the current viewport for display; resizing the
+window never persists these temporary bounds.
+Global connection controls align with the conversation column, so dock tab
+controls cannot cover sign-out or application close.
+Settings has a fixed 188px navigation and independently scrolling options; its
+800px shell uses the pinned panel radius and elevation, and becomes fullscreen
+with section controls above the options below 768px.
+Stable tab hosts retain visited terminal
+followers across selection, movement, floating and fullscreen. Closing a tab
+detaches; only explicit termination ends its shell. Restoring terminal coordinates
+never creates a shell or silently takes its writer grant. The terminal roster
+refreshes when its tab becomes active, so retained hidden UI cannot conceal
+shells created since the prior observation.
+Only a visible, nonzero terminal viewport with finite measured cell counts can
+request a resize. Hiding a retained host never resizes its remote shell.
+
+Session dock records share the layouts bucket, separately keyed by Session and
+endpoint/principal. Semantic intents apply to the latest record in one transaction.
+The adapter enforces two horizontal panes, 20–80% split, 16 tabs, four floats and
+at most 64 undo entries within the record budget. Runtime view IDs, references and
+terminal attachments never enter this record. Close/undo/reload resolve current
+resource coordinates; terminal restore only attaches read-only. A failed save
+leaves the committed layout intact and reports its failure.
+An accepted reopen remains pending until its presentation frame arrives. Command
+replies do not imply that the document has rendered that frame; late resources
+bind to their pending tab instead of creating another durable tab.
+Asynchronous Dock setup belongs to one effect lifetime. Retirement prevents late
+storage reads or reopen replies from publishing or installing subscriptions.
+Resource host notifications describe membership and tab metadata; content-only
+renderer frames retain the same external-store snapshot.
+
+Application extension restoration sends the ownerless application command;
+Session extension restoration carries its current pane and generation. Narrow
+resource-overlay visibility is transient and never writes the saved desktop
+visibility, including when opening a resource tab. Collapsing docked panes on a
+narrow viewport preserves the focused floating pane and the root dock selection.

@@ -1,0 +1,98 @@
+import {paired} from './paired-env.mjs';
+import {startService,waitUntil} from './service.mjs';
+import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
+import {chromium} from 'playwright';
+import {mkdir,writeFile,readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import assert from 'node:assert/strict';
+const report=process.env.RSI_REPORT_DIR;assert(report);await mkdir(report,{recursive:false});
+let service,browser,page;const errors=[],checks=[];
+try{
+ service=await startService({binary:paired.binary,assets:paired.assets,report});
+ await writeFile(join(service.workspace,'panel.txt'),'Independent panel bytes\n');
+ browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
+ await context.addInitScript(()=>{
+   const Original=Worker;window.terminalCalls=[];
+   window.Worker=class extends Original {postMessage(data,...rest){
+     if(data.kind==='call'&&data.method==='terminal'){try{window.terminalCalls.push(JSON.parse(data.payload).request)}catch{}}
+     super.postMessage(data,...rest);
+   }};
+ });
+ page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
+ await connectWorkbench(page,service,'Independent panels');await openWorkspace(page,service);
+ const conversation=page.getByRole('region',{name:'Main conversation',exact:true});
+ await conversation.getByLabel('Main message',{exact:true}).fill('Create a durable Session for resource verification.');
+ await conversation.getByTestId('composer-send').click();await page.waitForFunction(()=>document.querySelector('.pane.selected .pane-status')?.textContent==='Completed');
+ await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
+ await page.getByRole('button',{name:'Workspace files',exact:true}).click();
+ const contribution=page.locator('.resource-content .ui-contribution:visible');
+ await contribution.getByRole('textbox',{name:'Workspace-relative path',exact:true}).fill('panel.txt');
+ await contribution.getByRole('button',{name:'Read file',exact:true}).click();await contribution.locator('pre').filter({hasText:'Independent panel bytes'}).waitFor();
+ await page.screenshot({path:join(report,'files-panel.png')});
+ const first=await page.locator('[data-dockkit-tab]').first().getAttribute('data-dockkit-tab');
+ await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor();
+ const geometry=await page.getByRole('dialog',{name:'Settings',exact:true}).boundingBox();assert.equal(geometry.width,800);assert.equal(geometry.height,800);
+ await page.screenshot({path:join(report,'settings-independent.png')});await page.getByRole('button',{name:'Close settings',exact:true}).click();
+ await contribution.locator('pre').filter({hasText:'Independent panel bytes'}).waitFor();checks.push('Settings preserves the resource presentation');
+ await page.getByRole('button',{name:'Open resources',exact:true}).first().click();await page.getByRole('button',{name:'Workspace files',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelectorAll('.resource-content .ui-contribution').length===2);
+ await page.getByRole('button',{name:'Split resources',exact:true}).first().click();
+ const chips=page.locator('[data-dockkit-tab]');const last=chips.last();await last.click({button:'right'});await page.getByRole('menuitem',{name:'Float',exact:true}).click();
+ await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();await page.screenshot({path:join(report,'two-files-float.png')});
+ await page.getByRole('button',{name:'Dock resource',exact:true}).click();
+ await page.locator(`[data-dockkit-tab="${first}"]`).click();await contribution.locator('pre').filter({hasText:'Independent panel bytes'}).waitFor();checks.push('Two independent file views survive split, float and dock');
+ await page.locator(`[data-dockkit-tab="${first}"]`).click({button:'right'});await page.getByRole('menuitem',{name:'Close resource tab',exact:true}).click();
+ await page.getByRole('button',{name:'Undo layout',exact:true}).click();await page.locator(`[data-dockkit-tab="${first}"]`).waitFor();checks.push('Close undo reopens resource coordinates');
+ await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
+ await page.getByRole('button',{name:'New terminal',exact:true}).click();
+ const terminal=page.getByRole('region',{name:'Session terminals',exact:true});
+ await terminal.getByRole('status').filter({hasText:'You have control'}).waitFor();
+ await terminal.locator('.xterm-helper-textarea').focus();await page.keyboard.type("printf 'dock-terminal-ok' > dock-pty.txt; printf 'DOCK_TERMINAL_VISIBLE\\n'");await page.keyboard.press('Enter');
+ await waitUntil(async()=>await readFile(join(service.workspace,'dock-pty.txt'),'utf8').catch(()=>null)==='dock-terminal-ok','real Session terminal input');
+ await terminal.locator('.xterm-rows').filter({hasText:'DOCK_TERMINAL_VISIBLE'}).waitFor();
+ const terminalTab=page.locator('[data-dockkit-tab]').filter({hasText:'Terminal'}).last();
+ const followerCalls=()=>page.evaluate(()=>window.terminalCalls.filter(call=>['attach','create','detach'].includes(call.type)));
+ const beforeMove=await followerCalls();
+ await terminalTab.click({button:'right'});await page.getByRole('menuitem',{name:'Float',exact:true}).click();
+ await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();
+ await terminal.getByRole('status').filter({hasText:'You have control'}).waitFor();
+ await page.screenshot({path:join(report,'terminal-floating.png')});
+ await page.getByRole('button',{name:'Dock resource',exact:true}).click();await terminalTab.waitFor();
+ assert.deepEqual(await followerCalls(),beforeMove,'moving a terminal keeps its original follower');
+ await terminalTab.click({button:'right'});await page.getByRole('menuitem',{name:'Close resource tab',exact:true}).click();
+ await terminal.waitFor({state:'hidden'});await page.getByRole('button',{name:'Undo layout',exact:true}).click();
+ await terminal.getByRole('status').filter({hasText:'Read only'}).waitFor();
+ assert.equal((await followerCalls()).filter(call=>call.type==='create').length,1,'undo attaches and never creates or takes control');
+ checks.push('Real terminal follower survives float and dock; close detaches; undo attaches read only');
+ await terminal.getByRole('button',{name:'Hide terminal panel',exact:true}).click();
+ await terminal.waitFor({state:'hidden'});
+ const beforeRoster=await page.locator('[data-dockkit-tab]').count();
+ await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
+ await page.waitForFunction(count=>document.querySelectorAll('[data-dockkit-tab]').length===count+1,beforeRoster);
+ await page.locator('.terminal-list:visible').getByRole('button',{name:/^Terminal 1/}).click();
+ await terminal.getByRole('status').filter({hasText:'Read only'}).waitFor();
+ assert.equal((await followerCalls()).filter(call=>call.type==='create').length,1);
+ checks.push('Retained terminal roster refreshes when reopened and attaches its live shell');
+ await terminal.getByRole('button',{name:'Take control',exact:true}).click();
+ await terminal.getByRole('status').filter({hasText:'You have control'}).waitFor();
+ await terminal.locator('.xterm-helper-textarea').focus();await page.keyboard.type('exit 0');await page.keyboard.press('Enter');
+ await terminal.getByRole('status').filter({hasText:'Exited 0'}).waitFor();
+ const geometries=[];
+ for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]]){
+   await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});await page.setViewportSize({width,height});
+   await page.waitForFunction(width=>{const desktop=!!document.querySelector('.workbench>.sidebar');const dock=document.querySelector('.resource-dock:not([hidden])');return desktop===(width>=1024)&&!!dock&&dock.classList.contains('resource-fullscreen')===(width<768)},width);
+   const geometry=await page.evaluate(()=>{
+     const box=selector=>{const rect=document.querySelector(selector)?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null};
+     const control=document.querySelector('#sign-out'),r=control.getBoundingClientRect();return {connectionControlHit:control.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),overflow:document.documentElement.scrollWidth-innerWidth,resources:box('.resource-dock:not([hidden])'),navigation:box('.workbench>.sidebar,.navigation-rail'),main:box('.workspace-main')};
+   });
+   assert(geometry.overflow<=1,JSON.stringify(geometry));
+   if(width>=1024)assert(Math.abs(geometry.resources.width-Math.min(width*.45,width-geometry.navigation.width-400))<=2,JSON.stringify(geometry));
+   if(width>=768){assert(geometry.connectionControlHit,JSON.stringify(geometry));assert(geometry.main.width>=400,JSON.stringify(geometry));}else assert.equal(geometry.resources.width,width);
+   await page.screenshot({path:join(report,`dock-${width}-${theme}.png`)});geometries.push({theme,width,height,...geometry});
+ }
+ await writeFile(join(report,'geometry.json'),JSON.stringify(geometries,null,2));
+ checks.push('Eight Linux Chromium DPR 1 viewport/theme checks without document overflow');
+ await writeFile(join(report,'result.json'),JSON.stringify({family:paired.family,checks,errors},null,2));assert.deepEqual(errors,[]);
+ console.log(JSON.stringify({family:paired.family,checks,errors}));
+}catch(error){if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.html'),await page.content());await writeFile(join(report,'failure.txt'),await page.locator('body').innerText().catch(()=>String(error)));}throw error}
+finally{await browser?.close();await service?.close()}

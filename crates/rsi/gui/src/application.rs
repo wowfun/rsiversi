@@ -86,6 +86,12 @@ pub(crate) enum Command {
         bundle: String,
         surface: String,
     },
+    ReopenRemoteSurface {
+        pane: crate::SurfaceId,
+        generation: String,
+        bundle: String,
+        surface: String,
+    },
     ApplicationUiSurface {
         reference: rsi_ui::UiReference,
     },
@@ -115,6 +121,7 @@ pub(crate) enum Command {
     SessionsNext,
     ModelsNext,
     RegisterWorkspace {
+        location: rsi_directory_picker_api::ExecutionLocation,
         path: String,
         #[serde(default)]
         pane: Option<crate::SurfaceId>,
@@ -228,7 +235,13 @@ pub(crate) enum Command {
         ticket: String,
         text: String,
     },
-    CloseDetail,
+    CloseDetail {
+        view: Option<String>,
+    },
+    FloatPanel {
+        view: String,
+        floating: bool,
+    },
 }
 
 impl Command {
@@ -257,6 +270,7 @@ impl Command {
             Self::ApplicationUiSurface { .. }
             | Self::ExternalCatalog { .. }
             | Self::UiSurface { .. }
+            | Self::ReopenRemoteSurface { .. }
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
             | Self::Setup { .. }
@@ -282,7 +296,8 @@ impl Command {
             | Self::SettingsList
             | Self::SettingsNext { .. }
             | Self::SettingsSave { .. }
-            | Self::CloseDetail => None,
+            | Self::CloseDetail { .. }
+            | Self::FloatPanel { .. } => None,
         }
     }
 }
@@ -291,6 +306,7 @@ impl Command {
 pub(crate) struct Catalog {
     pub workspaces: Vec<rsi_workspace_protocol::WorkspaceRecord>,
     pub workspaces_more: bool,
+    pub workspace_order_seed: Option<rsi_workspace_protocol::WorkspaceOrderSeed>,
     pub sessions: Vec<Recent>,
     pub sessions_more: bool,
     pub models: Vec<rsi_ai_protocol::ModelRef>,
@@ -344,7 +360,7 @@ pub struct GuiApplication {
     pub(crate) has_files: bool,
     pub(crate) catalog: Mutex<Catalog>,
     pub(crate) catalog_work: tokio::sync::Mutex<()>,
-    pub(crate) details: Mutex<crate::details::Details>,
+    pub(crate) details: Mutex<crate::panel_registry::PanelRegistry>,
     pub(crate) notice: Mutex<String>,
     pub(crate) execution: Execution,
     changed: watch::Sender<u64>,
@@ -497,18 +513,12 @@ impl GuiApplication {
             "preferences": preferences.0.web,
             "appearance": preferences.0.appearance,
             "preference_error": preferences.1,
-            "ui_detail": details.ui,
-            "remote_ui_catalog": details.remote_catalog,
+            "panels": details.snapshot(),
             "has_remote_ui": self.remote_ui.is_some(),
-            "image_detail": details.image,
-            "source_media": details.source.as_ref().and_then(crate::details::SourceDetail::media),
-            "media_limits": crate::panes::images::limits(),
+                        "media_limits": crate::panes::images::limits(),
             "has_media": self.media.is_some(),
-            "settings": details.editor,
-            "settings_catalog": details.settings_catalog,
-            "detail": details.interaction,
-            "source_detail": details.source,
-            "block_sources": details.block_sources,
+            "settings": details.settings.editor,
+            "settings_catalog": details.settings.settings_catalog,
             "notice": *self.notice.lock().expect("Web notice poisoned"),
         })
     }
@@ -612,6 +622,15 @@ impl GuiApplication {
                     .command(command)
                     .await
             }
+            Command::ReopenRemoteSurface {
+                pane,
+                generation,
+                bundle,
+                surface,
+            } => {
+                self.reopen_remote_surface(pane, &generation, &bundle, &surface)
+                    .await
+            }
             Command::ApplicationUiSurface { reference } => {
                 self.application_ui_surface(&reference).await
             }
@@ -649,13 +668,17 @@ impl GuiApplication {
             | Command::WorkspacesNext
             | Command::SessionsNext
             | Command::ModelsNext => self.refresh(command).await,
-            Command::RegisterWorkspace { path, pane } => {
+            Command::RegisterWorkspace {
+                location,
+                path,
+                pane,
+            } => {
                 if path.len() > 16 * 1024 {
                     return Err("Workspace path exceeds its limit".into());
                 }
                 let workspace = self
                     .workspace
-                    .get_or_create(std::path::Path::new(&path))
+                    .register_at(&location, std::path::Path::new(&path))
                     .await
                     .map_err(error)?;
                 self.refresh(Command::Refresh).await?;
@@ -673,10 +696,20 @@ impl GuiApplication {
             Command::SettingsList => self.list_settings(None).await,
             Command::SettingsNext { ticket } => self.list_settings(Some(&ticket)).await,
             Command::SettingsSave { ticket, text } => self.save_settings(&ticket, &text).await,
-            Command::CloseDetail => {
-                self.details.lock().expect("Web details poisoned").begin()?;
+            Command::CloseDetail { view } => {
+                let mut registry = self.details.lock().expect("Web details poisoned");
+                if let Some(view) = view {
+                    registry.close(&view)?;
+                } else {
+                    registry.settings.begin()?;
+                }
                 Ok(())
             }
+            Command::FloatPanel { view, floating } => self
+                .details
+                .lock()
+                .expect("Web details poisoned")
+                .floating(&view, floating),
             command => self.pane_command(command).await,
         }
     }
@@ -769,7 +802,7 @@ impl PluginFactory for GuiApplicationFactory {
             has_files,
             catalog: Mutex::new(Catalog::default()),
             catalog_work: tokio::sync::Mutex::new(()),
-            details: Mutex::new(crate::details::Details::default()),
+            details: Mutex::new(crate::panel_registry::PanelRegistry::default()),
             notice: Mutex::new(String::new()),
             execution: plan.context().runtime().execution().clone(),
             changed,
@@ -794,11 +827,7 @@ impl PluginFactory for GuiApplicationFactory {
                     {
                         let _admission = app.admission.lock().expect("Web admission poisoned");
                         app.stop.cancel();
-                        app.details
-                            .lock()
-                            .expect("Web details poisoned")
-                            .stop
-                            .cancel();
+                        app.details.lock().expect("Web details poisoned").stop();
                         app.slots.close();
                         app.terminal_reads.close();
                         app.terminal_writes.close();
@@ -808,7 +837,7 @@ impl PluginFactory for GuiApplicationFactory {
                     app.tasks.wait().await;
                     let closed = app.close_surfaces().await;
                     *app.details.lock().expect("Web details poisoned") =
-                        crate::details::Details::default();
+                        crate::panel_registry::PanelRegistry::default();
                     *app.stream.lock().expect("Web frame stream poisoned") =
                         crate::frames::FrameState::default();
                     closed

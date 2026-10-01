@@ -3,7 +3,7 @@ use crate::{
     application::{Result, error},
 };
 use futures_util::future::BoxFuture;
-use rsi_directory_picker_api::{CreateRequest, ListRequest};
+use rsi_directory_picker_api::{CreateRequest, ExecutionLocation, ListRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 fn reply<T: serde::Serialize>(
@@ -20,8 +20,11 @@ fn reply<T: serde::Serialize>(
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Status,
+    Status {
+        location: ExecutionLocation,
+    },
     List {
+        location: ExecutionLocation,
         path: Option<String>,
         request_id: String,
     },
@@ -29,6 +32,7 @@ enum Request {
         request_id: String,
     },
     Create {
+        location: ExecutionLocation,
         parent: String,
         name: String,
     },
@@ -79,8 +83,8 @@ impl GuiApplication {
                 .as_ref()
                 .ok_or("Directory browsing is unavailable; enter a path manually")?;
             let value = match request {
-                Request::Status => reply(client.status().await.map_err(error)?),
-                Request::List { path, request_id } => {
+                Request::Status { location } => reply(client.status(location).await.map_err(error)?),
+                Request::List { location, path, request_id } => {
                     if request_id.is_empty()
                         || request_id.len() > 64
                         || !request_id
@@ -107,16 +111,16 @@ impl GuiApplication {
                     let listing = tokio::select! {
                         biased;
                         () = stop.cancelled() => return Err("Directory read cancelled".into()),
-                        result = client.list(ListRequest { path }) => result.map_err(error)?,
+                        result = client.list(location, ListRequest { path }) => result.map_err(error)?,
                     };
                     reply(listing)
                 }
                 Request::Cancel { .. } => {
                     unreachable!("handled without ordinary command admission")
                 }
-                Request::Create { parent, name } => reply(
+                Request::Create { location, parent, name } => reply(
                     client
-                        .create(CreateRequest { parent, name })
+                        .create(location, CreateRequest { parent, name })
                         .await
                         .map_err(error)?,
                 ),

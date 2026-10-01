@@ -60,13 +60,29 @@ pub(crate) struct ReuseDraft {
 }
 
 #[derive(Debug)]
-struct SubmissionState {
+pub(crate) struct SubmissionState {
     model_command: rsi_client::CommandSubmission,
     receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     owned: Mutex<BTreeSet<MessageId>>,
     submissions: Arc<tokio::sync::Semaphore>,
 }
 impl SubmissionState {
+    pub(crate) fn observe(&self, update: &rsi_agent_turn_protocol::SessionObservation) {
+        use rsi_agent_session_protocol::AgentControlRecordBody as Control;
+        let rsi_agent_turn_protocol::SessionObservation::Control { record, .. } = update else {
+            return;
+        };
+        let id = match record.body() {
+            Control::MessageClaimed { message_id, .. }
+            | Control::MessageDiscarded { message_id, .. } => message_id,
+            Control::MessageSuccessor { predecessor_id, .. } => predecessor_id,
+            _ => return,
+        };
+        self.owned
+            .lock()
+            .expect("Web pending identities poisoned")
+            .remove(id);
+    }
     fn new() -> Self {
         Self {
             model_command: rsi_client::CommandSubmission::default(),
@@ -96,6 +112,7 @@ struct Attachment {
     generation: u64,
     id: SessionId,
     path: String,
+    workspace: rsi_workspace_protocol::WorkspaceId,
     header: String,
     agent_preset: String,
     creation: Option<rsi_session_protocol::CreateSession>,
@@ -311,7 +328,7 @@ impl Pane {
                 current.controller.goal_changes().borrow().as_ref().is_some_and(std::result::Result::is_ok),
                 current.creation.is_some() && !current.durable.load(std::sync::atomic::Ordering::Acquire), true),
             "inline": inline::frames(&current, &state, ui),
-            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
+            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace":current.workspace,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
             "ui_cards": ui.has_block_renderers(&current.ui_target),
             "ui_revision": ui.membership_changes().borrow().to_string(),
@@ -426,8 +443,11 @@ impl GuiApplication {
                         }
                     };
                     pane.attachment(&generation)?;
-                    let mut details = self.details.lock().expect("attention detail");
-                    details.begin()?;
+                    let mut registry = self.details.lock().expect("attention detail");
+                    let details = registry.open(
+                        Some((index, generation.clone(), attachment.id.clone())),
+                        serde_json::json!({"action":"inspect_interaction","owner":attachment.id,"id":detail["request"]["id"]}),
+                    )?;
                     details.interaction = Some(detail);
                 }
             }
@@ -516,13 +536,11 @@ impl GuiApplication {
         finish_retirement(&self.panes, id, async {
             pane.detach_external().await;
             if let Some(current) = current {
-                let detached = self
-                    .details
+                self.details
                     .lock()
                     .expect("GUI details poisoned")
                     .detach(id, &current.generation.to_string());
-                let closed = current.close().await;
-                detached.and(closed)
+                current.close().await
             } else {
                 Ok(())
             }
@@ -880,6 +898,7 @@ impl GuiApplication {
         let ui_target = surface
             .lookup_local::<rsi_ui::UiTargetContract>()
             .ok_or("Surface UI target is unavailable")?;
+        renderer.bind_submission(draft.clone());
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
             export: export::State::default(),
@@ -898,6 +917,7 @@ impl GuiApplication {
             generation,
             id,
             path: header.canonical_cwd().into(),
+            workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
             header: header.fingerprint().map_err(error)?,
             agent_preset: header.agent_preset_id().to_string(),
             creation,
@@ -929,7 +949,7 @@ impl GuiApplication {
                 self.details
                     .lock()
                     .expect("Web details poisoned")
-                    .detach(index, &old.generation.to_string())?;
+                    .detach(index, &old.generation.to_string());
             }
             current.replace(attachment)
         };
@@ -1103,8 +1123,8 @@ impl GuiApplication {
         } else {
             return Err("Interaction is no longer pending".into());
         };
-        let mut details = self.details.lock().expect("Web details poisoned");
-        details.begin()?;
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = registry.open(Some((index, generation.into(), attachment.id.clone())), serde_json::json!({"action":"inspect_interaction","pane":index,"generation":generation,"owner":owner,"id":id}))?;
         details.interaction = Some(detail);
         Ok(())
     }
@@ -1194,5 +1214,77 @@ mod tests {
         pane.submission(&SessionId::new("replacement").unwrap())
             .unwrap();
         assert_eq!(pane.submissions.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn durable_message_retirement_reclaims_settled_owners_but_keeps_unknown_and_in_flight() {
+        use rsi_agent_session_protocol::{
+            ActivationId, AgentControlRecord, AgentControlRecordBody as Control,
+            MessageDiscardReason, QueueSlot, StepId, TurnId,
+        };
+        use rsi_agent_turn_protocol::{ObservationRetention, SessionObservation};
+        let pane = Pane::default();
+        let mut owners = Vec::new();
+        let message = MessageId::new("message").unwrap();
+        for index in 0..64 {
+            let owner = pane
+                .submission(&SessionId::new(format!("retained-{index}")).unwrap())
+                .unwrap();
+            owner.owned.lock().unwrap().insert(message.clone());
+            owners.push(owner);
+        }
+        let in_flight = owners[0].submissions.clone().try_acquire_owned().unwrap();
+        assert!(
+            pane.submission(&SessionId::new("blocked").unwrap())
+                .is_err()
+        );
+        let observe = |owner: &SubmissionState, body| {
+            let record = Arc::new(AgentControlRecord::new(2, 2, body).unwrap());
+            let record = ObservationRetention::default()
+                .retain_controls(vec![record])
+                .unwrap()
+                .pop()
+                .unwrap();
+            owner.observe(&SessionObservation::Control {
+                record,
+                durable_control_seq: 2,
+            });
+        };
+        for (index, owner) in owners[..63].iter().enumerate() {
+            observe(
+                owner,
+                Control::MessagePromoted {
+                    message_id: message.clone(),
+                },
+            );
+            assert!(owner.owned.lock().unwrap().contains(&message));
+            observe(
+                owner,
+                match index % 3 {
+                    0 => Control::MessageClaimed {
+                        message_id: message.clone(),
+                        activation_id: ActivationId::new("activation").unwrap(),
+                        turn_id: TurnId::new("turn").unwrap(),
+                        step_id: StepId::new("step").unwrap(),
+                        entered_fact_seq: 1,
+                    },
+                    1 => Control::MessageDiscarded {
+                        message_id: message.clone(),
+                        reason: MessageDiscardReason::Cancelled,
+                    },
+                    _ => Control::MessageSuccessor {
+                        predecessor_id: message.clone(),
+                        successor_id: MessageId::new("successor").unwrap(),
+                        slot: QueueSlot::initial(&message, 1, 1),
+                    },
+                },
+            );
+            assert!(owner.owned.lock().unwrap().is_empty());
+        }
+        pane.submission(&SessionId::new("next").unwrap()).unwrap();
+        assert_eq!(pane.submissions.lock().unwrap().len(), 3);
+        assert!(owners[63].owned.lock().unwrap().contains(&message));
+        assert_eq!(owners[0].submissions.available_permits(), 0);
+        drop(in_flight);
     }
 }

@@ -25,12 +25,12 @@ def verify(script, button, click, fill, until, screenshot, report):
             answered = True
         return script(r'return document.querySelector(".pane-status")?.textContent==="Completed"&&[...document.querySelectorAll(".message.tool")].some(e=>e.textContent.includes("host_profile"))')
     until(completed)
-    click(script(r'return [...document.querySelectorAll(".message.tool")].at(-1)?.querySelector("button")'))
+    click(script(r'return [...document.querySelectorAll(".message.tool")].at(-1)?.querySelector(".source-actions button")'))
     button('Recorded result')
-    until(lambda: script(r'return document.querySelector("#detail .ui-contribution")?.textContent.includes("rsi.profile-leaves · version 1")'))
-    assert script(r'return document.querySelector("#detail .ui-contribution").textContent.includes("catalog")')
-    assert script(r'const e=document.querySelector("#detail .ui-contribution");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its card'
-    assert script(r'const e=document.querySelector("#detail");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its dialog'
+    until(lambda: script(r'return document.querySelector(".resource-content .ui-contribution")?.textContent.includes("rsi.profile-leaves · version 1")'))
+    assert script(r'return document.querySelector(".resource-content .ui-contribution").textContent.includes("catalog")')
+    assert script(r'const e=document.querySelector(".resource-content .ui-contribution");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its card'
+    assert script(r'const e=document.querySelector(".resource-content");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its dialog'
     screenshot('typed-recorded-result.png')
     button('Close details')
     button('Standard')

@@ -1,10 +1,11 @@
-import {createContext,useContext,useEffect,useLayoutEffect,useRef,useState,type ReactNode} from 'react'
+import {createContext,useCallback,useContext,useEffect,useLayoutEffect,useRef,useState,type ReactNode} from 'react'
 import {bindSnapshotSelector} from '../vendor/dsh/renderer/bind.ts'
 import {defaultLayout,validateLayout,PresentationStore} from '../presentation-store.js'
 import {observable,useView} from './bridge.ts'
+import {applyIntent} from '../device-store.js'
 
-export interface Layout {version:2;navigationWidth:number;resourcesWidth:number;navigation:'expanded'|'rail'|'hidden';resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
-export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void}>({layout:defaultLayout as Layout,update:()=>{}})
+export interface Layout {version:3;navigationWidth:number;resourcesWidth:number;navigation:'expanded'|'rail'|'hidden';resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
+export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)
 const useIdentity = bindSnapshotSelector(presentationIdentity)
@@ -12,7 +13,6 @@ export function usePresentation() {
   const identity = useIdentity(value=>value)
   const appearance = useView(view=>view?.appearance)
   const [layout,setLayout] = useState<Layout>(validateLayout(defaultLayout) as Layout)
-  const [ready,setReady] = useState(false)
   const [storageNotice,setStorageNotice] = useState('')
   const storage = useRef<PresentationStore>()
   useLayoutEffect(()=>{
@@ -21,7 +21,9 @@ export function usePresentation() {
   },[appearance])
   useEffect(()=>{
     let active = true
-    setReady(false); setStorageNotice(''); setLayout(validateLayout(defaultLayout) as Layout); storage.current = undefined
+    let unsubscribe:(()=>void)|undefined
+    let focus:(()=>void)|undefined
+    setStorageNotice(''); setLayout(validateLayout(defaultLayout) as Layout); storage.current = undefined
     if (!identity) return
     void (async()=>{
       let store: PresentationStore | undefined
@@ -30,24 +32,55 @@ export function usePresentation() {
         if (!active) {store.close();return}
         const value = await store.load()
         if (!active) {store.close();return}
-        storage.current = store; setLayout(validateLayout(value)); setReady(true)
+        storage.current = store; setLayout(validateLayout(value))
+        let reading = false
+        const reload = () => {
+          if(reading || !active || !store)return
+          reading=true
+          void store.load().then(value=>{if(active)setLayout(validateLayout(value))},()=>{if(active)setStorageNotice('Saved layout could not be refreshed.')}).finally(()=>{reading=false})
+        }
+        unsubscribe=store.subscribe(reload);focus=reload;window.addEventListener('focus',reload)
       } catch {
         store?.close()
-        if(active){setReady(true);setStorageNotice('Layout preferences could not be loaded. Changes will last only for this connection.')}
+        if(active){setStorageNotice('Layout preferences could not be loaded. Changes will last only for this connection.')}
       }
     })()
-    return ()=>{active=false;storage.current?.close();storage.current=undefined}
+    return ()=>{active=false;unsubscribe?.();if(focus)window.removeEventListener('focus',focus);storage.current?.close();storage.current=undefined}
   },[identity])
+  const apply = (intent:Record<string,unknown>) => {
+    setLayout(current=>applyIntent('layouts',current,intent))
+    const store=storage.current
+    if(!store){setStorageNotice('Layout changes are not saved on this device.');return}
+    void store.apply(intent).then(
+      value=>{if(storage.current===store){setLayout(value);setStorageNotice('')}},
+      ()=>{if(storage.current===store)setStorageNotice('Layout changes could not be saved. Reload to restore the saved layout.')},
+    )
+  }
+  return {layout,storageNotice,update:(patch:Partial<Layout>)=>apply({kind:'patch',patch}),expand:(id:string,expanded:boolean)=>apply({kind:'workspace',id,expanded})}
+}
+// Long-lived resource listeners must route through the current viewport, even
+// when they retained the callback before a responsive transition.
+export function useResourceVisibility(desktop:Layout,persist:(patch:Partial<Layout>)=>void,narrow:boolean) {
+  const [closed,setClosed]=useState(true)
+  const current=useRef({persist,narrow});current.current={persist,narrow}
+  const update=useCallback((patch:Partial<Layout>)=>{
+    const {persist,narrow}=current.current
+    if(!narrow){persist(patch);return}
+    const {resourcesClosed,...saved}=patch
+    if(resourcesClosed!==undefined)setClosed(resourcesClosed)
+    if(Object.keys(saved).length)persist(saved)
+  },[])
+  return {layout:narrow?{...desktop,resourcesClosed:closed}:desktop,update}
+}
+export function useViewport() {
+  const [viewport,setViewport]=useState(()=>({width:innerWidth,height:innerHeight}))
   useEffect(()=>{
-    if (!ready || !storage.current) return
-    const store = storage.current
-    const timer = setTimeout(()=>{void store.save(layout).then(
-      ()=>{if(storage.current===store)setStorageNotice('')},
-      ()=>{if(storage.current===store)setStorageNotice('Layout preferences could not be saved. Current layout changes may be lost on reload.')},
-    )},150)
-    return ()=>clearTimeout(timer)
-  },[layout,ready])
-  return {layout,storageNotice,update:(patch:Partial<Layout>)=>setLayout(current=>validateLayout({...current,...patch}))}
+    let frame=0
+    const resize=()=>{if(!frame)frame=requestAnimationFrame(()=>{frame=0;setViewport({width:innerWidth,height:innerHeight})})}
+    window.addEventListener('resize',resize)
+    return ()=>{window.removeEventListener('resize',resize);cancelAnimationFrame(frame)}
+  },[])
+  return viewport
 }
 export function useNarrow(queryText = '(max-width: 767px)') {
   const [narrow,setNarrow] = useState(()=>matchMedia(queryText).matches)
@@ -73,12 +106,16 @@ export function Modal({children,close,className,label}:{children:ReactNode;close
   return <dialog ref={ref} className={className} aria-label={label} onCancel={event=>{event.preventDefault();onClose.current()}}>{children}</dialog>
 }
 export function ResizeHandle({name,value,min,max,onChange,reverse=false}:{name:string;value:number;min:number;max:number;onChange:(value:number)=>void;reverse?:boolean}) {
-  const start=useRef<{x:number;value:number}>()
+  const start=useRef<{x:number;value:number;preview:number;root:HTMLElement;previous:string}>()
+  const property=`--${name==='navigation'?'navigation':'resources'}-width`
+  const bounded=(value:number)=>Math.max(min,Math.min(max,value))
+  const finish=(commit:boolean)=>{const drag=start.current;if(!drag)return;start.current=undefined;drag.root.style.setProperty(property,drag.previous);if(commit)onChange(drag.preview)}
   return <div className="panel-resize" role="separator" tabIndex={0} aria-label={`Resize ${name}`} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={max} aria-valuenow={value}
-    onKeyDown={event=>{const delta=event.key==='ArrowLeft'?-10:event.key==='ArrowRight'?10:0;if(delta){event.preventDefault();onChange(value+delta*(reverse?-1:1))}}}
-    onPointerDown={event=>{start.current={x:event.clientX,value};event.currentTarget.setPointerCapture(event.pointerId)}}
-    onPointerMove={event=>{if(start.current)onChange(start.current.value+(event.clientX-start.current.x)*(reverse?-1:1))}}
-    onPointerUp={()=>{start.current=undefined}} onPointerCancel={()=>{start.current=undefined}}/>
+    onKeyDown={event=>{const delta=event.key==='ArrowLeft'?-10:event.key==='ArrowRight'?10:0;if(delta){event.preventDefault();onChange(bounded(value+delta*(reverse?-1:1)))}}}
+    onPointerDown={event=>{const root=document.getElementById('workbench');if(!root)return;start.current={x:event.clientX,value,preview:value,root,previous:root.style.getPropertyValue(property)};event.currentTarget.setPointerCapture(event.pointerId)}}
+    onPointerMove={event=>{const drag=start.current;if(drag){drag.preview=bounded(drag.value+(event.clientX-drag.x)*(reverse?-1:1));drag.root.style.setProperty(property,`${drag.preview}px`)}}}
+    onPointerUp={()=>finish(true)} onPointerCancel={()=>finish(false)} onLostPointerCapture={()=>finish(false)}/>
+
 }
 export interface PaletteAction {label:string;run:()=>void}
 export function CommandPalette({actions,close}:{actions:PaletteAction[];close:()=>void}) {

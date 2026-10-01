@@ -240,6 +240,7 @@ mod tests {
         }
         *bytes.last_mut().unwrap() = b'x';
         let opened = OpenedFile {
+            executable: false,
             path: RelativePath::new(&bytes).unwrap(),
             token: "0".repeat(32).try_into().unwrap(),
             kind: FileKind::File,

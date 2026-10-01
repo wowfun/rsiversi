@@ -12,16 +12,20 @@ impl GuiApplication {
         after: Option<CatalogCursor>,
     ) -> Result<()> {
         let client = self.remote_ui.as_ref().ok_or("Service UI is unavailable")?;
-        let (attached, revision) = self.ui_selection(pane, generation)?;
+        let (attached, revision) = self.ui_selection(
+            pane,
+            generation,
+            serde_json::json!({"action":"remote_ui_list","pane":pane,"generation":generation}),
+        )?;
         let scope = ExportScope {
             kind: "session".into(),
             key: attached.id.to_string(),
         };
         let stop = {
-            let mut details = self.details.lock().expect("Web details poisoned");
-            if details.revision != revision {
-                return Err("UI selection changed".into());
-            }
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry
+                .revision_mut(revision)
+                .ok_or("UI selection changed")?;
             details.ui = None;
             details.remote_catalog = Some(RemoteCatalog {
                 pane,
@@ -43,36 +47,65 @@ impl GuiApplication {
             () = stop.cancelled() => return Ok(()),
             result = client.catalog(&request) => result,
         };
-        let mut details = self.details.lock().expect("Web details poisoned");
-        if details.revision == revision
-            && let Some(catalog) = &mut details.remote_catalog
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        if let Some(catalog) = registry
+            .revision_mut(revision)
+            .and_then(|details| details.remote_catalog.as_mut())
         {
             match result {
                 Ok(entries) => catalog.page = Some(entries),
                 Err(failure) => catalog.error = Some(error(failure)),
             }
         }
-        drop(details);
+        drop(registry);
         self.changed();
         Ok(())
     }
 
     pub(crate) async fn remote_ui_next(&self, ticket: &str) -> Result<()> {
-        let (pane, generation, after) = {
-            let details = self.details.lock().expect("Web details poisoned");
-            let catalog = details
+        let client = self.remote_ui.as_ref().ok_or("Service UI is unavailable")?;
+        let (revision, stop, request) = {
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket_mut(ticket)?;
+            let mut catalog = details
                 .remote_catalog
-                .as_ref()
-                .filter(|catalog| catalog.ticket == ticket)
+                .take()
                 .ok_or("This extension catalog has retired")?;
-            let after = catalog
-                .page
-                .as_ref()
-                .and_then(|page| page.next.clone())
-                .ok_or("No more extensions")?;
-            (catalog.pane, catalog.generation.clone(), after)
+            let after = catalog.page.as_ref().and_then(|page| page.next.clone());
+            let Some(after) = after else {
+                details.remote_catalog = Some(catalog);
+                return Err("No more extensions".into());
+            };
+            let revision = details.begin()?;
+            catalog.ticket = revision.to_string();
+            catalog.page = None;
+            catalog.error = None;
+            let request = CatalogRequest {
+                scope: catalog.scope.clone(),
+                after: Some(after),
+                maximum: 64,
+            };
+            details.remote_catalog = Some(catalog);
+            (revision, details.stop.clone(), request)
         };
-        self.remote_ui_list(pane, &generation, Some(after)).await
+        self.changed();
+        let result = tokio::select! { biased;
+            () = stop.cancelled() => return Ok(()),
+            result = client.catalog(&request) => result,
+        };
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        if let Some(catalog) = registry
+            .revision_mut(revision)
+            .and_then(|details| details.remote_catalog.as_mut())
+        {
+            match result {
+                Ok(page) => catalog.page = Some(page),
+                Err(failure) => catalog.error = Some(error(failure)),
+            }
+        }
+        drop(registry);
+        self.changed();
+        Ok(())
     }
 
     pub(crate) async fn remote_ui_surface(
@@ -81,13 +114,9 @@ impl GuiApplication {
         bundle: &str,
         surface: &str,
     ) -> Result<()> {
-        let client = self
-            .remote_ui
-            .as_ref()
-            .ok_or("Service UI is unavailable")?
-            .clone();
         let (pane, generation, scope) = {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket(ticket)?;
             let catalog = details
                 .remote_catalog
                 .as_ref()
@@ -106,16 +135,69 @@ impl GuiApplication {
                 catalog.scope.clone(),
             )
         };
-        let (attached, revision) = self.ui_selection(pane, &generation)?;
+        self.open_remote_surface(pane, &generation, scope, bundle, surface)
+            .await
+    }
+
+    pub(crate) async fn reopen_remote_surface(
+        self: &Arc<Self>,
+        pane: crate::SurfaceId,
+        generation: &str,
+        bundle: &str,
+        surface: &str,
+    ) -> Result<()> {
+        let current = self.pane(pane)?;
+        let session = current
+            .current
+            .lock()
+            .expect("Web pane poisoned")
+            .as_ref()
+            .filter(|attached| attached.generation.to_string() == generation)
+            .map(|attached| attached.id.to_string())
+            .ok_or("This pane changed")?;
+        self.open_remote_surface(
+            pane,
+            generation,
+            ExportScope {
+                kind: "session".into(),
+                key: session,
+            },
+            bundle,
+            surface,
+        )
+        .await
+    }
+
+    async fn open_remote_surface(
+        self: &Arc<Self>,
+        pane: crate::SurfaceId,
+        generation: &str,
+        scope: ExportScope,
+        bundle: &str,
+        surface: &str,
+    ) -> Result<()> {
+        if !rsi_ui::name_valid(bundle) || !rsi_ui::name_valid(surface) {
+            return Err("Invalid extension coordinate".into());
+        }
+        let client = self
+            .remote_ui
+            .as_ref()
+            .ok_or("Service UI is unavailable")?
+            .clone();
+        let (attached, revision) = self.ui_selection(
+            pane,
+            generation,
+            serde_json::json!({"action":"remote_surface","bundle":bundle,"name":surface}),
+        )?;
         if attached.id.as_str() != scope.key {
             return Err("Extension target changed".into());
         }
         let application = rsi_ui::fresh_identity("web-ui")?;
         let stop = {
-            let mut details = self.details.lock().expect("Web details poisoned");
-            if details.revision != revision {
-                return Err("UI selection changed".into());
-            }
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry
+                .revision_mut(revision)
+                .ok_or("UI selection changed")?;
             let detail = details.ui.as_mut().expect("selected detail");
             detail.busy = true;
             detail.remote = Some(RemotePresentation {
@@ -175,11 +257,11 @@ impl GuiApplication {
     }
 
     fn remote_ui_item(&self, application: &str, item: UiItem) {
-        let mut details = self.details.lock().expect("Web details poisoned");
-        if details.stop.is_cancelled() {
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let Some(details) = registry.remote_mut(application) else {
             return;
-        }
-        let Some(revision) = details.revision.checked_add(1) else {
+        };
+        let Ok(revision) = details.advance() else {
             return;
         };
         let Some(detail) = details.ui.as_mut().filter(|detail| {
@@ -197,12 +279,15 @@ impl GuiApplication {
         detail.error = None;
         detail.remote.as_mut().expect("remote detail").item = Some(item);
         details.revision = revision;
-        drop(details);
+        drop(registry);
         self.changed();
     }
 
     fn remote_ui_error(&self, application: &str, message: String, closed: bool) {
-        let mut details = self.details.lock().expect("Web details poisoned");
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let Some(details) = registry.remote_mut(application) else {
+            return;
+        };
         let Some(detail) = details.ui.as_mut().filter(|detail| {
             detail
                 .remote
@@ -220,7 +305,7 @@ impl GuiApplication {
                 item.item.ticket = None;
             }
         }
-        drop(details);
+        drop(registry);
         self.changed();
     }
 
@@ -232,11 +317,9 @@ impl GuiApplication {
     ) -> Result<()> {
         let client = self.remote_ui.as_ref().ok_or("Service UI is unavailable")?;
         let request = {
-            let mut details = self.details.lock().expect("Web details poisoned");
-            let revision = details
-                .revision
-                .checked_add(1)
-                .ok_or("Detail generation exhausted")?;
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket_mut(ticket)?;
+            let revision = details.advance()?;
             let detail = details
                 .ui
                 .as_mut()
@@ -287,7 +370,8 @@ impl GuiApplication {
         maximum: usize,
     ) -> futures_util::future::BoxFuture<'static, Result<rsi_api_protocol::RetainedBytes>> {
         let request: Result<_> = (|| {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket(ticket)?;
             if details.stop.is_cancelled() {
                 return Err("Service extension closed".into());
             }

@@ -38,7 +38,7 @@ fn delta(state: &mut TestState, seq: u64, block: usize, text: &str) {
 }
 
 fn state(count: usize) -> TestState {
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("performance").unwrap(),
         1,
         "/isolated/performance",

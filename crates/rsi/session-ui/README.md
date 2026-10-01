@@ -102,3 +102,10 @@ interprets the canonical value using its saved output declaration. It performs
 no current-catalog lookup or plugin activation. Missing declarations display
 opaque JSON; unavailable codecs, mismatches and tool-owned errors retain raw
 result access. Text previews remain bounded and render as literal data.
+
+Exported Session UI children bind their Session service to the actual API origin
+before controller activation. Source consumers also receive a server-only bound
+Session source capability from this child: it selects the current execution lease
+for the controller's exact Header, retains finite read activity, and never infers
+Local authority from the absence of a caller. The capability is not serialized or
+exported to browser code. Each source request rechecks the same origin's Use grant.

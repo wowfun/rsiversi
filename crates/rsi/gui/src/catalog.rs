@@ -17,10 +17,12 @@ impl GuiApplication {
                 None
             };
             let page = self.workspace.list(after, 64).await.map_err(error)?;
+            let seed = self.workspace.order_seed().await.map_err(error)?;
             let mut catalog = self.catalog.lock().expect("Web catalog poisoned");
             catalog.workspaces_more = page.next.is_some();
             catalog.workspace_cursor = page.next;
             catalog.workspaces = page.records;
+            catalog.workspace_order_seed = Some(seed);
         }
         if matches!(command, Command::Refresh | Command::SessionsNext) {
             let after = if matches!(command, Command::SessionsNext) {

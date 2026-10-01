@@ -31,8 +31,9 @@ impl GuiApplication {
                 .ok_or("This block is no longer in the retained view")?
                 .sources()
         };
-        let mut details = self.details.lock().expect("Web details poisoned");
-        let ticket = details.begin()?.to_string();
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = registry.open(Some((index, generation.into(), attached.id.clone())), serde_json::json!({"action":"inspect_block","pane":index,"generation":generation,"key":key}))?;
+        let ticket = details.revision.to_string();
         details.block_sources = Some(crate::details::BlockSources::new(
             index,
             generation.into(),
@@ -43,7 +44,8 @@ impl GuiApplication {
     }
 
     pub(super) fn block_sources_page(&self, ticket: &str, forward: bool) -> Result<()> {
-        let mut details = self.details.lock().expect("Web details poisoned");
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = registry.ticket_mut(ticket)?;
         if details
             .block_sources
             .as_ref()
@@ -60,7 +62,8 @@ impl GuiApplication {
 
     pub(super) async fn source_page(&self, ticket: &str, forward: bool) -> Result<()> {
         let selected = {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket(ticket)?;
             let Some(detail) = details
                 .source
                 .as_ref()
@@ -103,20 +106,17 @@ impl GuiApplication {
         // The same lock order as pane replacement makes selection and invalidation atomic.
         let (attachment, revision, stop) = {
             let current = pane.current.lock().expect("Web pane poisoned");
-            let mut details = self.details.lock().expect("Web details poisoned");
-            if ticket.is_some_and(|ticket| {
-                details
-                    .source
-                    .as_ref()
-                    .is_none_or(|detail| detail.ticket != ticket)
-            }) {
-                return Ok(());
-            }
+            let mut registry = self.details.lock().expect("Web details poisoned");
             let attached = current
                 .as_ref()
                 .filter(|current| current.generation.to_string() == generation)
                 .cloned()
                 .ok_or("This pane changed; retry the action in the current conversation")?;
+            let details = if let Some(ticket) = ticket {
+                registry.ticket_mut(ticket)?
+            } else {
+                registry.open(Some((index, generation.into(), attached.id.clone())), serde_json::json!({"action":"inspect_source","pane":index,"generation":generation,"source":source}))?
+            };
             let revision = details.begin()?;
             details.source = Some(SourceDetail {
                 pane: index,
@@ -138,11 +138,13 @@ impl GuiApplication {
         if current
             .as_ref()
             .is_some_and(|current| std::sync::Arc::ptr_eq(current, &attachment))
-        {
-            self.details
+            && let Some(details) = self
+                .details
                 .lock()
                 .expect("Web details poisoned")
-                .source_result(revision, result);
+                .revision_mut(revision)
+        {
+            details.source_result(revision, result);
         }
         // A source error belongs to this detail; superseded reads never replace a global notice.
         Ok(())

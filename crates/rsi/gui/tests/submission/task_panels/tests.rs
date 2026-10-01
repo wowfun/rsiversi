@@ -31,7 +31,7 @@ fn open(app: &rsi_gui::GuiApplication, name: &str) -> String {
     json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":reference}).to_string()
 }
 fn detail(app: &rsi_gui::GuiApplication) -> Value {
-    view(app)["ui_detail"].clone()
+    crate::sources::panel(app)["ui_detail"].clone()
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn jobs_panel_pages_the_same_current_scope_and_cancels_closed_reads() {
     backend.task_panels.block_jobs.store(true, Ordering::SeqCst);
     let pending = app.command(&open(&app, "jobs"));
     until(|| backend.task_panels.reading_jobs.load(Ordering::SeqCst) == 1).await;
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    crate::sources::close_panel(&app).await;
     pending.await.unwrap();
     until(|| backend.task_panels.reading_jobs.load(Ordering::SeqCst) == 0).await;
     assert!(backend.cancel.lock().unwrap().is_empty());

@@ -2,7 +2,9 @@
   "repository": "https://github.com/deepseek-ai/deepseek-harness",
   "changes": [
     "Import aliases target the selected local closure.",
-    "ScopedStandardSourceBinding.ctx is an opaque RSI object instead of a Cordis Context."
+    "ScopedStandardSourceBinding.ctx is an opaque RSI object instead of a Cordis Context.",
+    "Dockkit keeps upstream geometry and gestures; imports use its separately pinned minimal primitive closure. Icon source retains only the four required glyphs and their helpers. exports.ts is an RSI import adapter.",
+    "dockkit-tokens.css retains only the platform token dependency closure used by dockkit and adapts dark selectors to RSI appearance."
   ],
   "files": [
     {
@@ -88,6 +90,258 @@
       "source_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
       "adapted_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
       "revision": "c291e7961a515f6d7af9304e7fd1d257929aef26"
+    },
+    {
+      "path": "dockkit/components/DockSurface.tsx",
+      "source": "packages/client/ui-dockkit/src/components/DockSurface.tsx",
+      "source_sha256": "f786e1a95f09832487fce6a01475293273ad025c474288acad731d02b7d2e1fb",
+      "adapted_sha256": "f786e1a95f09832487fce6a01475293273ad025c474288acad731d02b7d2e1fb",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/FloatLayer.tsx",
+      "source": "packages/client/ui-dockkit/src/components/FloatLayer.tsx",
+      "source_sha256": "1665e8163b0b0f13397f2f8bc6dc07c59d2e285fce63177d127d10f9406b79ec",
+      "adapted_sha256": "dd2cad9308bcadfd594e98259bd8e158b80183ecc72bd780d9785cfd0454978a",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/PaneTree.tsx",
+      "source": "packages/client/ui-dockkit/src/components/PaneTree.tsx",
+      "source_sha256": "b3504195fc149c86447e9c66da43bf0eea290d05c0dda25932e0d98495ce42b6",
+      "adapted_sha256": "b3504195fc149c86447e9c66da43bf0eea290d05c0dda25932e0d98495ce42b6",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/TabLayout.tsx",
+      "source": "packages/client/ui-dockkit/src/components/TabLayout.tsx",
+      "source_sha256": "ea6305089a7697214a3dba28ca0c364253721b5b67533fc5245bad3036e990be",
+      "adapted_sha256": "ea6305089a7697214a3dba28ca0c364253721b5b67533fc5245bad3036e990be",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/TabMenu.tsx",
+      "source": "packages/client/ui-dockkit/src/components/TabMenu.tsx",
+      "source_sha256": "20b266cfe69a8081bbc548df383b66067ae3e781f9619f8c16fe4f029607d780",
+      "adapted_sha256": "1c0a1c411e33a32b7399fd381494b6314b91d4eac0ad8e17a6b69d5f1e4ca474",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/TabPanel.tsx",
+      "source": "packages/client/ui-dockkit/src/components/TabPanel.tsx",
+      "source_sha256": "21d7c1dde24b86f3f165d87af68e1cbe69d9336f1fc5931cb058bee902043c5e",
+      "adapted_sha256": "445270c6fa86267544b751974dd3879d9b9d0523ef597f3c7b154474f35388c3",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/TabTitle.tsx",
+      "source": "packages/client/ui-dockkit/src/components/TabTitle.tsx",
+      "source_sha256": "93e0fc61611e3f787a41528f8538081992f87432a24f2a8b4cdae334c3020ee0",
+      "adapted_sha256": "93e0fc61611e3f787a41528f8538081992f87432a24f2a8b4cdae334c3020ee0",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/dockkit.module.css",
+      "source": "packages/client/ui-dockkit/src/components/dockkit.module.css",
+      "source_sha256": "aa18d0e2a41bfd99babd9011f1107b26d387c30665fdbcc3d6276ec268750fdf",
+      "adapted_sha256": "aa18d0e2a41bfd99babd9011f1107b26d387c30665fdbcc3d6276ec268750fdf",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/measure.ts",
+      "source": "packages/client/ui-dockkit/src/components/measure.ts",
+      "source_sha256": "393474808c98e5d7f5e7b6a045b2a15197bc0fd62e1dd66470c9377c5b5f2a63",
+      "adapted_sha256": "393474808c98e5d7f5e7b6a045b2a15197bc0fd62e1dd66470c9377c5b5f2a63",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/pointer.ts",
+      "source": "packages/client/ui-dockkit/src/components/pointer.ts",
+      "source_sha256": "9a5ebab889935f64050b511f9de120c8542a75734271c310bb9b5502573489ad",
+      "adapted_sha256": "9a5ebab889935f64050b511f9de120c8542a75734271c310bb9b5502573489ad",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/components/render.ts",
+      "source": "packages/client/ui-dockkit/src/components/render.ts",
+      "source_sha256": "7a20176c9efd17e3114506a3f193218d190958ef8294275d2dc263223c5b96b7",
+      "adapted_sha256": "7a20176c9efd17e3114506a3f193218d190958ef8294275d2dc263223c5b96b7",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/contract/adapter.ts",
+      "source": "packages/client/ui-dockkit/src/contract/adapter.ts",
+      "source_sha256": "546c3bda130d38fecbabc0177c9d7ae5adf768ac22e25807da90d3a4c1a1dd4a",
+      "adapted_sha256": "546c3bda130d38fecbabc0177c9d7ae5adf768ac22e25807da90d3a4c1a1dd4a",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/contract/types.ts",
+      "source": "packages/client/ui-dockkit/src/contract/types.ts",
+      "source_sha256": "1cd9b883e63e9437c42af58a994633d30692c6cdb581b59499f91d2bd37f244b",
+      "adapted_sha256": "c57a7661a621d2529ee5a95c2b5b9a949281592fbf37fcd62b748559cf3b6f96",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/constraints.ts",
+      "source": "packages/client/ui-dockkit/src/engine/constraints.ts",
+      "source_sha256": "1530328c10435e0278f67fd4e1689a43c35c60e2bb1ac4d86fee9b21c5e09c15",
+      "adapted_sha256": "1530328c10435e0278f67fd4e1689a43c35c60e2bb1ac4d86fee9b21c5e09c15",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/geometry.ts",
+      "source": "packages/client/ui-dockkit/src/engine/geometry.ts",
+      "source_sha256": "16ac9bbeaaffb65c4612245afb56d51dfbfe03f443275127dc856d9f9dd4dec5",
+      "adapted_sha256": "16ac9bbeaaffb65c4612245afb56d51dfbfe03f443275127dc856d9f9dd4dec5",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/initial.ts",
+      "source": "packages/client/ui-dockkit/src/engine/initial.ts",
+      "source_sha256": "cdd9ac0d7cb184c47d840479c5a80570a76d1f6713b810b32b5ddd35d8674efc",
+      "adapted_sha256": "cdd9ac0d7cb184c47d840479c5a80570a76d1f6713b810b32b5ddd35d8674efc",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/operations.ts",
+      "source": "packages/client/ui-dockkit/src/engine/operations.ts",
+      "source_sha256": "ab910652d80e3be1b7ffa75e61e594e7ab73d00d01f6029d69c07996a9e4c064",
+      "adapted_sha256": "ab910652d80e3be1b7ffa75e61e594e7ab73d00d01f6029d69c07996a9e4c064",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/planner.ts",
+      "source": "packages/client/ui-dockkit/src/engine/planner.ts",
+      "source_sha256": "4c3080aa23799a3feec54c533f444d86925a659f0a28526bc239ad814962bb73",
+      "adapted_sha256": "4c3080aa23799a3feec54c533f444d86925a659f0a28526bc239ad814962bb73",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/sequence.ts",
+      "source": "packages/client/ui-dockkit/src/engine/sequence.ts",
+      "source_sha256": "6baed06f30f4477aa1c8e19ad75b0a86b2f044bddd557066d7e823c271a70464",
+      "adapted_sha256": "6baed06f30f4477aa1c8e19ad75b0a86b2f044bddd557066d7e823c271a70464",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit/engine/tree.ts",
+      "source": "packages/client/ui-dockkit/src/engine/tree.ts",
+      "source_sha256": "83c8fffcb2f56b4428b6d0c4a5ae435c375d103c9256220cca79bb15f139e291",
+      "adapted_sha256": "83c8fffcb2f56b4428b6d0c4a5ae435c375d103c9256220cca79bb15f139e291",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/Tooltip.tsx",
+      "source": "packages/client/ui-primitives/src/Tooltip.tsx",
+      "source_sha256": "0f3542a97da788032ad89bc46bcdcb5b9d021917a472ee3dffbab0145a870dd0",
+      "adapted_sha256": "0f3542a97da788032ad89bc46bcdcb5b9d021917a472ee3dffbab0145a870dd0",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/MenuSurface.tsx",
+      "source": "packages/client/ui-primitives/src/MenuSurface.tsx",
+      "source_sha256": "1e9b1f476305d4076b23b42fd08b63f9429b8e1f646c06ebc39d8ded5de7fdbf",
+      "adapted_sha256": "1e9b1f476305d4076b23b42fd08b63f9429b8e1f646c06ebc39d8ded5de7fdbf",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/ShortcutKeys.tsx",
+      "source": "packages/client/ui-primitives/src/ShortcutKeys.tsx",
+      "source_sha256": "9a79d439af8196f373bb064470ab2c8d38ca5746257a806fd798389929a8f751",
+      "adapted_sha256": "9a79d439af8196f373bb064470ab2c8d38ca5746257a806fd798389929a8f751",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/useDismissOnOutsidePointer.ts",
+      "source": "packages/client/ui-primitives/src/useDismissOnOutsidePointer.ts",
+      "source_sha256": "c7e05b448eeade540b7c6623a5c60401a63d09589bb27a573760ae5defbb4644",
+      "adapted_sha256": "c7e05b448eeade540b7c6623a5c60401a63d09589bb27a573760ae5defbb4644",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/input-modality.ts",
+      "source": "packages/client/ui-primitives/src/input-modality.ts",
+      "source_sha256": "91268be3f5ddb7b9a1defb13628d96082477e8771cdaa5df37d6d8b16bbbf2ba",
+      "adapted_sha256": "91268be3f5ddb7b9a1defb13628d96082477e8771cdaa5df37d6d8b16bbbf2ba",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/keyboard-composition.ts",
+      "source": "packages/client/ui-primitives/src/keyboard-composition.ts",
+      "source_sha256": "be1684e7f3b8306da3cb991f1a5e393065d74107892b78a1002cdf2624f23f6c",
+      "adapted_sha256": "be1684e7f3b8306da3cb991f1a5e393065d74107892b78a1002cdf2624f23f6c",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/focus.ts",
+      "source": "packages/client/ui-primitives/src/focus.ts",
+      "source_sha256": "68fb4c2bde84ec41933090246cc1806494db78f15741ada54585630fe15ecc9b",
+      "adapted_sha256": "68fb4c2bde84ec41933090246cc1806494db78f15741ada54585630fe15ecc9b",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/useModalLayer.ts",
+      "source": "packages/client/ui-primitives/src/useModalLayer.ts",
+      "source_sha256": "c584a5cde081548fadaedbf703c205915e924a7b67a0488d45b56cfe960718e4",
+      "adapted_sha256": "c584a5cde081548fadaedbf703c205915e924a7b67a0488d45b56cfe960718e4",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/Tooltip.module.css",
+      "source": "packages/client/ui-primitives/src/Tooltip.module.css",
+      "source_sha256": "d1f3aa2d804d18f234a12b7219498fd1823ce8cc207a4da3778fa414bca97678",
+      "adapted_sha256": "d1f3aa2d804d18f234a12b7219498fd1823ce8cc207a4da3778fa414bca97678",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/MenuSurface.module.css",
+      "source": "packages/client/ui-primitives/src/MenuSurface.module.css",
+      "source_sha256": "6230cfabdb5294b5cf174bc79842a9596f6aee6cd76a8cd5e183c67279bca9ae",
+      "adapted_sha256": "6230cfabdb5294b5cf174bc79842a9596f6aee6cd76a8cd5e183c67279bca9ae",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/ShortcutKeys.module.css",
+      "source": "packages/client/ui-primitives/src/ShortcutKeys.module.css",
+      "source_sha256": "ffa9624099dafb8dfe3e76c57fe26a523cb7943fa5bedd31d3c67e16e3351139",
+      "adapted_sha256": "ffa9624099dafb8dfe3e76c57fe26a523cb7943fa5bedd31d3c67e16e3351139",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/icons/props.ts",
+      "source": "packages/client/ui-primitives/src/icons/props.ts",
+      "source_sha256": "edaf6e6c5fd556d99e3e6fa2d6f633884e7b72f16e4a8963765b1ed1882a15f3",
+      "adapted_sha256": "edaf6e6c5fd556d99e3e6fa2d6f633884e7b72f16e4a8963765b1ed1882a15f3",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-brand.ts",
+      "source": "packages/util/brand/src/index.ts",
+      "source_sha256": "f9d6da858d7308117227dcc2306ce7246b7309b2ae22d413d289cbae51e83e98",
+      "adapted_sha256": "f9d6da858d7308117227dcc2306ce7246b7309b2ae22d413d289cbae51e83e98",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/icons/index.tsx",
+      "source": "packages/client/ui-primitives/src/icons/index.tsx",
+      "source_sha256": "84de30f5b0f7e901e698442676b2a2b4d7aba1c5e9d95b107e7683c85e1bb1f9",
+      "adapted_sha256": "44562d633184d086162d727d319d4c62be48a28f1ea9b4a7b2d8cbee51092b94",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-tokens.css",
+      "source": "packages/client/ui-theme/src/styles/design-platform.css",
+      "source_sha256": "7728d22e508f581aa9eee8c7fb5394b47be7ead68c29c2b9545eca08c5b62b13",
+      "adapted_sha256": "d45717f3916c1b74ac52b4896113fc022c1ebe021d1ed279e15e37d3753dd25d",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
+    },
+    {
+      "path": "dockkit-primitives/exports.ts",
+      "source": "packages/client/ui-primitives/src/index.ts",
+      "source_sha256": "4fde7d4011835ecea55843dee947192bcc8626f2974e461e457f75b02d8a8d99",
+      "adapted_sha256": "070a9500fedaa69aaab395e6394a98b11a778b4851562e503d17f134d6f6328d",
+      "revision": "4878cdabd87d4041bdaff61d04c966883b9fd07a"
     }
   ]
 }

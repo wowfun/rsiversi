@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod binding;
+mod binding_source;
 mod output;
 mod patch;
 mod references;

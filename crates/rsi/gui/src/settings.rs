@@ -32,7 +32,8 @@ impl GuiApplication {
 
     pub(crate) async fn list_settings(&self, ticket: Option<&str>) -> Result<()> {
         let (revision, stop, after) = {
-            let mut details = self.details.lock().expect("Web details poisoned");
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = &mut registry.settings;
             let after = if let Some(ticket) = ticket {
                 let Some(catalog) = details
                     .settings_catalog
@@ -65,13 +66,15 @@ impl GuiApplication {
         self.details
             .lock()
             .expect("Web details poisoned")
+            .settings
             .settings_page(revision, result);
         Ok(())
     }
     pub(crate) async fn read_settings(&self, namespace: &str) -> Result<()> {
         validate_namespace(namespace).map_err(error)?;
         let (revision, stop) = {
-            let mut details = self.details.lock().expect("Web details poisoned");
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = &mut registry.settings;
             let revision = details.begin()?;
             details.settings_catalog = Some(SettingsCatalog {
                 ticket: revision.to_string(),
@@ -101,7 +104,8 @@ impl GuiApplication {
             () = stop.cancelled() => return Ok(()),
             result = read => result,
         };
-        let mut details = self.details.lock().expect("Web details poisoned");
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = &mut registry.settings;
         match result {
             Ok(editor) => details.settings(revision, editor),
             Err(error) => details.settings_error(revision, error),
@@ -110,7 +114,8 @@ impl GuiApplication {
     }
     pub(crate) async fn save_settings(&self, ticket: &str, text: &str) -> Result<()> {
         let (namespace, version, mut description) = {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = &registry.settings;
             let editor = details
                 .editor
                 .as_ref()
@@ -137,7 +142,8 @@ impl GuiApplication {
                 snapshot.value.clone(),
             ));
         }
-        let mut details = self.details.lock().expect("Web details poisoned");
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = &mut registry.settings;
         if details
             .editor
             .as_ref()

@@ -2,6 +2,10 @@ use crate::application::{Result, SettingsEditor};
 use rsi_conversation::{FieldWindow, SourceIndex, SourceRef};
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const SOURCE_PAGE_BYTES: usize = 64 * 1024;
@@ -125,8 +129,9 @@ pub(crate) struct RemoteCatalog {
     pub scope: rsi_ui_api::ExportScope,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Details {
+    pub(crate) sequence: Arc<AtomicU64>,
     pub(crate) revision: u64,
     pub stop: CancellationToken,
     pub ui: Option<UiDetail>,
@@ -138,12 +143,39 @@ pub(crate) struct Details {
     pub settings_catalog: Option<SettingsCatalog>,
     pub interaction: Option<Value>,
 }
+impl Default for Details {
+    fn default() -> Self {
+        Self::with_sequence(Arc::new(AtomicU64::new(0)))
+    }
+}
 impl Details {
-    pub fn begin(&mut self) -> Result<u64> {
+    pub fn with_sequence(sequence: Arc<AtomicU64>) -> Self {
+        Self {
+            sequence,
+            revision: 0,
+            stop: CancellationToken::new(),
+            ui: None,
+            remote_catalog: None,
+            image: None,
+            source: None,
+            block_sources: None,
+            editor: None,
+            settings_catalog: None,
+            interaction: None,
+        }
+    }
+    pub fn advance(&mut self) -> Result<u64> {
         self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or("Detail generation exhausted")?;
+            .sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| "Detail generation exhausted")?
+            + 1;
+        Ok(self.revision)
+    }
+    pub fn begin(&mut self) -> Result<u64> {
+        self.advance()?;
         self.stop.cancel();
         self.stop = CancellationToken::new();
         self.ui = None;
@@ -166,34 +198,6 @@ impl Details {
                 Err(error) => source.error = Some(error),
             }
         }
-    }
-    pub fn detach(&mut self, pane: crate::SurfaceId, generation: &str) -> Result<()> {
-        if self
-            .remote_catalog
-            .as_ref()
-            .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
-            || self
-                .image
-                .as_ref()
-                .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
-            || self.ui.as_ref().is_some_and(|detail| {
-                detail.pane == Some(pane) && detail.generation.as_deref() == Some(generation)
-            })
-            || self
-                .source
-                .as_ref()
-                .is_some_and(|source| source.pane == pane && source.generation == generation)
-            || self
-                .block_sources
-                .as_ref()
-                .is_some_and(|sources| sources.pane == pane && sources.generation == generation)
-            || self.interaction.as_ref().is_some_and(|detail| {
-                detail["pane"] == pane.as_str() && detail["generation"] == generation
-            })
-        {
-            self.begin()?;
-        }
-        Ok(())
     }
     pub fn settings(&mut self, revision: u64, editor: SettingsEditor) {
         if self.revision == revision {

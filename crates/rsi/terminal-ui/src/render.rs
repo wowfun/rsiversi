@@ -1235,7 +1235,7 @@ mod tests {
     use rsi_ai_protocol::{ContentDelta, LanguageEvent, ModelRef};
 
     fn state() -> State {
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("session-utf8").unwrap(),
             1,
             "/workspace/rsiversi",

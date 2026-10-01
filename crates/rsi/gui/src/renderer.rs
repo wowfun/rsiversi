@@ -20,6 +20,7 @@ pub(crate) struct Pending {
 
 #[derive(Debug, Default)]
 pub(crate) struct RenderState {
+    submission: Option<Arc<crate::panes::SubmissionState>>,
     pub transcript: Transcript,
     pub history: Option<Transcript>,
     pub history_before: Option<u64>,
@@ -58,6 +59,9 @@ pub(crate) struct Renderer {
     stop: CancellationToken,
 }
 impl Renderer {
+    pub(crate) fn bind_submission(&self, submission: Arc<crate::panes::SubmissionState>) {
+        self.state.lock().expect("Web renderer poisoned").submission = Some(submission);
+    }
     pub fn seed(&self, transcript: Transcript, before: Option<u64>, more: bool) {
         let mut state = self.state.lock().expect("Web renderer poisoned");
         if self.stop.is_cancelled() {
@@ -132,6 +136,9 @@ impl ObservationSink for Renderer {
         let mut state = self.state.lock().expect("Web renderer poisoned");
         if self.stop.is_cancelled() {
             return Err(ObservationFailure::SinkStopped);
+        }
+        if let Some(submission) = &state.submission {
+            submission.observe(&update);
         }
         state.transcript.observation(&update);
         state.fact_notice.clear();

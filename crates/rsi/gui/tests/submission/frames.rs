@@ -89,10 +89,11 @@ async fn application_contributions_have_no_session_binding_and_survive_session_s
         .unwrap();
     let view = sources::view(&app);
     let reference = view["application_surfaces"][0]["reference"].clone();
+    assert!(app.command(&json!({"action":"application_ui_surface","reference":reference,"pane":"main","generation":"17"}).to_string()).await.is_err());
     app.command(&json!({"action":"application_ui_surface","reference":reference}).to_string())
         .await
         .unwrap();
-    let detail = sources::view(&app)["ui_detail"].clone();
+    let detail = super::sources::panel(&app)["ui_detail"].clone();
     assert!(detail["pane"].is_null() && detail["generation"].is_null());
     assert_eq!(
         detail["model"]["standard_view"]["title"],
@@ -102,7 +103,7 @@ async fn application_contributions_have_no_session_binding_and_survive_session_s
         .await
         .unwrap();
     assert_eq!(
-        sources::view(&app)["ui_detail"]["binding"],
+        super::sources::panel(&app)["ui_detail"]["binding"],
         detail["binding"]
     );
     assert!(target.unwrap().dispose().await.is_clean());
@@ -170,11 +171,11 @@ async fn application_frames_follow_models_details_and_generation_changes_without
     let surface = &pane["ui_surfaces"][0]["reference"];
     app.command(&json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":surface}).to_string()).await.unwrap();
     let detail = frame(&app, Some("2"));
-    assert!(detail["sections"]["ui_detail"].is_object());
+    assert!(detail["sections"]["panels"][0]["ui_detail"].is_object());
     assert_eq!(detail["surfaces"], json!([]));
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    super::sources::close_panel(&app).await;
     let closed = frame(&app, Some("3"));
-    assert_eq!(closed["sections"]["ui_detail"], Value::Null);
+    assert_eq!(closed["sections"]["panels"], json!([]));
     app.command(r#"{"action":"add_surface","pane":"compare"}"#)
         .await
         .unwrap();
@@ -263,7 +264,7 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
                     }
                 }
                 if scenario == "single_detail" {
-                    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+                    super::sources::close_panel(&app).await;
                     app.command(&json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"9","field":{"kind":"turn_input"}}}).to_string()).await.unwrap();
                 }
                 let base = snapshot["frame_id"].as_str().unwrap();
@@ -290,7 +291,11 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
                 snapshot["frame_id"] = patch["frame_id"].clone();
                 let output_bytes = encoded.as_bytes().len();
                 drop(encoded);
-                assert_eq!(snapshot["view"], sources::view(&app));
+                let complete = frame(&app, None);
+                assert_eq!(snapshot["view"], complete["view"]);
+                // The complete frame is now the server's sole baseline, including
+                // frame-only composer action authority absent from legacy view().
+                snapshot = complete;
                 assert_eq!(measurement.section_materializations, 1);
                 if report {
                     eprintln!(
@@ -314,6 +319,18 @@ fn reconstruct_changed_block(pane: &mut Value, change: &Value) {
     assert_eq!(transcript["remove"], json!([]));
     for (key, value) in transcript["fields"].as_object().unwrap() {
         pane["transcript"][key] = value.clone();
+    }
+    if let Some(turns) = transcript.get("turns") {
+        pane["transcript"]["turns"]["revision"] = turns["revision"].clone();
+        let entries = pane["transcript"]["turns"]["entries"]
+            .as_object_mut()
+            .unwrap();
+        for id in turns["remove"].as_array().unwrap() {
+            entries.remove(id.as_str().unwrap());
+        }
+        for (id, turn) in turns["upsert"].as_object().unwrap() {
+            entries.insert(id.clone(), turn.clone());
+        }
     }
     let blocks = pane["transcript"]["blocks"].as_array_mut().unwrap();
     for block in transcript["upsert"].as_array().unwrap() {

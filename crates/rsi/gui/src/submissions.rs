@@ -560,21 +560,6 @@ impl GuiApplication {
                 let newly_owned = if mode == Mode::Query {
                     false
                 } else {
-                    if attached.durable.load(std::sync::atomic::Ordering::Acquire)
-                        && let Ok(inspection) = attached.handle.inspect().await
-                    {
-                        attached
-                            .submission
-                            .owned
-                            .lock()
-                            .expect("Web pending identities poisoned")
-                            .retain(|id| {
-                                inspection
-                                    .pending
-                                    .iter()
-                                    .any(|pending| &pending.message_id == id)
-                            });
-                    }
                     let mut owned = attached
                         .submission
                         .owned
@@ -609,6 +594,18 @@ impl GuiApplication {
                             error: "Message receipt identity does not match the saved request"
                                 .into(),
                         };
+                    }
+                    if matches!(
+                        receipt.state,
+                        rsi_agent_turn_protocol::MessageState::Claimed { .. }
+                            | rsi_agent_turn_protocol::MessageState::Discarded { .. }
+                    ) {
+                        attached
+                            .submission
+                            .owned
+                            .lock()
+                            .expect("Web pending identities poisoned")
+                            .remove(&id);
                     }
                     if !attached
                         .durable

@@ -13,7 +13,7 @@ def verify(script, button, fill, until, screenshot, frame, workspace, report):
     (directory / 'app.js').write_text("document.querySelector('#loaded').textContent='Local script loaded';let n=0;document.querySelector('#counter').onclick=()=>document.querySelector('#count').textContent=String(++n);try{parent.document.body.dataset.previewEscaped='yes'}catch{document.querySelector('#isolated').textContent='Parent isolated'}document.querySelector('#bridge').textContent=typeof window.__TAURI_INTERNALS__;document.addEventListener('securitypolicyviolation',e=>{if(e.effectiveDirective==='connect-src')document.querySelector('#network').dataset.blocked='connect-src'});fetch('https://preview-fixture.invalid/probe').catch(()=>document.querySelector('#network').textContent='Network blocked');")
     (directory / 'demo.html').write_text('<!doctype html><html><head><link rel="stylesheet" href="theme.css"></head><body><h1>Interactive native preview</h1><p id="loaded"></p><button id="counter">Count: <span id="count">0</span></button><p id="isolated"></p><p id="bridge"></p><p id="network"></p><img src="diagram.svg" width="300"><script src="app.js"></script></body></html>')
     def open_file(name):
-        if script('return document.querySelector("#detail")?.open'): button('Close details')
+        if script('return document.querySelector(".file-preview")'): button('Close details')
         button('Workspace files')
         fill('input[aria-label="Workspace-relative path"]', 'previews/' + name)
         button('Read file')
@@ -34,15 +34,25 @@ def verify(script, button, fill, until, screenshot, frame, workspace, report):
     until(lambda: script('return document.querySelector(".file-code")?.textContent.includes("fn main")'))
     assert script('return document.querySelectorAll(".file-token[style]").length') > 0
     button('Wrap lines'); screenshot('preview-code.png')
+    script('window.fixtureSvgSources=new Map();window.fixtureCreateUrl=URL.createObjectURL;URL.createObjectURL=function(blob){const url=window.fixtureCreateUrl.call(this,blob);if(blob.type==="image/svg+xml")void blob.text().then(text=>window.fixtureSvgSources.set(url,text));return url};return true')
     open_file('report.md')
-    until(lambda: script('const img=document.querySelector(".file-markdown img");return document.querySelector(".file-markdown table")&&img?.complete&&img.naturalWidth===640'))
+    until(lambda: script('const img=document.querySelector(".file-markdown img");return document.querySelector(".file-markdown table")&&img?.complete&&img.naturalWidth>0'))
+    # WebKitGTK's natural size follows responsive SVG layout. Keep the measured
+    # size and require successful decode plus the fixture's exact aspect ratio.
+    image=script('const img=document.querySelector(".file-markdown img");return {naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,box:img.getBoundingClientRect().toJSON()}')
+    assert abs(image['box']['width']/image['box']['height']-2)<.01,image
+    until(lambda: script('return window.fixtureSvgSources.has(document.querySelector(".file-markdown img").src)'))
+    intrinsic=script('const text=window.fixtureSvgSources.get(document.querySelector(".file-markdown img").src);const root=new DOMParser().parseFromString(text,"image/svg+xml").documentElement;URL.createObjectURL=window.fixtureCreateUrl;delete window.fixtureCreateUrl;delete window.fixtureSvgSources;return {width:root.getAttribute("width"),height:root.getAttribute("height"),style:root.getAttribute("style")}')
+    assert intrinsic['width']=='640' and intrinsic['height']=='320',intrinsic
+    image['sourceIntrinsic']=intrinsic
+    (report/'markdown-image.json').write_text(json.dumps(image,indent=2))
     assert not script('return Boolean(window.markdownExecuted)')
     screenshot('preview-markdown.png'); button('Source')
     until(lambda: script('return document.querySelector(".file-code")?.textContent.includes("![diagram]")'))
     (directory / 'report.md').write_text('# Explicit refresh\n')
     button('Preview'); until(lambda: script('return document.querySelector(".file-markdown h1")?.textContent==="Native report"'))
     button('Refresh'); until(lambda: script('return document.querySelector(".file-markdown h1")?.textContent==="Explicit refresh"'))
-    open_file('diagram.svg');until(lambda: script('const img=document.querySelector(".file-image");return img?.complete&&img.naturalWidth===640'))
+    open_file('diagram.svg');until(lambda: script('const img=document.querySelector(".file-image");return img?.complete&&img.naturalWidth>0'))
     button('100%');assert script('return document.querySelector(".file-image").style.width') == '640px'
     button('Fit');screenshot('preview-image.png')
     open_file('demo.html');until(lambda: script('return document.querySelector("iframe.file-html")'))

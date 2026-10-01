@@ -27,7 +27,11 @@ impl Drop for Active<'_> {
 }
 #[async_trait]
 impl Media for Reader {
-    async fn import_image(&self, source: Bytes) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image_with_options(
+        &self,
+        source: Bytes,
+        _options: rsi_media_protocol::ImageImportOptions,
+    ) -> rsi_media_protocol::Result<MediaRef> {
         self.imports.fetch_add(1, Ordering::SeqCst);
         self.active.fetch_add(1, Ordering::SeqCst);
         let _active = Active(&self.active);
@@ -271,7 +275,7 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     let inspect =
         json!({"action":"inspect_image","pane":"main","generation":generation,"media":media});
     cmd(&app, inspect.clone()).await;
-    let ticket = view(&app)["image_detail"]["ticket"].clone();
+    let ticket = super::sources::panel(&app)["image_detail"]["ticket"].clone();
     let selection = json!({"kind":"source","ticket":ticket}).to_string();
     assert_eq!(app.read_image(&selection).await.unwrap().bytes, png(2));
     backend.media.block_read.store(true, Ordering::SeqCst);
@@ -282,11 +286,11 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
             .await
             .is_err()
     );
-    cmd(&app, json!({"action":"close_detail"})).await;
+    super::sources::close_panel(&app).await;
     assert!(reading.await.is_err());
     assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
     assert!(app.read_image(&selection).await.is_err());
-    assert!(view(&app)["image_detail"].is_null());
+    assert!(super::sources::panel(&app)["image_detail"].is_null());
     backend.media.block_read.store(false, Ordering::SeqCst);
     backend.facts.lock().unwrap().push(
         SessionFact::new(
@@ -302,14 +306,16 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
         .unwrap(),
     );
     cmd(&app, json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"7","field":{"kind":"image_output"}}})).await;
-    assert_eq!(view(&app)["source_media"], json!(media));
+    assert_eq!(super::sources::panel(&app)["source_media"], json!(media));
     let selection =
-        json!({"kind":"source","ticket":view(&app)["source_detail"]["ticket"]}).to_string();
+        json!({"kind":"source","ticket":super::sources::panel(&app)["source_detail"]["ticket"]})
+            .to_string();
     assert_eq!(app.read_image(&selection).await.unwrap().bytes, png(2));
     backend.media.block_read.store(true, Ordering::SeqCst);
     cmd(&app, inspect).await;
     let selection =
-        json!({"kind":"source","ticket":view(&app)["image_detail"]["ticket"]}).to_string();
+        json!({"kind":"source","ticket":super::sources::panel(&app)["image_detail"]["ticket"]})
+            .to_string();
     let reading = app.read_image(&selection);
     until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
     assert!(runtime.shutdown().await.is_clean());

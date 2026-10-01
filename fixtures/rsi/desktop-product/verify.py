@@ -16,6 +16,7 @@ import sys
 import threading
 import tempfile
 import time
+from dock import verify as verify_dock
 from presentation import verify as verify_presentation
 from alignment import verify as verify_alignment
 from queue_scenario import verify as verify_queue
@@ -50,6 +51,7 @@ parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
 parser.add_argument('--plan-review', action='store_true')
 parser.add_argument('--terminals', action='store_true')
+parser.add_argument('--dock', action='store_true')
 parser.add_argument('--presentation', action='store_true')
 parser.add_argument('--ui-alignment', action='store_true')
 parser.add_argument('--queue', action='store_true')
@@ -69,6 +71,7 @@ if bool(args.live_env_file) != bool(args.live_model):
 if args.queue and args.live_env_file: parser.error('queue scenario requires its deterministic held response')
 if args.tasks and (args.live_env_file or args.close_timeout or args.ack_timeout):
     parser.error('task mechanisms require the ordinary deterministic product scenario')
+if args.dock and not args.terminals: parser.error('dock gestures require the real terminal scenario')
 if args.foreign_bundle and not args.daemon: parser.error('foreign build check requires --daemon')
 if args.ack_timeout and args.restart: parser.error('ACK timeout and clean restart are distinct scenarios')
 if args.close_timeout and (args.restart or args.save_failure or args.ack_timeout or args.live_env_file or args.refresh_during_click):
@@ -233,9 +236,20 @@ try:
         if value: call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
         until(lambda: script('return arguments[0].value', [item]) == value)
     def button(text):
+        if text == 'Close details' and not script('return document.querySelector("#detail").open'):
+            item=script('return document.querySelector("[data-dockkit-float-active=true] [data-dockkit-float-close], [data-dockkit-pane-active=true] [aria-selected=true] [data-dockkit-tab-close]")')
+            assert item, 'No active resource close control'
+            tab=script('return arguments[0].closest("[data-dockkit-content]").dataset.dockkitContent',[item])
+            call('POST',root+f'/element/{eid(item)}/click',{})
+            until(lambda: script('return !document.querySelector(`[data-dockkit-content="${arguments[0]}"]`)',[tab]))
+            return
         if text in ('Workspace files', 'Workspace changes', 'Service extensions', 'Session commands', 'Goal'):
             if script(r'return document.querySelector("[aria-label=\"Toggle resources\"]").getAttribute("aria-expanded")!=="true"'):
                 button('Toggle resources')
+            if not script('return [...document.querySelectorAll("button")].some(b=>b.textContent.trim()===arguments[0]&&b.getBoundingClientRect().height>0)',[text]):
+                count=script('return document.querySelectorAll("[data-dockkit-tab]").length')
+                button('Open resources')
+                until(lambda: script('return document.querySelectorAll("[data-dockkit-tab]").length')==count+1)
         if text in ('Compact','Standard','Detailed','Verbose'):
             script(r'''document.querySelector('.conversation-menu').open=true;const e=document.querySelector('[aria-label="Detail level"]');e.value=arguments[0];e.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('.conversation-menu').open=false;return true''',[text.lower()])
             return
@@ -254,6 +268,9 @@ try:
                 raise
             return True
         until(attempt)
+        if text == 'Terminal':
+            until(lambda: script('return [...document.querySelectorAll("[data-dockkit-tab][aria-selected=true]")].some(e=>e.textContent.includes("Resources"))'))
+            script('document.querySelector(".conversation-menu").open=false;return true')
         if text == 'Close details': until(lambda: script('return !document.querySelector("#detail").open'))
     def painted():
         script(r'window.fixturePaint=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.fixturePaint=true));return true')
@@ -369,7 +386,7 @@ try:
     if args.external: verify_delegation(script, button, fill, until, screenshot, workspace, args.report)
     if args.terminals:
         styles_before = script('return document.adoptedStyleSheets.length')
-        script(r'''const original=window.fetch;window.fetch=(path,options)=>{if(String(path)==='/_call/terminal'&&typeof options?.body==='string'){const input=JSON.parse(options.body);if(input.request?.type==='read'){window.fixtureTerminalRead=options.body;window.fixtureMainRead??=options.body}}const result=original(path,options);if(String(path).startsWith('/_frame')){window.fixtureFrameSeen=true;void result.then(response=>response.clone().json()).then(frame=>window.fixtureAssetOffer=frame.assets)}return result};return true''')
+        script(r'''window.fixtureTerminalCommands=[];const original=window.fetch;window.fetch=(path,options)=>{if(String(path)==='/_call/terminal'&&typeof options?.body==='string'){const input=JSON.parse(options.body);window.fixtureTerminalCommands.push(input.request);if(input.request?.type==='read'){window.fixtureTerminalRead=options.body;window.fixtureMainRead??=options.body}}const result=original(path,options);if(String(path).startsWith('/_frame')){window.fixtureFrameSeen=true;void result.then(response=>response.clone().json()).then(frame=>window.fixtureAssetOffer=frame.assets)}return result};return true''')
         button('Terminal'); button('New terminal')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
         typography = script('const s=getComputedStyle(document.querySelector(".xterm-rows"));return {family:s.fontFamily,size:s.fontSize,space:s.whiteSpace}')
@@ -410,16 +427,17 @@ try:
         (args.report / 'terminal-pressure.json').write_text(json.dumps({'readPressure':pressure,'asset':assets,'exactBytes':'native-pty-ok'}, indent=2))
         verify_writes(script, terminal_keys, until, workspace, args.report)
         screenshot('terminal-writer.png')
+        if args.dock: verify_dock(script, button, until, screenshot, call, root, eid, args.report)
         button('Hide terminal panel')
         until(lambda: script('return document.adoptedStyleSheets.length') == styles_before)
-        button('Terminal'); button('Bash 1 · running')
+        button('Terminal'); button('Terminal 1 · running')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="Read only"'))
         until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
         screenshot('terminal-readonly.png'); button('Take control')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
         terminal_keys('exit 7')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="Exited 7"'))
-        screenshot('terminal-exited.png'); button('Close terminal'); button('Hide terminal panel')
+        screenshot('terminal-exited.png'); button('Terminate terminal'); button('Hide terminal panel')
         (args.report / 'terminals.json').write_text(json.dumps({'status':'passed','native_bash':True,'readonly_reattach':True,'explicit_takeover':True,'exit_code':7,'closed':True},indent=2))
     if args.tasks:
         verify_tasks(script, button, fill, until, screenshot, workspace, args.report, task_provider)

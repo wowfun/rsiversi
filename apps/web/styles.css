@@ -117,9 +117,9 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .detail-dialog::backdrop { background:#253e4666; }
 .dialog-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
 .dialog-heading button { font-size:1.3rem; padding:0 8px; border:0; }
-.detail-dialog form { display:flex; flex-direction:column; gap:13px; }
+.detail-dialog form,.resource-content form { display:flex; flex-direction:column; gap:13px; }
 .detail-dialog pre { white-space:pre-wrap; overflow-wrap:anywhere; padding:12px; background:var(--mist); font-size:.76rem; max-height:40vh; overflow:auto; }
-.detail-dialog textarea { width:100%; }
+.detail-dialog textarea,.resource-content textarea { width:100%; }
 .question-field { display:flex; flex-direction:column; gap:9px; }
 .question-field .actions button { font-size:.76rem; }
 .settings-text { font:.78rem/1.55 Consolas,monospace; min-height:300px; }
@@ -200,6 +200,10 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .mcp-panel details { margin: .7rem 0; }
 .mcp-panel summary { cursor: pointer; }
 .mcp-panel code { overflow-wrap: anywhere; }
+.mcp-ssh-panel { display:grid; gap:12px; min-width:0; }
+.mcp-ssh-panel fieldset { display:grid; gap:12px; min-width:0; }
+.mcp-ssh-panel label:not(.check) { display:grid; gap:6px; min-width:0; }
+.mcp-ssh-panel label:not(.check)>input,.mcp-ssh-panel select,.mcp-ssh-panel textarea { width:100%; min-width:0; }
 .mcp-credential label { display: grid; gap: .4rem; margin: .7rem 0; }
 .mcp-credential input { min-width: 0; width: 100%; }
 .mcp-notice { overflow-wrap: anywhere; }

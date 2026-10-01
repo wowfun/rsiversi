@@ -58,10 +58,10 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
     assert_eq!(pane["ui_cards"], true);
     let card = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
     app.command(&card).await.unwrap();
-    let first = view(&app)["ui_detail"].clone();
+    let first = super::sources::panel(&app)["ui_detail"].clone();
     let read = button(&first, None);
     app.command(&read.to_string()).await.unwrap();
-    let first_page = view(&app)["ui_detail"].clone();
+    let first_page = super::sources::panel(&app)["ui_detail"].clone();
     let shown = first_page["model"]["standard_view"]["elements"][1]["text"]
         .as_str()
         .unwrap();
@@ -69,34 +69,34 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
     assert_eq!(shown, &text[..shown.len()]);
     let next = button(&first_page, Some("Next page"));
     app.command(&next.to_string()).await.unwrap();
-    let second_page = view(&app)["ui_detail"].clone();
+    let second_page = super::sources::panel(&app)["ui_detail"].clone();
     let second = second_page["model"]["standard_view"]["elements"][1]["text"]
         .as_str()
         .unwrap();
     assert_eq!(second, &text[shown.len()..shown.len() + second.len()]);
     let reads = backend.history_requests.lock().unwrap().len();
-    app.command(&next.to_string()).await.unwrap();
+    assert!(app.command(&next.to_string()).await.is_err());
     assert_eq!(backend.history_requests.lock().unwrap().len(), reads);
-    assert_eq!(view(&app)["ui_detail"], second_page);
+    assert_eq!(super::sources::panel(&app)["ui_detail"], second_page);
     backend.block_source.store(true, Ordering::SeqCst);
     let request = button(&second_page, Some("Next page"));
     let pending = app.command(&request.to_string());
     idle_read(&backend, true).await;
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    super::sources::close_panel(&app).await;
     idle_read(&backend, false).await;
     pending.await.unwrap();
-    assert!(view(&app)["ui_detail"].is_null());
+    assert!(super::sources::panel(&app)["ui_detail"].is_null());
     assert!(backend.cancel.lock().unwrap().is_empty());
     backend.block_source.store(false, Ordering::SeqCst);
     app.command(&card).await.unwrap();
-    let stale = button(&view(&app)["ui_detail"], None);
+    let stale = button(&super::sources::panel(&app)["ui_detail"], None);
     app.command(&json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string())
         .await
         .unwrap();
     let reads = backend.history_requests.lock().unwrap().len();
-    app.command(&stale.to_string()).await.unwrap();
+    assert!(app.command(&stale.to_string()).await.is_err());
     assert_eq!(backend.history_requests.lock().unwrap().len(), reads);
-    assert!(view(&app)["ui_detail"].is_null());
+    assert!(super::sources::panel(&app)["ui_detail"].is_null());
     assert!(runtime.shutdown().await.is_clean());
 }
 
@@ -219,31 +219,32 @@ async fn independent_addon_has_generic_fields_and_actions_with_cross_pane_and_wi
         .find(|surface| surface["title"] == "Independent addon")
         .unwrap();
     app.command(&json!({"action":"ui_surface","pane":"compare","generation":current["surfaces"]["compare"]["generation"],"reference":menu["reference"]}).to_string()).await.unwrap();
-    assert!(view(&app)["ui_detail"]["model"].is_null());
+    assert!(super::sources::panel(&app)["ui_detail"]["model"].is_null());
     assert!(
-        view(&app)["ui_detail"]["error"]
+        super::sources::panel(&app)["ui_detail"]["error"]
             .as_str()
             .unwrap()
             .contains("another")
     );
+    super::sources::close_panel(&app).await;
     let open = json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":menu["reference"]}).to_string();
     app.command(&open).await.unwrap();
-    let mut invoke = button(&view(&app)["ui_detail"], Some("Apply"));
+    let mut invoke = button(&super::sources::panel(&app)["ui_detail"], Some("Apply"));
     invoke["input"]["fields"] = json!({"value":"<script>literal</script>界"});
     app.command(&invoke.to_string()).await.unwrap();
-    let result = view(&app)["ui_detail"].clone();
+    let result = super::sources::panel(&app)["ui_detail"].clone();
     assert_eq!(result["model"]["standard_view"]["title"], pane["session"]);
     assert_eq!(
         result["model"]["standard_view"]["elements"][0]["text"],
         "<script>literal</script>界"
     );
-    app.command(&invoke.to_string()).await.unwrap();
+    assert!(app.command(&invoke.to_string()).await.is_err());
     assert_eq!(addon.calls.load(Ordering::SeqCst), 1);
     app.command(&open).await.unwrap();
     let lease = addon.lease.lock().unwrap().take().unwrap();
     assert!(lease.dispose().await.is_clean());
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !view(&app)["ui_detail"].is_null() {
+        while !super::sources::panel(&app)["ui_detail"].is_null() {
             tokio::task::yield_now().await;
         }
     })
@@ -363,7 +364,7 @@ async fn arbitrary_async_models_keep_exact_source_authority_and_close_every_snap
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
     for _ in 0..24 {
         app.command(&open).await.unwrap();
-        let detail = view(&app)["ui_detail"].clone();
+        let detail = super::sources::panel(&app)["ui_detail"].clone();
         assert_eq!(detail["model"]["renderer"], "fixture.model");
         assert!(detail["model"]["standard_view"].is_null());
         let ticket = detail["ticket"].as_str().unwrap();
@@ -377,7 +378,7 @@ async fn arbitrary_async_models_keep_exact_source_authority_and_close_every_snap
         assert!(app.read_ui_source(ticket, "foreign", 0, 1).await.is_err());
         assert!(app.read_ui_source(ticket, "raw", 0, 65_537).await.is_err());
         assert!(app.read_ui_source("foreign", "raw", 0, 1).await.is_err());
-        app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+        super::sources::close_panel(&app).await;
         assert!(app.read_ui_source(ticket, "raw", 0, 1).await.is_err());
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while registry.presentation_usage() != (0, 0, 0) {

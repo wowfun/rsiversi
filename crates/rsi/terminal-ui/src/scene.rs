@@ -586,7 +586,7 @@ mod tests {
     };
     fn state() -> TestState {
         TestState::new(
-            SessionHeader::new(
+            SessionHeader::new_local(
                 SessionId::new("scene").unwrap(),
                 1,
                 "/workspace",

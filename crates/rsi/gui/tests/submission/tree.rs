@@ -79,7 +79,7 @@ fn add_child(
 ) -> Arc<Backend> {
     let backend = Arc::new(Backend::default());
     *backend.header.lock().unwrap() = Some(
-        SessionHeader::new(
+        SessionHeader::new_local(
             id.clone(),
             1,
             "/tmp",
@@ -154,9 +154,9 @@ async fn open(app: &Arc<rsi_gui::GuiApplication>) {
     app.command(&json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":surface["reference"]}).to_string()).await.unwrap();
 }
 async fn click(app: &Arc<rsi_gui::GuiApplication>, label: &str) -> Value {
-    let command = ui::button(&view(app)["ui_detail"], Some(label));
+    let command = ui::button(&super::sources::panel(app)["ui_detail"], Some(label));
     app.command(&command.to_string()).await.unwrap();
-    let detail = view(app)["ui_detail"].clone();
+    let detail = super::sources::panel(app)["ui_detail"].clone();
     assert!(detail["error"].is_null(), "{detail}");
     detail
 }
@@ -236,7 +236,7 @@ async fn tree_paging_breadcrumbs_and_history_watermarks_use_no_child_observers()
 async fn tree_actions_reject_wrong_reader_membership_cursors_and_close_exact_reads() {
     let (runtime, root, child, app) = fixture().await;
     open(&app).await;
-    let initial = view(&app)["ui_detail"].clone();
+    let initial = super::sources::panel(&app)["ui_detail"].clone();
     let mut request = ui::button(&initial, Some("Inspect agent tree"));
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
     let reference = ui::reference(&initial, &request["name"]);
@@ -263,13 +263,13 @@ async fn tree_actions_reject_wrong_reader_membership_cursors_and_close_exact_rea
     click(&app, "Read conversation").await;
     click(&app, "Open Fact 130 fields").await;
     child.block_source.store(true, Ordering::SeqCst);
-    let command = ui::button(&view(&app)["ui_detail"], Some("TurnInput"));
+    let command = ui::button(&super::sources::panel(&app)["ui_detail"], Some("TurnInput"));
     let waiting = app.command(&command.to_string());
     until(|| child.active_source.load(Ordering::SeqCst) == 1).await;
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    super::sources::close_panel(&app).await;
     waiting.await.unwrap();
     assert_eq!(child.active_source.load(Ordering::SeqCst), 0);
-    assert!(view(&app)["ui_detail"].is_null());
+    assert!(super::sources::panel(&app)["ui_detail"].is_null());
     assert!(root.cancel.lock().unwrap().is_empty());
     assert!(child.cancel.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());

@@ -88,7 +88,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
             });
         };
         new MutationObserver(()=>{
-            const text=document.querySelector('#detail')?.textContent??'';
+            const text=document.querySelector('.resource-content')?.textContent??'';
             if(/Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired/.test(text)){
                 const diagnostic=text.slice(0,4096);
                 if(window.fixtureGoal.errors.at(-1)?.diagnostic!==diagnostic)push(window.fixtureGoal.errors,{time:performance.now(),diagnostic});
@@ -100,16 +100,16 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     def text(selector):
         return script('return document.querySelector(arguments[0])?.innerText??""', [selector])
     def has(value):
-        return value in text('#detail .ui-contribution')
+        return value in text('.resource-content .ui-contribution')
     def goal_until(predicate):
         def checked():
-            detail = text('#detail')
+            detail = text('.resource-content')
             assert not re.search(r'Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired', detail), detail
             return predicate()
         return until(checked)
     def close():
         button('Close details')
-        until(lambda: script('return !document.querySelector("#detail").open'))
+        until(lambda: script('return !document.querySelector(".resource-content .ui-contribution")'))
     def send(prompt, expected):
         fill('textarea[aria-label="Main message"]', prompt)
         button('Send')
@@ -162,7 +162,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     goal_until(lambda: text('.pane-status') == 'Cancelled' and has('Driver: Disarmed'))
     provider.release('Native Goal hold')
     screenshot('tasks-goal-cancelled.png')
-    goal_text = text('#detail')
+    goal_text = text('.resource-content')
     allocated, cap = map(int, re.search(r'Allocated rounds: (\d+) / (\d+)', goal_text).groups())
     assert (allocated, cap) == (2, 3)
     close()

@@ -127,7 +127,7 @@ impl SessionService for Service {
         r: CreateSession,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
         *self.0.header.lock().unwrap() = Some(
-            SessionHeader::new(
+            SessionHeader::new_local(
                 r.session_id,
                 1,
                 "/tmp",
@@ -623,6 +623,11 @@ impl Backend {
 struct Unused;
 #[async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for Unused {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(
         &self,
         _: &rsi_workspace_protocol::WorkspaceId,
@@ -636,8 +641,9 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Unused {
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspacePage> {
         unreachable!()
     }
-    async fn get_or_create(
+    async fn register_at(
         &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
         _: &std::path::Path,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
         unreachable!()

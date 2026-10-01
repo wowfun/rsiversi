@@ -9,18 +9,18 @@ import {TerminalInput} from './terminal-input.mjs'
 import {terminalDocument} from './terminal-style.ts'
 
 type Status={id:string;size:{rows:number;columns:number};phase:{state:string;exit_code?:number|null;signal?:number|null};controller:string|null;controller_epoch:number}
-type Follower={terminal:Status;id:string}
+export type Follower={terminal:Status;id:string}
 type Reply={type:string;value:any;ack?:string}
 function terminalTheme(){const style=getComputedStyle(document.documentElement);return {background:style.getPropertyValue('--secondary-surface').trim(),foreground:style.getPropertyValue('--ink').trim(),cursor:style.getPropertyValue('--teal').trim(),selectionBackground:style.getPropertyValue('--active').trim()}}
 const encoder=new TextEncoder()
-export function Terminals({pane,surface,hide}:{pane:string;surface:Surface;hide:()=>void}) {
+export function Terminals({pane,surface,hide,initial,created,onOpen}:{pane:string;surface:Surface;hide:()=>void;initial?:string;created?:Follower;onOpen?:(id?:string)=>void}) {
   const [roster,setRoster]=useState<Status[]>([]),[follower,setFollower]=useState<Follower>(),[status,setStatus]=useState<Status>(),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
   const screen=useRef<HTMLDivElement>(null),alive=useRef(true),current=useRef<Follower>(),pump=useRef<TerminalInput>(),display=useRef<Xterm>(),resizeCurrent=useRef<()=>void>()
   const request=async(request:unknown):Promise<Reply>=>JSON.parse(await input.terminal({pane,generation:surface.generation,request}))
   const operate=(operation:unknown)=>request(operation)
   const refresh=async()=>{const reply=await operate({type:'list'});if(alive.current)setRoster(reply.value)}
   const detach=async(value:Follower)=>{await operate({type:'detach',attachment:value.id})}
-  useEffect(()=>{alive.current=true;void refresh().catch(error=>setNotice(String(error)));return()=>{alive.current=false;pump.current?.stop();if(current.current)void detach(current.current).catch(()=>{})}},[])
+  useEffect(()=>{alive.current=true;if(created){current.current=created;setFollower(created);setStatus(created.terminal)}else if(initial){void attach(initial).catch(error=>setNotice(String(error)))}void refresh().catch(error=>setNotice(String(error)));return()=>{alive.current=false;pump.current?.stop();if(current.current)void detach(current.current).catch(()=>{})}},[])
   const action=async(work:()=>Promise<void>)=>{if(busy)return;setBusy(true);setNotice('');try{await work()}catch(error){if(alive.current)setNotice(String(error))}finally{if(alive.current)setBusy(false)}}
   const attach=async(id?:string)=>{
     pump.current?.stop();if(current.current){await detach(current.current);current.current=undefined;setFollower(undefined)}
@@ -47,7 +47,17 @@ export function Terminals({pane,surface,hide}:{pane:string;surface:Surface;hide:
     try{term.loadAddon(fit);term.open(screen.current)}catch(error){term.dispose();styles.dispose();setNotice(String(error));return}
     display.current=term;installWriter(follower,follower.terminal)
     const data=term.onData(text=>pump.current?.push(encoder.encode(text))),binary=term.onBinary(text=>pump.current?.push(Uint8Array.from(text,c=>c.charCodeAt(0)&255)))
-    const resize=()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{const value=current.current,dimensions=fit.proposeDimensions();if(!active||!value||!dimensions||value.terminal.controller!==value.id||value.terminal.phase.state!=='running')return;const size={rows:Math.max(1,Math.min(200,dimensions.rows)),columns:Math.max(1,Math.min(500,dimensions.cols))};if(size.rows===value.terminal.size.rows&&size.columns===value.terminal.size.columns)return;void operate({type:'resize',attachment:value.id,size}).catch(error=>{if(active)setNotice(String(error))})},100)}
+    const resize=()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{
+      const value=current.current,bounds=screen.current?.getBoundingClientRect()
+      if(!active||!value||!bounds||bounds.width<=0||bounds.height<=0||value.terminal.controller!==value.id||value.terminal.phase.state!=='running')return
+      const dimensions=fit.proposeDimensions()
+      // FitAddon parses computed CSS sizes; hidden/transitioning hosts can yield
+      // NaN even after xterm has cached valid cell metrics.
+      if(!dimensions||!Number.isFinite(dimensions.rows)||!Number.isFinite(dimensions.cols))return
+      const size={rows:Math.max(1,Math.min(200,Math.floor(dimensions.rows))),columns:Math.max(1,Math.min(500,Math.floor(dimensions.cols)))}
+      if(size.rows===value.terminal.size.rows&&size.columns===value.terminal.size.columns)return
+      void operate({type:'resize',attachment:value.id,size}).catch(error=>{if(active)setNotice(String(error))})
+    },100)}
     resizeCurrent.current=resize
     const observer=new ResizeObserver(resize);observer.observe(screen.current);resize()
     const refreshTheme=()=>{term.options.theme=terminalTheme()}
@@ -73,8 +83,8 @@ export function Terminals({pane,surface,hide}:{pane:string;surface:Surface;hide:
   const writer=!!follower&&status?.controller===follower.id&&status.phase.state==='running'
   const phase=status?.phase.state==='exited'?`Exited ${status.phase.exit_code??`(signal ${status.phase.signal??'unknown'})`}`:status?.phase.state==='failed'?'Stopped with an error':writer?'You have control':status?'Read only':'No terminal selected'
   return <section className="terminal-panel" aria-label="Session terminals">
-    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>void action(()=>attach())}>New terminal</Button><Button size="sm" disabled={busy} onClick={()=>void action(refresh)}>Refresh</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();current.current=undefined;setFollower(undefined);setStatus(undefined);await refresh()})}>Close terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
-    {roster.length>0&&<nav className="terminal-tabs" aria-label="Open terminals">{roster.map((terminal,index)=><Button size="sm" key={terminal.id} aria-pressed={follower?.terminal.id===terminal.id} title={terminal.id} disabled={busy} onClick={()=>void action(()=>attach(terminal.id))}>Bash {index+1} · {terminal.phase.state}</Button>)}</nav>}
+    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen?onOpen():void action(()=>attach())}>New terminal</Button><Button size="sm" disabled={busy} onClick={()=>void action(refresh)}>Refresh</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();current.current=undefined;setFollower(undefined);setStatus(undefined);await refresh()})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
+    {!initial&&roster.length>0&&<nav className="terminal-tabs" aria-label="Open terminals">{roster.map((terminal,index)=><Button size="sm" key={terminal.id} aria-pressed={follower?.terminal.id===terminal.id} title={terminal.id} disabled={busy} onClick={()=>onOpen?onOpen(terminal.id):void action(()=>attach(terminal.id))}>Bash {index+1} · {terminal.phase.state}</Button>)}</nav>}
     {notice&&<p className="terminal-notice" role="alert">{notice}</p>}
     <div className="terminal-screen" ref={screen} hidden={!follower}/>
     {!follower&&<div className="terminal-empty"><p>Run commands in this Session’s workspace.</p><p className="hint">New terminals use this Session’s saved sandbox policy. Hiding this panel leaves shells running.</p></div>}

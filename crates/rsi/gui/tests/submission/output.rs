@@ -89,6 +89,10 @@ async fn idle(cache: &Cache, active: bool) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one output view read, paging, close and replacement authority sequence"
+)]
 async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_views() {
     let (runtime, backend, app) = sources::fixture().await;
     let cache = Arc::new(Cache::default());
@@ -121,11 +125,11 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
     let open = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
     for (label, id) in [("Read stdout", "a"), ("Read stderr", "b")] {
         app.command(&open).await.unwrap();
-        let card = view(&app)["ui_detail"].clone();
+        let card = super::sources::panel(&app)["ui_detail"].clone();
         assert!(card.to_string().contains("command failed"));
         let read = ui::button(&card, Some(label));
         app.command(&read.to_string()).await.unwrap();
-        let first = view(&app)["ui_detail"].clone();
+        let first = super::sources::panel(&app)["ui_detail"].clone();
         let code = first["model"]["standard_view"]["elements"][2]["text"]
             .as_str()
             .unwrap();
@@ -138,23 +142,37 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         );
         let next = ui::button(&first, Some("Next page"));
         app.command(&next.to_string()).await.unwrap();
-        assert!(view(&app)["ui_detail"].to_string().contains("SECOND-PAGE"));
-        let hex = ui::button(&view(&app)["ui_detail"], Some("View exact hex"));
+        assert!(
+            super::sources::panel(&app)["ui_detail"]
+                .to_string()
+                .contains("SECOND-PAGE")
+        );
+        let hex = ui::button(
+            &super::sources::panel(&app)["ui_detail"],
+            Some("View exact hex"),
+        );
         app.command(&hex.to_string()).await.unwrap();
         assert!(
-            view(&app)["ui_detail"]
+            super::sources::panel(&app)["ui_detail"]
                 .to_string()
                 .contains("00004000  53 45 43")
         );
-        assert!(view(&app)["ui_detail"].to_string().contains("00 ff"));
+        assert!(
+            super::sources::panel(&app)["ui_detail"]
+                .to_string()
+                .contains("00 ff")
+        );
         let reads = cache.reads.lock().unwrap().len();
-        app.command(&next.to_string()).await.unwrap();
+        assert!(app.command(&next.to_string()).await.is_err());
         assert_eq!(cache.reads.lock().unwrap().len(), reads);
         cache.unavailable.store(true, Ordering::SeqCst);
-        let previous = ui::button(&view(&app)["ui_detail"], Some("Previous page"));
+        let previous = ui::button(
+            &super::sources::panel(&app)["ui_detail"],
+            Some("Previous page"),
+        );
         app.command(&previous.to_string()).await.unwrap();
         assert!(
-            view(&app)["ui_detail"]["error"]
+            super::sources::panel(&app)["ui_detail"]["error"]
                 .as_str()
                 .unwrap()
                 .contains("unavailable")
@@ -163,12 +181,16 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
     }
     for close in [true, false] {
         app.command(&open).await.unwrap();
-        let read = ui::button(&view(&app)["ui_detail"], Some("Read stdout"));
+        let read = ui::button(
+            &super::sources::panel(&app)["ui_detail"],
+            Some("Read stdout"),
+        );
         cache.block.store(true, Ordering::SeqCst);
+        let closing_view = super::sources::panel(&app)["view"].clone();
         let pending = app.command(&read.to_string());
         idle(&cache, true).await;
         if close {
-            app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+            super::sources::close_panel(&app).await;
         } else {
             app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
                 .await
@@ -176,7 +198,13 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         }
         idle(&cache, false).await;
         pending.await.unwrap();
-        assert!(view(&app)["ui_detail"].is_null());
+        assert!(
+            !view(&app)["panels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|panel| panel["view"] == closing_view)
+        );
         cache.block.store(false, Ordering::SeqCst);
     }
     assert!(backend.cancel.lock().unwrap().is_empty());

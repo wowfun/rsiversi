@@ -66,13 +66,14 @@ impl GuiApplication {
     ) -> Result<()> {
         let pane_ref = self.pane(pane)?;
         let current = pane_ref.current.lock().expect("Web pane poisoned");
-        current
+        let attached = current
             .as_ref()
             .filter(|attached| attached.generation.to_string() == generation)
             .ok_or("This pane changed")?;
         media.validate().map_err(error)?;
-        let mut details = self.details.lock().expect("Web details poisoned");
-        let ticket = details.begin()?.to_string();
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = registry.open(Some((pane, generation.into(), attached.id.clone())), serde_json::json!({"action":"inspect_image","pane":pane,"generation":generation,"media":media}))?;
+        let ticket = details.revision.to_string();
         details.image = Some(crate::details::ImageDetail {
             pane,
             generation: generation.into(),
@@ -102,7 +103,8 @@ impl GuiApplication {
                 .map_err(|_| "An image operation is still in progress")?;
             let (reference, stop) = match selection {
                 Preview::Source { ticket } => {
-                    let details = self.details.lock().expect("Web details poisoned");
+                    let registry = self.details.lock().expect("Web details poisoned");
+                    let details = registry.ticket(&ticket)?;
                     let reference = details
                         .image
                         .as_ref()

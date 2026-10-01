@@ -9,6 +9,7 @@ mod details;
 mod directory;
 mod frames;
 mod markdown;
+mod panel_registry;
 mod panes;
 mod projection;
 mod renderer;

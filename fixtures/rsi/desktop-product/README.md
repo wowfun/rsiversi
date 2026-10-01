@@ -206,3 +206,18 @@ screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
 actual WebDriver document refresh and verifies a saved draft survives observer
 replacement. This is distinct from application restart and a synthetic view refresh.
+
+`--dock --terminals` also drives native context-menu float, pointer movement and
+resize, docking, keyboard undo, redo and fullscreen on the same live terminal.
+It checks that these gestures do not create, attach or detach a follower. Pointer
+gestures use XTest on the ancestry-verified private Xvfb display, entering GTK
+through native input. WebDriver remains responsible for element inspection and
+keyboard controls. The fixture records trusted pointer events and measured bounds.
+The float resize retains both the immediate screenshot and a second capture after
+terminal fit and two animation frames, separating gesture timing from settled
+renderer evidence.
+It also checks light/dark workbench and Settings geometry at 1440×900,
+1024×768, 767×900 and 390×844 after media-query layout and the acknowledged
+terminal resize settle. It rejects terminal error notices and non-integer or
+out-of-range resize commands; native screenshots are reviewed separately from
+the Chromium pixel baselines.

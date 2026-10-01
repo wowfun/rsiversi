@@ -117,7 +117,7 @@ async fn ready(app: &rsi_gui::GuiApplication, revision: u64) -> Value {
     let mut changed = app.changes();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let detail = sources::view(app)["ui_detail"].clone();
+            let detail = super::sources::panel(app)["ui_detail"].clone();
             if detail["model"]["data"]["count"] == revision && detail["busy"] == false {
                 return detail;
             }
@@ -173,7 +173,7 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
         .to_string();
     for _ in 0..24 {
         app.command(&list).await.unwrap();
-        let catalog = sources::view(&app)["remote_ui_catalog"].clone();
+        let catalog = super::sources::panel(&app)["remote_ui_catalog"].clone();
         let mut open = json!({"action":"remote_ui_surface","ticket":catalog["ticket"],"bundle":"foreign","surface":"counter"});
         assert!(app.command(&open.to_string()).await.is_err());
         open["bundle"] = "remote".into();
@@ -195,11 +195,12 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
         let invoke = json!({"action":"ui_invoke","ticket":ticket,"name":"apply","input":{"value":null,"fields":{}}}).to_string();
         app.command(&invoke).await.unwrap();
         assert!(app.command(&invoke).await.is_err());
-        assert_eq!(sources::view(&app)["ui_detail"]["busy"], true);
+        assert_eq!(super::sources::panel(&app)["ui_detail"]["busy"], true);
         remote.push(2).await;
         ready(&app, 2).await;
         assert!(app.command(&invoke).await.is_err());
-        app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+        super::sources::close_panel(&app).await;
+        super::sources::close_panel(&app).await;
         assert!(app.read_ui_source(ticket, "raw", 0, 1).await.is_err());
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while remote.active.load(Ordering::SeqCst) != 0 {

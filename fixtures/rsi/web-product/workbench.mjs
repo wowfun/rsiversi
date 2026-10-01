@@ -1,4 +1,4 @@
-import {detailMode,navigationFilter} from './controls.mjs';
+import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,copyFile,chmod,mkdtemp,rm} from 'node:fs/promises';
@@ -27,6 +27,13 @@ try {
     const errors=[]; let page;
     try {
       const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});
+      await context.addInitScript(()=>{
+        window.navigationQueries=0;const Original=Worker;
+        window.Worker=class extends Original {
+          constructor(...args){super(...args);this.queries=new Set();this.addEventListener('message',({data})=>{if(data.kind==='reply'&&this.queries.delete(data.id)&&!data.error)window.navigationQueries++})}
+          postMessage(data,...rest){if(data.kind==='call'&&data.method==='command'){const command=JSON.parse(data.payload);if(command.action==='navigate'&&command.command.kind==='query')this.queries.add(data.id)}super.postMessage(data,...rest)}
+        };
+      });
       page=await context.newPage();page.on('pageerror',error=>{errors.push(error.stack ?? error.message);console.error('page error',error.message)});
       await page.goto(service.origin);
       await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register(`${name}-workbench`)));
@@ -40,7 +47,7 @@ try {
       await page.getByRole('button',{name:'Settings',exact:true}).click();
       await page.getByLabel('Provider',{exact:true}).selectOption('openai-compatible');
       await page.getByRole('button',{name:'Check credential',exact:true}).click();
-      await page.getByText('configured · read only',{exact:true}).waitFor();
+      await page.locator('.credential-status').getByText('configured',{exact:true}).waitFor();
       await page.getByLabel('Deployment name').fill('first-provider');
       await page.getByLabel('Provider endpoint').fill(endpoint);
       await page.getByLabel('Request path').fill('/v1/chat/completions');
@@ -68,23 +75,40 @@ try {
       await input.fill('First conversation from an empty configuration.');
       await page.getByTestId('composer-send').click();
       await page.locator('.message.assistant').filter({hasText:'Reviewed:'}).waitFor({timeout:30000});
+      await page.waitForFunction(()=>document.querySelector('.pane.selected .pane-status')?.textContent==='Completed');
+      const queries=await page.evaluate(()=>window.navigationQueries);
       await page.getByRole('button',{name:'Refresh workspaces and conversations',exact:true}).click();
+      await page.waitForFunction(before=>window.navigationQueries>before,queries);
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
       await page.locator('#sessions .session-row').waitFor();
       await page.locator('#sessions .session-options summary').click();
       await page.getByRole('button',{name:'Rename',exact:true}).click();
       await page.getByLabel('Conversation title',{exact:true}).fill('First milestone');
       await page.getByRole('button',{name:'Save title',exact:true}).click();
+      await page.getByLabel('Conversation title',{exact:true}).waitFor({state:'hidden'});
+      await page.getByRole('button',{name:'Refresh conversations in workspace',exact:true}).click();
       await page.locator('#sessions strong').filter({hasText:'First milestone'}).waitFor();
+      const options=page.locator('#sessions .session-options');
+      if(!await options.evaluate(node=>node.open))await options.locator('summary').click();
       await page.getByRole('button',{name:'Archive',exact:true}).click();
       await page.locator('#sessions .session-row').waitFor({state:'detached'});
       assert(await input.isEnabled(),'archive must leave the attached conversation usable');
       await navigationFilter(page,'archived');
       await page.locator('#sessions strong').filter({hasText:'First milestone'}).waitFor();
-      await page.locator('.conversation-menu').evaluate(node=>node.open=true);await page.locator('#add-surface').click();await page.locator('.conversation-menu').evaluate(node=>node.open=false);
-      await page.locator('#pane-tab-compare').waitFor();
+      await page.locator('.conversation-menu>summary').click();await page.locator('#add-surface').click();await page.locator('.conversation-menu>summary').click();
+      await page.locator('#pane-tab-compare').waitFor({state:'attached'});
       await page.locator('#sessions .nav-item').click();
       await page.getByLabel('Compare message',{exact:true}).fill('Separate saved compare draft');
+      // A wide viewport can still have a narrow conversation column beside resources.
+      await page.setViewportSize({width:1024,height:768});
+      await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
+      await page.locator('#pane-tab-compare').waitFor({state:'hidden'});
+      await selectSurface(page,'main');
+      await selectSurface(page,'compare');
+      await page.locator('.conversation-menu>summary').click();
       await page.getByRole('button',{name:'Close compare',exact:true}).click();
+      await page.locator('.conversation-menu>summary').click();
+      await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
       await page.getByLabel('Main message',{exact:true}).waitFor({state:'visible'});
       await detailMode(page,'verbose');
       await page.waitForFunction(()=>document.documentElement.dataset.detail==='verbose');

@@ -13,13 +13,13 @@ def verify(script, button, fill, until, screenshot, workspace, report):
     until(lambda: script('return document.querySelector(".pane-status")?.textContent==="Completed"'))
     button('Workspace changes'); button('Review workspace changes')
     def ready():
-        if script('return [...document.querySelectorAll("dialog")].some(e=>e.textContent.includes("Complete · 1 files"))'): return True
+        if script('return [...document.querySelectorAll(".resource-content")].some(e=>e.textContent.includes("Complete · 1 files"))'): return True
         button('Review workspace changes'); return False
     until(ready); screenshot('review-summary.png')
     # An earlier text-only Turn is also durable; select the interval with one changed file.
-    script('''const field=[...document.querySelectorAll("dialog .ui-field")].find(e=>e.textContent.includes("Complete · 1 files"));let e=field.nextElementSibling;while(e&&e.tagName!=="BUTTON")e=e.nextElementSibling;if(!e)throw Error("interval action missing");e.click();return true''')
+    script('''const field=[...document.querySelectorAll(".resource-content .ui-field")].find(e=>e.textContent.includes("Complete · 1 files"));let e=field.nextElementSibling;while(e&&e.tagName!=="BUTTON")e=e.nextElementSibling;if(!e)throw Error("interval action missing");e.click();return true''')
     button('Open file diff')
-    diff = until(lambda: script('return document.querySelector("dialog pre")?.textContent'))
+    diff = until(lambda: script('return document.querySelector(".resource-content pre")?.textContent'))
     assert '-before\n' in diff and '+after · 界' in diff and 'committed' not in diff, diff
     screenshot('review-diff.png'); button('Close details')
     (report / 'workspace-review.json').write_text(json.dumps({'status':'passed','native_bridge':True,'dirty_baseline':True,'diff':diff},ensure_ascii=False,indent=2))

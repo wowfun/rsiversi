@@ -1,3 +1,4 @@
+import { resourceHosts, publishResources, clearResources } from "./src/resource-hosts.ts";
 import { TurnPresentation, readingPosition, restoreAnchor } from "./turn-presentation.js";
 const documentBuildFamily = typeof __RSI_BUILD_FAMILY__ === "string" ? __RSI_BUILD_FAMILY__ : "";
 import { keyboardAction } from "./composer-actions.js";
@@ -134,7 +135,7 @@ async function perform(run) {
 }
 function clearView() {
   presentationIdentity.set(undefined); publish(undefined); view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
-  clearImages();
+  clearImages(); clearResources();
   for (const pane of panes.values()) pane.reset();
   ExternalPane.clearDrafts();
   $("detail").close();
@@ -489,7 +490,7 @@ class Pane {
     this.visibleFrame = requestAnimationFrame(() => { this.visibleFrame = undefined; this.syncVisible(); });
   }
   syncVisible() {
-    if (!this.generation || !this.node.isConnected || closing) return;
+    if (!this.generation || !this.node.isConnected || this.switching || closing) return;
     const bounds = this.transcript.getBoundingClientRect();
     const entries = [...this.blocks].filter(([, entry]) => {
       const rect = entry.node.getBoundingClientRect();
@@ -504,12 +505,12 @@ class Pane {
   async sendVisible() {
     this.visibleRunning = true;
     try {
-      while (this.visiblePending && !closing) {
+      while (this.visiblePending && !this.switching && !closing) {
         const request = this.visiblePending; this.visiblePending = undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           try { await command({ action: "ui_visible", pane: this.index, ...request }); break; }
           catch (error) {
-            if (this.generation !== request.generation || closing) break;
+            if (this.generation !== request.generation || this.switching || closing) break;
             if (attempt === 1) notify(error.message);
             else await new Promise(resolve => setTimeout(resolve, 100));
           }
@@ -1089,7 +1090,7 @@ class Pane {
     if (snapshot && !snapshot.entries.length) this.extensionView.append(element("p", "", "No extension views in this preset"));
   }
   render(data, models) {
-    this.historyContext = data ? {session:data.session,path:data.path} : undefined;
+    this.historyContext = data ? {session:data.session,workspace:data.workspace} : undefined;
     const changed = this.generation !== data?.generation;
     if (this.selection !== data?.selection) { this.selection = data?.selection; this.switching = false; }
     if (changed) {
@@ -1133,8 +1134,6 @@ class Pane {
     if (!data || this.stopBinding?.generation !== data.generation || this.stopBinding?.turn_id !== data.active) this.stopBinding = undefined;
     this.cancel.disabled = !this.stopBinding; this.cancel.hidden = !this.stopBinding;
     this.renderQueue(data);
-    this.renderCommands(data);
-    this.renderImages(data);
     this.renderExtensions(data);
     this.renderComposer();
     const empty = !data?.transcript.blocks.length;
@@ -1291,7 +1290,8 @@ function render(next) {
   if (!panes.has(selected)) selected = panes.keys().next().value;
   select(selected);
   publish(next);
-  renderDetail(next);
+  renderDetail(next, modalTarget);
+  renderResources(next);
 }
 installActions({ command, open: openInSelected, select, call,
   async closeSurface(key) {
@@ -1318,21 +1318,53 @@ function showDialog(key, title, body) {
 async function closeDetail() { await command({ action: "close_detail" }); dialogKey = undefined; $("detail").close(); }
 $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
-function renderDetail(next) {
+const modalTarget = {
+  get key() { return dialogKey; },
+  get body() { return $("detail-body"); },
+  rendererKey: "settings-detail", surface: "dialog", show: showDialog,
+  clear() { dialogKey = undefined; $("detail").close(); },
+};
+function renderResources(next) {
+  const keep = new Set();
+  for (const entry of next.panels ?? []) {
+    keep.add(entry.view);
+    let target = resourceHosts.get(entry.view);
+    if (!target) {
+      const body = element("div", "resource-content");
+      $("resource-parking").append(body);
+      target = {body, key: undefined, title: "Resource", entry,
+        rendererKey: `resource-${entry.view}`, surface: "pane",
+        show(key, title, content) {
+          if (this.key === key) return;
+          this.key = key; this.title = title; this.body.replaceChildren(content);
+        },
+        clear() { this.key = undefined; this.body.replaceChildren(); },
+      };
+      resourceHosts.set(entry.view, target);
+    }
+    target.entry = entry;
+    renderDetail({...entry, has_media:next.has_media}, target);
+  }
+  for (const [id, target] of resourceHosts) if (!keep.has(id)) {
+    target.body.remove(); resourceHosts.delete(id);
+  }
+  publishResources();
+}
+function renderDetail(next, target) {
   if (next.image_detail) {
     const detail = next.image_detail;
     const key = `image:${detail.ticket}`;
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const body = element("div", "image-detail");
     body.append(element("p", "hint", `${detail.media.width} × ${detail.media.height} · ${detail.media.bytes} bytes`));
-    showDialog(key, "Image preview", body);
+    target.show(key, "Image preview", body);
     previewImage(body, detail.media, detail.ticket); return;
   }
-  if (next.ui_detail) { renderUiDetail(next.ui_detail); return; }
+  if (next.ui_detail) { renderUiDetail(next.ui_detail, target); return; }
   if (next.remote_ui_catalog) {
     const catalog = next.remote_ui_catalog;
     const key = JSON.stringify(catalog);
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const body = element("div", "settings-list");
     if (catalog.error) body.append(element("p", "settings-error", catalog.error));
     else if (!catalog.page) body.append(element("p", "", "Loading service extensions…"));
@@ -1341,12 +1373,12 @@ function renderDetail(next) {
       if (!catalog.page.entries.length) body.append(element("p", "", "No service extensions."));
       if (catalog.page.next) body.append(button("More extensions", () => command({ action: "remote_ui_next", ticket: catalog.ticket }), "quiet"));
     }
-    showDialog(key, "Service extensions", body); return;
+    target.show(key, "Service extensions", body); return;
   }
   if (next.settings_catalog) {
     const catalog = next.settings_catalog;
     const key = JSON.stringify(catalog);
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const body = element("div", "settings-catalog");
     if (catalog.error) body.append(element("p", "settings-error", catalog.error));
     else if (!catalog.page) body.append(element("p", "", catalog.namespace ? `Reading ${catalog.namespace}…` : "Loading registered settings…"));
@@ -1360,12 +1392,12 @@ function renderDetail(next) {
       actions.append(button("Refresh settings", () => command({ action: "settings_list" })), nextPage);
       body.append(list, actions);
     }
-    showDialog(key, "Settings", body); return;
+    target.show(key, "Settings", body); return;
   }
   if (next.block_sources) {
     const detail = next.block_sources;
     const key = `block-sources:${detail.ticket}`;
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const body = element("div", "block-sources");
     body.append(element("p", "hint", `Sources ${detail.start + (detail.page.length ? 1 : 0)}–${detail.start + detail.page.length} of ${detail.total}`));
     const list = element("div", "source-list");
@@ -1378,12 +1410,12 @@ function renderDetail(next) {
     const nextPage = button("Next sources", () => command({ action: "block_sources_page", ticket: detail.ticket, forward: true }));
     previous.disabled = detail.start === 0; nextPage.disabled = detail.start + detail.page.length >= detail.total;
     actions.append(previous, nextPage); body.append(list, actions);
-    showDialog(key, "Block sources", body); return;
+    target.show(key, "Block sources", body); return;
   }
   if (next.source_detail) {
     const detail = next.source_detail;
     const key = JSON.stringify(detail);
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const body = element("div", "source-detail");
     body.append(element("p", "hint", `Fact ${detail.source.seq} · ${detail.source.field.kind}`));
     if (detail.error) body.append(element("p", "source-error", `Source unavailable: ${detail.error}`));
@@ -1406,11 +1438,11 @@ function renderDetail(next) {
         body.append(open, preview);
       }
     }
-    showDialog(key, "Exact source", body); return;
+    target.show(key, "Exact source", body); return;
   }
   if (next.settings) {
     const editor = next.settings;
-    if (dialogKey === editor.ticket) return;
+    if (target.key === editor.ticket) return;
     const form = element("form"); const text = element("textarea", "settings-text"); text.value = editor.text; text.spellcheck = false; text.setAttribute("aria-label", "Settings JSON");
     const save = element("button", "primary", "Save settings"); save.type = "submit";
     const description = editor.description;
@@ -1439,13 +1471,13 @@ function renderDetail(next) {
       try {await command({action:"settings_save",ticket:editor.ticket,text:jsonMode ? text.value : JSON.stringify(fields.read())})}
       catch(error) {failure.textContent=error instanceof Error ? error.message : String(error);save.disabled=!description.writable}
     });
-    showDialog(editor.ticket, editor.namespace, form); return;
+    target.show(editor.ticket, editor.namespace, form); return;
   }
   if (next.detail) {
     const detail = next.detail; const request = detail.request;
     const key = JSON.stringify([detail.pane, detail.generation, detail.kind,
       detail.kind === "approval" ? request.subject.session_id : null, request.id]);
-    if (dialogKey === key) return;
+    if (target.key === key) return;
     const form = element("form");
     const base = { pane: detail.pane, generation: detail.generation, id: request.id };
     if (detail.kind === "question" && request.review) {
@@ -1467,7 +1499,7 @@ function renderDetail(next) {
       }
       form.addEventListener("submit", event => event.preventDefault());
       form.append(element("label", "", "Optional review feedback"), feedback, failure, actions);
-      showDialog(key, "Review plan", form);
+      target.show(key, "Review plan", form);
     } else if (detail.kind === "question") {
       const inputs = request.questions.map(question => {
         const field = element("div", "question-field"); const input = element("textarea"); input.rows = 2; input.required = true; input.setAttribute("aria-label", question.prompt);
@@ -1477,32 +1509,32 @@ function renderDetail(next) {
       });
       const send = element("button", "primary", "Send answers"); send.type = "submit"; form.append(send);
       form.addEventListener("submit", event => { event.preventDefault(); perform(() => command({ action: "answer", ...base, answers: inputs.map(input => input.value) })); });
-      showDialog(key, "Answer the assistant", form);
+      target.show(key, "Answer the assistant", form);
     } else {
       form.append(element("p", "", request.reason), element("pre", "", JSON.stringify(request.review ?? request, null, 2)));
       const actions = element("div", "actions");
       actions.append(button("Allow once", () => command({ action: "approve", ...base, owner: request.subject.session_id, allow: true }), "primary"),
         button("Deny", () => command({ action: "approve", ...base, owner: request.subject.session_id, allow: false })));
-      form.append(actions); showDialog(key, request.action, form);
+      form.append(actions); target.show(key, request.action, form);
     }
     return;
   }
-  if (dialogKey && dialogKey !== "settings-prompt") { dialogKey = undefined; $("detail").close(); }
+  if (target.key && target.key !== "settings-prompt") target.clear();
 }
 
 
-function renderUiDetail(detail) {
+function renderUiDetail(detail, target) {
   if (!detail.model || !detail.binding) {
     const body = element("p", "hint", detail.error ?? "Loading…");
-    showDialog(`ui-loading:${detail.ticket}:${detail.error ?? ""}`, "Card details", body);
+    target.show(`ui-loading:${detail.ticket}:${detail.error ?? ""}`, "Card details", body);
     return;
   }
   const binding = JSON.stringify(detail.binding);
   const key = `ui:${binding}`;
   let body;
-  if (dialogKey === key) body = $("detail-body").firstElementChild;
-  else { body = element("div", "ui-presentation"); showDialog(key, detail.model.standard_view?.title ?? "Card details", body); }
-  rendererSlots.push({ key: "detail", surface: "dialog", root: body, binding,
+  if (target.key === key) body = target.body.firstElementChild;
+  else { body = element("div", "ui-presentation"); target.show(key, detail.model.standard_view?.title ?? "Card details", body); }
+  rendererSlots.push({ key: target.rendererKey, surface: target.surface, root: body, binding,
     snapshot: { model: detail.model, busy: detail.busy, error: detail.error },
     host: { invoke(action, input) {
       if (detail.busy || !detail.model.actions.some(item => item.name === action)) throw new Error("This action is no longer available");

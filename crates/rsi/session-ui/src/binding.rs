@@ -235,6 +235,7 @@ impl Binder {
         slot: OwnedSemaphorePermit,
     ) -> Result<UiBinding> {
         let program = ProfileProgram::from_profile(Profile::new(vec![
+            ProfileEntry::new("source", "rsi.session.ui.source", ConfigValue::Null),
             ProfileEntry::new("sink", "rsi.session.ui.sink", ConfigValue::Null),
             ProfileEntry::new(
                 "controller",
@@ -243,7 +244,7 @@ impl Binder {
             ),
             ProfileEntry::new("target", "rsi.session.ui.target", ConfigValue::Null),
         ]));
-        let host = host(origin).map_err(|_| ApiError::Unavailable)?;
+        let host = host(origin, id).map_err(|_| ApiError::Unavailable)?;
         let profile = ScopedProfile::start(&host, &self.parent, program)
             .await
             .map_err(|_| ApiError::Unavailable)?;
@@ -321,15 +322,24 @@ impl UiTargetBinder for Binding {
         receiver.await.map_err(|_| ApiError::Unavailable)?
     }
 }
-fn host(origin: CallOrigin) -> rsi_host::Result<Host> {
+fn host(origin: CallOrigin, session: SessionId) -> rsi_host::Result<Host> {
     let mut builder = HostBuilder::without_paths(std::env::consts::OS);
     let invalidation = Arc::new(Invalidation::default());
+    builder.register_local_contract::<SessionContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionSourceContract>()?;
     builder.register_local_contract::<ObservationSinkContract>()?;
     builder.register_local_contract::<SessionControllerContract>()?;
     builder.register_local_contract::<UiTargetContract>()?;
     builder.register_local_contract::<TargetLease>()?;
     builder.register_local_contract::<rsi_ui::UiBusinessApiContract>()?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 3] = [
+    let factories: [(&str, Arc<dyn PluginFactory>); 4] = [
+        (
+            "rsi.session.ui.source",
+            Arc::new(super::binding_source::SourceFactory {
+                origin: origin.clone(),
+                session,
+            }),
+        ),
         (
             "rsi.session.ui.sink",
             Arc::new(SinkFactory(invalidation.clone())),
@@ -364,7 +374,9 @@ impl PluginFactory for SessionUiBinderFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(super::no_config(config)?
             .requiring_local::<UiContract>()
-            .requiring_local::<SessionContract>()
+            .requiring_local::<rsi_session_protocol::SessionIngressContract>()
+            .requiring_local::<rsi_session_protocol::SessionReadContract>()
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<ApiDispatchContract>()
             .requiring_local::<ConnectionDescriptionContract>())
     }

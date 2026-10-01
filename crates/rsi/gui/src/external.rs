@@ -131,13 +131,11 @@ impl GuiApplication {
         pane.detach_external().await;
         let old = pane.current.lock().expect("native pane").take();
         if let Some(old) = old {
-            let detached = self
-                .details
+            self.details
                 .lock()
                 .expect("GUI details")
                 .detach(index, &old.generation.to_string());
-            let closed = old.close().await;
-            if let Err(error) = detached.and(closed) {
+            if let Err(error) = old.close().await {
                 current.controller.retire().await;
                 return Err(error);
             }

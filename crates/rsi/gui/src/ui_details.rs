@@ -7,6 +7,7 @@ impl GuiApplication {
         &self,
         index: crate::SurfaceId,
         generation: &str,
+        reopen: serde_json::Value,
     ) -> Result<(Arc<Attachment>, u64)> {
         let pane = self.pane(index)?;
         let current = pane.current.lock().expect("Web pane poisoned");
@@ -15,8 +16,12 @@ impl GuiApplication {
             .filter(|attached| attached.generation.to_string() == generation)
             .cloned()
             .ok_or("This pane changed; reopen its card")?;
-        let mut details = self.details.lock().expect("Web details poisoned");
-        let revision = details.begin()?;
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let details = registry.open(
+            Some((index, generation.into(), attached.id.clone())),
+            reopen,
+        )?;
+        let revision = details.revision;
         details.ui = Some(UiDetail {
             pane: Some(index),
             generation: Some(generation.into()),
@@ -33,10 +38,10 @@ impl GuiApplication {
         Ok((attached, revision))
     }
     fn ui_result(&self, revision: u64, result: Result<BoundView>) {
-        let mut details = self.details.lock().expect("Web details poisoned");
-        if details.revision != revision || details.stop.is_cancelled() {
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let Some(details) = registry.revision_mut(revision) else {
             return;
-        }
+        };
         let Some(detail) = &mut details.ui else {
             return;
         };
@@ -59,20 +64,14 @@ impl GuiApplication {
             }
             Err(error) => detail.error = Some(error),
         }
-        drop(details);
+        drop(registry);
         self.changed();
     }
     pub(crate) fn prune_ui(&self) {
-        let mut details = self.details.lock().expect("Web details poisoned");
-        if details
-            .ui
-            .as_ref()
-            .filter(|detail| detail.remote.is_none())
-            .and_then(|detail| detail.binding.as_ref())
-            .is_some_and(|reference| !self.ui.is_current(reference))
-        {
-            let _ = details.begin();
-        }
+        self.details
+            .lock()
+            .expect("Web details poisoned")
+            .prune_ui(|reference| self.ui.is_current(reference));
     }
     pub(crate) async fn ui_surface(
         self: &Arc<Self>,
@@ -80,7 +79,7 @@ impl GuiApplication {
         generation: &str,
         reference: &UiReference,
     ) -> Result<()> {
-        let (attached, revision) = self.ui_selection(index, generation)?;
+        let (attached, revision) = self.ui_selection(index, generation, serde_json::json!({"action":"ui_surface","pane":index,"generation":generation,"reference":reference}))?;
         if !self.ui.matches_target(&attached.ui_target, reference) {
             self.ui_result(
                 revision,
@@ -102,8 +101,12 @@ impl GuiApplication {
             return Err("This UI contribution belongs to another or retired target".into());
         }
         let revision = {
-            let mut details = self.details.lock().expect("GUI details poisoned");
-            let revision = details.begin()?;
+            let mut registry = self.details.lock().expect("GUI details poisoned");
+            let details = registry.open(
+                None,
+                serde_json::json!({"action":"application_ui_surface","reference":reference}),
+            )?;
+            let revision = details.revision;
             details.ui = Some(UiDetail {
                 pane: None,
                 generation: None,
@@ -131,10 +134,10 @@ impl GuiApplication {
         lease: Arc<rsi_ui::PresentationLease>,
     ) -> Result<()> {
         let stop = {
-            let mut details = self.details.lock().expect("Web details poisoned");
-            if details.revision != revision {
-                return Err("UI selection was replaced".into());
-            }
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry
+                .revision_mut(revision)
+                .ok_or("UI selection was replaced")?;
             let detail = details.ui.as_mut().expect("selected UI detail");
             detail.binding = Some(lease.identity().reference.clone());
             detail.lease = Some(lease.clone());
@@ -185,10 +188,10 @@ impl GuiApplication {
         result: Result<rsi_ui::SnapshotPin>,
         settled: bool,
     ) {
-        let mut details = self.details.lock().expect("Web details poisoned");
-        if details.stop.is_cancelled() {
+        let mut registry = self.details.lock().expect("Web details poisoned");
+        let Some(details) = registry.lease_mut(lease) else {
             return;
-        }
+        };
         let Some(detail) = details.ui.as_mut().filter(|detail| {
             detail
                 .lease
@@ -216,7 +219,7 @@ impl GuiApplication {
             }
             Err(failure) => detail.error = Some(failure),
         }
-        drop(details);
+        drop(registry);
         self.changed();
     }
     pub(crate) async fn ui_block(
@@ -225,7 +228,11 @@ impl GuiApplication {
         generation: &str,
         key: &str,
     ) -> Result<()> {
-        let (attached, revision) = self.ui_selection(index, generation)?;
+        let (attached, revision) = self.ui_selection(
+            index,
+            generation,
+            serde_json::json!({"action":"ui_block","pane":index,"generation":generation,"key":key}),
+        )?;
         let block = {
             let state = attached
                 .renderer
@@ -293,8 +300,9 @@ impl GuiApplication {
             .details
             .lock()
             .expect("Web details poisoned")
-            .ui
-            .as_ref()
+            .ticket(ticket)
+            .ok()
+            .and_then(|details| details.ui.as_ref())
             .is_some_and(|detail| detail.remote.is_some())
         {
             return self.remote_ui_invoke(ticket, name, input).await;
@@ -304,7 +312,8 @@ impl GuiApplication {
 
     async fn local_ui_invoke(&self, ticket: &str, name: String, input: ActionInput) -> Result<()> {
         if let Some((lease, snapshot)) = {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket(ticket)?;
             details
                 .ui
                 .as_ref()
@@ -312,11 +321,9 @@ impl GuiApplication {
                 .and_then(|detail| Some((detail.lease.clone()?, detail.snapshot.clone()?)))
         } {
             let admitted = {
-                let mut details = self.details.lock().expect("Web details poisoned");
-                let next = details
-                    .revision
-                    .checked_add(1)
-                    .ok_or("Detail generation exhausted")?;
+                let mut registry = self.details.lock().expect("Web details poisoned");
+                let details = registry.ticket_mut(ticket)?;
+                let next = details.advance()?;
                 let Some(detail) = details
                     .ui
                     .as_mut()
@@ -344,7 +351,8 @@ impl GuiApplication {
             return Ok(());
         }
         let selected = {
-            let details = self.details.lock().expect("Web details poisoned");
+            let registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket(ticket)?;
             let Some(detail) = details
                 .ui
                 .as_ref()
@@ -373,7 +381,8 @@ impl GuiApplication {
             if !self.ui.matches_target(&attached.ui_target, &reference) {
                 return Err("This UI action has retired".into());
             }
-            let mut details = self.details.lock().expect("Web details poisoned");
+            let mut registry = self.details.lock().expect("Web details poisoned");
+            let details = registry.ticket_mut(ticket)?;
             if details
                 .ui
                 .as_ref()
@@ -419,20 +428,20 @@ impl GuiApplication {
             .details
             .lock()
             .expect("Web details poisoned")
-            .ui
-            .as_ref()
+            .ticket(ticket)
+            .ok()
+            .and_then(|details| details.ui.as_ref())
             .is_some_and(|detail| detail.remote.is_some())
         {
             return self.remote_ui_source(ticket, name, offset, maximum);
         }
         let selected = {
-            let details = self.details.lock().expect("Web details poisoned");
-            details
-                .ui
-                .as_ref()
-                .filter(|detail| {
-                    detail.ticket == ticket && !detail.busy && !details.stop.is_cancelled()
-                })
+            let registry = self.details.lock().expect("Web details poisoned");
+            registry
+                .ticket(ticket)
+                .ok()
+                .and_then(|details| details.ui.as_ref().filter(|_| !details.stop.is_cancelled()))
+                .filter(|detail| detail.ticket == ticket && !detail.busy)
                 .and_then(|detail| {
                     Some((detail.lease.clone()?, detail.snapshot.as_ref()?.revision()))
                 })

@@ -43,6 +43,7 @@ impl SessionFiles for Reader {
             return Err(FilesError::Unavailable.into());
         }
         let opened = OpenedFile {
+            executable: false,
             path: path.clone(),
             kind,
             length: self
@@ -219,9 +220,9 @@ async fn open_card(app: &Arc<rsi_gui::GuiApplication>, pane: &str) {
     app.command(&json!({"action":"ui_surface","pane":pane,"generation":pane_view["generation"],"reference":menu["reference"]}).to_string()).await.unwrap();
 }
 async fn click(app: &Arc<rsi_gui::GuiApplication>, label: &str) -> Value {
-    let command = ui::button(&view(app)["ui_detail"], Some(label));
+    let command = ui::button(&super::sources::panel(app)["ui_detail"], Some(label));
     app.command(&command.to_string()).await.unwrap();
-    view(app)["ui_detail"].clone()
+    super::sources::panel(app)["ui_detail"].clone()
 }
 fn shown(detail: &Value) -> String {
     detail["model"]["standard_view"].to_string()
@@ -288,7 +289,9 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
     click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     reader.block.store(true, Ordering::SeqCst);
-    let pending = app.command(&ui::button(&view(&app)["ui_detail"], Some("Next page")).to_string());
+    let pending = app.command(
+        &ui::button(&super::sources::panel(&app)["ui_detail"], Some("Next page")).to_string(),
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while reader.active.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -296,30 +299,36 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
     })
     .await
     .unwrap();
-    let concurrent = ui::button(&view(&app)["ui_detail"], Some("Next page"));
+    let concurrent = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Next page"));
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
     assert!(matches!(
         registry
             .invoke(
-                &ui::reference(&view(&app)["ui_detail"], &concurrent["name"]),
+                &ui::reference(
+                    &super::sources::panel(&app)["ui_detail"],
+                    &concurrent["name"]
+                ),
                 serde_json::from_value(concurrent["input"].clone()).unwrap(),
             )
             .await,
         Err(rsi_ui::UiError::Capacity)
     ));
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    super::sources::close_panel(&app).await;
     pending.await.unwrap();
     assert_eq!(reader.active.load(Ordering::SeqCst), 0);
-    assert!(view(&app)["ui_detail"].is_null());
+    assert!(super::sources::panel(&app)["ui_detail"].is_null());
     reader.block.store(false, Ordering::SeqCst);
     open_card(&app, "main").await;
-    let old = ui::button(&view(&app)["ui_detail"], Some("Current snapshot"));
+    let old = ui::button(
+        &super::sources::panel(&app)["ui_detail"],
+        Some("Current snapshot"),
+    );
     let session = view(&app)["surfaces"]["main"]["session"].clone();
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let reads = reader.reads.lock().unwrap().len();
-    app.command(&old.to_string()).await.unwrap();
+    assert!(app.command(&old.to_string()).await.is_err());
     assert_eq!(reader.reads.lock().unwrap().len(), reads);
     assert!(reader.opened.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
@@ -331,8 +340,8 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     open_card(&app, "main").await;
     click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
-    let old = ui::button(&view(&app)["ui_detail"], Some("Next page"));
-    let reference = ui::reference(&view(&app)["ui_detail"], &old["name"]);
+    let old = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Next page"));
+    let reference = ui::reference(&super::sources::panel(&app)["ui_detail"], &old["name"]);
     assert!(files.dispose().await.is_clean());
     let replacement = Arc::new(Reader::default());
     let supplied = runtime
@@ -369,7 +378,7 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     assert_eq!(replacement.next.load(Ordering::SeqCst), 0);
     assert!(reader.opened.lock().unwrap().is_empty());
     open_card(&app, "main").await;
-    let mut invalid = ui::button(&view(&app)["ui_detail"], Some("Read file"));
+    let mut invalid = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Read file"));
     invalid["input"]["fields"] = json!({"path":"sample","root":"/"});
     assert!(matches!(
         registry
@@ -397,7 +406,7 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
 
 async fn open_path(app: &Arc<rsi_gui::GuiApplication>, path: &str) {
     open_card(app, "main").await;
-    let mut command = ui::button(&view(app)["ui_detail"], Some("Read file"));
+    let mut command = ui::button(&super::sources::panel(app)["ui_detail"], Some("Read file"));
     command["input"]["fields"] = json!({"path":path});
     app.command(&command.to_string()).await.unwrap();
 }
@@ -410,7 +419,7 @@ async fn missing_html_resources_are_diagnostics_not_empty_image_sources() {
         b"<h1>Still visible</h1><img src=gone.png alt=Missing>".to_vec(),
     );
     open_path(&app, "missing.html").await;
-    let model = view(&app)["ui_detail"]["model"].clone();
+    let model = super::sources::panel(&app)["ui_detail"]["model"].clone();
     assert_eq!(model["renderer"], "rsi.file-preview");
     assert_eq!(model["sources"].as_array().unwrap().len(), 2);
     assert!(
@@ -437,7 +446,7 @@ async fn rich_preview_sources_keep_version_authority_and_release_resource_tokens
         ),
     ]);
     open_path(&app, "report.md").await;
-    let detail = view(&app)["ui_detail"].clone();
+    let detail = super::sources::panel(&app)["ui_detail"].clone();
     assert_eq!(detail["model"]["renderer"], "rsi.file-preview");
     assert_eq!(detail["model"]["sources"].as_array().unwrap().len(), 3);
     assert_eq!(reader.opened.lock().unwrap().len(), 2);
@@ -472,7 +481,7 @@ async fn preview_paging_retains_resource_tokens_and_prepared_bytes_until_refresh
         (b"theme.css".to_vec(), b"body { color: green }".to_vec()),
     ]);
     open_path(&app, "report.html").await;
-    let original = view(&app)["ui_detail"]["model"].clone();
+    let original = super::sources::panel(&app)["ui_detail"]["model"].clone();
     let opens = reader.next.load(Ordering::SeqCst);
     let reads = reader.reads.lock().unwrap().len();
     reader
@@ -498,7 +507,7 @@ async fn preview_paging_retains_resource_tokens_and_prepared_bytes_until_refresh
         reads + 3,
         "only the three requested pages may be read"
     );
-    let detail = view(&app)["ui_detail"].clone();
+    let detail = super::sources::panel(&app)["ui_detail"].clone();
     let bytes = app
         .read_ui_source(
             detail["ticket"].as_str().unwrap(),
@@ -529,7 +538,7 @@ async fn cancelling_rich_preview_preparation_releases_already_opened_resources()
     ]);
     *reader.block_path.lock().unwrap() = Some(b"theme.css".to_vec());
     open_card(&app, "main").await;
-    let mut command = ui::button(&view(&app)["ui_detail"], Some("Read file"));
+    let mut command = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Read file"));
     command["input"]["fields"] = json!({"path":"report.html"});
     let pending = app.command(&command.to_string());
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -543,7 +552,7 @@ async fn cancelling_rich_preview_preparation_releases_already_opened_resources()
     })
     .await
     .unwrap();
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    super::sources::close_panel(&app).await;
     pending.await.unwrap();
     assert_eq!(reader.active.load(Ordering::SeqCst), 0);
     assert_eq!(
