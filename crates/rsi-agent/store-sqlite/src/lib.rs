@@ -118,6 +118,8 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
             session_id TEXT PRIMARY KEY NOT NULL,
             created_at_ms INTEGER NOT NULL CHECK (created_at_ms > 0),
             header_json TEXT NOT NULL,
+            coordinates_key TEXT NOT NULL,
+            last_activity_ms INTEGER NOT NULL CHECK (last_activity_ms >= created_at_ms),
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
@@ -268,7 +270,31 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 14] = [
+const EXPECTED_INDEXES: [(&str, &str); 20] = [
+    (
+        "sessions_by_location_created",
+        "CREATE INDEX sessions_by_location_created ON sessions (json_extract(coordinates_key, '$.location'), created_at_ms DESC, session_id DESC)",
+    ),
+    (
+        "sessions_by_location_activity",
+        "CREATE INDEX sessions_by_location_activity ON sessions (json_extract(coordinates_key, '$.location'), last_activity_ms DESC, session_id DESC)",
+    ),
+    (
+        "sessions_by_location_id",
+        "CREATE INDEX sessions_by_location_id ON sessions (json_extract(coordinates_key, '$.location'), session_id)",
+    ),
+    (
+        "sessions_by_activity",
+        "CREATE INDEX sessions_by_activity ON sessions (last_activity_ms DESC, session_id DESC)",
+    ),
+    (
+        "sessions_by_coordinates_activity",
+        "CREATE INDEX sessions_by_coordinates_activity ON sessions (coordinates_key, last_activity_ms DESC, session_id DESC)",
+    ),
+    (
+        "sessions_by_coordinates_id",
+        "CREATE INDEX sessions_by_coordinates_id ON sessions (coordinates_key, session_id)",
+    ),
     (
         "agent_messages_by_slot",
         "CREATE INDEX agent_messages_by_slot ON agent_messages (session_id, queue_slot_id, accepted_control_seq DESC)",
@@ -917,6 +943,7 @@ impl SqliteStore {
     }
 }
 
+mod activity;
 mod append;
 mod cas;
 mod domain;

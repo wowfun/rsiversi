@@ -69,7 +69,7 @@ fn built_binary_verify_rejects_a_snapshot_with_an_uncheckpointed_wal() {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(
-                    SessionHeader::new(
+                    SessionHeader::new_local(
                         session_id,
                         1,
                         "/workspace",

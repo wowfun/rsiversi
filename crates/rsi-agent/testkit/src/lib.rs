@@ -50,6 +50,9 @@ pub struct MemoryStore {
 struct MemoryState {
     sessions: BTreeMap<SessionId, MemorySession>,
     recent_sessions: BTreeSet<(u64, SessionId)>,
+    activity_sessions: BTreeSet<(u64, SessionId)>,
+    coordinate_activity:
+        BTreeMap<rsi_agent_session_protocol::ExecutionCoordinates, BTreeSet<(u64, SessionId)>>,
     cas: BTreeMap<String, Arc<[u8]>>,
     fact_read_cursors: Vec<u64>,
     ready_messages: BTreeMap<(SessionId, u64, SessionId, u64), StoreReadyMessage>,
@@ -62,6 +65,7 @@ struct MemoryState {
 
 #[derive(Clone, Debug)]
 struct MemorySession {
+    last_activity_ms: u64,
     header: SessionHeader,
     facts: Vec<Arc<SessionFact>>,
     turns: BTreeMap<TurnId, MemoryTurnBoundary>,
@@ -150,7 +154,9 @@ impl MemoryStore {
     }
 }
 
+mod activity_contract;
 mod contribution;
+pub use activity_contract::{assert_activity_membership_bounds, assert_activity_store_contract};
 mod domain_contract;
 mod memory_store;
 mod program_graph;

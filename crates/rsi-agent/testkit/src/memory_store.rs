@@ -19,6 +19,122 @@ use super::{
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn session_activity_summaries(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Option<rsi_agent_store_protocol::StoreActivityRow>>> {
+        rsi_agent_store_protocol::validate_activity_summaries(sessions)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(sessions
+            .iter()
+            .map(|id| {
+                state
+                    .sessions
+                    .get(id)
+                    .map(|session| rsi_agent_store_protocol::StoreActivityRow {
+                        session_id: id.clone(),
+                        coordinates: session.header.coordinates().clone(),
+                        created_at_ms: session.header.created_at_ms(),
+                        last_activity_ms: session.last_activity_ms,
+                    })
+            })
+            .collect())
+    }
+    async fn list_session_activity(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreActivityPage> {
+        use rsi_agent_store_protocol::{StoreActivityCursor, StoreActivityPage, StoreActivityRow};
+        use std::ops::Bound::{Excluded, Unbounded};
+        validate_session_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let empty = BTreeSet::new();
+        let entries = coordinates.map_or(&state.activity_sessions, |coordinates| {
+            state.coordinate_activity.get(coordinates).unwrap_or(&empty)
+        });
+        let newest = entries
+            .iter()
+            .rev()
+            .find(|(_, id)| locations.contains(state.sessions[id].header.coordinates().location()))
+            .map(|(time, id)| StoreActivityCursor {
+                last_activity_ms: *time,
+                session_id: id.clone(),
+            });
+        let end = after.map_or(Unbounded, |cursor| {
+            Excluded((cursor.last_activity_ms, cursor.session_id.clone()))
+        });
+        let mut sessions = entries
+            .range((Unbounded, end))
+            .rev()
+            .filter(|(_, id)| {
+                locations.contains(state.sessions[id].header.coordinates().location())
+            })
+            .take(limit + 1)
+            .map(|(time, id)| {
+                let session = &state.sessions[id];
+                StoreActivityRow {
+                    session_id: id.clone(),
+                    coordinates: session.header.coordinates().clone(),
+                    created_at_ms: session.header.created_at_ms(),
+                    last_activity_ms: *time,
+                }
+            })
+            .collect::<Vec<_>>();
+        let has_more = sessions.len() > limit;
+        sessions.truncate(limit);
+        let page = StoreActivityPage {
+            after: after.cloned(),
+            sessions,
+            has_more,
+            newest,
+        };
+        page.validate(coordinates, limit)?;
+        Ok(page)
+    }
+    async fn session_order_seed(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+    ) -> Result<rsi_agent_store_protocol::StoreOrderSeed> {
+        use rsi_agent_store_protocol::{MAXIMUM_ORDER_MEMBERS, StoreOrderSeed};
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut members = state
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                coordinates.is_none_or(|coordinates| session.header.coordinates() == coordinates)
+                    && locations.contains(session.header.coordinates().location())
+            })
+            .map(|(id, _)| id.clone())
+            .take(MAXIMUM_ORDER_MEMBERS + 1)
+            .collect::<Vec<_>>();
+        members.sort();
+        StoreOrderSeed::from_members(
+            members
+                .into_iter()
+                .map(|id| {
+                    let coordinates = state.sessions[&id].header.coordinates().clone();
+                    (
+                        id.clone(),
+                        coordinates,
+                        state.sessions[&id].last_activity_ms,
+                    )
+                })
+                .collect(),
+        )
+    }
     async fn list_program_notices(
         &self,
         after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
@@ -293,6 +409,8 @@ impl SessionStore for MemoryStore {
 
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
+        let activity =
+            rsi_agent_store_protocol::appended_activity(batch.header.as_ref(), &batch.facts, &[]);
         if self.should_fail_append() {
             return Err(StoreError::Io("injected append failure".into()));
         }
@@ -315,16 +433,20 @@ impl SessionStore for MemoryStore {
             }
             let (turn_updates, fact_prefix_digest) =
                 index_appended_turns(&session.turns, &batch.facts, session.fact_prefix_digest)?;
+            let previous = session.last_activity_ms;
+            session.last_activity_ms = previous.max(activity);
             session.facts.extend(batch.facts);
             session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
-            Ok(AppendCommit {
+            let commit = AppendCommit {
                 durable_seq: session
                     .facts
                     .last()
                     .expect("a validated append is nonempty")
                     .seq(),
-            })
+            };
+            index_activity(&mut state, &batch.session_id, Some(previous));
+            Ok(commit)
         } else {
             if batch.header.is_none() {
                 return Err(StoreError::NotFound(batch.session_id.to_string()));
@@ -360,8 +482,9 @@ impl SessionStore for MemoryStore {
                 );
             }
             state.sessions.insert(
-                batch.session_id,
+                batch.session_id.clone(),
                 MemorySession {
+                    last_activity_ms: activity,
                     header,
                     facts: batch.facts,
                     turns,
@@ -377,6 +500,7 @@ impl SessionStore for MemoryStore {
                     domain_usage: BTreeMap::new(),
                 },
             );
+            index_activity(&mut state, &batch.session_id, None);
             Ok(AppendCommit { durable_seq })
         }
     }
@@ -1050,6 +1174,7 @@ impl SessionStore for MemoryStore {
 
     async fn list_recent_sessions(
         &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
     ) -> Result<StoreRecentSessionPage> {
@@ -1066,6 +1191,17 @@ impl SessionStore for MemoryStore {
                 after.is_none_or(|after| {
                     (*created_at_ms, session_id) < (after.created_at_ms, &after.session_id)
                 })
+            })
+            .filter(|(_, id)| {
+                locations.contains(
+                    state
+                        .sessions
+                        .get(id)
+                        .expect("indexed Session")
+                        .header
+                        .coordinates()
+                        .location(),
+                )
             })
             .take(limit + 1)
             .map(|(_, session_id)| StoreRecentSession {
@@ -1660,6 +1796,15 @@ fn apply_atomic_memory_append(
     state: &mut MemoryState,
     append: AtomicSessionAppend,
 ) -> Result<StoreSessionWatermarks> {
+    let activity = rsi_agent_store_protocol::appended_activity(
+        append.header.as_ref(),
+        &append.facts,
+        &append.controls,
+    );
+    let previous = state
+        .sessions
+        .get(&append.session_id)
+        .map(|session| session.last_activity_ms);
     let session_id = append.session_id.clone();
     let minimum_entered_fact_seq = append
         .expected_fact_seq
@@ -1696,6 +1841,7 @@ fn apply_atomic_memory_append(
                     advance_control_prefix_digest(digest, record)
                         .map_err(|error| StoreError::Invalid(error.to_string()))
                 })?;
+        session.last_activity_ms = session.last_activity_ms.max(activity);
         session.facts.extend(append.facts);
         session.turns.extend(turn_updates);
         session.fact_prefix_digest = fact_digest;
@@ -1732,6 +1878,7 @@ fn apply_atomic_memory_append(
         state.sessions.insert(
             session_id.clone(),
             MemorySession {
+                last_activity_ms: activity,
                 header,
                 facts: append.facts,
                 turns,
@@ -1810,11 +1957,13 @@ fn apply_atomic_memory_append(
         boundary.terminal_control =
             Some((record.seq(), hex::encode(session.control_prefix_digest)));
     }
-    Ok(StoreSessionWatermarks {
-        session_id,
+    let result = StoreSessionWatermarks {
+        session_id: session_id.clone(),
         durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
-    })
+    };
+    index_activity(state, &session_id, previous);
+    Ok(result)
 }
 
 fn apply_program_updates(
@@ -2683,4 +2832,19 @@ fn memory_completion_reservations(state: &MemoryState, parent: &SessionId) -> us
                 .filter(|(head, _)| !head.terminal)
                 .count()
         })
+}
+
+fn index_activity(state: &mut MemoryState, session_id: &SessionId, previous: Option<u64>) {
+    let session = &state.sessions[session_id];
+    let coordinates = session.header.coordinates().clone();
+    let entries = state.coordinate_activity.entry(coordinates).or_default();
+    if let Some(previous) = previous {
+        state
+            .activity_sessions
+            .remove(&(previous, session_id.clone()));
+        entries.remove(&(previous, session_id.clone()));
+    }
+    let key = (session.last_activity_ms, session_id.clone());
+    state.activity_sessions.insert(key.clone());
+    entries.insert(key);
 }

@@ -232,8 +232,10 @@ impl Ui {
                         revision: grants.revision.clone(),
                         scope: wire::Grant {
                             principal,
-                            target: target.clone(),
-                            operation: *kind,
+                            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                                target: target.clone(),
+                                operation: *kind,
+                            },
                         },
                         granted: true,
                     },

@@ -11,6 +11,7 @@ use rsi_agent_session_protocol::{
     MessageDelivery, MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody,
     SessionHeader, SessionId, StepId, TurnId, validate_control_sequence, validate_fact_sequence,
 };
+pub use rsi_execution_protocol::ExecutionLocations;
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +19,9 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod activity;
 mod domain;
+pub use activity::*;
 mod queue;
 pub use queue::{validate_queue_successor, validate_queue_suffix, validate_queue_withdrawal};
 mod program;
@@ -39,7 +42,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 28;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 31;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1823,6 +1826,26 @@ impl fmt::Debug for SessionValidationLease {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
+    /// Reads up to 64 exact indexed summaries in one snapshot, preserving input order.
+    /// Missing identities return None; no Header or transcript body is read.
+    async fn session_activity_summaries(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Option<StoreActivityRow>>>;
+    /// Reads live activity metadata in one snapshot without history or Header bodies.
+    async fn list_session_activity(
+        &self,
+        locations: &rsi_execution_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        after: Option<&StoreActivityCursor>,
+        limit: usize,
+    ) -> Result<StoreActivityPage>;
+    /// Reads complete bounded group membership in one snapshot, or explicit overflow.
+    async fn session_order_seed(
+        &self,
+        locations: &rsi_execution_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+    ) -> Result<StoreOrderSeed>;
     /// Validates the selected history and retains its proof through dependent reads.
     /// Call before acquiring a payload materialization reservation.
     async fn prepare_session(&self, session_id: &SessionId) -> Result<SessionValidationLease>;
@@ -2005,6 +2028,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Lists at most `limit` sessions after an exclusive creation-time-descending cursor.
     async fn list_recent_sessions(
         &self,
+        locations: &ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
     ) -> Result<StoreRecentSessionPage>;

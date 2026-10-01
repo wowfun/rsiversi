@@ -10,7 +10,7 @@ use rsi_ai_protocol::{ContentDelta, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, Mo
 use rsi_sandbox::SandboxMode;
 
 fn header() -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("memory-session").unwrap(),
         1,
         "/workspace",
@@ -305,4 +305,16 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
 async fn queue_store_atomic_order_and_receipt_contract() {
     let store = MemoryStore::new();
     rsi_agent_testkit::assert_queue_store_contract(&store, header()).await;
+}
+
+#[tokio::test]
+async fn memory_activity_is_indexed_isolated_and_atomic() {
+    let store = MemoryStore::new();
+    rsi_agent_testkit::assert_activity_store_contract(&store, &header()).await;
+}
+
+#[tokio::test]
+async fn memory_activity_membership_is_complete_at_64_65_and_1024_and_rejects_1025() {
+    let store = MemoryStore::new();
+    rsi_agent_testkit::assert_activity_membership_bounds(&store, &header()).await;
 }

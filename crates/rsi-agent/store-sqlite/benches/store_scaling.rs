@@ -234,7 +234,7 @@ async fn append_session(
 }
 
 fn header(session_id: SessionId) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         session_id,
         1,
         "/workspace",
@@ -332,7 +332,11 @@ async fn benchmark_metadata(sessions: usize) {
                 let mut after = None;
                 loop {
                     let page = store
-                        .list_recent_sessions(after.as_ref(), 256)
+                        .list_recent_sessions(
+                            &rsi_agent_store_protocol::ExecutionLocations::all(),
+                            after.as_ref(),
+                            256,
+                        )
                         .await
                         .unwrap();
                     if !page.has_more {
@@ -422,8 +426,9 @@ async fn benchmark_metadata(sessions: usize) {
                     required_active_activations: Vec::new(),
                     quiescent_descendants_of: None,
                 };
+                let locations = rsi_agent_store_protocol::ExecutionLocations::all();
                 let (read, write) = tokio::join!(
-                    store.list_recent_sessions(None, 256),
+                    store.list_recent_sessions(&locations, None, 256),
                     store.commit_agent(commit)
                 );
                 black_box(read.unwrap());

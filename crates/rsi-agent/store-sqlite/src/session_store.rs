@@ -46,6 +46,32 @@ const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_mess
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn session_activity_summaries(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<Vec<Option<rsi_agent_store_protocol::StoreActivityRow>>>
+    {
+        self.activity_summaries(sessions).await
+    }
+
+    async fn list_session_activity(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreActivityPage> {
+        self.activity_page(locations, coordinates, after, limit)
+            .await
+    }
+    async fn session_order_seed(
+        &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
+        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+    ) -> Result<rsi_agent_store_protocol::StoreOrderSeed> {
+        self.order_seed(locations, coordinates).await
+    }
+
     async fn list_program_notices(
         &self,
         after: Option<&rsi_agent_store_protocol::StoreProgramNotice>,
@@ -172,6 +198,15 @@ impl SessionStore for SqliteStore {
                     insert_fact(&transaction, &batch.session_id, fact)?;
                 }
                 let durable_seq = advance_watermark(&transaction, &batch)?;
+                super::activity::advance_activity(
+                    &transaction,
+                    &batch.session_id,
+                    rsi_agent_store_protocol::appended_activity(
+                        batch.header.as_ref(),
+                        &batch.facts,
+                        &[],
+                    ),
+                )?;
                 transaction.commit().map_err(sql_error)?;
                 Ok(AppendCommit { durable_seq })
             })
@@ -1195,56 +1230,37 @@ impl SessionStore for SqliteStore {
 
     async fn list_recent_sessions(
         &self,
+        locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
     ) -> Result<StoreRecentSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
+        let locations = locations.clone();
         let after = after.cloned();
         let page = self
             .with_reader(move |connection| {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(sql_error)?;
-                let sqlite_limit = i64::try_from(limit + 1)
-                    .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
+                let (sql, parameters) = crate::activity::ordered_query(
+                    &locations,
+                    None,
+                    crate::activity::Ordering::Created,
+                    after
+                        .as_ref()
+                        .map(|cursor| (cursor.created_at_ms, &cursor.session_id)),
+                    limit + 1,
+                )?;
                 let mut projections = Vec::with_capacity(limit + 1);
-                if let Some(after) = &after {
-                    let mut statement = transaction
-                        .prepare(
-                            "SELECT session_id, created_at_ms FROM sessions
-                         WHERE (created_at_ms, session_id) < (?1, ?2)
-                         ORDER BY created_at_ms DESC, session_id DESC LIMIT ?3",
-                        )
-                        .map_err(sql_error)?;
+                {
+                    let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
                     let rows = statement
-                        .query_map(
-                            params![
-                                sqlite_u64("recent-session cursor timestamp", after.created_at_ms)?,
-                                after.session_id.as_str(),
-                                sqlite_limit,
-                            ],
-                            |row| Ok((bounded_text(row, 0, 256)?, row.get::<_, i64>(1)?)),
-                        )
-                        .map_err(sql_error)?;
-                    for row in rows {
-                        let (session_id, created_at_ms) = row.map_err(sql_error)?;
-                        projections.push((session_id, created_at_ms));
-                    }
-                } else {
-                    let mut statement = transaction
-                        .prepare(
-                            "SELECT session_id, created_at_ms FROM sessions
-                         ORDER BY created_at_ms DESC, session_id DESC LIMIT ?1",
-                        )
-                        .map_err(sql_error)?;
-                    let rows = statement
-                        .query_map([sqlite_limit], |row| {
-                            Ok((bounded_text(row, 0, 256)?, row.get::<_, i64>(1)?))
+                        .query_map(rusqlite::params_from_iter(parameters), |row| {
+                            Ok((bounded_text(row, 0, 256)?, row.get::<_, i64>(2)?))
                         })
                         .map_err(sql_error)?;
                     for row in rows {
-                        let (session_id, created_at_ms) = row.map_err(sql_error)?;
-                        projections.push((session_id, created_at_ms));
+                        projections.push(row.map_err(sql_error)?);
                     }
                 }
                 let has_more = projections.len() > limit;

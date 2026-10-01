@@ -3,10 +3,11 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 use async_trait::async_trait;
-use futures_util::{StreamExt, future::BoxFuture};
-use rsi_agent_session_protocol::SessionId;
+use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
+use rsi_agent_session_protocol::{ExecutionCoordinates, SessionId};
+use rsi_agent_store_protocol::{SessionStore, SessionStoreContract};
 use rsi_api_protocol::{
-    ApiError, ApiRegistrarContract, ConnectionDescriptionContract, HostEpoch, Result,
+    ApiError, ApiRegistrarContract, CallOrigin, ConnectionDescriptionContract, HostEpoch, Result,
 };
 use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, LocalContract, MetaError, PluginFactory,
@@ -17,12 +18,14 @@ use rsi_navigation_api::{
     PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
 };
 use rsi_session_protocol::{SessionContract, SessionError, SessionService};
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::storage_error;
+use rsi_storage_domain::{
+    Domain, DomainFacilityContract, DomainSpec, RecordObjectSize, encoded_entry_bytes,
+};
 use rsi_workspace_protocol::{
     WorkspaceError, WorkspaceId, WorkspaceRegistry, WorkspaceRegistryContract,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -31,6 +34,7 @@ use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 mod attention;
 mod endpoint;
+mod order;
 pub use attention::AttentionFactory;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -38,23 +42,26 @@ pub use attention::AttentionFactory;
 struct Document {
     revision: u64,
     records: BTreeMap<SessionId, SessionMetadata>,
+    #[serde(skip)]
+    accounting: Option<MetadataSize>,
 }
-impl Document {
-    fn validate(&self) -> Result<()> {
-        for record in self.records.values() {
-            record.validate()?;
-        }
-        if self.records.values().filter(|record| record.pinned).count() > 64 {
+#[derive(Clone, Copy, Debug, Default)]
+struct MetadataSize {
+    records: RecordObjectSize,
+    pins: usize,
+}
+impl MetadataSize {
+    fn check(self, revision: u64) -> Result<()> {
+        if self.pins > 64 {
             return Err(ApiError::Invalid(
                 "at most 64 sessions may be pinned".into(),
             ));
         }
-        if self.records.len() > 8192
-            || serde_json::to_vec(&serde_json::json!({"metadata":self}))
-                .map_err(|_| ApiError::Invalid("invalid navigation document".into()))?
-                .len()
-                > 8 * 1024 * 1024
-        {
+        // The Domain record wrapper is intentional: it counts toward the 8 MiB bound.
+        let bytes = b"{\"metadata\":{\"revision\":,\"records\":}}".len()
+            + revision.to_string().len()
+            + self.records.bytes();
+        if self.records.records() > 8192 || bytes > 8 * 1024 * 1024 {
             return Err(ApiError::Invalid(
                 "navigation metadata exceeds 8192 records or 8 MiB".into(),
             ));
@@ -62,10 +69,73 @@ impl Document {
         Ok(())
     }
 }
+fn metadata_bytes(id: &SessionId, metadata: &SessionMetadata) -> Result<usize> {
+    encoded_entry_bytes(
+        id.as_str(),
+        serde_json::to_vec(metadata)
+            .map_err(|_| ApiError::Invalid("invalid navigation metadata".into()))?
+            .len(),
+    )
+    .map_err(storage_error)
+}
+impl Document {
+    fn validate(&mut self) -> Result<()> {
+        let mut accounting = MetadataSize::default();
+        for (id, record) in &self.records {
+            record.validate()?;
+            accounting.records = accounting
+                .records
+                .with_entry(None, metadata_bytes(id, record)?)
+                .map_err(storage_error)?;
+            accounting.pins += usize::from(record.pinned);
+        }
+        accounting.check(self.revision)?;
+        self.accounting = Some(accounting);
+        Ok(())
+    }
+    fn edit(&mut self, session: &SessionId, metadata: &SessionMetadata) -> Result<()> {
+        if self.accounting.is_none() {
+            self.validate()?;
+        }
+        let mut accounting = self.accounting.expect("validated metadata accounting");
+        let previous = self.records.get(session);
+        let previous_bytes = previous
+            .map(|old| metadata_bytes(session, old))
+            .transpose()?;
+        accounting.pins -= usize::from(previous.is_some_and(|old| old.pinned));
+        let remove = *metadata == SessionMetadata::default();
+        if remove {
+            if let Some(bytes) = previous_bytes {
+                accounting.records = accounting
+                    .records
+                    .without_entry(bytes)
+                    .map_err(storage_error)?;
+            }
+        } else {
+            accounting.records = accounting
+                .records
+                .with_entry(previous_bytes, metadata_bytes(session, metadata)?)
+                .map_err(storage_error)?;
+            accounting.pins += usize::from(metadata.pinned);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
+        accounting.check(revision)?;
+        if remove {
+            self.records.remove(session);
+        } else {
+            self.records.insert(session.clone(), metadata.clone());
+        }
+        self.revision = revision;
+        self.accounting = Some(accounting);
+        Ok(())
+    }
+}
 #[derive(Debug)]
 struct State {
     closed: bool,
-    uncertain: bool,
     document: Arc<Document>,
 }
 /// One Host's navigation owner; it never owns Session execution.
@@ -73,6 +143,8 @@ struct State {
 pub struct Navigation {
     domain: Arc<dyn Domain>,
     session: Arc<dyn SessionService>,
+    resolver: Arc<dyn rsi_execution::ExecutionResolver>,
+    store: Arc<dyn SessionStore>,
     workspace: Arc<dyn WorkspaceRegistry>,
     epoch: HostEpoch,
     state: Mutex<State>,
@@ -86,12 +158,10 @@ impl Navigation {
         self: &Arc<Self>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
     ) -> Result<BoxFuture<'static, Result<T>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
         let state = self.state.lock().expect("navigation state poisoned");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.uncertain {
-            return Err(ApiError::OutcomeUnknown);
         }
         let permit = self
             .slots
@@ -111,61 +181,113 @@ impl Navigation {
     /// Admits a bounded filtered scan; empty results may still have a continuation.
     pub fn query(
         self: &Arc<Self>,
+        origin: &CallOrigin,
         filter: NavigationFilter,
         after: Option<NavigationCursor>,
     ) -> Result<BoxFuture<'static, Result<NavigationPage>>> {
         filter.validate()?;
-        self.run(move |owner| Box::pin(async move { owner.scan(filter, after).await }))
+        let visibility = self.resolver.visibility(origin)?;
+        self.run(move |owner| Box::pin(async move { owner.scan(visibility, filter, after).await }))
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded scan keeps visibility, cursor and per-page workspace lookup together"
+    )]
     async fn scan(
         &self,
+        visibility: rsi_execution::ExecutionVisibility,
         filter: NavigationFilter,
         after: Option<NavigationCursor>,
     ) -> Result<NavigationPage> {
-        let document = self
-            .state
-            .lock()
-            .expect("navigation state poisoned")
-            .document
-            .clone();
+        self.domain.ensure_available().map_err(storage_error)?;
+        let document = self.document();
         if let Some(after) = &after
             && (after.filter != filter
                 || after.host_epoch != self.epoch
                 || revision(&after.metadata_revision)? != document.revision
-                || after.after.created_at_ms == 0)
+                || after.after.last_activity_ms == 0)
         {
             return Err(ApiError::Invalid(
                 "navigation changed; refresh this search".into(),
             ));
         }
+        let coordinates = match &filter.workspace {
+            WorkspaceFilter::Registered { id } => {
+                let record = match self.workspace.get(id).await {
+                    Ok(record) => record,
+                    Err(WorkspaceError::Unknown(_)) => {
+                        return Ok(NavigationPage {
+                            metadata_revision: document.revision.to_string(),
+                            newest: None,
+                            entries: Vec::new(),
+                            scanned: 0,
+                            next: None,
+                        });
+                    }
+                    Err(_) => return Err(ApiError::Unavailable),
+                };
+                if !visibility
+                    .locations()
+                    .contains(record.coordinates.location())
+                {
+                    return Err(ApiError::Unauthorized);
+                }
+                Some(record.coordinates)
+            }
+            _ => None,
+        };
         let page = self
-            .session
-            .list_recent(after.as_ref().map(|after| &after.after), 256)
+            .store
+            .list_session_activity(
+                visibility.locations(),
+                coordinates.as_ref(),
+                after.as_ref().map(|after| &after.after),
+                256,
+            )
             .await
-            .map_err(session_error)?;
+            .map_err(|_| ApiError::Unavailable)?;
         let mut entries = Vec::new();
         let mut scanned = 0;
         let mut cursor = None;
         let query = filter.query.to_lowercase();
-        for row in &page.sessions {
+        let default_metadata = SessionMetadata::default();
+        let lookups = self.workspace_lookups(page.sessions.iter().map(|row| {
+            let metadata = document
+                .records
+                .get(&row.session_id)
+                .unwrap_or(&default_metadata);
+            (metadata.archived == filter.archived
+                && !metadata.pinned
+                && matches_query(
+                    &query,
+                    &row.session_id,
+                    metadata,
+                    Some(row.coordinates.path()),
+                ))
+            .then_some(&row.coordinates)
+        }));
+        let mut rows = stream::iter(&page.sessions).zip(lookups);
+        while let Some((row, workspace)) = rows.next().await {
             scanned += 1;
             cursor = Some(row.cursor());
-            let id = row.header.session_id();
+            let id = &row.session_id;
             let metadata = document.records.get(id).cloned().unwrap_or_default();
             if metadata.archived != filter.archived || metadata.pinned {
                 continue;
             }
-            let path = row.header.canonical_cwd();
+            let path = row.coordinates.path();
             if !matches_query(&query, id, &metadata, Some(path)) {
                 continue;
             }
-            let workspace = self.workspace_for(path).await?;
+            let workspace = workspace?;
             if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
             entries.push(NavigationEntry {
                 session: id.clone(),
-                created_at_ms: row.header.created_at_ms().to_string(),
+                created_at_ms: row.created_at_ms.to_string(),
+                last_activity_ms: row.last_activity_ms.to_string(),
+                location: row.coordinates.location().clone(),
                 path: path.into(),
                 workspace,
                 metadata,
@@ -174,8 +296,10 @@ impl Navigation {
                 break;
             }
         }
+        drop(rows);
         let more = scanned < page.sessions.len() || page.has_more;
         Ok(NavigationPage {
+            newest: page.newest,
             metadata_revision: document.revision.to_string(),
             entries,
             scanned: u16::try_from(scanned).expect("bounded Session page"),
@@ -191,26 +315,57 @@ impl Navigation {
             },
         })
     }
-    async fn workspace_for(&self, path: &str) -> Result<Option<WorkspaceId>> {
-        let derived = WorkspaceId::parse(hex::encode(sha2::Sha256::digest(path.as_bytes())))
-            .map_err(|_| ApiError::Backend("invalid Session workspace identity".into()))?;
+    async fn workspace_for(
+        &self,
+        coordinates: &ExecutionCoordinates,
+    ) -> Result<Option<WorkspaceId>> {
+        let derived = WorkspaceId::from_coordinates(coordinates);
         match self.workspace.get(&derived).await {
             Ok(record) => Ok(Some(record.id)),
             Err(WorkspaceError::Unknown(_)) => Ok(None),
             Err(_) => Err(ApiError::Unavailable),
         }
     }
-    /// Reads all pinned Headers with no attach or activity side effects.
+    // Shared futures retain one result per coordinate without starting unpolled lookups.
+    fn workspace_lookups<'a>(
+        &'a self,
+        coordinates: impl IntoIterator<Item = Option<&'a ExecutionCoordinates>>,
+    ) -> stream::BoxStream<'a, Result<Option<WorkspaceId>>> {
+        let mut distinct = BTreeMap::new();
+        let reads = coordinates
+            .into_iter()
+            .map(|coordinates| {
+                let read = coordinates.map(|coordinates| {
+                    distinct
+                        .entry(coordinates.clone())
+                        .or_insert_with(|| self.workspace_for(coordinates).boxed().shared())
+                        .clone()
+                });
+                async move {
+                    match read {
+                        Some(read) => read.await,
+                        None => Ok(None),
+                    }
+                }
+                .boxed()
+            })
+            .collect::<Vec<_>>();
+        stream::iter(reads).buffered(4).boxed()
+    }
+    /// Reads all pinned summaries with no attach or activity side effects.
     ///
     /// # Panics
     /// Panics if a prior panic poisoned navigation state.
     pub fn pinned(
         self: &Arc<Self>,
+        origin: CallOrigin,
         filter: NavigationFilter,
     ) -> Result<BoxFuture<'static, Result<PinnedPage>>> {
         filter.validate()?;
+        let visibility = self.resolver.visibility(&origin)?;
         self.run(move |owner| {
             Box::pin(async move {
+                owner.domain.ensure_available().map_err(storage_error)?;
                 let document = owner
                     .state
                     .lock()
@@ -220,52 +375,70 @@ impl Navigation {
                 let mut available = Vec::new();
                 let mut missing = Vec::new();
                 let query = filter.query.to_lowercase();
-                let reads: Vec<_> = document
+                let selected = document
                     .records
                     .iter()
                     .filter(|(_, metadata)| metadata.pinned && metadata.archived == filter.archived)
-                    .map(|(id, metadata)| {
-                        let session = owner.session.clone();
-                        let id = id.clone();
-                        let metadata = metadata.clone();
-                        async move {
-                            let result = session.read_header(&id).await;
-                            (id, metadata, result)
+                    .map(|(id, metadata)| (id.clone(), metadata.clone()))
+                    .collect::<Vec<_>>();
+                let ids = selected
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                let rows = owner
+                    .store
+                    .session_activity_summaries(&ids)
+                    .await
+                    .map_err(|_| ApiError::Unavailable)?;
+                let lookups = owner.workspace_lookups(rows.iter().zip(&selected).map(
+                    |(row, (id, metadata))| {
+                        row.as_ref()
+                            .filter(|row| {
+                                visibility.locations().contains(row.coordinates.location())
+                                    && matches_query(
+                                        &query,
+                                        id,
+                                        metadata,
+                                        Some(row.coordinates.path()),
+                                    )
+                            })
+                            .map(|row| &row.coordinates)
+                    },
+                ));
+                let mut rows = stream::iter(selected.iter().zip(&rows)).zip(lookups);
+                while let Some((((id, metadata), row), workspace)) = rows.next().await {
+                    let Some(row) = row else {
+                        if matches!(origin, CallOrigin::Local)
+                            && filter.workspace == WorkspaceFilter::All
+                            && matches_query(&query, id, metadata, None)
+                        {
+                            missing.push(PinnedEntry::Missing {
+                                session: id.clone(),
+                                metadata: metadata.clone(),
+                            });
                         }
-                    })
-                    .collect();
-                let mut headers = futures_util::stream::iter(reads).buffered(4);
-                while let Some((id, metadata, result)) = headers.next().await {
-                    let header = match result {
-                        Ok(header) => header,
-                        Err(SessionError::NotFound(_)) => {
-                            if filter.workspace == WorkspaceFilter::All
-                                && matches_query(&query, &id, &metadata, None)
-                            {
-                                missing.push(PinnedEntry::Missing {
-                                    session: id.clone(),
-                                    metadata: metadata.clone(),
-                                });
-                            }
-                            continue;
-                        }
-                        Err(error) => return Err(session_error(error)),
+                        continue;
                     };
-                    let path = header.canonical_cwd();
-                    if !matches_query(&query, &id, &metadata, Some(path)) {
+                    if !visibility.locations().contains(row.coordinates.location()) {
                         continue;
                     }
-                    let workspace = owner.workspace_for(path).await?;
+                    let path = row.coordinates.path();
+                    if !matches_query(&query, id, metadata, Some(path)) {
+                        continue;
+                    }
+                    let workspace = workspace?;
                     if !filter.workspace.matches(workspace.as_ref()) {
                         continue;
                     }
                     available.push((
-                        header.created_at_ms(),
+                        row.last_activity_ms,
                         id.clone(),
                         PinnedEntry::Available {
                             entry: NavigationEntry {
                                 session: id.clone(),
-                                created_at_ms: header.created_at_ms().to_string(),
+                                created_at_ms: row.created_at_ms.to_string(),
+                                last_activity_ms: row.last_activity_ms.to_string(),
+                                location: row.coordinates.location().clone(),
                                 path: path.into(),
                                 workspace,
                                 metadata: metadata.clone(),
@@ -289,6 +462,7 @@ impl Navigation {
     /// Panics if an earlier panic poisoned this owner's state lock.
     pub fn replace(
         self: &Arc<Self>,
+        origin: CallOrigin,
         session: SessionId,
         expected: &str,
         mut metadata: SessionMetadata,
@@ -318,25 +492,25 @@ impl Navigation {
                         "navigation revision conflict; refresh before editing".into(),
                     ));
                 }
-                match owner.session.read_header(&session).await {
-                    Ok(_) => {}
+                let _admission = match owner.session.read_header(&session).await {
+                    Ok(header) => Some(
+                        owner
+                            .resolver
+                            .admit(&origin, header.coordinates().location())?,
+                    ),
                     Err(SessionError::NotFound(_))
-                        if document.records.get(&session).is_some_and(|old| {
-                            metadata == SessionMetadata::default() || old.pinned && !metadata.pinned
-                        }) => {}
+                        if matches!(origin, CallOrigin::Local)
+                            && document.records.get(&session).is_some_and(|old| {
+                                metadata == SessionMetadata::default()
+                                    || old.pinned && !metadata.pinned
+                            }) =>
+                    {
+                        None
+                    }
                     Err(error) => return Err(session_error(error)),
-                }
-                if metadata == SessionMetadata::default() {
-                    document.records.remove(&session);
-                } else {
-                    document.records.insert(session.clone(), metadata.clone());
-                }
-                document.revision = document
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
-                document.validate()?;
-                if owner
+                };
+                document.edit(&session, &metadata)?;
+                owner
                     .domain
                     .put(
                         "metadata",
@@ -344,15 +518,7 @@ impl Navigation {
                             .map_err(|_| ApiError::Invalid("invalid navigation document".into()))?,
                     )
                     .await
-                    .is_err()
-                {
-                    owner
-                        .state
-                        .lock()
-                        .expect("navigation state poisoned")
-                        .uncertain = true;
-                    return Err(ApiError::OutcomeUnknown);
-                }
+                    .map_err(storage_error)?;
                 let receipt = MetadataReceipt {
                     revision: document.revision.to_string(),
                     session,
@@ -413,6 +579,8 @@ impl PluginFactory for NavigationFactory {
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<DomainFacilityContract>()
             .requiring_local::<SessionContract>()
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
+            .requiring_local::<SessionStoreContract>()
             .requiring_local::<WorkspaceRegistryContract>()
             .requiring_local::<ConnectionDescriptionContract>()
             .requiring_local::<ApiRegistrarContract>())
@@ -431,11 +599,11 @@ impl PluginFactory for NavigationFactory {
             })
             .await
             .map_err(activation)?;
-        let mut records = domain.snapshot().await;
+        let mut records = domain.snapshot().await.map_err(activation)?;
         if records.len() > 1 || records.keys().any(|key| key != "metadata") {
             return Err(MetaError::Activation("invalid navigation records".into()));
         }
-        let document: Document = records
+        let mut document: Document = records
             .remove("metadata")
             .map_or_else(|| Ok(Document::default()), serde_json::from_value)
             .map_err(|_| MetaError::Activation("invalid navigation document".into()))?;
@@ -443,6 +611,8 @@ impl PluginFactory for NavigationFactory {
         let owner = Arc::new(Navigation {
             domain,
             session: plan.local::<SessionContract>()?,
+            resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
+            store: plan.local::<SessionStoreContract>()?,
             workspace: plan.local::<WorkspaceRegistryContract>()?,
             epoch: plan
                 .local::<ConnectionDescriptionContract>()?
@@ -450,7 +620,6 @@ impl PluginFactory for NavigationFactory {
                 .clone(),
             state: Mutex::new(State {
                 closed: false,
-                uncertain: false,
                 document: Arc::new(document),
             }),
             slots: Arc::new(Semaphore::new(8)),

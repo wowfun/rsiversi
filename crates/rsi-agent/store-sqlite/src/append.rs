@@ -109,14 +109,15 @@ pub(super) fn apply_atomic_sqlite_append(
                 .execute(
                     "INSERT INTO sessions
                         (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
-                         control_seq, control_prefix_sha256)
-                     VALUES (?1, ?2, ?3, 0, ?4, 0, ?5)",
+                         control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
+                     VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
                     params![
                         append.session_id.as_str(),
                         sqlite_u64("session creation timestamp", header.created_at_ms())?,
                         encode_json("session header", header)?,
                         hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                         hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
+                        super::activity::coordinates_key(header.coordinates())?,
                     ],
                 )
                 .map_err(sql_error)?;
@@ -267,6 +268,15 @@ pub(super) fn apply_atomic_sqlite_append(
             "SQLite lost an atomic Agent commit predicate".into(),
         ));
     }
+    super::activity::advance_activity(
+        transaction,
+        &append.session_id,
+        rsi_agent_store_protocol::appended_activity(
+            append.header.as_ref(),
+            &append.facts,
+            &append.controls,
+        ),
+    )?;
     Ok(StoreSessionWatermarks {
         session_id: append.session_id,
         durable_fact_seq,
@@ -1068,14 +1078,15 @@ pub(super) fn admit_append(transaction: &Transaction<'_>, batch: &AppendBatch) -
             .execute(
                 "INSERT INTO sessions
                     (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
-                     control_seq, control_prefix_sha256)
-                 VALUES (?1, ?2, ?3, 0, ?4, 0, ?5)",
+                     control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
+                 VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
                 params![
                     batch.session_id.as_str(),
                     sqlite_u64("session creation timestamp", header.created_at_ms())?,
                     encode_json("session header", header)?,
                     hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                     hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
+                    super::activity::coordinates_key(header.coordinates())?,
                 ],
             )
             .map(|_| ())

@@ -266,8 +266,10 @@ impl Ui {
                         revision: grants.revision.clone(),
                         scope: wire::Grant {
                             principal: Principal::Local,
-                            target: target.clone(),
-                            operation,
+                            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                                target: target.clone(),
+                                operation,
+                            },
                         },
                         granted: true,
                     },
@@ -301,10 +303,7 @@ impl Ui {
         if let Some(grants) = &self.view.grants {
             for scope in grants.scopes.iter().skip(offset).take(64) {
                 items.push((
-                    format!(
-                        "Revoke {:?} · {} / {} · {:?}",
-                        scope.principal, scope.target.profile, scope.target.leaf, scope.operation
-                    ),
+                    format!("Revoke {:?} · {:?}", scope.principal, scope.scope),
                     Choice::Run(
                         LeafCommand::Grant {
                             revision: grants.revision.clone(),

@@ -11,6 +11,11 @@ struct WorkspaceFailures {
 
 #[async_trait::async_trait]
 impl WorkspaceRegistry for WorkspaceFailures {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(&self, _: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         unreachable!("New registers its canonical directory")
     }
@@ -21,7 +26,11 @@ impl WorkspaceRegistry for WorkspaceFailures {
     ) -> rsi_workspace_protocol::Result<WorkspacePage> {
         unreachable!("New does not list workspaces")
     }
-    async fn get_or_create(&self, path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+    async fn register_at(
+        &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
+        path: &Path,
+    ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         self.paths.lock().unwrap().push(path.to_owned());
         Err(self
             .errors

@@ -3,16 +3,19 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 use rsi_agent_session_protocol::SessionId;
+pub use rsi_agent_store_protocol::StoreActivityCursor as ActivityCursor;
 use rsi_api_protocol::{
     ApiClient, ApiError, HostEpoch, OperationAccess, OperationClass, OperationEffect, OperationId,
     OperationSpec, RequestEncoding, Result, call_json,
 };
-use rsi_session_protocol::RecentSessionCursor;
 use rsi_workspace_protocol::WorkspaceId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 /// Current-owner attention and explicit reading-position operations.
 pub mod attention;
+mod order;
+mod validation;
+pub use order::{OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest};
 
 /// Exact title and archive state; neither field mutates Session execution.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -102,7 +105,7 @@ pub struct NavigationCursor {
     /// Exact metadata revision.
     pub metadata_revision: String,
     /// Last scanned durable Store position.
-    pub after: RecentSessionCursor,
+    pub after: ActivityCursor,
 }
 /// One navigation result derived from durable Header and optional metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -112,7 +115,11 @@ pub struct NavigationEntry {
     pub session: SessionId,
     /// Exact creation timestamp encoded as decimal text.
     pub created_at_ms: String,
-    /// Immutable canonical Host path.
+    /// Exact activity timestamp encoded as decimal text.
+    pub last_activity_ms: String,
+    /// Immutable execution machine; never permission to use it.
+    pub location: rsi_agent_session_protocol::ExecutionLocation,
+    /// Immutable canonical target path.
     pub path: String,
     /// Exact registered workspace, or absent for unregistered historical roots.
     pub workspace: Option<WorkspaceId>,
@@ -125,7 +132,9 @@ pub struct NavigationEntry {
 pub struct NavigationPage {
     /// Metadata revision used by this page and later explicit edits.
     pub metadata_revision: String,
-    /// At most 64 matches in descending creation order.
+    /// Newest activity key in the selected coordinate scope at this read.
+    pub newest: Option<ActivityCursor>,
+    /// At most 64 matches in descending activity order.
     pub entries: Vec<NavigationEntry>,
     /// Actual scanned row count, at most 256.
     pub scanned: u16,
@@ -136,7 +145,7 @@ pub struct NavigationPage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PinnedEntry {
-    /// Read-only durable Header and its metadata.
+    /// Indexed durable identity and its metadata.
     Available {
         /// Complete navigation row.
         entry: NavigationEntry,
@@ -155,7 +164,7 @@ pub enum PinnedEntry {
 pub struct PinnedPage {
     /// Revision shared with ordinary navigation and edits.
     pub metadata_revision: String,
-    /// Available rows descending by creation/identity, then missing IDs descending.
+    /// Available rows descending by activity/identity, then missing IDs descending.
     pub entries: Vec<PinnedEntry>,
 }
 /// Exact metadata mutation receipt.
@@ -183,6 +192,10 @@ pub enum NavigationOperation {
     Query,
     /// Read every matching pin without attaching a Session.
     Pinned,
+    /// Read complete bounded manual-order membership.
+    OrderSeed,
+    /// Read exact device-ordered summary identities.
+    Summaries,
     /// Replace one title/archive record against the global revision.
     Replace,
 }
@@ -198,19 +211,27 @@ impl NavigationOperation {
                 match self {
                     Self::Query => "query",
                     Self::Pinned => "pinned",
+                    Self::OrderSeed => "order_seed",
+                    Self::Summaries => "summaries",
                     Self::Replace => "replace",
                 },
-                2,
+                3,
             )
             .expect("static navigation operation"),
             access: OperationAccess::Authenticated,
             class: OperationClass::Data,
             effect: match self {
-                Self::Query | Self::Pinned => OperationEffect::Read,
+                Self::Query | Self::Pinned | Self::OrderSeed | Self::Summaries => {
+                    OperationEffect::Read
+                }
                 Self::Replace => OperationEffect::Mutation,
             },
             encoding: RequestEncoding::Json,
-            maximum_request_bytes: 4096,
+            maximum_request_bytes: match self {
+                Self::Query | Self::Pinned | Self::Replace => 4096,
+                Self::Summaries => 32 * 1024,
+                Self::OrderSeed => 128 * 1024,
+            },
             maximum_response_bytes: 2 * 1024 * 1024,
         }
     }
@@ -229,6 +250,8 @@ impl NavigationClient {
             NavigationOperation::Query,
             NavigationOperation::Pinned,
             NavigationOperation::Replace,
+            NavigationOperation::OrderSeed,
+            NavigationOperation::Summaries,
         ]
         .into_iter()
         .any(|operation| !api.operations().contains(&operation.spec()))
@@ -262,38 +285,12 @@ impl NavigationClient {
             Ok(value) => value,
             Err(never) => match never {},
         };
-        revision(&page.metadata_revision)?;
-        if page.entries.len() > 64
-            || page.scanned > 256
-            || usize::from(page.scanned) < page.entries.len()
-        {
-            return Err(ApiError::Invalid("invalid navigation page bounds".into()));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for entry in &page.entries {
-            entry.metadata.validate()?;
-            revision(&entry.created_at_ms)?;
-            rsi_workspace_protocol::validate_workspace_path(std::path::Path::new(&entry.path))
-                .map_err(|_| ApiError::Invalid("invalid navigation path".into()))?;
-            if !seen.insert(&entry.session)
-                || entry.metadata.archived != filter.archived
-                || !filter.workspace.matches(entry.workspace.as_ref())
-                || entry.metadata.pinned
-            {
-                return Err(ApiError::Invalid("invalid navigation match".into()));
-            }
-        }
-        if let Some(next) = &page.next
-            && (next.filter != filter
-                || next.host_epoch != self.api.description().host_epoch
-                || next.metadata_revision != page.metadata_revision
-                || page.scanned == 0
-                || after
-                    .as_ref()
-                    .is_some_and(|previous| !cursor_advances(&previous.after, &next.after)))
-        {
-            return Err(ApiError::Invalid("invalid navigation continuation".into()));
-        }
+        validation::page(
+            &page,
+            &filter,
+            after.as_ref(),
+            &self.api.description().host_epoch,
+        )?;
         Ok(page)
     }
     /// Reads all matching pins, rejecting duplicate, misfiltered or malformed rows.
@@ -309,54 +306,7 @@ impl NavigationClient {
             Ok(value) => value,
             Err(never) => match never {},
         };
-        revision(&page.metadata_revision)?;
-        if page.entries.len() > 64 {
-            return Err(ApiError::Invalid("too many pinned sessions".into()));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        let mut previous = None;
-        let mut missing = false;
-        let query = filter.query.to_lowercase();
-        for row in &page.entries {
-            let (id, metadata) = match row {
-                PinnedEntry::Available { entry } => {
-                    let created = revision(&entry.created_at_ms)?;
-                    let order = (created, entry.session.clone());
-                    if created == 0
-                        || missing
-                        || previous.as_ref().is_some_and(|previous| &order >= previous)
-                        || !filter.workspace.matches(entry.workspace.as_ref())
-                        || !matches_query(
-                            &query,
-                            &entry.session,
-                            &entry.metadata,
-                            Some(&entry.path),
-                        )
-                    {
-                        return Err(ApiError::Invalid("invalid pinned match or ordering".into()));
-                    }
-                    rsi_workspace_protocol::validate_workspace_path(std::path::Path::new(
-                        &entry.path,
-                    ))
-                    .map_err(|_| ApiError::Invalid("invalid pinned path".into()))?;
-                    previous = Some(order);
-                    (&entry.session, &entry.metadata)
-                }
-                PinnedEntry::Missing { session, metadata } => {
-                    missing = true;
-                    if filter.workspace != WorkspaceFilter::All
-                        || !matches_query(&query, session, metadata, None)
-                    {
-                        return Err(ApiError::Invalid("invalid missing pinned match".into()));
-                    }
-                    (session, metadata)
-                }
-            };
-            metadata.validate()?;
-            if !metadata.pinned || metadata.archived != filter.archived || !seen.insert(id) {
-                return Err(ApiError::Invalid("invalid pinned metadata".into()));
-            }
-        }
+        validation::pins(&page, &filter)?;
         Ok(page)
     }
     /// Edits title/archive metadata once against the observed global revision.
@@ -402,9 +352,9 @@ impl NavigationClient {
         Ok(receipt)
     }
 }
-/// Checks strict descending creation-time/identity progress through durable rows.
-pub fn cursor_advances(previous: &RecentSessionCursor, next: &RecentSessionCursor) -> bool {
-    (next.created_at_ms, &next.session_id) < (previous.created_at_ms, &previous.session_id)
+/// Checks strict descending activity/identity progress through durable rows.
+pub fn cursor_advances(previous: &ActivityCursor, next: &ActivityCursor) -> bool {
+    (next.last_activity_ms, &next.session_id) < (previous.last_activity_ms, &previous.session_id)
 }
 
 /// Shared title/path/identity search semantics at both sides of the wire.
@@ -422,3 +372,6 @@ pub fn matches_query(
             .is_some_and(|title| title.to_lowercase().contains(query))
         || path.is_some_and(|path| path.to_lowercase().contains(query))
 }
+
+#[cfg(test)]
+mod validation_tests;

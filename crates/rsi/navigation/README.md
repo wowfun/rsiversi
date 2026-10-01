@@ -7,24 +7,44 @@ does not persist runtime status. Two read slots and one nonqueued writer bound
 work; accepted writes survive waiter loss and retirement drains them. Its API
 returns pending targets before running, unknown and unread activity. A closed
 native durable cut is an unread update, not a guarantee of effect settlement.
+Native attention candidates use the actual caller's Session ingress view for
+both listing and acknowledgments. Per-principal reading positions never grant
+access to another location's Session activity.
 
-A failed backend commit closes this owner's query and mutation admission with an
-unknown outcome until Host restart reloads durable truth. Cached metadata cannot
-authorize another edit or cursor while its durable revision is uncertain.
+Storage failures use the [Domain API projection](../../rsi-storage/domain/README.md).
+Unknown commit outcomes close query and mutation admission until Host restart
+reloads durable truth; a known pre-commit failure leaves admission available.
 
 This ordinary Host plugin joins durable Session summaries with navigation
 metadata. One Storage document contains a global revision and at most 8,192
 title/archive records within 8 MiB, including record wrappers. Every read validates
 durable bounds; every mutation validates the projected document before writing.
+Cold validation seeds exact record-object byte and pin counts. An edit measures
+only the old and new entry and projects the revision envelope before publication.
+The immutable snapshot and atomic single-record durable format remain unchanged.
 The Session owner remains authoritative for existence and immutable Header data.
 Unpublished drafts cannot acquire Host navigation metadata.
 
-Queries scan at most 256 Store rows and return at most 64 matches. Search covers
+Every endpoint forwards its actual origin. Each finite request captures admitted
+location visibility and retains the grant gates until settlement. Store queries
+apply this selection before pagination and ordering budgets. Exact summaries
+return null for inaccessible identities; pins omit inaccessible and, for Device
+callers, missing identities whose location cannot be established. Metadata edits
+admit the selected Header location; configuration grants confer no SSH Use.
+
+Queries select at most 256 indexed activity rows and return at most 64 matches.
+An exact registered workspace uses the coordinate/activity index. Search covers
 title, canonical workspace path and exact SessionId without loading transcript
 content. Continuation uses the last scanned row, even when there are no matches;
 changing metadata, Host generation or query parameters invalidates the cursor.
+Activity changes do not invalidate continuation. The page carries the newest
+activity key from the same Store snapshot so clients can offer an explicit refresh.
 Workspace grouping resolves exact registered identities without filesystem access
-or registration side effects. The [wire contract](../navigation-api/README.md)
+or registration side effects. Each page, pin list or exact-summary request shares
+one lookup per distinct coordinate, with at most four lookups in flight. Results
+retain input order; an ordinary page stops at its match limit without draining
+the remaining lookup queue.
+The [wire contract](../navigation-api/README.md)
 owns external fields, bounds and client validation.
 
 Eight non-queued requests and one non-queued writer bound work. The writer owns
@@ -37,19 +57,22 @@ Reading positions retain at most 4,096 records / 1 MiB. Admission evicts least
 recently acknowledged positions until both bounds fit; restart seeds that order
 from the durable key order. Eviction may show old activity as unread again, but
 cannot acknowledge it for another principal or prevent future acknowledgments.
-A failed eviction or write closes admission as an unknown outcome. Ready and
+Reading positions cache their entry sizes and use the
+[Domain record-object accounting](../../rsi-storage/domain/README.md) for projected
+bounds. An acknowledgment measures only its new position; it neither clones nor
+encodes unrelated positions. Eviction walks recency only until both bounds fit.
+Eviction and the requested acknowledgment are separate record commits. Confirmed
+evictions remain effective even if a later deletion or acknowledgment fails;
+each confirmed deletion is also immediately reflected in the cache. A known
+failure leaves the requested position unacknowledged and allows a later explicit
+retry. Unknown outcomes fence the retained Storage generation. Observing sources
+is rejected before I/O when that generation is already unavailable. Ready and
 closed external conversations retain unread observations according to their epoch
 and sequence, including history loaded from a remote peer.
 
-Navigation wire version 2 separates pinned discovery from ordinary continuation.
-The version-1 durable metadata document accepts a missing `pinned` field as false;
-new records always write it. At most 64 records may be pinned. Archiving clears
-pinning in the same revision CAS. A dedicated pinned query reads every pinned
-Header through the read-only Session operation, independent of recent-page depth.
-It applies the same title/path/identity, archive and workspace filter, sorts by
-creation time then SessionId descending, and reports missing Headers as disabled
-entries that may be explicitly unpinned. Other read failures remain errors. A
-query never cleans up metadata. Missing-Header records may also be explicitly
+The version-1 metadata document retains the pinned field and bounds owned by the
+[wire contract](../navigation-api/README.md). Missing identities remain explicit
+entries; queries never clean up metadata. Missing-Header records may also be explicitly
 cleared by replacing them with default metadata, whether pinned or not, under
 the same revision CAS. This cannot create metadata for an unpublished Session.
 Ordinary pages exclude pinned entries.
@@ -57,6 +80,14 @@ Ordinary pages exclude pinned entries.
 Workspace filters explicitly select all, one registered identity, or unregistered
 Headers. No matching row is not proof of exhaustion when a cursor remains.
 
-Pinned Header reads use at most four concurrent reads per bounded pinned query. The
-captured metadata revision, missing-Header rows, stable sorting and error semantics
-are unchanged; a read failure is not an empty pinned list.
+Pinned summaries use one bounded Store snapshot for at most 64 exact identities.
+Neither ordinary nor pinned listing decodes Headers or transcript bodies. Pins sort
+by activity and identity descending; absent durable identities retain explicit
+missing entries. Metadata edits continue to check durable existence separately.
+
+Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
+
+Manual membership reads the Store's complete bounded identity snapshot and joins
+one immutable metadata revision. A seed includes both pin and archive partitions,
+so filtering a view cannot silently remove a device's saved members. Exact summary
+reads preserve the requested order and metadata revision; missing rows stay null.

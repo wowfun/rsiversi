@@ -1,5 +1,26 @@
 # rsi-agent-store-protocol
 
+Activity enumeration is a metadata-only live keyset over `(last_activity_ms,
+SessionId)` descending, globally or within exact execution coordinates. It reads
+neither transcript nor complete Headers and does not mount a Session. Each page
+and its newest cursor share one read snapshot. Activity commits atomically with
+the owning append and never regresses under wall-clock rollback. Header creation,
+new human MessageAccepted controls (excluding same-commit queue successors),
+TurnAccepted, ImageRequested, CancelRequested, ImageOutput, ToolResult,
+ToolRejected and Conversation ContentDelta/Source/Finished/Failed events count.
+Other control and Fact kinds do not count.
+
+Complete ordering membership is a separate single-snapshot query returning at
+most 1024 identities within 128 KiB of encoded JSON. Overflow returns an explicit
+TooLarge result, never a truncated list masquerading as complete membership.
+These indexes are projections of durable coordinates and records, not execution
+or machine-use authority.
+Creation-ordered recent pages, activity pages and complete membership accept an explicit bounded location
+selection. Providers apply it inside the read snapshot, before row/byte limits
+and newest-cursor selection. Unauthorized locations cannot consume a caller's
+membership budget or appear as continuation metadata. Store treats the selector
+as mechanical query data; its caller must retain the corresponding admission.
+
 Exact message reads return only the selected indexed mailbox entry, including its
 terminal state. They validate it against the durable control tail in the same
 snapshot and never materialize or count unrelated pending message bodies.
@@ -296,3 +317,9 @@ capacity for this probe. Full payload reads retain their separate byte budget.
 `message_permits_promotion` owns the shared ingress promotion rule used by Store
 validation and client projections. Source kind, resolved delivery and an exact
 Turn binding determine the result; adapters do not duplicate that decision.
+
+Complete order seeds dictionary-encode execution coordinates and carry a group
+index and indexed last-activity key beside every SessionId. Both derive from the same read transaction, so a
+flat view can reject cross-machine/workspace moves without reading all summaries.
+Groups are unique, referenced, in first-member order, and share the seed's 128 KiB
+bound. Summary pages are independent later read snapshots.

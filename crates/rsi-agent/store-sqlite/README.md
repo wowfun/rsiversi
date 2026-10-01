@@ -1,5 +1,21 @@
 # rsi-agent-store-sqlite
 
+Schema 31 holds exact execution-coordinate and activity projections on each Session
+row. Global activity, location activity/membership, coordinate activity and coordinate membership each have a
+dedicated index. Append updates the projection in the same transaction as canonical
+records, using the Store protocol's closed activity whitelist. Activity and complete
+ordering-membership reads select bounded scalar metadata only; they do not decode
+Headers, validate dormant history or mount Sessions. Continuation uses an index
+range rather than a revision fence, and newest metadata shares its read transaction.
+Explicit location selections use the location expression indexes inside that
+transaction, before page and complete-membership limits. Recent pages have a
+dedicated location/creation index. Multi-location activity, recent and complete-membership reads bound
+each index range before merging candidates, so sorting never consumes all matching
+history. Filtering a returned
+unrestricted page cannot provide the same budget or cursor contract.
+Exact activity summaries select all requested identities in one bounded query and
+snapshot, preserving request order and explicit absence without reading Headers.
+
 Forward Fact windows perform a length-only bounded selection in one read
 transaction before projecting admitted bodies in one ordered query over those
 exact coordinates. Oversized coordinates are absent from that query, so their
@@ -215,7 +231,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 28 stores immutable queue successors and a lifetime-retained queue operation index with individually bounded receipts. It rejects older schema versions without migration or reset. The format admits version 2 selected-reference envelopes and the current mandatory Agent-preset
+The exact current schema stores immutable queue successors and a lifetime-retained queue operation index with individually bounded receipts. It rejects older schema versions without migration or reset. The format admits version 2 selected-reference envelopes and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

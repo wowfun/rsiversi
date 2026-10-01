@@ -44,7 +44,6 @@ futures-util.workspace = true
 getrandom.workspace = true
 ratatui.workspace = true
 hex.workspace = true
-sha2.workspace = true
 rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }

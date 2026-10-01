@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rsi_agent_session_protocol::SessionId;
 use rsi_navigation_api::{
-    NavigationClient, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
-    PinnedEntry, SessionMetadata, WorkspaceFilter,
+    ActivityCursor, NavigationClient, NavigationCursor, NavigationEntry, NavigationFilter,
+    NavigationPage, OrderMembership, OrderScope, OrderSeed, PinnedEntry, SessionMetadata,
+    SummaryRequest, WorkspaceFilter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NavigationCommand {
+    /// Capture complete manual-order membership without reading transcripts.
+    OrderSeed {
+        /// Exact immutable coordinate scope, independent of search.
+        scope: OrderScope,
+    },
+    /// Read a device-ordered page from the currently retained seed.
+    OrderSummaries {
+        /// Current seed ticket; stale controls cannot substitute membership.
+        ticket: String,
+        /// At most 64 exact members in desired order.
+        sessions: Vec<SessionId>,
+    },
     /// Acknowledge an explicitly displayed attention cut.
     MarkRead {
         /// Exact source identity and coordinates.
@@ -80,8 +93,21 @@ fn group_key(workspace: &WorkspaceFilter) -> Result<String> {
         WorkspaceFilter::All => Err("Choose one workspace group".into()),
     }
 }
+#[derive(Clone, Debug, Serialize)]
+struct OrderView {
+    ticket: String,
+    seed: OrderSeed,
+    requested: Vec<SessionId>,
+    entries: Vec<Option<NavigationEntry>>,
+}
 #[derive(Debug, Default, Serialize)]
 struct View {
+    order: Option<OrderView>,
+    newer_activity: bool,
+    #[serde(skip)]
+    newest: Option<ActivityCursor>,
+    #[serde(skip)]
+    continued: bool,
     attention: Option<rsi_navigation_api::attention::Page>,
     attention_notice: Option<String>,
     ticket: String,
@@ -141,8 +167,12 @@ impl NavigationFeature {
                 Some(true)
             },
             changed = async {
-                if refresh { let _ = self.execute(NavigationCommand::Query { filter }).await; }
-                self.refresh_attention().await
+                let continued = self.state.lock().expect("navigation state").view.continued;
+                let changed = if refresh && !continued {
+                    let _ = self.execute(NavigationCommand::Query { filter }).await;
+                    true
+                } else { self.observe_head(filter).await };
+                self.refresh_attention().await || changed
             } => Some(refresh || changed),
         };
         self.background_read
@@ -215,6 +245,67 @@ impl NavigationFeature {
             state.view.diagnostic = Some(message.clone());
         }
         result
+    }
+    async fn observe_head(&self, filter: NavigationFilter) -> bool {
+        let Ok(page) = self.client.query(filter, None).await else {
+            return false;
+        };
+        let mut state = self.state.lock().expect("navigation state");
+        let newer = state.view.newest != page.newest;
+        let changed = newer != state.view.newer_activity;
+        state.view.newer_activity = newer;
+        changed
+    }
+    async fn order_summaries(&self, ticket: &str, sessions: Vec<SessionId>) -> Result<()> {
+        let seed = self
+            .state
+            .lock()
+            .expect("navigation state")
+            .view
+            .order
+            .as_ref()
+            .filter(|view| view.ticket == ticket)
+            .map(|view| view.seed.clone())
+            .ok_or("Manual order changed; refresh complete membership")?;
+        let OrderMembership::Available { members, groups } = &seed.membership else {
+            return Err("Manual ordering exceeds complete membership bounds".into());
+        };
+        let selected = sessions
+            .iter()
+            .map(|id| {
+                members
+                    .binary_search_by(|member| member.session.cmp(id))
+                    .map(|index| &members[index])
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| "Summary is outside the complete order membership")?;
+        let request = SummaryRequest {
+            sessions: sessions.clone(),
+            metadata_revision: seed.metadata_revision.clone(),
+        };
+        let page = self.client.summaries(request).await.map_err(error)?;
+        for (row, member) in page.entries.iter().zip(selected) {
+            if let Some(row) = row {
+                let coordinates = &groups[usize::from(member.group)];
+                if row.location != *coordinates.location()
+                    || row.path != coordinates.path()
+                    || row.metadata.pinned != member.pinned
+                    || row.metadata.archived != member.archived
+                {
+                    return Err("Summary changed order group or partition".into());
+                }
+            }
+        }
+        let mut state = self.state.lock().expect("navigation state");
+        let view = state
+            .view
+            .order
+            .as_mut()
+            .filter(|view| view.ticket == ticket)
+            .ok_or("Manual order changed")?;
+        view.requested = sessions;
+        view.entries = page.entries;
+        Ok(())
     }
     async fn page(
         &self,
@@ -297,6 +388,21 @@ impl NavigationFeature {
     }
     #[allow(clippy::too_many_lines)] // Closed command dispatcher shares one serialized navigation owner.
     async fn execute_inner(&self, command: NavigationCommand, saved: &mut bool) -> Result<()> {
+        if let NavigationCommand::OrderSeed { scope } = command {
+            let seed = self.client.order_seed(scope).await.map_err(error)?;
+            let ticket = rsi_ui::fresh_identity("order")?;
+            self.state.lock().expect("navigation state").view.order = Some(OrderView {
+                ticket,
+                seed,
+                requested: Vec::new(),
+                entries: Vec::new(),
+            });
+            return Ok(());
+        }
+        if let NavigationCommand::OrderSummaries { ticket, sessions } = command {
+            return self.order_summaries(&ticket, sessions).await;
+        }
+        let continued = matches!(&command, NavigationCommand::Next { .. });
         if let NavigationCommand::Group { workspace, ticket } = command {
             return self.group(workspace, ticket).await;
         }
@@ -320,7 +426,9 @@ impl NavigationFeature {
             return Ok(());
         }
         let (filter, after) = match command {
-            NavigationCommand::MarkRead { .. }
+            NavigationCommand::OrderSeed { .. }
+            | NavigationCommand::OrderSummaries { .. }
+            | NavigationCommand::MarkRead { .. }
             | NavigationCommand::Group { .. }
             | NavigationCommand::CloseGroup { .. } => unreachable!("handled above"),
             NavigationCommand::Query { filter } => {
@@ -395,10 +503,25 @@ impl NavigationFeature {
             } else {
                 rsi_ui::fresh_identity("navigation")?
             };
+            let order = state
+                .view
+                .order
+                .take()
+                .filter(|order| order.seed.metadata_revision == page.metadata_revision);
+            let newer_activity = continued && state.view.newest != page.newest;
+            let newest = if continued {
+                state.view.newest.take()
+            } else {
+                page.newest
+            };
             let attention = state.view.attention.take();
             let attention_notice = state.view.attention_notice.take();
             *state = State {
                 view: View {
+                    order,
+                    newer_activity,
+                    newest,
+                    continued,
                     attention,
                     attention_notice,
                     ticket,
@@ -632,6 +755,7 @@ mod group_tests {
         release_read: tokio::sync::Notify,
         revision: std::sync::atomic::AtomicU64,
         other_reads: std::sync::atomic::AtomicUsize,
+        queries: std::sync::atomic::AtomicUsize,
         replacements: std::sync::atomic::AtomicUsize,
         race_pins: std::sync::atomic::AtomicBool,
         fail_registered: std::sync::atomic::AtomicBool,
@@ -661,6 +785,10 @@ mod group_tests {
                 self.read_entered.notify_one();
                 self.release_read.notified().await;
             }
+            if operation == &NavigationOperation::Query.spec() {
+                self.queries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let request: Value = serde_json::from_slice(input.as_bytes()).unwrap();
             let revision = self
                 .revision
@@ -674,6 +802,17 @@ mod group_tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                     + 1;
                 json!({"revision":revision.to_string(),"session":request["session"],"metadata":request["metadata"]})
+            } else if operation == &NavigationOperation::OrderSeed.spec() {
+                json!({"scope":request,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"membership":{
+                    "kind":"available","groups":[{"location":{"kind":"local"},"path":"/project"}],
+                    "members":[{"session":"one","group":0,"last_activity_ms":"1","pinned":false,"archived":false},{"session":"two","group":0,"last_activity_ms":"2","pinned":false,"archived":false}]
+                }})
+            } else if operation == &NavigationOperation::Summaries.spec() {
+                if request["metadata_revision"] != revision {
+                    return Err(ApiError::Invalid("metadata changed".into()));
+                }
+                let entries = request["sessions"].as_array().unwrap().iter().map(|id|json!({"session":id,"created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},"path":"/project","workspace":null,"metadata":{"pinned":false,"archived":false,"title":null}})).collect::<Vec<_>>();
+                json!({"metadata_revision":revision,"entries":entries})
             } else if operation == &NavigationOperation::Pinned.spec() {
                 let revision = if self.race_pins.load(std::sync::atomic::Ordering::SeqCst) {
                     "999".to_owned()
@@ -695,11 +834,11 @@ mod group_tests {
                     self.other_reads
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-                let before = request["after"]["after"]["created_at_ms"]
+                let before = request["after"]["after"]["last_activity_ms"]
                     .as_u64()
                     .unwrap_or(10000);
-                let next=(group&&before>5904).then(||json!({"filter":filter,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"after":{"created_at_ms":before-256,"session_id":format!("row-{}",before-256)}}));
-                json!({"metadata_revision":revision,"entries":[],"scanned":if group {256}else{0},"next":next})
+                let next=(group&&before>5904).then(||json!({"filter":filter,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"after":{"last_activity_ms":before-256,"session_id":format!("row-{}",before-256)}}));
+                json!({"metadata_revision":revision,"newest":if group {Some(json!({"last_activity_ms":10000,"session_id":"row-10000"}))} else {None},"entries":[],"scanned":if group {256}else{0},"next":next})
             };
             Ok(ApiOutput::Reply(ApiMessage {
                 json: ByteBudget::default().encode(&page, 2 * 1024 * 1024)?,
@@ -714,6 +853,7 @@ mod group_tests {
             release_read: tokio::sync::Notify::new(),
             revision: 1.into(),
             other_reads: 0.into(),
+            queries: 0.into(),
             replacements: 0.into(),
             race_pins: false.into(),
             fail_registered: false.into(),
@@ -726,6 +866,8 @@ mod group_tests {
                 NavigationOperation::Query,
                 NavigationOperation::Pinned,
                 NavigationOperation::Replace,
+                NavigationOperation::OrderSeed,
+                NavigationOperation::Summaries,
             ]
             .map(NavigationOperation::spec)
             .into(),
@@ -743,6 +885,84 @@ mod group_tests {
             stop: tokio_util::sync::CancellationToken::new(),
         });
         (api, owner)
+    }
+    #[tokio::test]
+    async fn full_background_refresh_does_not_issue_a_second_query_for_its_head() {
+        let (api, owner) = fixture();
+        assert_eq!(owner.refresh_background(true).await, Some(true));
+        assert_eq!(api.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let _ = owner.refresh_background(false).await;
+        assert_eq!(api.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn manual_summary_commands_keep_seed_identity_order_and_metadata_revision() {
+        let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        owner
+            .command(NavigationCommand::OrderSeed {
+                scope: OrderScope::All,
+            })
+            .await
+            .unwrap();
+        let ticket = owner.view()["order"]["ticket"].as_str().unwrap().to_owned();
+        let ids = ["two", "one"]
+            .map(|id| SessionId::new(id).unwrap())
+            .to_vec();
+        owner
+            .command(NavigationCommand::OrderSummaries {
+                ticket: ticket.clone(),
+                sessions: ids.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(owner.view()["order"]["entries"][0]["session"], "two");
+        for sessions in [
+            vec![SessionId::new("foreign").unwrap()],
+            vec![ids[0].clone(), ids[0].clone()],
+        ] {
+            assert!(
+                owner
+                    .command(NavigationCommand::OrderSummaries {
+                        ticket: ticket.clone(),
+                        sessions
+                    })
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            owner
+                .command(NavigationCommand::OrderSummaries {
+                    ticket: "stale".into(),
+                    sessions: ids.clone()
+                })
+                .await
+                .is_err()
+        );
+        api.revision.store(2, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            owner
+                .command(NavigationCommand::OrderSummaries {
+                    ticket,
+                    sessions: ids
+                })
+                .await
+                .is_err()
+        );
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        assert!(owner.view()["order"].is_null());
+        owner.work.close().await;
     }
     #[tokio::test]
     async fn user_action_preempts_a_blocked_automatic_refresh() {

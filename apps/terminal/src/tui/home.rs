@@ -337,13 +337,23 @@ mod tests {
     struct Workspace;
     #[async_trait::async_trait]
     impl rsi_workspace_protocol::WorkspaceRegistry for Workspace {
-        async fn get_or_create(
+        async fn order_seed(
             &self,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+            unreachable!("workspace order membership is not used by this fixture")
+        }
+        async fn register_at(
+            &self,
+            _location: &rsi_workspace_protocol::ExecutionLocation,
             path: &std::path::Path,
         ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
             Ok(rsi_workspace_protocol::WorkspaceRecord {
                 id: rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap(),
-                path: path.into(),
+                coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                    rsi_workspace_protocol::ExecutionLocation::Local,
+                    path.to_str().unwrap(),
+                )
+                .unwrap(),
             })
         }
         async fn get(

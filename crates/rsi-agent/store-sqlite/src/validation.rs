@@ -274,6 +274,8 @@ pub(super) fn read_session_header_row(
         header_json,
         control_prefix_sha256,
         control_seq,
+        coordinates_key,
+        last_activity_ms,
     ) = connection
         .query_row(
             "SELECT created_at_ms, durable_seq,
@@ -283,7 +285,7 @@ pub(super) fn read_session_header_row(
                     CASE WHEN length(CAST(header_json AS BLOB)) <= ?2
                          THEN header_json END,
                     CASE WHEN length(CAST(control_prefix_sha256 AS BLOB)) = 64
-                         THEN control_prefix_sha256 END, control_seq
+                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms
              FROM sessions WHERE session_id = ?1",
             params![
                 session_id.as_str(),
@@ -299,6 +301,8 @@ pub(super) fn read_session_header_row(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, i64>(6)?,
+                    bounded_text(row, 7, 128 * 1024)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         )
@@ -328,6 +332,13 @@ pub(super) fn read_session_header_row(
     if header.created_at_ms() != decode_u64("session creation timestamp", created_at_ms)? {
         return Err(StoreError::Corrupt(
             "session creation timestamp differs from its durable header".into(),
+        ));
+    }
+    if super::activity::coordinates_key(header.coordinates())? != coordinates_key
+        || decode_u64("activity timestamp", last_activity_ms)? < header.created_at_ms()
+    {
+        return Err(StoreError::Corrupt(
+            "Session coordinate or activity projection differs from its Header".into(),
         ));
     }
     Ok((header, durable_seq))
@@ -442,8 +453,24 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
         }
         for session_id in &page {
             validate_session(connection, session_id)?;
-            validate_canonical_fact_prefix(connection, session_id)?;
-            validate_canonical_control_prefix(connection, session_id)?;
+            let facts = validate_canonical_fact_prefix(connection, session_id)?;
+            let controls = validate_canonical_control_prefix(connection, session_id)?;
+            let (created, activity) = connection
+                .query_row(
+                    "SELECT created_at_ms, last_activity_ms FROM sessions WHERE session_id = ?1",
+                    [session_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(sql_error)?;
+            if decode_u64("activity timestamp", activity)?
+                != decode_u64("creation timestamp", created)?
+                    .max(facts)
+                    .max(controls)
+            {
+                return Err(StoreError::Corrupt(
+                    "activity index differs from canonical records".into(),
+                ));
+            }
         }
         cursor = page.last().cloned();
     }
@@ -1002,7 +1029,8 @@ impl ActivationProjection {
 pub(super) fn validate_canonical_fact_prefix(
     connection: &Connection,
     session_id: &SessionId,
-) -> Result<()> {
+) -> Result<u64> {
+    let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let expected_digest = connection
         .query_row(
             "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
@@ -1049,6 +1077,7 @@ pub(super) fn validate_canonical_fact_prefix(
                 "session Fact JSON differs from its durable turn index columns".into(),
             ));
         }
+        activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
         })?;
@@ -1085,13 +1114,14 @@ pub(super) fn validate_canonical_fact_prefix(
             "Fact-prefix digest differs from the canonical Fact stream".into(),
         ));
     }
-    Ok(())
+    Ok(activity.latest())
 }
 
 pub(super) fn validate_canonical_control_prefix(
     connection: &Connection,
     session_id: &SessionId,
-) -> Result<()> {
+) -> Result<u64> {
+    let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let expected_digest = connection
         .query_row(
             "SELECT control_prefix_sha256 FROM sessions WHERE session_id = ?1",
@@ -1130,6 +1160,7 @@ pub(super) fn validate_canonical_control_prefix(
                 "Agent control JSON sequence differs from its contiguous durable row".into(),
             ));
         }
+        activity.observe_control(&record);
         digest = advance_control_prefix_digest(digest, &record).map_err(|error| {
             StoreError::Corrupt(format!("stored Agent control record is invalid: {error}"))
         })?;
@@ -1143,7 +1174,7 @@ pub(super) fn validate_canonical_control_prefix(
             "control-prefix digest differs from the canonical control stream".into(),
         ));
     }
-    Ok(())
+    Ok(activity.latest())
 }
 
 #[derive(Default)]

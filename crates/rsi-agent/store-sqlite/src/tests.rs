@@ -363,7 +363,7 @@ use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
 
 fn test_header(session_id: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(session_id).unwrap(),
         1,
         "/workspace",
@@ -633,7 +633,11 @@ async fn repeated_recent_listing_does_not_validate_history() {
     let store = SqliteStore::open(root.path()).unwrap();
     assert_eq!(
         store
-            .list_recent_sessions(None, 1)
+            .list_recent_sessions(
+                &rsi_agent_store_protocol::ExecutionLocations::all(),
+                None,
+                1
+            )
             .await
             .unwrap()
             .sessions
@@ -643,7 +647,11 @@ async fn repeated_recent_listing_does_not_validate_history() {
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
     assert_eq!(
         store
-            .list_recent_sessions(None, 1)
+            .list_recent_sessions(
+                &rsi_agent_store_protocol::ExecutionLocations::all(),
+                None,
+                1
+            )
             .await
             .unwrap()
             .sessions
@@ -1293,7 +1301,11 @@ async fn metadata_catalog_larger_than_validation_cache_never_validates_history()
         let mut cursor = None;
         loop {
             let page = store
-                .list_recent_sessions(cursor.as_ref(), 256)
+                .list_recent_sessions(
+                    &rsi_agent_store_protocol::ExecutionLocations::all(),
+                    cursor.as_ref(),
+                    256,
+                )
                 .await
                 .unwrap();
             for session in &page.sessions {

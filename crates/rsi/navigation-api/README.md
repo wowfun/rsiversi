@@ -12,25 +12,52 @@ starts a peer. The Host retains at most 4,096 read positions within 1 MiB.
 The authenticated navigation API reads durable Session truth and edits only
 Host-owned title/archive metadata. It never stops or deletes a Session. Titles
 are at most 256 UTF-8 bytes and queries at most 128 bytes. A query scans at most
-256 recent rows and returns at most 64 matches. Its continuation names the last
+256 indexed activity rows and returns at most 64 matches. Its continuation names the last
 scanned Session, the exact query, archive/workspace filter, Host generation and
-metadata revision. Empty pages can have a continuation. New sessions created
-ahead of the cursor appear after refresh; a query is not a Store-wide snapshot.
+metadata revision. Empty pages can have a continuation. Activity changes never invalidate a continuation. Rows that move ahead of the
+cursor appear after refresh; a query is not a Store-wide snapshot. Each page
+returns the newest activity key from the same read snapshot.
 
-Grouping uses a WorkspaceId derived from the Header's canonical path and an exact
-registry lookup. Missing registrations remain unregistered; reads never create
+Grouping uses a WorkspaceId derived from the complete execution coordinates and
+an exact registry lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
 
-Navigation wire version 2 separates pinned discovery from ordinary continuation.
+Navigation wire version 3 exposes immutable execution location and activity time.
+Query, pinned and metadata replacement requests have a 4 KiB envelope bound;
+summary batches have 32 KiB and coordinate-bearing order-seed requests 128 KiB.
 The version-1 durable metadata document accepts a missing `pinned` field as false;
 new records always write it. At most 64 records may be pinned. Archiving clears
-pinning in the same revision CAS. A dedicated pinned query reads every pinned
-Header through the read-only Session operation, independent of recent-page depth.
-It applies the same title/path/identity, archive and workspace filter, sorts by
-creation time then SessionId descending, and reports missing Headers as disabled
-entries that may be explicitly unpinned. Other read failures remain errors. A
-query never cleans up metadata. Ordinary pages exclude pinned entries.
+pinning in the same revision CAS. Dedicated pinned discovery reads one Store
+snapshot of all selected identities independently of ordinary continuation.
+Neither listing decodes Headers or transcript bodies. Pins apply the same
+query/archive/workspace filter and sort by activity then SessionId descending.
+Missing identities remain disabled entries that may be explicitly unpinned;
+other read failures remain errors. Queries never clean up metadata. Ordinary
+pages exclude pins. External rows must contain valid machine/path coordinates,
+canonical nonzero decimal timestamps and strict descending activity keys.
 
 Workspace filters explicitly select all, one registered identity, or unregistered
 Headers. No matching row is not proof of exhaustion when a cursor remains.
+
+Manual ordering reads an `order_seed` for all coordinates or one exact coordinate.
+Search text does not remove members. The single Store membership snapshot includes
+at most 1,024 identities; the complete wire seed including pin/archive partitions
+must fit 128 KiB. `too_large` pauses manual mode without replacing saved order.
+Malformed membership remains an error; only encoded-size overflow is downgraded
+to that explicit capacity result when adding the wire envelope.
+The response binds the immutable scope, Host epoch and metadata revision. Clients
+reconcile complete membership first, then use `summaries` for at most 64 distinct
+identities in requested order under that metadata revision. Missing rows remain
+explicit null entries. No summary operation attaches a Session. Metadata changes
+require a fresh seed; activity changes do not. Neither coordinates nor seeds grant
+execution authority.
+
+The seed dictionary contains complete execution coordinates; each member's group
+index selects its exact workspace even in a flat view. Moves must preserve this
+group and the shared pin/archive partition. Dictionary groups and IDs derive from
+the same Store transaction; they are not assembled from later summary pages.
+
+Each member also includes its exact decimal last-activity timestamp. On first manual
+use, clients order all members by descending activity/identity before applying the
+move; they never seed manual order from just the visible page.

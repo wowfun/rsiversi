@@ -1,6 +1,5 @@
 use super::{Action, Client, Menu, Update, error};
 use rsi_history_api::{ConversationIdentity, Coverage, Reply, Request, Scope};
-use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
 fn coverage(value: &Coverage) -> String {
     format!(
@@ -17,10 +16,8 @@ fn coverage(value: &Coverage) -> String {
 }
 impl Client {
     pub(super) fn search_history(&mut self, conversation: ConversationIdentity, query: String) {
-        let workspace = rsi_workspace_protocol::WorkspaceId::parse(hex::encode(Sha256::digest(
-            self.state.header.canonical_cwd().as_bytes(),
-        )))
-        .expect("canonical workspace digest");
+        let workspace =
+            rsi_workspace_protocol::WorkspaceId::from_coordinates(self.state.header.coordinates());
         let request = Request::Search {
             scope: Scope {
                 workspace,

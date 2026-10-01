@@ -37,6 +37,7 @@ impl Managed {
 }
 impl LocalSessionService {
     pub(super) async fn collect_activity(&self) -> Result<SessionActivityPage> {
+        self.check_origin()?;
         let _permit = self
             .activity
             .slots
@@ -84,6 +85,26 @@ impl LocalSessionService {
         }
         cache.insert(session.clone(), cached);
     }
+    async fn retain_visible_activity(
+        &self,
+        selected: &mut BTreeMap<SessionId, bool>,
+        locations: &rsi_execution::ExecutionLocations,
+    ) -> Result<()> {
+        let ids: Vec<_> = selected.keys().cloned().collect();
+        for batch in ids.chunks(64) {
+            let rows = self
+                .store
+                .session_activity_summaries(batch)
+                .await
+                .map_err(super::map_store_error)?;
+            for (id, row) in batch.iter().zip(rows) {
+                if row.is_none_or(|row| !locations.contains(row.coordinates.location())) {
+                    selected.remove(id);
+                }
+            }
+        }
+        Ok(())
+    }
     async fn activity_snapshot(&self) -> Result<SessionActivityPage> {
         let residents = self
             .projection_service
@@ -101,6 +122,9 @@ impl LocalSessionService {
         for row in residents.entries {
             selected.insert(row.session, row.running);
         }
+        let visibility = self.visibility()?;
+        self.retain_visible_activity(&mut selected, visibility.locations())
+            .await?;
         let ids: Vec<_> = selected.keys().cloned().collect();
         let reservation = self.interaction_retention.reserve_collection()?;
         let approvals = self.approvals.pending_for_sessions(&ids).await?;

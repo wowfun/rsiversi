@@ -108,7 +108,7 @@ async fn matching_oversized_turn_indexes_fail_before_owned_materialization() {
 }
 
 fn test_header(session_id: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(session_id).unwrap(),
         1,
         "/workspace",

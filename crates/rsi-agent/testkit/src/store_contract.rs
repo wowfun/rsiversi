@@ -354,12 +354,23 @@ pub async fn assert_mechanical_store_contract(
     let sessions = store.list_sessions(None, 8).await.unwrap();
     assert_eq!(sessions.sessions, vec![session_id.clone()]);
     assert!(!sessions.has_more);
-    let recent = store.list_recent_sessions(None, 8).await.unwrap();
+    let recent = store
+        .list_recent_sessions(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            None,
+            8,
+        )
+        .await
+        .unwrap();
     assert_eq!(recent.sessions.len(), 1);
     assert_eq!(recent.sessions[0].header, header);
     assert!(
         store
-            .list_recent_sessions(Some(&recent.sessions[0].cursor()), 8)
+            .list_recent_sessions(
+                &rsi_agent_store_protocol::ExecutionLocations::all(),
+                Some(&recent.sessions[0].cursor()),
+                8
+            )
             .await
             .unwrap()
             .sessions
@@ -1099,7 +1110,7 @@ pub async fn assert_mechanical_store_contract(
     ));
 
     let unrelated_root_id = SessionId::new("shared-contract-unrelated-root").unwrap();
-    let unrelated_root_header = SessionHeader::new(
+    let unrelated_root_header = SessionHeader::new_local(
         unrelated_root_id.clone(),
         32,
         header.canonical_cwd(),

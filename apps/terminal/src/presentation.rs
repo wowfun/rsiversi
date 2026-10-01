@@ -355,7 +355,7 @@ mod tests {
         use rsi_agent_session_protocol::{
             AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
         };
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("presentation").unwrap(),
             1,
             "/workspace",

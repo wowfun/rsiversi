@@ -8,7 +8,7 @@ export function openHistoryPicker(pane,view,call,button){
   const heading=node("div","","dialog-heading");heading.append(node("h2","Search conversation text"),button("Close",()=>dialog.close(),"quiet"));
   const help=node("p","Search explicit human, assistant and tool text within one conversation. Index progress and omissions are shown below. Open the original before selecting a fragment.","hint");
   const workspace=node("select");workspace.setAttribute("aria-label","History workspace");
-  for(const item of view?.catalog?.workspaces??[]){const option=node("option",item.path);option.value=item.id;option.selected=item.path===context.path;workspace.append(option);}
+  for(const item of view?.catalog?.workspaces??[]){const option=node("option",item.coordinates.path);option.value=item.id;option.selected=item.id===context.workspace;workspace.append(option);}
   const kind=node("select");kind.setAttribute("aria-label","History source kind");for(const [id,label]of[["native","Native Session"],["external","External observations"]]){const option=node("option",label);option.value=id;kind.append(option);}
   const source=node("input");source.setAttribute("aria-label","History conversation ID");source.maxLength=256;
   const choices=node("select");choices.setAttribute("aria-label","Saved history source");choices.append(node("option","Choose a saved source…"));

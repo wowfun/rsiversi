@@ -52,7 +52,7 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
     let abandoned = SessionId::new("attention-abandoned").unwrap();
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
     for session in [&id, &abandoned] {
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             session.clone(),
             1,
             cwd.to_str().unwrap(),

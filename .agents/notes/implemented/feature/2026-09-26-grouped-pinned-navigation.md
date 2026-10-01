@@ -10,7 +10,7 @@ rows cannot establish idle state.
 
 ## Decision
 
-Navigation reads immutable Store Headers through a dedicated service operation. It bounds pins to
+Navigation reads Store-owned indexed summaries through a dedicated service operation. It bounds pins to
 64 independent IDs, keeps normal group cursors separate, and preserves explicit
 empty continuations. It retains durable metadata version 1 with missing pins false;
 versions the changed wire contract. It uses attention as the only live-status source.
@@ -28,7 +28,10 @@ empty pages, archive unpins atomically, and missing Headers remain explicitly
 removable. No transcript or model call is needed for an untitled row.
 
 
-Each pinned refresh makes at most 64 Header reads. Concurrent metadata edits
+Each pinned refresh reads at most 64 exact summaries in one bounded Store snapshot,
+without decoding Headers or transcript bodies. The
+[indexed navigation decision](2026-09-29-indexed-device-local-navigation.md)
+owns activity ordering and complete device-local membership. Concurrent metadata edits
 invalidate all affected cursors and require an explicit refreshed view. They do
 not silently load page one for every expanded group. Unchanged metadata leaves
 continued pages at their current position; newest-page refreshes retain validated

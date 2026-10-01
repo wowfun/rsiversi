@@ -3,9 +3,28 @@ use rsi_acp_protocol::{
     observation::{Capabilities, ConversationId, Snapshot},
     service::{self, Endpoint, Resident, Setup, View},
 };
+use rsi_session_protocol::SessionService;
 use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage, SessionHandle};
-#[derive(Debug)]
-struct Sources(Mutex<ExternalStatus>);
+#[derive(Clone, Debug)]
+struct Sources(
+    Arc<Mutex<ExternalStatus>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<Mutex<Vec<CallOrigin>>>,
+);
+#[async_trait]
+impl SessionIngress for Sources {
+    fn scoped(&self, origin: CallOrigin) -> Arc<dyn SessionService> {
+        self.2.lock().unwrap().push(origin);
+        Arc::new(self.clone())
+    }
+    async fn create_from(
+        &self,
+        _: CreateSession,
+        _: CallOrigin,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        unreachable!()
+    }
+}
 #[async_trait]
 impl SessionService for Sources {
     async fn read_header(
@@ -36,6 +55,7 @@ impl SessionService for Sources {
     async fn activity(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionActivityPage> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(rsi_session_protocol::SessionActivityPage {
             entries: vec![],
             truncated: false,
@@ -45,6 +65,7 @@ impl SessionService for Sources {
 #[async_trait]
 impl ExternalConversations for Sources {
     async fn residents(&self) -> service::Result<Vec<Resident>> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let status = *self.0.lock().unwrap();
         Ok(vec![Resident {
             snapshot: Snapshot {
@@ -113,27 +134,46 @@ struct Storage {
     spec: DomainSpec,
     rows: Mutex<BTreeMap<String, serde_json::Value>>,
     fail: std::sync::atomic::AtomicBool,
+    fenced: std::sync::atomic::AtomicBool,
+    reject_put: std::sync::atomic::AtomicBool,
 }
 #[async_trait]
 impl Domain for Storage {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        if self.fenced.load(std::sync::atomic::Ordering::Acquire) {
+            Err(rsi_storage::StorageError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
     fn spec(&self) -> &DomainSpec {
         &self.spec
     }
-    async fn snapshot(&self) -> BTreeMap<String, serde_json::Value> {
-        self.rows.lock().unwrap().clone()
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        Ok(self.rows.lock().unwrap().clone())
     }
     async fn put(
         &self,
         key: &str,
         value: serde_json::Value,
     ) -> std::result::Result<(), rsi_storage::StorageError> {
+        self.ensure_available()?;
+        if self.reject_put.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(rsi_storage::StorageError::Io("rejected before put".into()));
+        }
         self.rows.lock().unwrap().insert(key.into(), value);
         Ok(())
     }
     async fn delete(&self, key: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
+        self.ensure_available()?;
         let removed = self.rows.lock().unwrap().remove(key).is_some();
         if self.fail.load(std::sync::atomic::Ordering::Acquire) {
-            Err(rsi_storage::StorageError::Io(
+            self.fenced
+                .store(true, std::sync::atomic::Ordering::Release);
+            Err(rsi_storage::StorageError::OutcomeUnknown(
                 "lost deletion receipt".into(),
             ))
         } else {
@@ -141,14 +181,19 @@ impl Domain for Storage {
         }
     }
 }
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one causal capacity, read status and lost deletion receipt scenario"
-)]
-async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_acknowledgments() {
-    let sources = Arc::new(Sources(Mutex::new(ExternalStatus::Ready)));
-    let positions: BTreeMap<_, _> = (0..4096)
+fn fixture(count: usize) -> (Arc<Sources>, Arc<Storage>, Attention) {
+    fixture_with_byte_limit(count, 1024 * 1024)
+}
+fn fixture_with_byte_limit(
+    count: usize,
+    maximum_bytes: usize,
+) -> (Arc<Sources>, Arc<Storage>, Attention) {
+    let sources = Arc::new(Sources(
+        Arc::new(Mutex::new(ExternalStatus::Ready)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    let positions: BTreeMap<_, _> = (0..count)
         .map(|index| {
             (
                 format!("{index:064x}"),
@@ -168,7 +213,7 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
             backend: "test".into(),
             version: 1,
             maximum_records: 4096,
-            maximum_bytes: 1024 * 1024,
+            maximum_bytes,
         },
         rows: Mutex::new(
             positions
@@ -177,23 +222,25 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
                 .collect(),
         ),
         fail: std::sync::atomic::AtomicBool::new(false),
+        fenced: std::sync::atomic::AtomicBool::new(false),
+        reject_put: std::sync::atomic::AtomicBool::new(false),
     });
     let owner = Attention {
         session: sources.clone(),
         external: sources.clone(),
         epoch: HostEpoch::generate().unwrap(),
         domain: storage.clone(),
-        state: Mutex::new(State {
-            closed: false,
-            uncertain: false,
-            recency: positions.keys().cloned().collect(),
-            positions,
-        }),
+        state: Mutex::new(State::from_positions(positions)),
         execution: Execution::native(tokio::runtime::Handle::current()),
         tasks: TaskTracker::new(),
         slots: Arc::new(Semaphore::new(2)),
         writer: Arc::new(Semaphore::new(1)),
     };
+    (sources, storage, owner)
+}
+#[tokio::test]
+async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_acknowledgments() {
+    let (sources, storage, owner) = fixture(4096);
     for status in [ExternalStatus::Ready, ExternalStatus::Closed] {
         *sources.0.lock().unwrap() = status;
         let page = owner.read(&CallOrigin::Local).await.unwrap();
@@ -225,7 +272,7 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
             .entries
             .is_empty()
     );
-    let rows = storage.snapshot().await;
+    let rows = storage.snapshot().await.unwrap();
     assert_eq!(rows.len(), 4096);
     assert!(!rows.contains_key(&format!("{:064x}", 0)));
     assert!(serde_json::to_vec(&rows).unwrap().len() <= 1024 * 1024);
@@ -233,13 +280,10 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
     let stored_key = key(&CallOrigin::Local, &position.conversation);
     {
         let mut state = owner.state.lock().unwrap();
-        state.positions.remove(&stored_key);
-        state.recency.retain(|key| key != &stored_key);
+        state.remove(&stored_key);
         let replacement = format!("{:064x}", 4096);
-        state
-            .positions
-            .insert(replacement.clone(), position.clone());
-        state.recency.push_back(replacement);
+        let bytes = position_bytes(&replacement, &position);
+        state.put(replacement, position.clone(), bytes);
     }
     storage
         .fail
@@ -258,6 +302,207 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
     ));
     assert!(matches!(
         owner.read(&CallOrigin::Local).await,
-        Err(ApiError::OutcomeUnknown)
+        Err(ApiError::Unavailable)
     ));
+}
+
+#[tokio::test]
+async fn fenced_attention_rejects_before_observing_either_source() {
+    use std::sync::atomic::Ordering;
+    let (sources, storage, owner) = fixture(0);
+    let position = owner
+        .read(&CallOrigin::Local)
+        .await
+        .unwrap()
+        .entries
+        .remove(0)
+        .position;
+    sources.1.store(0, Ordering::SeqCst);
+    storage.fenced.store(true, Ordering::Release);
+    assert!(matches!(
+        owner.read(&CallOrigin::Local).await,
+        Err(ApiError::Unavailable)
+    ));
+    assert!(matches!(
+        owner
+            .mark(
+                CallOrigin::Local,
+                MarkRead {
+                    host_epoch: owner.epoch.clone(),
+                    position,
+                }
+            )
+            .await,
+        Err(ApiError::Unavailable)
+    ));
+    assert_eq!(sources.1.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn known_failed_acknowledgment_keeps_confirmed_evictions_and_allows_explicit_retry() {
+    use std::sync::atomic::Ordering;
+    let (_, storage, owner) = fixture(4096);
+    let position = owner
+        .read(&CallOrigin::Local)
+        .await
+        .unwrap()
+        .entries
+        .remove(0)
+        .position;
+    let request = MarkRead {
+        host_epoch: owner.epoch.clone(),
+        position: position.clone(),
+    };
+    storage.reject_put.store(true, Ordering::Release);
+    assert!(matches!(
+        owner.mark(CallOrigin::Local, request.clone()).await,
+        Err(ApiError::Unavailable)
+    ));
+    let actual = storage.rows.lock().unwrap().clone();
+    assert_eq!(actual.len(), 4095);
+    assert!(!actual.contains_key(&format!("{:064x}", 0)));
+    assert!(!actual.contains_key(&key(&CallOrigin::Local, &position.conversation)));
+    {
+        let state = owner.state.lock().unwrap();
+        let cached: BTreeMap<_, _> = state
+            .positions
+            .iter()
+            .map(|(key, record)| (key.clone(), serde_json::to_value(&record.position).unwrap()))
+            .collect();
+        assert_eq!(actual, cached);
+        assert_eq!(
+            state.size.bytes(),
+            serde_json::to_vec(&actual).unwrap().len()
+        );
+        assert_eq!(state.size.records(), actual.len());
+        assert_eq!(state.recency.len(), state.positions.len());
+        assert!(
+            state
+                .recency
+                .iter()
+                .all(|key| state.positions.contains_key(key))
+        );
+    }
+    assert_eq!(
+        owner.read(&CallOrigin::Local).await.unwrap().entries.len(),
+        1
+    );
+    storage.reject_put.store(false, Ordering::Release);
+    owner.mark(CallOrigin::Local, request).await.unwrap();
+    assert!(
+        owner
+            .read(&CallOrigin::Local)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(storage.rows.lock().unwrap().len(), 4096);
+}
+
+#[tokio::test]
+async fn byte_limited_eviction_and_repeated_acknowledgments_preserve_exact_cache_sizes() {
+    use std::sync::atomic::Ordering;
+    let (_, seed, _) = fixture(3);
+    let limit = serde_json::to_vec(&seed.snapshot().await.unwrap())
+        .unwrap()
+        .len();
+    let (_, storage, owner) = fixture_with_byte_limit(3, limit);
+    let position = owner
+        .read(&CallOrigin::Local)
+        .await
+        .unwrap()
+        .entries
+        .remove(0)
+        .position;
+    let request = MarkRead {
+        host_epoch: owner.epoch.clone(),
+        position,
+    };
+    let assert_cache = || {
+        let actual = storage.rows.lock().unwrap();
+        let state = owner.state.lock().unwrap();
+        assert_eq!(
+            state.size.bytes(),
+            serde_json::to_vec(&*actual).unwrap().len()
+        );
+        assert_eq!(state.size.records(), actual.len());
+        assert!(state.size.bytes() <= limit);
+        assert_eq!(state.recency.len(), actual.len());
+        for (key, record) in &state.positions {
+            assert_eq!(actual[key], serde_json::to_value(&record.position).unwrap());
+            assert!(state.recency.contains(key));
+        }
+    };
+    assert_cache();
+    // The external position is larger than either old native position. One
+    // deletion cannot fit it at the initial byte ceiling, so two must commit.
+    storage.reject_put.store(true, Ordering::Release);
+    assert!(matches!(
+        owner.mark(CallOrigin::Local, request.clone()).await,
+        Err(ApiError::Unavailable)
+    ));
+    assert_eq!(storage.rows.lock().unwrap().len(), 1);
+    assert!(
+        storage
+            .rows
+            .lock()
+            .unwrap()
+            .contains_key(&format!("{:064x}", 2))
+    );
+    assert_cache();
+    storage.reject_put.store(false, Ordering::Release);
+    for sequence in ["1", "2", "1", "2"] {
+        let mut request = request.clone();
+        request.position.sequence = sequence.into();
+        owner.mark(CallOrigin::Local, request).await.unwrap();
+        assert_cache();
+        assert_eq!(storage.rows.lock().unwrap().len(), 2);
+    }
+    assert!(
+        owner
+            .read(&CallOrigin::Local)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let state = State::from_positions(
+        storage
+            .snapshot()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| (key, serde_json::from_value(value).unwrap()))
+            .collect(),
+    );
+    assert_eq!(state.size, owner.state.lock().unwrap().size);
+}
+
+#[tokio::test]
+async fn attention_passes_the_same_principal_to_candidate_reads_and_acknowledgments() {
+    let (sources, _, owner) = fixture(0);
+    let id = rsi_api_protocol::DeviceId::from_bytes([9; 16]);
+    let origin = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+        id: id.clone(),
+        revoked: tokio_util::sync::CancellationToken::new(),
+    });
+    let page = owner.read(&origin).await.unwrap();
+    owner
+        .mark(
+            origin,
+            MarkRead {
+                host_epoch: page.host_epoch,
+                position: page.entries[0].position.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let origins = sources.2.lock().unwrap();
+    assert_eq!(origins.len(), 2);
+    assert!(
+        origins
+            .iter()
+            .all(|origin| matches!(origin, CallOrigin::Device(device) if device.id == id))
+    );
 }

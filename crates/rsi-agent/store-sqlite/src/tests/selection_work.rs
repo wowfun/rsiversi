@@ -7,6 +7,63 @@ use rusqlite::{
 static MEASUREMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static VM: AtomicU64 = AtomicU64::new(0);
 static COMPLETED_QUERIES: AtomicU64 = AtomicU64::new(0);
+static SUMMARY_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+fn count_summary_reads(event: TraceEvent<'_>) {
+    if let TraceEvent::Profile(statement, _) = event
+        && (statement.sql().starts_with("SELECT") || statement.sql().starts_with("WITH"))
+    {
+        SUMMARY_QUERIES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn activity_summaries_use_one_query_preserve_order_and_do_not_read_headers() {
+    let _measurement = MEASUREMENT.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let a = seed_session(&store, "a").await;
+    let b = seed_session(&store, "b").await;
+    Connection::open(root.path().join("sessions.sqlite3"))
+        .unwrap()
+        .execute("UPDATE sessions SET header_json = 'invalid header'", [])
+        .unwrap();
+    let mut requested = (0..62)
+        .map(|index| SessionId::new(format!("missing-{index}")).unwrap())
+        .collect::<Vec<_>>();
+    requested.insert(3, b.clone());
+    requested.insert(60, a.clone());
+    store.inner.connections.reader.lock().unwrap().trace_v2(
+        TraceEventCodes::SQLITE_TRACE_PROFILE,
+        Some(count_summary_reads),
+    );
+    SUMMARY_QUERIES.store(0, Ordering::Relaxed);
+    let rows = store.activity_summaries(&requested).await.unwrap();
+    assert_eq!(rows.len(), requested.len());
+    for (id, row) in requested.iter().zip(&rows) {
+        if *id == a || *id == b {
+            assert_eq!(&row.as_ref().unwrap().session_id, id);
+        } else {
+            assert!(row.is_none());
+        }
+    }
+    let queries = SUMMARY_QUERIES.load(Ordering::Relaxed);
+    eprintln!(
+        "activity summaries: {} identities, {queries} SELECT statements",
+        requested.len()
+    );
+    assert_eq!(
+        queries, 1,
+        "a bounded summary batch needs one metadata query"
+    );
+    SUMMARY_QUERIES.store(0, Ordering::Relaxed);
+    assert!(store.activity_summaries(&[]).await.unwrap().is_empty());
+    assert!(matches!(
+        store.activity_summaries(&[a.clone(), a]).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(SUMMARY_QUERIES.load(Ordering::Relaxed), 0);
+}
 
 fn count(event: TraceEvent<'_>) {
     if let TraceEvent::Profile(statement, _) = event {

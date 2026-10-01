@@ -372,7 +372,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
         use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
-        Ok(SessionHeader::new(
+        Ok(SessionHeader::new_local(
             SessionId::new("session-reconcile").unwrap(),
             1,
             std::env::temp_dir().to_str().unwrap(),
@@ -1076,6 +1076,11 @@ impl rsi_ai_protocol::LanguageModels for UnknownThenAcceptedHandle {
 pub(crate) struct UnusedWorkspace;
 #[async_trait::async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for UnusedWorkspace {
+    async fn order_seed(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
+        unreachable!("workspace order membership is not used by this fixture")
+    }
     async fn get(
         &self,
         _: &rsi_workspace_protocol::WorkspaceId,
@@ -1089,8 +1094,9 @@ impl rsi_workspace_protocol::WorkspaceRegistry for UnusedWorkspace {
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspacePage> {
         unreachable!("not used")
     }
-    async fn get_or_create(
+    async fn register_at(
         &self,
+        _location: &rsi_workspace_protocol::ExecutionLocation,
         _: &std::path::Path,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
         unreachable!("not used")
@@ -1141,9 +1147,10 @@ impl SessionService for HeadlessDomain {
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl rsi_media_protocol::Media for HeadlessDomain {
-    async fn import_image(
+    async fn import_image_with_options(
         &self,
         _: bytes::Bytes,
+        _: rsi_media_protocol::ImageImportOptions,
     ) -> rsi_media_protocol::Result<rsi_media_protocol::MediaRef> {
         unreachable!()
     }

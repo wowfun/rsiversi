@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 fn header(session: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new(session).unwrap(),
         1,
         "/workspace",
@@ -386,14 +386,15 @@ fn insert_agent_node_without_admission(database: &Path, header: &SessionHeader) 
         .execute(
             "INSERT INTO sessions
                  (session_id, created_at_ms, header_json, durable_seq,
-                  fact_prefix_sha256, control_seq, control_prefix_sha256)
-             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5)",
+                  fact_prefix_sha256, control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
+             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
             rusqlite::params![
                 session_id.as_str(),
                 i64::try_from(header.created_at_ms()).unwrap(),
                 serde_json::to_string(header).unwrap(),
                 hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                 hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
+                serde_json::to_string(header.coordinates()).unwrap(),
             ],
         )
         .unwrap();
@@ -801,7 +802,14 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
         second_sessions.sessions,
         vec![SessionId::new("session-3").unwrap()]
     );
-    let recent = store.list_recent_sessions(None, 2).await.unwrap();
+    let recent = store
+        .list_recent_sessions(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            None,
+            2,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         recent
             .sessions
@@ -812,7 +820,11 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
     );
     assert!(recent.has_more);
     let next_recent = store
-        .list_recent_sessions(Some(&recent.sessions[1].cursor()), 2)
+        .list_recent_sessions(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            Some(&recent.sessions[1].cursor()),
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1080,7 +1092,7 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
         matches!(store.header(&session).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
     );
     assert!(
-        matches!(store.list_recent_sessions(None, 1).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
+        matches!(store.list_recent_sessions(&rsi_agent_store_protocol::ExecutionLocations::all(), None, 1).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
     );
 }
 
@@ -2270,4 +2282,71 @@ async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_
         SqliteStore::verify(root.path()),
         Err(StoreError::Corrupt(_))
     ));
+}
+
+#[tokio::test]
+async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_projection_tampering() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_activity_store_contract(&store, &header("activity-template")).await;
+    drop(store);
+    let database = root.path().join("sessions.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET last_activity_ms = 999 WHERE session_id = 'activity-a'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        matches!(SqliteStore::verify(root.path()), Err(StoreError::Corrupt(message)) if message.contains("activity index"))
+    );
+    let connection = Connection::open(&database).unwrap();
+    connection.execute("UPDATE sessions SET last_activity_ms = 60, header_json = 'not json' WHERE session_id = 'activity-a'", []).unwrap();
+    connection
+        .execute(
+            "UPDATE facts SET fact_json = 'not json' WHERE session_id = 'activity-a'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let page = store
+        .list_session_activity(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            None,
+            None,
+            64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.sessions[0].session_id.as_str(), "activity-a");
+    assert!(
+        store
+            .session_order_seed(&rsi_agent_store_protocol::ExecutionLocations::all(), None)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        store.header(&page.sessions[0].session_id).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_activity_is_indexed_isolated_and_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_activity_store_contract(&store, &header("activity-template")).await;
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_activity_membership_is_complete_at_64_65_and_1024_and_rejects_1025() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_activity_membership_bounds(&store, &header("activity-template"))
+        .await;
 }

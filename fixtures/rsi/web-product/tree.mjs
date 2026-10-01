@@ -1,3 +1,4 @@
+import {closeDetails,openResource,details} from "./controls.mjs";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 
@@ -7,8 +8,8 @@ export async function verifyTree(page, pane, service, report, browser) {
   await pane.getByTestId("composer-send").click();
   await pane.locator(".message.assistant").filter({ hasText: "Reviewed: Subagent activation completed." }).waitFor();
   await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-  await page.getByRole("button", { name: "Agent tree", exact: true }).click();
-  const detail = page.getByRole("dialog");
+  await openResource(page,"Agent tree");
+  const detail = details(page);
   await detail.getByRole("button", { name: "Inspect agent tree", exact: true }).click();
   await detail.getByRole("button", { name: "Inspect inspect-child", exact: true }).waitFor();
   await page.screenshot({ path: join(report, `${browser}-agent-tree.png`) });
@@ -24,6 +25,5 @@ export async function verifyTree(page, pane, service, report, browser) {
   await page.screenshot({ path: join(report, `${browser}-child-history.png`) });
   await detail.getByRole("button", { name: "Root agent", exact: true }).click();
   await detail.getByRole("button", { name: "Inspect inspect-child", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
-  await detail.waitFor({ state: "hidden" });
+  await closeDetails(page);
 }

@@ -71,7 +71,7 @@ fn scene() -> Vec<u8> {
         AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
         TurnId,
     };
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("native-scene").unwrap(),
         1,
         "/workspace",
