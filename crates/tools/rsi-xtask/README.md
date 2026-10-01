@@ -30,7 +30,8 @@ requires the existing Native ABI and Portable boundaries.
 `cargo xtask verify-docs` is read-only and requires the virtual workspace root.
 It checks documentation taxonomy, governance boundaries, active `AGENTS.md` word
 budgets, Cargo package README identity and minimum prose, relative Markdown links,
-and active Agent Notes. Independent diagnostics are reported in stable path,
+and active Agent Notes. `--structure-only` omits Agent Notes so CI can report
+structure independently of archive-baseline availability. Independent diagnostics are reported in stable path,
 line and message order. Root instructions have a 400-word budget; descendant
 instructions have 300 words. A reasoned, path-specific override is the last resort.
 
@@ -104,3 +105,18 @@ architecture; an arbitrary `libs/` tree is not an alternative library root.
 The application root is resolved to its physical directory before classifying
 edges, including when `apps/` is a symlink. A broken or escaping application root
 is an error; sibling names such as `appsfoo/` are not application paths.
+
+`cargo xtask verify-lockfiles` discovers tracked and nonignored untracked
+manifests and lockfiles, so new authored workspaces are checked before staging. It
+asks Cargo for their workspace roots, and checks each distinct root with full
+`cargo metadata --locked --offline`. It reports all independent failures and
+missing or orphaned locks, without updating locks. `--online` explicitly permits
+dependency fetching and is used by the independent CI lockfile gate.
+Offline failure diagnostics point to `--online` when a required dependency is
+not cached; this permits fetching but still never refreshes a stale lockfile.
+
+CI prepares the exact Agent Notes baseline separately: pull-request base SHA,
+push predecessor SHA, or the resolved `origin/main` commit for manual dispatch.
+Missing objects are explicitly fetched and verified; only an all-zero first-push
+SHA means an empty baseline. Local verification never fetches or substitutes a
+baseline. Failed baseline preparation does not suppress other documentation checks.

@@ -20,10 +20,15 @@ number, so a manual diagnostic cannot cancel its required checks. Feature-branch
 pushes do not compete with the pull request's merge-tree verification. Document
 archive validation uses the pull request base, push predecessor, or `origin/main`
 for a manual run; an absent event field must not become an empty base reference.
+The preparation step fetches a missing exact commit (including a force-push
+predecessor) and verifies it without requiring ancestry. Only the all-zero
+first-push predecessor is empty. Documentation structure, archive notes,
+architecture, rustdoc and doctests have independent outcomes. A baseline fetch
+failure affects notes only; product lint does not suppress unrelated tests.
 
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
-dependency audit, and Windows `rsi-meta`.
+dependency audit, lockfile consistency, and Windows `rsi-meta`.
 Conformance remains the only command that enumerates the foundation test
 surface and runs on Linux, macOS, and Windows. Product lint and tests run in
 their product jobs; the Base job owns `rsi-host` and every Base service family,
@@ -49,7 +54,11 @@ runs without relaxing policy.
 Whole-package lint/test commands establish a package's single CI owner. A
 focused integration or environment preflight in a consuming product job does
 not transfer that ownership; the coverage check recognizes whole-target commands
-rather than treating every package selector as another owning test suite.
+rather than treating every package selector as another owning test suite. Every
+owner must select the package for both Clippy and executed whole-target tests;
+compile-only or focused preflights cannot satisfy that requirement. The Linux SSH
+job owns the Execution and SSH families, including the helper executable. Native
+SSH preflights restore any temporarily relaxed namespace sysctl after completion.
 
 The Linux desktop job owns native admission, paired asset and Host incompatibility
 rejection, frame-ACK failure, document-close deadlines, and the normal conversation
@@ -78,7 +87,11 @@ dependency audit caches installed tools without a target directory. Both use
 the existing pinned Rust cache action and retain locked tool installation.
 Standalone fixtures keep their own lockfiles and targets. Audit enumerates
 Git-tracked lockfiles, fetching advisories for the root and reusing that database
-for the remaining files.
+for the remaining files. A separate read-only lockfile gate discovers workspace
+roots through Cargo and runs full locked metadata, aggregating stale, missing
+and orphaned lock diagnostics. Its explicit online mode fetches dependencies;
+local verification defaults to offline. This detects manifest drift that a
+vulnerability audit of old dependency versions cannot establish.
 
 Platform-dependent filesystem and process fixtures cannot establish portable
 behavior merely because their input types compile. Git metadata equality also
@@ -112,6 +125,11 @@ savings. Dropping browsers or the desktop's second build would discard distinct
 platform and build-family evidence. Native executables dominate the measured
 acceptance archives, so excluding those copies removes upload work without
 weakening the scenarios or adding another packaging mechanism.
+
+Verification prerequisites are the actual toolchain and build steps. A failed
+cache action remains a job failure but does not suppress otherwise runnable
+checks. Workspace lock discovery includes nonignored new files before staging,
+so staging alone does not change the set of checked workspaces.
 
 ## Consequences
 

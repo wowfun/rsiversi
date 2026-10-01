@@ -12,6 +12,7 @@ mod architecture;
 mod cargo_step;
 mod code_check;
 mod documentation;
+mod lockfiles;
 mod repository_root;
 mod rsi_meta;
 
@@ -62,11 +63,20 @@ fn run() -> Result<(), String> {
             verify_agent_notes(&repository, true)
                 .map_err(|error| format!("verify-agent-notes: {error}"))
         }
-        [command] if command == "verify-docs" => {
+        [command, rest @ ..]
+            if command == "verify-lockfiles" && (rest.is_empty() || rest == ["--online"]) =>
+        {
+            let repository = env::current_dir().map_err(|e| e.to_string())?;
+            repository_root::require(&repository, "verify-lockfiles")?;
+            lockfiles::verify(&repository, !rest.is_empty())
+        }
+        [command, rest @ ..]
+            if command == "verify-docs" && (rest.is_empty() || rest == ["--structure-only"]) =>
+        {
             let repository = env::current_dir()
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
             let mut errors = documentation::verify(&repository);
-            if let Err(error) = verify_agent_notes(&repository, false) {
+            if rest.is_empty() && let Err(error) = verify_agent_notes(&repository, false) {
                 errors.push(error);
             }
             if errors.is_empty() {
@@ -88,7 +98,7 @@ fn run() -> Result<(), String> {
             code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
+            "usage: rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-lockfiles [--online] | rsi-xtask verify-docs [--structure-only] | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

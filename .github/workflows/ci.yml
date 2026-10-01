@@ -16,7 +16,7 @@ concurrency:
 jobs:
   documentation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,24 +25,83 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+      - id: docs_setup
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
-      - name: Verify documentation
-        timeout-minutes: 10
+      - name: Prepare Agent Notes baseline
+        id: notes_base
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
+        timeout-minutes: 5
         env:
-          RSI_AGENT_NOTES_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+          NOTES_EVENT: ${{ github.event_name }}
+          NOTES_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          NOTES_PUSH_BEFORE: ${{ github.event.before }}
+        shell: python3 {0}
         run: |
-          cargo xtask verify-docs
-          cargo xtask verify-architecture
+          import os, re, subprocess
+          def git(*args):
+              return subprocess.run(["git", *args], check=True, text=True, capture_output=True).stdout.strip()
+          event = os.environ["NOTES_EVENT"]
+          if event == "workflow_dispatch":
+              git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+              base = git("rev-parse", "refs/remotes/origin/main^{commit}")
+          elif event == "pull_request":
+              base = os.environ["NOTES_PR_BASE"]
+          elif event == "push":
+              base = os.environ["NOTES_PUSH_BEFORE"]
+          else:
+              raise RuntimeError("unsupported baseline event")
+          if not re.fullmatch(r"[0-9a-f]{40}", base):
+              raise RuntimeError("missing or invalid exact baseline SHA")
+          if base == "0" * 40:
+              if event != "push":
+                  raise RuntimeError("empty baseline is only valid for first push")
+          else:
+              if subprocess.run(["git", "cat-file", "-e", base + "^{commit}"], capture_output=True).returncode:
+                  git("fetch", "--no-tags", "origin", base)
+              git("cat-file", "-e", base + "^{commit}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("base=" + base + "\n")
+      - name: Verify documentation structure
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
+        timeout-minutes: 5
+        run: cargo xtask verify-docs --structure-only
+      - name: Verify Agent Notes
+        if: ${{ !cancelled() && steps.notes_base.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          RSI_AGENT_NOTES_BASE: ${{ steps.notes_base.outputs.base }}
+        run: cargo xtask verify-agent-notes
+      - name: Verify architecture
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
+        timeout-minutes: 5
+        run: cargo xtask verify-architecture
       - name: Build public Rust documentation
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 15
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --workspace --lib --no-deps
       - name: Exercise Rust documentation examples
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 15
         run: cargo test --locked --workspace --doc
+
+  lockfiles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: lockfiles
+      - name: Verify every workspace lockfile
+        timeout-minutes: 20
+        run: cargo xtask verify-lockfiles --online
 
   rsi-meta-conformance:
     strategy:
@@ -77,14 +136,14 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 181
+    timeout-minutes: 191
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
           components: rust-analyzer
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> target
@@ -164,7 +223,16 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config ripgrep
+          sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config ripgrep musl-tools openssh-server
+          sudo install -d -m 0755 /run/sshd
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          install -d -m 0700 "$HOME/rsi-ssh-ci"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSH_USER=$(id -un)" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSH_FIXTURES=$HOME/rsi-ssh-ci" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
       - name: Install Web fixture packages
         id: web_harness
         if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
@@ -193,7 +261,7 @@ jobs:
       - name: Exercise the product Web application over TLS and HTTP/2
         id: web_product
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
-        timeout-minutes: 20
+        timeout-minutes: 30
         working-directory: fixtures/rsi/web-product
         env:
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-evidence
@@ -217,6 +285,17 @@ jobs:
           export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
           npm test
           RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/alignment" node ui-alignment.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/dock-panels" node dock-panels.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/dock-durability" node dock-durability.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/navigation-order" node navigation-order.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/device-storage" node device-storage.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-lifecycle" node review-lifecycle.mjs
+          RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workbench" node workbench.mjs
+          cd ../../..
+          node fixtures/rsi/workbench-reference/settings-goldens.mjs --report "$RUNNER_TEMP/rsi-web-evidence/settings-goldens"
+          git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness "$RUNNER_TEMP/rsi-workbench-reference"
+          git -C "$RUNNER_TEMP/rsi-workbench-reference" checkout --detach 4878cdabd87d4041bdaff61d04c966883b9fd07a
+          RSI_DSH_REFERENCE="$RUNNER_TEMP/rsi-workbench-reference" node fixtures/rsi/workbench-reference/verify.mjs --report "$RUNNER_TEMP/rsi-web-evidence/workbench-reference"
 
       - name: Exercise paired Web integration probes
         id: web_integrations
@@ -244,6 +323,8 @@ jobs:
           done
           export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
           cd ../../..
+          RSI_BUILD_FAMILY_MANIFEST="$RSI_PAIRED_BUNDLE/build-family.json" RSI_BUILD_FAMILY_SHA256="$(python3 -c 'import json,os; print(json.load(open(os.environ["RSI_PAIRED_BUNDLE"]+"/receipt.json"))["family_sha256"])')" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/rsi-app/build/target" cargo build --locked --manifest-path target/rsi-app/build/source/Cargo.toml --target x86_64-unknown-linux-gnu -p rsi-cli --example profile-leaf-probe
+          RSI_PROFILE_PROBE="$GITHUB_WORKSPACE/target/rsi-app/build/target/x86_64-unknown-linux-gnu/debug/examples/profile-leaf-probe" RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/ssh-targets" node fixtures/rsi/web-product/ssh-targets.mjs
           cargo test --locked -p rsi-cli --features paired-web-tests --test service_host_cli web::web_alias_and_profile_serve_default_assets_with_stable_authorized_identity -- --exact
           npm ci --ignore-scripts --prefix fixtures/rsi/acp
           export RSI_ACP_SDK_NODE="$(command -v node)"
@@ -379,7 +460,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes ripgrep bubblewrap libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+      - id: base_setup
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
           components: clippy
@@ -387,13 +469,15 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
         run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
         run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise Linux Bubblewrap enforcement
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: |
           declare -A previous_policy
           restore_policy() {
@@ -417,7 +501,7 @@ jobs:
           cargo test --locked -p rsi-process-local --test process pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement -- --ignored --exact
         timeout-minutes: 5
       - name: Exercise Tool JSON feature-unification boundary
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: cargo test --locked -p rsi-tools-protocol --all-targets --no-fail-fast --features serde_json/arbitrary_precision
         timeout-minutes: 10
 
@@ -519,7 +603,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes ripgrep bubblewrap libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+      - id: native_setup
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
           components: clippy,rustfmt
@@ -527,20 +612,22 @@ jobs:
         with:
           workspaces: . -> target
       - name: Fetch native addon build fixture dependencies
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml
       - name: Check generated linked addon with its pinned lockfile
         timeout-minutes: 25
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 fixtures/rsi/addon-linked-template/verify.py --report "$RUNNER_TEMP/rsi-linked-template-evidence"
       - name: Check generated native addon with its pinned lockfile
         timeout-minutes: 25
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && runner.os == 'Linux' }}
         env:
           RSI_SCAFFOLD_PUBLISHED_SDK: '1'
         run: |
           cargo fetch --locked --manifest-path fixtures/rsi/addon-template/Cargo.toml
           cargo test --locked -p rsi-app-catalog --test addons scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact
       - name: Check independent language source addon
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         timeout-minutes: 20
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/lsp-addon
@@ -554,20 +641,24 @@ jobs:
             python3 fixtures/rsi/lsp-addon/verify.py --binary "$CARGO_TARGET_DIR/debug/rsi-language-addon-example" --analyzer "$(rustup which rust-analyzer)" --report "$RUNNER_TEMP/rsi-language-addon-evidence"
           fi
       - name: Check independent native addon fixture
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: |
           cargo fmt --manifest-path fixtures/rsi/native-addon/Cargo.toml -- --check
           cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets -- -D warnings
           cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets --all-features -- -D warnings
         timeout-minutes: 10
       - name: Lint standard rsi
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: cargo clippy --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: |
           cargo clippy --locked -p rsi-gui --features test-support --all-targets -- -D warnings
           cargo test --locked -p rsi-gui --features test-support --test submission
         timeout-minutes: 10
       - name: Check independent terminal presentation
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: |
           cargo fmt --manifest-path crates/rsi/terminal-native/Cargo.toml -- --check
           cargo clippy --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --all-targets -- -D warnings
@@ -575,11 +666,12 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --no-deps --all-features
         timeout-minutes: 15
       - name: Compile standard rsi tests
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         id: standard_build
         run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'Linux' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
         run: |
@@ -666,7 +758,7 @@ jobs:
             !${{ runner.temp }}/rsi-session-api-evaluation/session-api-eval
           if-no-files-found: warn
       - name: Exercise standard rsi on macOS
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'macOS' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
         run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
@@ -757,11 +849,80 @@ jobs:
         run: cargo xtask rsi-meta conformance
         timeout-minutes: 45
 
+  rsi-ssh-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_MIN_STACK: 268435456
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install isolated Linux SSH prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes openssh-server bubblewrap musl-tools libdbus-1-dev pkg-config
+          sudo install -d -m 0755 /run/sshd
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          install -d -m 0700 "$HOME/rsi-ssh-ci"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSH_USER=$(id -un)" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSH_FIXTURES=$HOME/rsi-ssh-ci" >> "$GITHUB_ENV"
+          echo "RSI_TEST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+          echo "RSI_TEST_HELPER_BIN=$GITHUB_WORKSPACE/target/x86_64-unknown-linux-musl/release/rsi-ssh-helper" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-unknown-linux-musl
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: . -> target
+          key: ssh-linux
+      - name: Lint Execution and SSH packages
+        run: cargo clippy --locked -p 'rsi-execution*' -p 'rsi-ssh*' --all-targets -- -D warnings
+      - name: Test Execution and SSH packages
+        run: cargo test --locked -p 'rsi-execution*' -p 'rsi-ssh*' --all-targets
+      - name: Build receipt-compatible static helper
+        run: cargo build --locked -p rsi-ssh-helper-app --release --target x86_64-unknown-linux-musl
+      - name: Verify native manager and namespace support
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          test -f /sys/fs/cgroup/cgroup.controllers
+          test "$(systemctl --user show --property=ServiceWatchdogs --value)" = yes
+          systemd-run --user --pipe --wait --collect --expand-environment=no /usr/bin/true
+          bwrap --unshare-user --unshare-pid --ro-bind / / /usr/bin/true
+      - name: Verify generated OpenSSH policy and trust
+        run: cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --nocapture
+      - name: Verify target lifecycle and cgroup cleanup
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          cargo test --locked -p rsi-ssh-helper-app --test native -- --ignored --nocapture
+          cargo test --locked -p rsi-ssh-helper --test cache --test execution -- --ignored --nocapture
+          cargo test --locked -p rsi-ssh-helper --test lifecycle native_watchdog_and_cgroup_cleanup -- --ignored --exact --nocapture
+          cargo test --locked -p rsi-sandbox-local --test local native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access -- --ignored --exact
+      - name: Verify actual SSH execution, context, LSP, MCP and saturated control ACKs
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          cargo test --locked -p rsi-ssh-helper-app --test ssh -- --ignored --nocapture
+
   ci-required:
     if: always()
     needs:
+      - rsi-ssh-linux
       - rsi-desktop
       - documentation
+      - lockfiles
       - rsi-meta-conformance
       - rsi-meta-browser
       - rsi-base
@@ -793,12 +954,12 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes ripgrep libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev webkit2gtk-driver python3-gi gir1.2-webkit2-4.1 xvfb dbus-x11 bubblewrap libxtst6
+          sudo apt-get install --no-install-recommends --yes ripgrep libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev webkit2gtk-driver python3-gi gir1.2-webkit2-4.1 xvfb dbus-x11 bubblewrap libxtst6 musl-tools
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.97.0
           components: clippy,rustfmt,rust-analyzer
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.23.2
@@ -867,7 +1028,7 @@ jobs:
       - name: Exercise actual WebKitGTK session terminals
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 5
-        run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-terminal-evidence" --terminals --window-close
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-terminal-evidence" --terminals --dock --window-close
       - name: Exercise document close deadline
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5

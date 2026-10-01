@@ -185,18 +185,7 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
         run: Option<String>,
     }
 
-    let output = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(repository())
-        .output()
-        .expect("cargo metadata should run");
-    assert!(
-        output.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("cargo metadata JSON");
+    let metadata = workspace_metadata();
     let packages = metadata["packages"]
         .as_array()
         .expect("metadata packages array");
@@ -213,74 +202,96 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
     let workflow: Workflow = yaml_serde::from_str(&workflow).expect("workflow YAML");
     let package_jobs = [
         "rsi-base",
+        "rsi-ssh-linux",
         "rsi-ai",
         "rsi-agent",
         "rsi",
         "rsi-desktop",
         "repository-tools",
     ];
-    let job_patterns = package_jobs
-        .into_iter()
-        .map(|job_name| {
-            let patterns = workflow.jobs[job_name]
-                .steps
-                .iter()
-                .filter_map(|step| step.run.as_deref())
-                .flat_map(cargo_package_patterns)
-                .collect::<BTreeSet<_>>();
-            (job_name, patterns)
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    for package in packages {
-        let name = package["name"].as_str().expect("package name");
-        let manifest = Path::new(package["manifest_path"].as_str().expect("manifest path"));
-        let relative = manifest
-            .strip_prefix(repository())
-            .expect("workspace manifest below repository");
-        let mut components = relative.components();
-        let owner = components
-            .next()
-            .and_then(|value| value.as_os_str().to_str());
-        assert!(
-            matches!(owner, Some("crates" | "apps")),
-            "workspace package {name} escaped crates/ and apps/"
-        );
-        let product = components
-            .next()
-            .and_then(|value| value.as_os_str().to_str())
-            .expect("product directory");
-        if owner == Some("crates") && product == "rsi-meta" {
-            assert!(
-                meta_packages.contains(name),
-                "rsi-meta package {name} is absent from the conformance authority"
-            );
-            continue;
-        }
-        let owners = job_patterns
-            .iter()
-            .filter(|(_, patterns)| {
-                patterns
+    for check in ["test", "clippy"] {
+        let job_patterns = package_jobs
+            .into_iter()
+            .map(|job_name| {
+                let patterns = workflow.jobs[job_name]
+                    .steps
                     .iter()
-                    .any(|pattern| package_matches(pattern, name))
+                    .filter_map(|step| step.run.as_deref())
+                    .flat_map(|command| cargo_package_patterns(command, check))
+                    .collect::<BTreeSet<_>>();
+                (job_name, patterns)
             })
-            .map(|(job, _)| *job)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            owners.len(),
-            1,
-            "workspace package {name} at {} is selected by CI jobs {owners:?}",
-            relative.display()
-        );
+            .collect::<BTreeMap<_, _>>();
+
+        for package in packages {
+            let name = package["name"].as_str().expect("package name");
+            let manifest = Path::new(package["manifest_path"].as_str().expect("manifest path"));
+            let relative = manifest
+                .strip_prefix(repository())
+                .expect("workspace manifest below repository");
+            let mut components = relative.components();
+            let owner = components
+                .next()
+                .and_then(|value| value.as_os_str().to_str());
+            assert!(
+                matches!(owner, Some("crates" | "apps")),
+                "workspace package {name} escaped crates/ and apps/"
+            );
+            let product = components
+                .next()
+                .and_then(|value| value.as_os_str().to_str())
+                .expect("product directory");
+            if owner == Some("crates") && product == "rsi-meta" {
+                assert!(
+                    meta_packages.contains(name),
+                    "rsi-meta package {name} is absent from the conformance authority"
+                );
+                continue;
+            }
+            let owners = job_patterns
+                .iter()
+                .filter(|(_, patterns)| {
+                    patterns
+                        .iter()
+                        .any(|pattern| package_matches(pattern, name))
+                })
+                .map(|(job, _)| *job)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                owners.len(),
+                1,
+                "workspace package {name} at {} has {check} coverage in CI jobs {owners:?}",
+                relative.display()
+            );
+        }
     }
 }
 
-fn cargo_package_patterns(command: &str) -> Vec<String> {
+fn workspace_metadata() -> serde_json::Value {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(repository())
+        .output()
+        .expect("cargo metadata should run");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("cargo metadata JSON")
+}
+
+fn cargo_package_patterns(command: &str, check: &str) -> Vec<String> {
     command
         .lines()
         .flat_map(|line| {
             let tokens = line.split_whitespace().collect::<Vec<_>>();
-            if !tokens.contains(&"--all-targets") {
+            if !tokens.windows(2).any(|pair| pair == ["cargo", check])
+                || !tokens.contains(&"--all-targets")
+                || tokens
+                    .iter()
+                    .any(|token| matches!(*token, "--no-run" | "--ignored" | "--test" | "--doc"))
+            {
                 return Vec::new();
             }
             tokens
@@ -294,12 +305,30 @@ fn cargo_package_patterns(command: &str) -> Vec<String> {
 #[test]
 fn targeted_preflight_does_not_reassign_whole_package_ci_ownership() {
     let preflight = "cargo test --locked -p rsi-sandbox-local --test local native_enforcement -- --ignored --exact";
-    assert!(cargo_package_patterns(preflight).is_empty());
+    assert!(cargo_package_patterns(preflight, "test").is_empty());
     assert_eq!(
-        cargo_package_patterns(&format!(
-            "{preflight}\ncargo clippy --locked -p rsi-desktop --all-targets -- -D warnings"
-        )),
+        cargo_package_patterns(
+            &format!(
+                "{preflight}\ncargo clippy --locked -p rsi-desktop --all-targets -- -D warnings"
+            ),
+            "clippy"
+        ),
         vec!["rsi-desktop"]
+    );
+}
+
+#[test]
+fn whole_package_coverage_requires_execution_and_the_matching_check() {
+    for command in [
+        "cargo test -p rsi-execution --all-targets --no-run",
+        "cargo test -p rsi-execution --all-targets -- --ignored",
+        "cargo clippy -p rsi-execution --all-targets -- -D warnings",
+    ] {
+        assert!(cargo_package_patterns(command, "test").is_empty());
+    }
+    assert_eq!(
+        cargo_package_patterns("cargo test -p 'rsi-execution*' --all-targets", "test"),
+        ["rsi-execution*"]
     );
 }
 
@@ -344,24 +373,24 @@ fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
     let documentation = workflow["jobs"]["documentation"]["steps"]
         .as_sequence()
         .unwrap();
-    let verify = documentation
+    for command in [
+        "cargo xtask verify-docs --structure-only",
+        "cargo xtask verify-architecture",
+        "cargo xtask verify-agent-notes",
+    ] {
+        let verify = documentation
+            .iter()
+            .find(|step| step["run"].as_str() == Some(command))
+            .unwrap();
+        assert!(verify["if"].as_str().unwrap().contains("!cancelled()"));
+    }
+    let notes = documentation
         .iter()
-        .find(|step| {
-            step["run"]
-                .as_str()
-                .is_some_and(|run| run.lines().any(|line| line == "cargo xtask verify-docs"))
-        })
+        .find(|step| step["name"].as_str() == Some("Verify Agent Notes"))
         .unwrap();
-    assert!(
-        verify["run"]
-            .as_str()
-            .unwrap()
-            .lines()
-            .any(|line| line == "cargo xtask verify-architecture")
-    );
     assert_eq!(
-        verify["env"]["RSI_AGENT_NOTES_BASE"].as_str(),
-        Some("${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}")
+        notes["env"]["RSI_AGENT_NOTES_BASE"].as_str(),
+        Some("${{ steps.notes_base.outputs.base }}")
     );
 }
 
@@ -850,6 +879,13 @@ fn paired_web_consumers_have_independent_failure_domains() {
                 .contains("trap restore_policy EXIT")
         );
     }
+    let product = step("web_product")["run"].as_str().unwrap();
+    for probe in ["navigation-order.mjs", "device-storage.mjs"] {
+        assert!(
+            product.contains(&format!("node {probe}")),
+            "missing deterministic product probe {probe}"
+        );
+    }
     let probes = step("web_integrations")["run"].as_str().unwrap();
     assert!(probes.contains("run-paired.py"));
     assert!(probes.contains("--ignored --exact --list"));
@@ -986,5 +1022,147 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
                 "audit --no-fetch --file two/Cargo.lock",
             ]
         );
+    }
+}
+
+#[test]
+fn ci_baseline_script_fetches_exact_nonancestor_commits_and_rejects_missing_input() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["documentation"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let script = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("notes_base"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    let source = temp.path().join("source");
+    let checkout = temp.path().join("checkout");
+    fs::create_dir(&source).unwrap();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "Fixture"]);
+    git(
+        &source,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    git(&source, &["commit", "--allow-empty", "-m", "initial"]);
+    let initial = git(&source, &["rev-parse", "HEAD"]);
+    git(
+        &source,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "--single-branch",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    git(&source, &["checkout", "--orphan", "previous"]);
+    git(
+        &source,
+        &["commit", "--allow-empty", "-m", "force predecessor"],
+    );
+    let previous = git(&source, &["rev-parse", "HEAD"]);
+    git(&source, &["push", "origin", "previous"]);
+    let run = |event: &str, sha: &str, succeeds: bool| {
+        let receipt = temp.path().join("output");
+        fs::write(&receipt, "").unwrap();
+        let output = Command::new("python3")
+            .args(["-c", script])
+            .current_dir(&checkout)
+            .env("NOTES_EVENT", event)
+            .env("NOTES_PR_BASE", sha)
+            .env("NOTES_PUSH_BEFORE", sha)
+            .env("GITHUB_OUTPUT", &receipt)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), succeeds, "{}", stderr(&output));
+        fs::read_to_string(receipt).unwrap()
+    };
+    assert_eq!(
+        run("pull_request", &initial, true),
+        format!("base={initial}\n")
+    );
+    assert_eq!(run("push", &previous, true), format!("base={previous}\n"));
+    assert_eq!(
+        run("workflow_dispatch", "", true),
+        format!("base={initial}\n")
+    );
+    assert_eq!(
+        run("push", &"0".repeat(40), true),
+        format!("base={}\n", "0".repeat(40))
+    );
+    for (event, sha) in [
+        ("push", ""),
+        ("pull_request", ""),
+        ("push", "1111111111111111111111111111111111111111"),
+        ("pull_request", "0000000000000000000000000000000000000000"),
+    ] {
+        assert!(run(event, sha, false).is_empty());
+    }
+}
+
+#[test]
+fn native_verification_depends_on_toolchain_not_cache_success() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    for job in workflow["jobs"].as_mapping().unwrap().values() {
+        let Some(steps) = job["steps"].as_sequence() else {
+            continue;
+        };
+        for id in ["docs_setup", "base_setup", "native_setup"] {
+            let Some(setup) = steps.iter().find(|step| step["id"].as_str() == Some(id)) else {
+                continue;
+            };
+            assert!(
+                setup["uses"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("dtolnay/rust-toolchain@")
+            );
+            // A skipped consumer must not erase a prerequisite failure from the job result.
+            assert!(job["continue-on-error"].is_null());
+            assert!(setup["continue-on-error"].is_null());
+            if id == "docs_setup" {
+                continue;
+            }
+            let cache = steps
+                .iter()
+                .find(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.starts_with("Swatinem/rust-cache@"))
+                })
+                .unwrap();
+            assert!(cache["id"].is_null());
+            assert!(cache["continue-on-error"].is_null());
+            for step in steps.iter().filter(|step| {
+                step["if"]
+                    .as_str()
+                    .is_some_and(|condition| condition.contains(id))
+            }) {
+                assert!(step["if"].as_str().unwrap().contains("!cancelled()"));
+            }
+        }
     }
 }
