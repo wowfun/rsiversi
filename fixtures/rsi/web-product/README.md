@@ -58,7 +58,10 @@ diagnostics cannot replace the readiness or startup error.
 Goal controls retain bounded Worker invocation/reply evidence and intermediate
 control errors. Resume after a completed paused round waits for both the live
 driver and the delivered durable settlement projection, rather than treating
-their independent streams as one notification.
+their independent streams as one notification. Cancel after resume also waits
+for the second Turn's held response in the transcript and the displayed Waiting
+driver, then exercises the resumed controls at both viewport sizes. A provider
+request arriving server-side alone does not establish a delivered client state.
 
 First install the shared document's pinned build dependencies with
 `pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts` from this directory.
@@ -423,6 +426,9 @@ facts and transport/build identity; credentials are redacted on cleanup.
 `review-lifecycle.mjs` also delays a restored navigation read across another
 window's Updated selection, checking that automatic reconciliation preserves the
 committed mode and empty saved order for both Session and workspace navigation.
+Controlled storage replies separately verify that older layout reads, saves and
+errors cannot overwrite a newer local intent, and overlapping invalidations are
+followed by a fresh read. These are React lifecycle checks, not transport evidence.
 It runs current React and storage modules through an isolated
 Vite server in Chromium. It retires Dock initialization during open, read and
 reopen; verifies no late focus/subscription installation; checks content-only host

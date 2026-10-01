@@ -21,6 +21,9 @@ After scenarios close a dialog, the final composer geometry check waits for the
 closed document view; native click delivery alone does not settle a Rust command.
 Appearance checks wait for the new Settings read to replace the previous dialog's
 theme field before editing; reopening the dialog can temporarily retain old fields.
+Profile receipt recovery waits for the requested root catalog before opening its
+disclosure, then confirms it is open before selecting a receipt; the old leaf
+catalog can remain visible while the asynchronous read changes the layout.
 The frame-admission probe holds one real document ACK before requesting a second
 frame, then releases that same ACK. It cannot assume the ordinary polling loop
 always occupies the frame lane or consume an unacknowledged frame itself. Each

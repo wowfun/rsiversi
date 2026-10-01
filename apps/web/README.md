@@ -558,6 +558,9 @@ Queue rows reuse the last received array while its pane generation is unchanged.
 Unrelated transcript patches do not serialize the queue for a comparison or
 replace its controls. Layout persistence failures are visible; the current
 connection can still use in-memory layout settings.
+Layout reads and save replies cannot replace a newer local layout intent.
+Notifications arriving during a refresh request another read, so a coalesced
+invalidation cannot leave the document on an older saved layout.
 
 Connection and preference alerts occupy their own flow rows. While an alert is
 visible, the connected toolbar also reserves a row so it cannot overlap alert

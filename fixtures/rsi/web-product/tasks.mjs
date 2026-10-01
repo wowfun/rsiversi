@@ -234,6 +234,9 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await detail.getByRole("button", { name: "Resume Goal", exact: true }).click();
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 2 / 3" }), "second Goal allocation");
     await goalUntil(() => service.provider.requests.length === beforeGoal + 2, "resumed Goal stream entered");
+    await goalVisible(pane.locator(".transcript .message.assistant").filter({ hasText: "Waiting for fixture release." }).nth(1), "second Goal response delivered");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "second Goal waiting");
+    await capture("goal-resumed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Cancel automatic round", exact: true }).click();
     await goalVisible(pane.locator(".pane-status").filter({ hasText: "Cancelled" }), "second Goal cancelled");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");

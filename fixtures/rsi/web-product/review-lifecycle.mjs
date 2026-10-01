@@ -11,14 +11,46 @@ const code=`
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {ResourceDocks} from './src/resource-dock.tsx';
-import {DeviceStore} from './device-store.js';
+import {DeviceStore,applyIntent} from './device-store.js';
+import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
 import {emptyDock,dockIntent} from './src/dock-state.ts';
-import {presentationIdentity,LayoutContext,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
+import {presentationIdentity,LayoutContext,usePresentation,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {source,installActions} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
 window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
+window.stalePresentationReply=async(mode)=>{
+ const original=PresentationStore.open,actEnvironment=window.IS_REACT_ACT_ENVIRONMENT;
+ window.IS_REACT_ACT_ENVIRONMENT=true;
+ let saved=defaultLayout,current,notify,readReply,pauseRead=false;const writes=[];
+ const store={load:()=>{const value=saved;return pauseRead?new Promise(resolve=>{readReply=()=>resolve(value)}):Promise.resolve(value)},apply:intent=>{saved=applyIntent('layouts',saved,intent);const value=saved;return new Promise((resolve,reject)=>writes.push({resolve:()=>resolve(value),reject}))},subscribe:callback=>{notify=callback;return()=>{}},close(){}};
+ PresentationStore.open=async()=>store;
+ presentationIdentity.set('presentation-race:'+mode);source.set({surfaces:{},application_surfaces:[]});
+ const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
+ function Probe(){current=usePresentation();return <output>{current.layout.navigationWidth}</output>}
+ try{
+  await React.act(async()=>root.render(<Probe/>));
+  if(mode==='read'){
+   pauseRead=true;await React.act(async()=>notify());
+   await React.act(async()=>current.update({navigationWidth:310}));
+   await React.act(async()=>readReply());
+  }else if(mode==='reload'){
+   pauseRead=true;await React.act(async()=>notify());
+   saved=applyIntent('layouts',saved,{kind:'patch',patch:{navigationWidth:310}});
+   await React.act(async()=>notify());pauseRead=false;
+   await React.act(async()=>readReply());
+  }else{
+   await React.act(async()=>current.update({navigationWidth:300}));
+   await React.act(async()=>current.update({navigationWidth:310}));
+   await React.act(async()=>mode==='write-error'?writes[0].reject(Error('old save failed')):writes[0].resolve());
+  }
+  return {width:current.layout.navigationWidth,notice:current.storageNotice};
+ }finally{
+  await React.act(async()=>{for(const write of writes)write.resolve();readReply?.()});
+  await React.act(async()=>root.unmount());node.remove();PresentationStore.open=original;window.IS_REACT_ACT_ENVIRONMENT=actEnvironment;
+ }
+};
 window.staleNavigationRead=async(kind)=>{
  const identity='navigation-race:'+kind,scope=kind==='sessionOrder'?'sessions:all':'workspaces',store=await DeviceStore.open(identity);
  const members=[{id:'session-a',partition:'group'}];
@@ -99,6 +131,10 @@ let browser;const errors=[],checks=[];
 try{
  await mkdir(report,{recursive:true});await server.listen();browser=await chromium.launch();
  const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
+ for(const mode of ['write','read','write-error','reload']){
+  const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
+  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');checks.push({stalePresentationReply:mode,...presentation});
+ }
  for(const kind of ['sessionOrder','workspaceOrder']){
   const navigation=await page.evaluate(kind=>window.staleNavigationRead(kind),kind);
   assert.equal(navigation.preferences[kind],'updated');assert.equal(navigation.displayed,'updated');assert.deepEqual(navigation.order.ids,[]);checks.push({staleNavigationRead:kind,...navigation});
