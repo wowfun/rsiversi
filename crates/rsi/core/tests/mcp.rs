@@ -274,6 +274,7 @@ async fn real_grants_fence_status_and_hold_refresh_through_reply_loss_and_revoca
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     host.lookup_local::<SettingsContract>()
         .unwrap()
         .scope("rsi.mcp")
@@ -462,6 +463,7 @@ async fn remote_mcp_credentials_bind_current_http_reference_and_stdio_remains_ob
         .start(profile)
         .await
         .unwrap();
+    product::ready(&host).await;
     let registered = host
         .lookup_local::<DeviceAdministrationContract>()
         .unwrap()
@@ -602,6 +604,7 @@ async fn remote_exa_credential_uses_fixed_owner_and_grant_without_enabling_or_qu
         .start(Profile::default())
         .await
         .unwrap();
+    product::ready(&host).await;
     let registered = host
         .lookup_local::<DeviceAdministrationContract>()
         .unwrap()

@@ -375,6 +375,14 @@ async fn built_in_standard_host_profile_boots_the_real_product_composition() {
     let running = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
         .await
         .unwrap();
+    assert!(
+        running
+            .api_dispatch()
+            .unwrap()
+            .operations()
+            .contains(&rsi_configuration_api::McpOperation::Status.spec()),
+        "startup must publish MCP configuration before clients freeze operations"
+    );
     let inspection = running
         .inspect(rsi_meta::InspectionRequest::default())
         .unwrap();

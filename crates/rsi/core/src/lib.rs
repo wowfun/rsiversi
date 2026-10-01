@@ -255,6 +255,7 @@ impl RunningRsi {
                         "rsi.managed-providers",
                         "rsi-history",
                         "rsi.history.api",
+                        "rsi-mcp-api",
                         "rsi-workspace-review",
                         "rsi.workspace-review.api",
                     ] {

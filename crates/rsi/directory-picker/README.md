@@ -26,7 +26,8 @@ At most two actual Local filesystem tasks or target helper exchanges run. Each c
 seconds; dropping a caller or reaching its deadline stops scheduling new I/O.
 Uninterruptible syscalls retain the actual task slot and grant lease until they
 return. Retirement closes admission, cancels further I/O and waits for those
-actual tasks. Target processes retain their lane through cancellation and native
+actual tasks, including release of their grant leases and capacity permits.
+The tracking token is released last, after resource destructors finish. Target processes retain their lane through cancellation and native
 settlement; a lost mutation reply is never retried. A read timeout is explicit; creation timeout is outcome unknown.
 There is no automatic creation retry. Non-Unix builds register status and return
 Unsupported without requiring a native implementation.
@@ -39,3 +40,7 @@ an ambient home behind that identity.
 Status reports `allowed: false` only for an authorization denial. Exhausted
 configuration capacity and shutdown remain their explicit API errors, so a
 temporary admission failure never masquerades as a missing durable grant.
+
+The deadline regression starts real blocking work behind explicit entry/release
+barriers, then advances the caller's Tokio clock. It does not depend on an OS
+worker starting within a short wall-clock deadline.

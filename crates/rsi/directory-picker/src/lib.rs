@@ -77,7 +77,8 @@ impl Work {
             let stop = self.stop.child_token();
             let cancel = CancelOnDrop(stop.clone());
             let task = tokio::task::spawn_blocking(move || {
-                let (_guard, _slot, _token) = (guard, slot, token);
+                // Locals drop in reverse order: retirement follows grant and slot release.
+                let (_token, _slot, _guard) = (token, slot, guard);
                 if stop.is_cancelled() {
                     return Err(Failure::Cancelled);
                 }
@@ -132,7 +133,7 @@ impl Work {
             let stop = self.stop.child_token();
             let cancel = CancelOnDrop(stop.clone());
             let task = tokio::spawn(async move {
-                let (_slot, _token) = (slot, token);
+                let (_token, _slot) = (token, slot);
                 target::exchange(execution, request, stop).await
             });
             (task, cancel)
@@ -374,6 +375,55 @@ impl PluginFactory for DirectoryPickerFactory {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn close_waits_for_guard_destruction_and_capacity_release() {
+        struct Guard {
+            dropping: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.dropping.take().unwrap().send(());
+                let _ = self.release.recv();
+            }
+        }
+        let work = Arc::new(Work::new(Duration::from_secs(30)));
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let task = work.run(
+            Guard {
+                dropping: Some(entered),
+                release: blocked,
+            },
+            false,
+            |_| Ok(()),
+        );
+        let closing = async {
+            started.await.unwrap();
+            let close = work.close();
+            tokio::pin!(close);
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(close.as_mut(), cx).is_pending())
+            })
+            .await;
+            let permits = work.slots.available_permits();
+            drop(release);
+            if pending {
+                close.await;
+            }
+            assert!(
+                pending,
+                "retirement completed while the grant destructor was blocked"
+            );
+            assert_eq!(
+                permits, 1,
+                "the actual task retains its slot through grant release"
+            );
+            assert_eq!(work.slots.available_permits(), 2);
+        };
+        let (result, ()) = tokio::join!(task, closing);
+        assert_eq!(result.unwrap(), Ok(()));
+    }
+    #[tokio::test(start_paused = true)]
     async fn deadlines_keep_actual_slots_and_guards_until_uninterruptible_work_finishes() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Guard(Arc<AtomicUsize>);
@@ -388,13 +438,21 @@ mod tests {
         for mutation in [false, true] {
             let (send, receive) = std::sync::mpsc::channel::<()>();
             unblockers.push(send);
-            let result = work
-                .run(Guard(released.clone()), mutation, move |_| {
-                    let _ = receive.recv();
-                    Ok(())
-                })
-                .await
-                .unwrap();
+            let (entered, started) = std::sync::mpsc::channel();
+            let attempt = work.run(Guard(released.clone()), mutation, move |_| {
+                entered.send(()).unwrap();
+                let _ = receive.recv();
+                Ok(())
+            });
+            tokio::pin!(attempt);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(attempt.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            started.recv_timeout(Duration::from_secs(30)).unwrap();
+            tokio::time::advance(Duration::from_millis(20)).await;
+            let result = attempt.await.unwrap();
             assert_eq!(
                 result,
                 Err(if mutation {
