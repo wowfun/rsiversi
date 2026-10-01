@@ -2445,6 +2445,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "iri-string"
+version = "0.7.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4600,6 +4610,9 @@ dependencies = [
  "rsi-credentials-protocol",
  "rsi-directory-picker",
  "rsi-directory-picker-api",
+ "rsi-execution",
+ "rsi-execution-local",
+ "rsi-execution-protocol",
  "rsi-files",
  "rsi-files-native-fs",
  "rsi-files-protocol",
@@ -4651,6 +4664,8 @@ dependencies = [
  "rsi-settings-protocol",
  "rsi-settings-testkit",
  "rsi-shell-bash",
+ "rsi-ssh-client",
+ "rsi-ssh-protocol",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-storage-sqlite",
@@ -4872,8 +4887,11 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-testkit",
  "rsi-ai-protocol",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -4921,12 +4939,15 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-ai-testkit",
  "rsi-approval-protocol",
+ "rsi-execution",
  "rsi-files",
+ "rsi-files-protocol",
  "rsi-files-tools",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools",
  "rsi-tools-protocol",
@@ -4982,8 +5003,12 @@ dependencies = [
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-jobs",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -5069,6 +5094,7 @@ dependencies = [
  "rsi-agent-schedule",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-meta",
@@ -5152,6 +5178,7 @@ dependencies = [
  "jsonschema",
  "rsi-ai-protocol",
  "rsi-approval-protocol",
+ "rsi-execution-protocol",
  "rsi-media-protocol",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -5168,8 +5195,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-execution-protocol",
  "rsi-meta-contract",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -5248,6 +5278,7 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-agent-workspace-context",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-meta",
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
@@ -5269,6 +5300,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-jobs",
  "rsi-meta",
  "rsi-meta-contract",
@@ -5299,11 +5331,14 @@ dependencies = [
  "rsi-agent-store-sqlite",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-files-native-fs",
+ "rsi-files-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-meta-profile",
  "rsi-meta-scope",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools",
  "rsi-tools-protocol",
@@ -5862,6 +5897,7 @@ name = "rsi-approval-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-workspace-path",
@@ -6061,8 +6097,10 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution-protocol",
  "rsi-mcp-protocol",
  "rsi-session-protocol",
+ "rsi-ssh-protocol",
  "serde",
  "serde_json",
  "tokio",
@@ -6163,8 +6201,11 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-configuration-access",
  "rsi-directory-picker-api",
+ "rsi-execution",
  "rsi-files-native-fs",
  "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
  "serde",
  "serde_json",
  "tempfile",
@@ -6178,9 +6219,57 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
+ "rsi-execution-protocol",
  "rsi-meta",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-execution"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-api-protocol",
+ "rsi-execution-protocol",
+ "rsi-files-protocol",
+ "rsi-meta-contract",
+ "rsi-process",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-execution-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-execution",
+ "rsi-files",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-execution-protocol"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-protocol",
+ "rsi-workspace-path",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6215,6 +6304,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "hex",
+ "rsi-api-protocol",
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",
@@ -6229,9 +6319,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "hex",
+ "rsi-execution",
  "rsi-files",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools",
  "rsi-tools-protocol",
@@ -6332,9 +6424,12 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-files-native-fs",
+ "rsi-files-protocol",
  "rsi-history-api",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-session-protocol",
  "rsi-tools-protocol",
@@ -6443,6 +6538,8 @@ dependencies = [
  "futures-util",
  "hex",
  "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files",
  "rsi-files-protocol",
  "rsi-meta",
@@ -6508,13 +6605,21 @@ name = "rsi-mcp"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "bytes",
  "futures-util",
+ "image",
  "reqwest 0.12.28",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-mcp-protocol",
+ "rsi-media",
+ "rsi-media-protocol",
+ "rsi-media-testkit",
  "rsi-meta",
  "rsi-process",
  "rsi-process-local",
@@ -6536,8 +6641,10 @@ name = "rsi-mcp-protocol"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "iri-string",
  "rsi-agent-session-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -6751,9 +6858,12 @@ dependencies = [
  "hex",
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-meta",
  "rsi-navigation-api",
  "rsi-sandbox",
@@ -6773,6 +6883,7 @@ name = "rsi-navigation-api"
 version = "0.0.1"
 dependencies = [
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-session-protocol",
@@ -6863,6 +6974,9 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "rsi-execution",
+ "rsi-files",
+ "rsi-files-protocol",
  "rsi-meta",
  "rsi-process",
  "rsi-pty-protocol",
@@ -6877,6 +6991,7 @@ name = "rsi-pty-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
  "serde",
@@ -7064,6 +7179,8 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-client",
  "rsi-conversation",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta",
@@ -7150,9 +7267,11 @@ dependencies = [
  "rsi-api-http-client",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
  "rsi-files",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-session-protocol",
  "serde",
@@ -7204,6 +7323,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta-contract",
@@ -7264,6 +7384,7 @@ dependencies = [
  "rsi-application",
  "rsi-client",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-host",
  "rsi-meta",
@@ -7354,6 +7475,9 @@ name = "rsi-shell-bash"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-execution",
+ "rsi-files",
+ "rsi-files-protocol",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-meta",
@@ -7366,6 +7490,116 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ssh-client"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-execution",
+ "rsi-files-protocol",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-ssh-protocol",
+ "rsi-ssh-transport",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ssh-helper"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cap-std",
+ "hex",
+ "rsi-execution",
+ "rsi-execution-local",
+ "rsi-files",
+ "rsi-files-native-fs",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-ssh-client",
+ "rsi-ssh-protocol",
+ "rsi-ssh-transport",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ssh-helper-app"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-agent-session-protocol",
+ "rsi-agent-workspace-context",
+ "rsi-ai-protocol",
+ "rsi-apply-patch",
+ "rsi-credentials-protocol",
+ "rsi-directory-picker",
+ "rsi-execution",
+ "rsi-files",
+ "rsi-files-protocol",
+ "rsi-lsp",
+ "rsi-mcp",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-ssh-client",
+ "rsi-ssh-helper",
+ "rsi-ssh-protocol",
+ "rsi-ssh-transport",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ssh-protocol"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "rsi-execution",
+ "rsi-files-protocol",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-workspace-path",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rsi-ssh-transport"
+version = "0.0.1"
+dependencies = [
+ "rsi-ssh-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
 ]
@@ -7387,6 +7621,7 @@ name = "rsi-storage-domain"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-protocol",
  "rsi-meta",
  "rsi-storage",
  "serde",
@@ -7485,7 +7720,6 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "termina",
  "tokio",
@@ -7525,6 +7759,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rsi-execution",
  "rsi-meta",
  "rsi-meta-native-loader",
  "rsi-sandbox",
@@ -7543,9 +7778,12 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "jsonschema",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-workspace-path",
  "serde",
@@ -7721,6 +7959,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-configuration-api",
  "rsi-credentials-protocol",
+ "rsi-execution-protocol",
  "rsi-host",
  "rsi-meta",
  "rsi-navigation-api",
@@ -7738,7 +7977,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "hex",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-meta",
+ "rsi-process",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-storage-json",
@@ -7748,6 +7990,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7761,6 +8004,7 @@ dependencies = [
  "rsi-api-http-client",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
  "rsi-meta",
  "rsi-storage",
  "rsi-storage-domain",
@@ -7785,6 +8029,7 @@ dependencies = [
  "async-trait",
  "hex",
  "rsi-api-protocol",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-workspace-path",
  "serde",
@@ -7809,6 +8054,7 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files",
  "rsi-files-native-fs",
  "rsi-files-protocol",
@@ -7848,7 +8094,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
- "hex",
  "rsi-api-protocol",
  "rsi-client",
  "rsi-meta",
@@ -7858,7 +8103,6 @@ dependencies = [
  "rsi-workspace-review-api",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
 ]
 

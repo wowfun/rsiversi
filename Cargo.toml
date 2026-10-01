@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*/*", "apps/cli", "apps/catalog", "apps/terminal", "apps/serve", "apps/acp", "apps/web-worker", "apps/desktop", "apps/devtools"]
+members = ["crates/*/*", "apps/cli", "apps/catalog", "apps/terminal", "apps/serve", "apps/acp", "apps/web-worker", "apps/desktop", "apps/devtools", "apps/ssh-helper"]
 exclude = [
     "crates/rsi/terminal-native",
     "crates/rsi/docs",
@@ -40,6 +40,8 @@ http-body-util = "0.1"
 hyper = { version = "1.11", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# Freeze RFC 6570 expansion behavior; upgrades must pass MCP URI-template fixtures.
+iri-string = "=0.7.14"
 jsonschema = { version = "0.33", default-features = false }
 # Keep the JS/WASM bindings family aligned with the matching wasm-bindgen CLI in CI.
 js-sys = "=0.3.104"
