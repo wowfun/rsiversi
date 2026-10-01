@@ -186,7 +186,7 @@ async fn real_native_echo_callback_cost() {
 
 #[tokio::test]
 async fn nested_native_bridge_preserves_transferred_capability_and_bidi_terminal() {
-    let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(2));
+    let (_cache, catalog) = catalog();
     let runtime = Runtime::default();
     let upstream = runtime
         .root()
@@ -242,7 +242,7 @@ async fn nested_native_bridge_preserves_transferred_capability_and_bidi_terminal
 
 #[tokio::test(flavor = "current_thread")]
 async fn outbound_native_host_calls_support_a_current_thread_runtime() {
-    let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(2));
+    let (_cache, catalog) = catalog();
     let runtime = Runtime::default();
     let (_native, service) =
         apply_delayed_native(&runtime, &catalog, json!({ "prefix": "current-thread:" })).await;
