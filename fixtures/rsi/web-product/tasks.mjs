@@ -164,6 +164,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (isDetail) await resources(page);
         if (reveal) await reveal();
         const expected_controls = await assertControls(page, isDetail ? `${resourceSelector} .ui-contribution` : paneSelector, expected);
         await assertNoNotices(page);

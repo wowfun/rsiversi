@@ -1,5 +1,5 @@
 import {closeDetails,details} from "./controls.mjs";
-import {resources as showResources} from './controls.mjs';
+import {openResource} from './controls.mjs';
 import './paired-env.mjs';
 import { cleanupAll } from "./cleanup.mjs";
 import assert from "node:assert/strict";
@@ -48,7 +48,7 @@ try {
   await context.addInitScript(() => {
     const NativeWorker = Worker;
     window.workerStarts = 0;
-    window.Worker = class extends NativeWorker { constructor(...args) { super(...args); window.workerStarts++; this.addEventListener("message", event => { if (event.data.kind === "view") { window.admittedOffer = JSON.parse(event.data.assets); const frame = JSON.parse(event.data.view); const detail = frame.view?.ui_detail ?? frame.sections?.ui_detail; if (detail) window.nativeDetail = detail; } }); } };
+    window.Worker = class extends NativeWorker { constructor(...args) { super(...args); window.workerStarts++; this.addEventListener("message", event => { if (event.data.kind === "view") { window.admittedOffer = JSON.parse(event.data.assets); const frame = JSON.parse(event.data.view); const detail = (frame.view?.panels ?? frame.sections?.panels ?? []).find(panel => panel.ui_detail)?.ui_detail; if (detail) window.nativeDetail = detail; } }); } };
   });
   page = await context.newPage(); const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.goto(service.origin);
@@ -103,7 +103,7 @@ try {
   await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor({state:"attached"});
   const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
   for (let cycle = 0; cycle < 3; cycle++) {
-    await showResources(page);await page.getByRole("button", { name: "Service extensions", exact: true }).click();
+    await openResource(page,"Service extensions");
     await details(page).getByRole("button", { name: "Native Session model", exact: true }).click();
     const detail = details(page);
     await page.waitForFunction(() => window.nativeDetail?.error || window.nativeDetail?.model);
@@ -112,7 +112,7 @@ try {
     assert.equal(await page.evaluate(async () => (await import(`/rsi-renderers/${window.admittedOffer.revision}/rust-entry.js`)).live_renderers()), 1);
     const before = await detail.locator(".renderer-mount p").innerText();
     await detail.getByRole("button", { name: "Refresh native model", exact: true }).click();
-    await page.waitForFunction(before => document.querySelector(".resource-content .renderer-mount p")?.textContent !== before, before);
+    await waitUntil(async () => await detail.locator(".renderer-mount p").innerText() !== before, "native model refreshed");
     await detail.getByRole("button", { name: "Read native bytes", exact: true }).click();
     await detail.locator("[data-fixture-bytes]").filter({ hasText: "00 ff 41 42 43" }).waitFor();
     if (cycle === 0) await page.screenshot({ path: join(report, "native-session-rust-wasm.png") });
