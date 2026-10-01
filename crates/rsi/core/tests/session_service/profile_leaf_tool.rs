@@ -86,8 +86,10 @@ async fn profile_tool_uses_live_session_grants_and_the_same_review_and_receipt_o
         &running,
         Grant {
             principal: Principal::Local,
-            target: target.clone(),
-            operation: ChangeKind::Disable,
+            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                target: target.clone(),
+                operation: ChangeKind::Disable,
+            },
         },
         true,
     )
@@ -119,8 +121,10 @@ async fn profile_tool_uses_live_session_grants_and_the_same_review_and_receipt_o
     assert_eq!(std::fs::read(&path).unwrap(), original);
     let scope = Grant {
         principal: Principal::Agent(id),
-        target,
-        operation: ChangeKind::Disable,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target,
+            operation: ChangeKind::Disable,
+        },
     };
     grant(&running, scope.clone(), true).await;
     provider.queue(preview);

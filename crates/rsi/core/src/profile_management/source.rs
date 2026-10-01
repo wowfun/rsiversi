@@ -306,7 +306,7 @@ impl Manager {
             Err(error) => return Ok(Err(error)),
         };
         for leaf in &mut result.leaves {
-            leaf.allowed = self.allowed(&principal, &leaf.target);
+            leaf.allowed = self.allowed(&principal, &leaf.target)?;
         }
         result.validate(&request, &self.epoch)?;
         Ok(Ok(result))
@@ -318,7 +318,7 @@ impl Manager {
     ) -> Reply<wire::Preview> {
         request.target.validate()?;
         request.change.validate()?;
-        let _scope = match self.scope(&principal, &request.target, request.change.kind()) {
+        let _scope = match self.scope(&principal, &request.target, request.change.kind())? {
             Ok(token) => token,
             Err(error) => return Ok(Err(error)),
         };
@@ -378,7 +378,7 @@ impl Manager {
             }
             proposal.preview.clone()
         };
-        let _scope = match self.scope(&principal, &preview.target, preview.operation) {
+        let _scope = match self.scope(&principal, &preview.target, preview.operation)? {
             Ok(token) => token,
             Err(error) => return Ok(Err(error)),
         };

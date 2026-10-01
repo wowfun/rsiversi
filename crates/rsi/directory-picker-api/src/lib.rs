@@ -7,6 +7,7 @@ use rsi_api_protocol::{
     ApiClient, ApiClientContract, ApiError, OperationAccess, OperationClass, OperationEffect,
     OperationId, OperationSpec, RequestEncoding, call_json,
 };
+pub use rsi_execution_protocol::ExecutionLocation;
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
@@ -55,6 +56,15 @@ impl fmt::Display for Failure {
 }
 /// Domain result inside the authenticated transport result.
 pub type Result<T> = std::result::Result<T, Failure>;
+/// Explicit location selection; the contained data does not confer authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtLocation<T> {
+    /// The machine whose directory namespace is selected.
+    pub location: ExecutionLocation,
+    /// Closed operation-specific input.
+    pub request: T,
+}
 /// Platform and current grant availability; contains no paths.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,7 +239,7 @@ impl Operation {
                     Self::List => "list",
                     Self::Create => "create",
                 },
-                1,
+                2,
             )
             .expect("static operation"),
             access: OperationAccess::Authenticated,
@@ -273,17 +283,39 @@ impl Client {
         Ok(result)
     }
     /// Reads platform/grant status without filesystem access.
-    pub async fn status(&self) -> rsi_api_protocol::Result<Result<Status>> {
-        self.call(Operation::Status, &()).await
+    pub async fn status(
+        &self,
+        location: ExecutionLocation,
+    ) -> rsi_api_protocol::Result<Result<Status>> {
+        self.call(
+            Operation::Status,
+            &AtLocation {
+                location,
+                request: (),
+            },
+        )
+        .await
     }
     /// Reads a bounded physical window without retrying failures.
-    pub async fn list(&self, request: ListRequest) -> rsi_api_protocol::Result<Result<Listing>> {
+    pub async fn list(
+        &self,
+        location: ExecutionLocation,
+        request: ListRequest,
+    ) -> rsi_api_protocol::Result<Result<Listing>> {
         if let Some(path) = &request.path
             && let Err(error) = validate_path(path)
         {
             return Ok(Err(error));
         }
-        let result: Result<Listing> = self.call(Operation::List, &request).await?;
+        let result: Result<Listing> = self
+            .call(
+                Operation::List,
+                &AtLocation {
+                    location,
+                    request: &request,
+                },
+            )
+            .await?;
         if let Ok(listing) = &result {
             listing
                 .validate(&request)
@@ -294,6 +326,7 @@ impl Client {
     /// Creates once; transport uncertainty never authorizes an automatic retry.
     pub async fn create(
         &self,
+        location: ExecutionLocation,
         request: CreateRequest,
     ) -> rsi_api_protocol::Result<Result<Created>> {
         if let Err(error) =
@@ -301,18 +334,36 @@ impl Client {
         {
             return Ok(Err(error));
         }
-        let result: Result<Created> = self.call(Operation::Create, &request).await?;
+        let result: Result<Created> = self
+            .call(
+                Operation::Create,
+                &AtLocation {
+                    location,
+                    request: &request,
+                },
+            )
+            .await?;
         if let Ok(created) = &result
-            && (created.requested_parent != request.parent
-                || created.name != request.name
-                || validate_physical(&created.parent).is_err()
-                || validate_physical(&created.path).is_err()
-                || created.path
-                    != format!("{}/{}", created.parent.trim_end_matches('/'), created.name))
+            && created.validate(&request).is_err()
         {
             return Err(ApiError::OutcomeUnknown);
         }
         Ok(result)
+    }
+}
+impl Created {
+    /// Checks mutation acknowledgement against the exact submitted identity.
+    pub fn validate(&self, request: &CreateRequest) -> Result<()> {
+        if self.requested_parent != request.parent
+            || self.name != request.name
+            || validate_physical(&self.parent).is_err()
+            || validate_physical(&self.path).is_err()
+            || self.path != format!("{}/{}", self.parent.trim_end_matches('/'), self.name)
+        {
+            Err(Failure::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
     }
 }
 #[cfg(test)]

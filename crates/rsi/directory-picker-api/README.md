@@ -1,13 +1,15 @@
 # rsi-directory-picker-api
 
-The standard product's directory picker uses authenticated version-1 `status`,
+The standard product's directory picker uses authenticated version-2 `status`,
 `list` and `create` operations. Its ordinary client plugin is shared by Worker
 and native GUI transports. Status reports platform support and grant availability;
-it discloses no filesystem paths. Browse and creation require ConfigurationAccess
-at the Host. A known workspace path can still be registered independently.
+it discloses no filesystem paths. Every request explicitly selects an execution location. Local browse and creation
+require ConfigurationAccess; SSH browse and creation require the caller's current
+Use grant for that exact target. Status tests admission without connecting or
+disclosing target paths. A known workspace path can still be registered independently.
 
-List accepts an optional absolute UTF-8 Host path, at most 16 KiB. Omission selects
-the home captured by composition. The result names physical path, physical home,
+List accepts an optional absolute UTF-8 path in the selected location, at most 16 KiB. Omission selects
+the Local home captured by composition, or the target account home resolved by the helper. The result names physical path, physical home,
 path-component breadcrumbs, directory entries and explicit truncation and skipped
 non-UTF-8 indicators. It is one sorted window, not a paginated catalog: at most
 1,000 entries and 2 MiB encoded, ordered by UTF-8 name bytes. Hidden entries remain

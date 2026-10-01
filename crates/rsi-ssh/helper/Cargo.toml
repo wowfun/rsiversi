@@ -1,0 +1,39 @@
+[package]
+name = "rsi-ssh-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+cap-std.workspace = true
+hex.workspace = true
+rsi-execution-local = { path = "../../rsi-execution/local" }
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-ssh-protocol = { path = "../protocol" }
+rsi-ssh-transport = { path = "../transport" }
+rustix = { workspace = true, features = ["stdio", "pipe"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "net", "process", "rt-multi-thread", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-ssh-client = { path = "../client" }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

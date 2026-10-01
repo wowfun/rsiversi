@@ -46,12 +46,14 @@ fn grant_byte_bound_is_independent_of_the_scope_count() {
     let scopes = (0..128)
         .map(|i| Grant {
             principal: Principal::Local,
-            target: Target {
-                profile: "p".repeat(255),
-                leaf: format!("{i:03}{}", "x".repeat(253)),
-                ..target()
+            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                target: Target {
+                    profile: "p".repeat(255),
+                    leaf: format!("{i:03}{}", "x".repeat(253)),
+                    ..target()
+                },
+                operation: ChangeKind::Disable,
             },
-            operation: ChangeKind::Disable,
         })
         .collect();
     let grants = Grants {
@@ -130,8 +132,10 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
                 expected: "0".into(),
                 scope: Grant {
                     principal: Principal::Local,
-                    target: target(),
-                    operation: ChangeKind::Disable
+                    scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                        target: target(),
+                        operation: ChangeKind::Disable
+                    },
                 },
                 granted: true
             })
@@ -243,8 +247,10 @@ fn prepared_preview_and_catalog_reject_identity_confusion_without_rejecting_byte
     assert!(page.validate(&query, &epoch).is_err());
     let grant = Grant {
         principal: Principal::Local,
-        target: target(),
-        operation: ChangeKind::Disable,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target: target(),
+            operation: ChangeKind::Disable,
+        },
     };
     assert!(
         Grants {
@@ -276,4 +282,90 @@ fn largest_escaped_configuration_fits_the_actual_leaf_request_envelope() {
     ByteBudget::default()
         .encode(&request, Operation::Preview.spec().maximum_request_bytes)
         .expect("the leaf API embeds a value, not its JSON string");
+}
+
+#[test]
+fn ssh_grants_bind_exact_machine_operation_server_and_credential_addresses() {
+    use rsi_configuration_api::leaf::GrantScope;
+    use rsi_credentials_protocol::CredentialRef;
+    use rsi_execution_protocol::ExecutionTargetId;
+    let machine = ExecutionTargetId::parse("a".repeat(32)).unwrap();
+    let credential = CredentialRef::new("rsi.mcp", "selected").unwrap();
+    let use_scope = GrantScope::SshUse {
+        target: machine.clone(),
+    };
+    let manage = GrantScope::SshManage {
+        target: machine.clone(),
+    };
+    let stdio = GrantScope::SshStdio {
+        target: machine.clone(),
+        server: "exact-server".into(),
+        credentials: vec![credential.clone()],
+    };
+    for scope in [&use_scope, &manage, &stdio] {
+        scope.validate().unwrap();
+    }
+    assert_eq!(
+        [
+            use_scope.clone(),
+            manage,
+            stdio.clone(),
+            GrantScope::SshUse {
+                target: ExecutionTargetId::parse("b".repeat(32)).unwrap()
+            }
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len(),
+        4
+    );
+    for credentials in [
+        vec![credential.clone(), credential],
+        vec![CredentialRef::new("rsi.ai", "model-secret").unwrap()],
+        (0..33)
+            .map(|index| CredentialRef::new("rsi.mcp", format!("{index:02}")).unwrap())
+            .collect(),
+    ] {
+        assert!(
+            GrantScope::SshStdio {
+                target: machine.clone(),
+                server: "exact-server".into(),
+                credentials
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    for server in [String::new(), "../server".into(), "a".repeat(65)] {
+        assert!(
+            GrantScope::SshStdio {
+                target: machine.clone(),
+                server,
+                credentials: vec![]
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    assert!(
+        serde_json::from_value::<GrantScope>(
+            json!({"kind":"ssh_use","target":machine,"credentials":[]})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<Grant>(
+            json!({"principal":{"kind":"local"},"target":target(),"operation":"disable"})
+        )
+        .is_err()
+    );
+    let encoded = serde_json::to_value(Grant {
+        principal: Principal::Local,
+        scope: stdio.clone(),
+    })
+    .unwrap();
+    assert_eq!(
+        serde_json::from_value::<Grant>(encoded).unwrap().scope,
+        stdio
+    );
 }

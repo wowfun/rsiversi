@@ -20,6 +20,11 @@ credential and retires its exact issued token on failed authorization. A ten-min
 the browser cookie. The HTTP adapter consumes a narrow injected exchange
 capability and never decides product identity or grants.
 
+The automatic configuration grant does not include target Use, target management
+or SSH stdio management. The [SSH decision](../feature/2026-09-29-ssh-execution-and-helper-lifecycle.md)
+owns explicit Local trust and delegation; a local browser launch is not an
+implicit authorization to use every configured machine.
+
 ## Alternatives considered
 
 A reusable process token in query parameters simplifies reopening but exposes a

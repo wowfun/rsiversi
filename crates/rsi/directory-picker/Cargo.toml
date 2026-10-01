@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 async-trait.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

@@ -1,0 +1,45 @@
+[package]
+name = "rsi-ssh-helper-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "rsi-ssh-helper"
+path = "src/main.rs"
+
+[dependencies]
+rsi-directory-picker = { path = "../../crates/rsi/directory-picker" }
+rsi-agent-workspace-context = { path = "../../crates/rsi-agent/workspace-context" }
+rsi-apply-patch = { path = "../../crates/rsi-apply-patch/core" }
+rsi-ssh-helper = { path = "../../crates/rsi-ssh/helper" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[dev-dependencies]
+rsi-mcp = { path = "../../crates/rsi-mcp/core" }
+rsi-credentials-protocol = { path = "../../crates/rsi-credentials/protocol" }
+async-trait.workspace = true
+rsi-lsp = { path = "../../crates/rsi-lsp/core" }
+rsi-meta = { path = "../../crates/rsi-meta/core" }
+rsi-files = { path = "../../crates/rsi-files/core" }
+rsi-files-protocol = { path = "../../crates/rsi-files/protocol" }
+rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
+rsi-execution = { path = "../../crates/rsi-execution/core" }
+tokio-util.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rsi-process = { path = "../../crates/rsi-process/core" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
+rsi-ssh-client = { path = "../../crates/rsi-ssh/client" }
+rsi-ssh-protocol = { path = "../../crates/rsi-ssh/protocol" }
+rsi-ssh-transport = { path = "../../crates/rsi-ssh/transport" }
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
+
+[lints]
+workspace = true

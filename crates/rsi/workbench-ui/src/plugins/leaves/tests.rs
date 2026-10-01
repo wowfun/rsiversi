@@ -108,8 +108,11 @@ fn fixture() -> (Arc<PluginsFeature>, Arc<Remote>) {
     let owner = Arc::new(PluginsFeature {
         client: rsi_configuration_api::ConfigurationClient::new(remote.clone()).unwrap(),
         mcp: None,
+        mcp_ssh: None,
         exa: None,
         leaves: Some(wire::Client::new(remote.clone()).unwrap()),
+        ssh: None,
+        ssh_trust: false,
         leaf_grants: false,
         state: Mutex::default(),
         work: Work::new(rsi_meta::Execution::native(

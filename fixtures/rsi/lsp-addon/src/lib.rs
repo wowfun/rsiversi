@@ -79,6 +79,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_testkit_replaces_provider_and_retires_retained_generation() {
         let config = |revision| rsi_lsp::Config {
+            remote_program: None,
             program: if cfg!(windows) {
                 "C:\\fixture\\server.exe".into()
             } else {

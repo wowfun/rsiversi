@@ -7,9 +7,26 @@ use std::{io::Read, sync::Arc};
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Catalog { query: CatalogRequest },
+    Catalog {
+        query: CatalogRequest,
+    },
     Grants,
-    SetGrant { request: SetGrant },
+    SshCatalog,
+    SshTrust {
+        request: rsi_configuration_api::ssh::ConfirmTrust,
+    },
+    SshConnect {
+        request: rsi_configuration_api::ssh::ConnectionRequest,
+    },
+    SshDisconnect {
+        request: rsi_configuration_api::ssh::ConnectionRequest,
+    },
+    SshResolve {
+        request: rsi_configuration_api::ssh::ResolveDirectory,
+    },
+    SetGrant {
+        request: SetGrant,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,6 +65,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = async {
         Ok::<_, Box<dyn std::error::Error>>(match request {
             Request::Catalog { query } => serde_json::to_value(client.catalog(query).await?)?,
+            Request::SshCatalog => serde_json::to_value(
+                rsi_configuration_api::ssh::Client::new(api.clone())?
+                    .catalog()
+                    .await?,
+            )?,
+            Request::SshTrust { request } => serde_json::to_value(
+                rsi_configuration_api::ssh::Client::new(api.clone())?
+                    .confirm_trust(request)
+                    .await?,
+            )?,
+            Request::SshConnect { request } => serde_json::to_value(
+                rsi_configuration_api::ssh::Client::new(api.clone())?
+                    .connect(request)
+                    .await?,
+            )?,
+            Request::SshDisconnect { request } => serde_json::to_value(
+                rsi_configuration_api::ssh::Client::new(api.clone())?
+                    .disconnect(request)
+                    .await?,
+            )?,
+            Request::SshResolve { request } => serde_json::to_value(
+                rsi_configuration_api::ssh::Client::new(api.clone())?
+                    .resolve_directory(request)
+                    .await?,
+            )?,
             Request::Grants => serde_json::to_value(client.grants().await?)?,
             Request::SetGrant { request } => {
                 serde_json::to_value(client.set_grant(request).await?)?

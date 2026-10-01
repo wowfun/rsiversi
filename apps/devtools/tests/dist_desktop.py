@@ -16,6 +16,12 @@ spec.loader.exec_module(dist)
 
 
 class FrozenSource(unittest.TestCase):
+    def test_helper_target_is_linux_and_same_cpu(self):
+        self.assertEqual(dist.helper_target('x86_64-unknown-linux-gnu'), 'x86_64-unknown-linux-musl')
+        self.assertEqual(dist.helper_target('aarch64-unknown-linux-musl'), 'aarch64-unknown-linux-musl')
+        for target in ['x86_64-apple-darwin', 'aarch64-pc-windows-msvc', 'riscv64gc-unknown-linux-gnu']:
+            with self.assertRaises(ValueError): dist.helper_target(target)
+
     def test_invalid_distribution_command_names_the_public_tool(self):
         result = subprocess.run([sys.executable, str(Path(__file__).parents[1] / 'distribution.py'), 'bogus'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
@@ -91,6 +97,24 @@ class FrozenSource(unittest.TestCase):
             self.assertTrue((output / 'alias').is_symlink())
             self.assertFalse((output / 'alias').exists())
             self.assertFalse((output / 'omitted').exists())
+            dist.verify_capture(output, records)
+
+    def test_concurrent_read_does_not_invalidate_source_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'source'; root.mkdir()
+            output = Path(temporary) / 'capture'; output.mkdir()
+            source = root / 'file.rs'
+            source.write_bytes(b'unchanged source')
+            os.utime(source, ns=(0, source.stat().st_mtime_ns))
+            original_open = Path.open
+            def read_before_open(path, *args, **kwargs):
+                if path == source:
+                    with original_open(path, 'rb') as reader:
+                        reader.read()
+                return original_open(path, *args, **kwargs)
+            with patch.object(Path, 'open', read_before_open):
+                records = dist.capture(root, output, ['file.rs'])
+            self.assertEqual((output / 'file.rs').read_bytes(), b'unchanged source')
             dist.verify_capture(output, records)
 
     def test_concurrent_source_change_invalidates_the_whole_capture(self):
@@ -173,6 +197,42 @@ with module.build_lock(pathlib.Path(sys.argv[2])): print('entered', flush=True)
             self.assertEqual(os.readlink(cache / 'current'), 'generations/100/bundle')
             self.assertTrue((cache / 'generations/400/failure.json').is_file())
 
+    def test_successful_bundle_receipt_pins_helper_target_and_actual_artifact_bytes(self):
+        import hashlib
+        for cpu in ['x86_64', 'aarch64']:
+            with self.subTest(cpu=cpu), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); (root / 'Cargo.toml').write_text('[workspace]')
+                cache = root / 'cache'; cache.mkdir()
+                output_dir = root / 'output'; output_dir.mkdir()
+                native = cpu + '-unknown-linux-gnu'
+                helper = cpu + '-unknown-linux-musl'
+                def output(command, **kwargs):
+                    if command[0] == 'git': return b'Cargo.toml\0'
+                    if command[:2] == ['rustc', '-vV']: return 'host: ' + native + '\n'
+                    return 'fixture-tool-version'
+                def build(command, **kwargs):
+                    if command[0] == 'cargo':
+                        target = command[command.index('--target') + 1]
+                        profile = 'release' if '--release' in command else 'debug'
+                        directory = cache / 'build/target' / target / profile
+                        directory.mkdir(parents=True, exist_ok=True)
+                        names = ['rsi-ssh-helper'] if target == helper else ['rsi', 'rsi-desktop']
+                        for name in names: (directory / name).write_bytes((target + ':' + name).encode())
+                    elif command[0] == 'node':
+                        assets = Path(command[2]); assets.mkdir()
+                        (assets / 'index.html').write_bytes(b'fixture assets')
+                with patch.object(dist.shutil, 'which', return_value='/usr/bin/true'), patch.object(dist.subprocess, 'check_output', output), patch.object(dist.subprocess, 'run', build):
+                    dist.build_captured(root, cache, SimpleNamespace(kind='desktop', debug=True), output_dir, False)
+                bundle = output_dir / 'bundle'
+                receipt = json.loads((bundle / 'receipt.json').read_text())
+                self.assertEqual({key: receipt[key] for key in ['format', 'target', 'helper_target', 'profile', 'kind', 'mode']}, dict(format=1, target=native, helper_target=helper, profile='debug', kind='desktop', mode='published'))
+                self.assertEqual(set(receipt['artifacts']), {'rsi', 'rsi-desktop', 'rsi-ssh-helper', 'assets/index.html'})
+                for name, digest in receipt['artifacts'].items():
+                    self.assertEqual(digest, hashlib.sha256((bundle / name).read_bytes()).hexdigest())
+                for name in ['rsi', 'rsi-desktop', 'rsi-ssh-helper']:
+                    self.assertEqual((bundle / name).stat().st_mode & 0o777, 0o755)
+                self.assertEqual(receipt['family_sha256'], hashlib.sha256((bundle / 'build-family.json').read_bytes()).hexdigest())
+
     def test_failed_build_never_replaces_current(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); (root / 'Cargo.toml').write_text('[workspace]')
@@ -184,7 +244,7 @@ with module.build_lock(pathlib.Path(sys.argv[2])): print('entered', flush=True)
                 if command[0] == 'git': return b'Cargo.toml\0'
                 if command[:2] == ['rustc', '-vV']: return 'host: x86_64-unknown-linux-gnu\n'
                 return 'test-tool-version'
-            with patch.object(dist.subprocess, 'check_output', output), patch.object(dist.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['cargo'])):
+            with patch.object(dist.shutil, 'which', return_value='/usr/bin/true'), patch.object(dist.subprocess, 'check_output', output), patch.object(dist.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['cargo'])):
                 with self.assertRaises(subprocess.CalledProcessError): dist.build(root, cache, args, None)
             self.assertEqual(os.readlink(cache / 'current'), 'generations/old/bundle')
             self.assertEqual([p.name for p in (cache / 'generations').iterdir() if (p / 'bundle/receipt.json').exists()], ['old'])

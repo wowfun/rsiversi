@@ -37,8 +37,8 @@ export function Setup({close}: {close: () => void}) {
     await command({kind:'providers_replace',expected_revision:providers.desired_revision,deployments:next}); setEditing(undefined)
   }
   return <section className="setup-panel" aria-label="Settings">
-    <div className="settings-header"><div className="setup-heading"><div><span className="eyebrow">Application settings</span><h1>{tab === 'plugins' ? 'Plugins' : 'Models & access'}</h1><p className="hint">{tab === 'plugins' ? 'Current service observations. Refresh to read again.' : 'Changes apply to new conversations. Each step saves independently.'}</p></div><Button onClick={close} aria-label="Close settings">×</Button></div>
-    <nav className="settings-tabs" aria-label="Settings sections"><Button aria-pressed={tab === 'models'} onClick={() => setTab('models')}>Models & access</Button><Button aria-pressed={tab === 'plugins'} onClick={() => {setTab('plugins');act(() => input.command({action:'plugins',command:{kind:'refresh'}}))}}>Plugins</Button></nav></div>
+    <nav className="settings-tabs" aria-label="Settings sections"><Button aria-pressed={tab === 'models'} onClick={() => setTab('models')}>Models & access</Button><Button aria-pressed={tab === 'plugins'} onClick={() => {setTab('plugins');act(() => input.command({action:'plugins',command:{kind:'refresh'}}))}}>Plugins</Button></nav>
+    <div className="settings-options"><div className="setup-heading"><div><span className="eyebrow">Application settings</span><h1>{tab === 'plugins' ? 'Plugins' : 'Models & access'}</h1><p className="hint">{tab === 'plugins' ? 'Current service observations. Refresh to read again.' : 'Changes apply to new conversations. Each step saves independently.'}</p></div><Button onClick={close} aria-label="Close settings">×</Button></div>
     {tab === 'plugins' ? <Plugins loading={busy}/> : <>
     {!setup?.allowed && <p className="permission-note">Configuration is read only for this connection. A service administrator can grant this device access.</p>}
     <Button disabled={busy} size="sm" onClick={() => act(() => command({kind:'refresh'}))}>Refresh setup status</Button>
@@ -71,8 +71,9 @@ export function Setup({close}: {close: () => void}) {
       <form onSubmit={e=>{e.preventDefault();act(()=>command({kind:'default_preset',ticket:setup?.ticket,preset}))}}><label>Default preset<input aria-label="Default preset" required placeholder={setup?.presets?.default ?? 'Existing preset identity'} value={preset} onChange={e=>setPreset(e.target.value)} disabled={locked}/></label><Button type="submit" size="sm" disabled={locked}>Save preset selection</Button></form>
     </section></div>
     <section className="setup-receipts" aria-label="Setup receipts"><h2>Operation results</h2>{setup?.receipts.map((receipt,index)=><p key={index} data-outcome={receipt.outcome}><strong>{receipt.operation} · {receipt.outcome}</strong> — {receipt.message}</p>)}</section>
-    <section className="application-extensions"><h2>Application extensions</h2>{contributions?.map(item=><Button key={JSON.stringify(item.reference)} size="sm" onClick={()=>act(()=>input.command({action:"application_ui_surface",reference:item.reference}))}>{item.title}</Button>)}</section>
+    <section className="application-extensions"><h2>Application extensions</h2>{contributions?.map(item=><Button key={JSON.stringify(item.reference)} size="sm" onClick={()=>act(async()=>{await input.command({action:"application_ui_surface",reference:item.reference});close()})}>{item.title}</Button>)}</section>
     <details className="advanced-settings"><summary>Additional settings</summary><Button size="sm" onClick={()=>act(()=>input.command({action:'settings_list'}))}>Open registered settings</Button></details>
     </>}
+    </div>
   </section>
 }

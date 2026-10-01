@@ -7,8 +7,10 @@ use rsi_api_protocol::ApiError;
 use rsi_api_protocol::{ApiRegistrarContract, CallOrigin, json_handler};
 use rsi_configuration_access::{ConfigurationAccess, ConfigurationAccessContract};
 use rsi_directory_picker_api::{
-    CreateRequest, Created, Failure, ListRequest, Listing, Operation, Status,
+    AtLocation, CreateRequest, Created, ExecutionLocation, Failure, ListRequest, Listing,
+    Operation, Status,
 };
+use rsi_execution::{ExecutionResolver, ExecutionResolverContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use std::{path::PathBuf, sync::Arc};
 #[cfg(unix)]
@@ -19,6 +21,10 @@ use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 #[cfg(unix)]
 mod native;
+#[cfg(unix)]
+mod target;
+#[cfg(unix)]
+pub use target::maybe_run_directory_picker_helper;
 #[cfg(unix)]
 #[derive(Debug)]
 struct Work {
@@ -106,10 +112,44 @@ impl Work {
         }
         self.tasks.wait().await;
     }
+    async fn remote(
+        &self,
+        execution: rsi_execution::ExecutionLease,
+        request: target::Request,
+    ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<target::Reply>> {
+        let mutation = matches!(request, target::Request::Create(_));
+        let (task, cancel) = {
+            let closed = self.closed.lock().expect("directory admission poisoned");
+            if *closed {
+                return Err(ApiError::ShuttingDown);
+            }
+            let slot = self
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ApiError::Capacity)?;
+            let token = self.tasks.token();
+            let stop = self.stop.child_token();
+            let cancel = CancelOnDrop(stop.clone());
+            let task = tokio::spawn(async move {
+                let (_slot, _token) = (slot, token);
+                target::exchange(execution, request, stop).await
+            });
+            (task, cancel)
+        };
+        let result = match tokio::time::timeout(self.deadline, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) | Err(_) if mutation => Err(Failure::OutcomeUnknown),
+            Ok(Err(_)) => Err(Failure::Io {
+                message: "target directory worker failed".into(),
+            }),
+            Err(_) => Err(Failure::TimedOut),
+        };
+        drop(cancel);
+        Ok(result)
+    }
 }
-fn access_allowed(
-    admission: rsi_api_protocol::Result<rsi_configuration_access::ConfigurationLease>,
-) -> rsi_api_protocol::Result<bool> {
+fn access_allowed<T>(admission: rsi_api_protocol::Result<T>) -> rsi_api_protocol::Result<bool> {
     match admission {
         Ok(_) => Ok(true),
         Err(ApiError::Unauthorized) => Ok(false),
@@ -122,13 +162,13 @@ mod status_tests {
     use super::*;
     #[test]
     fn status_preserves_capacity_and_shutdown_instead_of_reporting_denied() {
-        assert!(!access_allowed(Err(ApiError::Unauthorized)).unwrap());
+        assert!(!access_allowed::<()>(Err(ApiError::Unauthorized)).unwrap());
         assert!(matches!(
-            access_allowed(Err(ApiError::Capacity)),
+            access_allowed::<()>(Err(ApiError::Capacity)),
             Err(ApiError::Capacity)
         ));
         assert!(matches!(
-            access_allowed(Err(ApiError::ShuttingDown)),
+            access_allowed::<()>(Err(ApiError::ShuttingDown)),
             Err(ApiError::ShuttingDown)
         ));
     }
@@ -137,6 +177,7 @@ mod status_tests {
 #[derive(Debug)]
 struct Owner {
     access: Arc<ConfigurationAccess>,
+    execution: Arc<dyn ExecutionResolver>,
     #[cfg(unix)]
     home: Option<PathBuf>,
     #[cfg(unix)]
@@ -146,8 +187,31 @@ impl Owner {
     async fn list(
         &self,
         origin: &CallOrigin,
+        location: ExecutionLocation,
         request: ListRequest,
     ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<Listing>> {
+        if location != ExecutionLocation::Local {
+            #[cfg(unix)]
+            {
+                let execution = self.execution.lease(origin.clone(), &location)?;
+                return Ok(
+                    match self
+                        .work
+                        .remote(execution, target::Request::List(request))
+                        .await?
+                    {
+                        Ok(target::Reply::Listing(value)) => Ok(value),
+                        Ok(_) => Err(Failure::Invalid),
+                        Err(error) => Err(error),
+                    },
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _admission = self.execution.admit(origin, &location)?;
+                return Ok(Err(Failure::Unsupported));
+            }
+        }
         let grant = self.access.admit(origin)?;
         #[cfg(unix)]
         {
@@ -165,8 +229,31 @@ impl Owner {
     async fn create(
         &self,
         origin: &CallOrigin,
+        location: ExecutionLocation,
         request: CreateRequest,
     ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<Created>> {
+        if location != ExecutionLocation::Local {
+            #[cfg(unix)]
+            {
+                let execution = self.execution.lease(origin.clone(), &location)?;
+                return Ok(
+                    match self
+                        .work
+                        .remote(execution, target::Request::Create(request))
+                        .await?
+                    {
+                        Ok(target::Reply::Created(value)) => Ok(value),
+                        Ok(_) => Err(Failure::OutcomeUnknown),
+                        Err(error) => Err(error),
+                    },
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _admission = self.execution.admit(origin, &location)?;
+                return Ok(Err(Failure::Unsupported));
+            }
+        }
         let grant = self.access.admit(origin)?;
         #[cfg(unix)]
         {
@@ -204,11 +291,13 @@ impl PluginFactory for DirectoryPickerFactory {
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<ApiRegistrarContract>()
+            .requiring_local::<ExecutionResolverContract>()
             .requiring_local::<ConfigurationAccessContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let owner = Arc::new(Owner {
             access: plan.local::<ConfigurationAccessContract>()?,
+            execution: plan.local::<ExecutionResolverContract>()?,
             #[cfg(unix)]
             home: self.home.clone(),
             #[cfg(unix)]
@@ -219,12 +308,21 @@ impl PluginFactory for DirectoryPickerFactory {
         let status = registrar
             .register(
                 Operation::Status.spec(),
-                json_handler(move |context, (): ()| {
+                json_handler(move |context, request: AtLocation<()>| {
                     let owner = status_owner.clone();
                     async move {
                         Ok(Ok::<_, Failure>(Status {
-                            supported: cfg!(unix),
-                            allowed: access_allowed(owner.access.admit(&context.origin))?,
+                            supported: match request.location {
+                                ExecutionLocation::Local => cfg!(unix),
+                                ExecutionLocation::Ssh { .. } => cfg!(target_os = "linux"),
+                            },
+                            allowed: if request.location == ExecutionLocation::Local {
+                                access_allowed(owner.access.admit(&context.origin))?
+                            } else {
+                                access_allowed(
+                                    owner.execution.admit(&context.origin, &request.location),
+                                )?
+                            },
                         }))
                     }
                 }),
@@ -234,9 +332,13 @@ impl PluginFactory for DirectoryPickerFactory {
         let list = registrar
             .register(
                 Operation::List.spec(),
-                json_handler(move |context, request: ListRequest| {
+                json_handler(move |context, request: AtLocation<ListRequest>| {
                     let owner = list_owner.clone();
-                    async move { owner.list(&context.origin, request).await }
+                    async move {
+                        owner
+                            .list(&context.origin, request.location, request.request)
+                            .await
+                    }
                 }),
             )
             .map_err(|error| MetaError::Activation(error.to_string()))?;
@@ -244,9 +346,13 @@ impl PluginFactory for DirectoryPickerFactory {
         let create = registrar
             .register(
                 Operation::Create.spec(),
-                json_handler(move |context, request: CreateRequest| {
+                json_handler(move |context, request: AtLocation<CreateRequest>| {
                     let owner = create_owner.clone();
-                    async move { owner.create(&context.origin, request).await }
+                    async move {
+                        owner
+                            .create(&context.origin, request.location, request.request)
+                            .await
+                    }
                 }),
             )
             .map_err(|error| MetaError::Activation(error.to_string()))?;

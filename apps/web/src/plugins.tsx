@@ -1,6 +1,8 @@
+import {McpSsh} from './mcp-ssh.tsx'
 import { useState } from 'react'
 import { Button } from './button.tsx'
 import { input, run, useView, useSelected, type McpServer, type PluginsView } from './bridge.ts'
+import { SshTargets } from './ssh-targets.tsx'
 import { ProfileLeaves } from './profile-leaves.tsx'
 export function Plugins({loading=false}:{loading?:boolean}) {
   const view = useView(view => view?.plugins), [working,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
@@ -19,6 +21,8 @@ export function Plugins({loading=false}:{loading?:boolean}) {
   })()
   const label = (value: string) => value.replaceAll('_',' ')
   return <section className="plugins-panel" aria-label="Plugins">
+    {view?.ssh?.available && <SshTargets view={view.ssh} busy={busy} command={value=>command({kind:'ssh',command:value})} grantCommand={value=>command({kind:'leaves',command:value})} grantRevision={view.leaves?.grants?.revision ?? null}/>}
+    {view?.mcp_ssh?.available&&<McpSsh view={view.mcp_ssh} ssh={view.ssh} busy={busy} command={value=>command({kind:'mcp_ssh',command:value})}/>}
     {view?.leaves?.available && <ProfileLeaves view={view.leaves} busy={busy} command={value => command({kind:'leaves',command:value})}/>}
     <div className="actions"><h2>Plugins</h2><Button disabled={busy} onClick={() => command({kind:'refresh'})}>Refresh plugin status</Button></div>
     <div className="actions" aria-label="Plugin observation source">

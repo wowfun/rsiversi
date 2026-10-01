@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react'
-import {input} from './bridge.ts'
+import {input,useView,type ExecutionLocation} from './bridge.ts'
 import {Modal} from './presentation.tsx'
 import {Button} from './button.tsx'
 interface Entry {name:string;path:string;hidden:boolean;symlink:boolean}
@@ -16,14 +16,17 @@ export function DirectoryPickerHost() {
   return open?<DirectoryPicker close={()=>setOpen(false)}/>:null
 }
 function DirectoryPicker({close}:{close:()=>void}) {
+  const [selected,setSelected]=useState('local')
+  const targets=useView(view=>view?.plugins?.ssh?.catalog?.targets)
+  const location:ExecutionLocation=selected==='local'?{kind:'local'}:{kind:'ssh',target:selected}
   const [columns,setColumns]=useState<Listing[]>([]),[path,setPath]=useState(''),[editing,setEditing]=useState(false)
-  const [hidden,setHidden]=useState(false),[available,setAvailable]=useState(false),[status,setStatus]=useState('Checking Host…')
+  const [hidden,setHidden]=useState(false),[available,setAvailable]=useState(false),[status,setStatus]=useState('Checking location…')
   const [busy,setBusy]=useState<string>(),[newFolder,setNewFolder]=useState(false),[name,setName]=useState(''),[uncertain,setUncertain]=useState(false)
   const readId=useRef<string>(),request=useRef(0),alive=useRef(true),current=columns.at(-1)
   async function browse(path:string|null,parent?:Listing) {
     const revision=++request.current,id=crypto.randomUUID();readId.current=id;setBusy('list');setStatus('')
     try {
-      const listing=await directory<Listing>({action:'list',path,request_id:id})
+      const listing=await directory<Listing>({action:'list',location,path,request_id:id})
       if(!alive.current||revision!==request.current)return
       setColumns(parent&&parent.entries.some(entry=>entry.path===listing.path)?[parent,listing]:[listing]);setPath(listing.path);setEditing(false);setUncertain(false)
       return listing
@@ -32,22 +35,25 @@ function DirectoryPicker({close}:{close:()=>void}) {
   }
   useEffect(()=>{
     alive.current=true
+    const revision=++request.current
+    setColumns([]);setPath('');setNewFolder(false);setUncertain(false);setAvailable(false);setBusy('check');setStatus('Checking location…')
     void (async()=>{
       try {
-        const state=await directory<{supported:boolean;allowed:boolean}>({action:'status'})
-        if(!alive.current)return
+        const state=await directory<{supported:boolean;allowed:boolean}>({action:'status',location})
+        if(!alive.current||revision!==request.current)return
         setAvailable(state.supported&&state.allowed)
         if(state.supported&&state.allowed)await browse(null)
-        else {setEditing(true);setStatus(state.supported?'Directory browsing requires a configuration grant. Enter a known path to register it.':'This Host supports manual workspace paths. Directory browsing is unavailable.')}
-      }catch(error){if(alive.current){setEditing(true);setStatus(String(error))}}
+        else {setBusy(undefined);setEditing(true);setStatus(state.supported?(location.kind==='local'?'Local browsing requires a configuration grant. Enter a known path to register it.':'This SSH target requires Use permission.'):'Directory browsing is unavailable for this location.')}
+      }catch(error){if(alive.current&&revision===request.current){setBusy(undefined);setEditing(true);setStatus(String(error))}}
     })()
     return()=>{alive.current=false;request.current++;if(readId.current)void input.directory({action:'cancel',request_id:readId.current}).catch(()=>{})}
-  },[])
+  },[selected])
+  useEffect(()=>{void input.command({action:'plugins',command:{kind:'ssh',command:{kind:'read'}}}).catch(()=>{})},[])
   async function create() {
     if(!current||busy||uncertain)return
     setBusy('create');setStatus('')
     try {
-      const created=await directory<{path:string}>({action:'create',parent:current.path,name})
+      const created=await directory<{path:string}>({action:'create',location,parent:current.path,name})
       if(!alive.current)return
       setNewFolder(false);setName('');const parent=await browse(current.path);if(parent)await browse(created.path,parent)
     }catch(error){if(alive.current){setStatus(String(error));const kind=(error as {kind?:string})?.kind;setUncertain(!kind||kind==='outcome_unknown')}}
@@ -60,10 +66,10 @@ function DirectoryPicker({close}:{close:()=>void}) {
       let physical=path
       if(available && (editing||!current||current.path!==path)){
         const id=crypto.randomUUID();readId.current=id
-        const listing=await directory<Listing>({action:'list',path,request_id:id})
+        const listing=await directory<Listing>({action:'list',location,path,request_id:id})
         physical=listing.path
       }
-      await input.open({action:'register_workspace',path:physical});close()
+      await input.open({action:'register_workspace',location,path:physical});close()
     }
     catch(error){if(alive.current){setStatus(String(error));setBusy(undefined)}}
   }
@@ -71,6 +77,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
   const crumbs=current?[{label:'/',path:'/'},...current.breadcrumbs.map((label,index)=>({label,path:'/'+current.breadcrumbs.slice(0,index+1).join('/')}))]:[]
   return <Modal label="Select workspace directory" className="directory-picker" close={closing}>
     <header><h2>Select workspace directory</h2>
+      <label>Execution location<select aria-label="Execution location" value={selected} disabled={!!busy} onChange={event=>setSelected(event.target.value)}><option value="local">Local Service</option>{selected!=='local'&&!targets?.some(target=>target.candidate.target===selected&&target.permissions.use_target)&&<option value={selected}>Selected SSH target · unavailable</option>}{targets?.filter(target=>target.permissions.use_target).map(target=><option key={target.candidate.target} value={target.candidate.target}>{target.candidate.name}{target.connected?'':' · disconnected'}</option>)}</select></label>
       {editing?<form className="directory-path" onSubmit={event=>{event.preventDefault();if(available)void browse(path);else void open()}}><input autoFocus aria-label="Directory path" value={path} onChange={event=>setPath(event.target.value)} maxLength={16384} placeholder="/path/to/project"/><Button type="submit" disabled={!!busy}>{available?'Go':'Open'}</Button></form>:<div className="directory-location"><nav className="directory-breadcrumbs" aria-label="Directory breadcrumbs">
         {current?.home&&<button disabled={!!busy} onClick={()=>void browse(current.home)}>Home</button>}
         {crumbs.map(crumb=><button key={crumb.path} title={crumb.path} disabled={!!busy} onClick={()=>void browse(crumb.path)}>{crumb.label}</button>)}

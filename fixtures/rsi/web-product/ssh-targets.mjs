@@ -1,0 +1,108 @@
+// Real SSH, generated keys and Local public API trust; no source-owned user identities.
+import {paired} from './paired-env.mjs';
+import {liveFixture} from './live-fixture.mjs';
+import {verifySshMcp} from './ssh-mcp.mjs';
+import {verifySshSession} from './ssh-session-live.mjs';
+import {verifyTargetIsolation} from './ssh-contention.mjs';
+import {startService,waitUntil,boundedRun} from './service.mjs';
+import {chromium,request as requests} from 'playwright';
+import {mkdir,mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {tmpdir} from 'node:os';
+import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import net from 'node:net';
+import assert from 'node:assert/strict';
+const report=process.env.RSI_REPORT_DIR;assert(report);
+const required=name=>{assert(process.env[name],`explicit ${name} required`);return process.env[name]};
+const sshdBinary=required('RSI_TEST_SSHD'),sessionBinary=process.env.RSI_TEST_SSH_SESSION,authBinary=process.env.RSI_TEST_SSH_AUTH,user=required('RSI_TEST_SSH_USER'),fixtures=required('RSI_TEST_SSH_FIXTURES');
+const liveMode=process.env.RSI_SSH_LIVE==='1';
+if(liveMode)assert.equal(process.env.RSI_WEB_REPORT,report);else await mkdir(report,{recursive:true});
+const root=await mkdtemp(join(tmpdir(),'rsi-product-ssh-'));
+const authorized=await mkdtemp(join(fixtures,'product-'));
+let service,browser,sshd,page,deviceApi,live,session;const checks=[],errors=[],screens=[];
+const probe=resolve(process.env.RSI_PROFILE_PROBE ?? 'target/debug/examples/profile-leaf-probe');
+try {
+  const hostKey=join(root,'host'),identity=join(root,'identity');
+  for(const key of [hostKey,identity])boundedRun('/usr/bin/ssh-keygen',['-q','-t','ed25519','-N','','-f',key]);
+  await writeFile(join(authorized,'authorized_keys'),await readFile(`${identity}.pub`),{mode:0o600});
+  const listener=net.createServer();await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
+  const config=join(root,'sshd_config');
+  await writeFile(config,`Port ${port}\nListenAddress 127.0.0.1\nHostKey ${hostKey}\nPidFile ${root}/sshd.pid\nAuthorizedKeysFile ${authorized}/authorized_keys\n${sessionBinary?`SshdSessionPath ${sessionBinary}\n`:''}${authBinary?`SshdAuthPath ${authBinary}\n`:''}PasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\nUsePAM no\nStrictModes yes\nAllowUsers ${user}\nAllowTcpForwarding no\nAllowAgentForwarding no\nX11Forwarding no\nPermitTunnel no\nPermitUserEnvironment no\n`);
+  const sshEnv=process.env.RSI_TEST_SSH_LIBRARY_PATH?{LD_LIBRARY_PATH:process.env.RSI_TEST_SSH_LIBRARY_PATH}:{};
+  sshd=spawn(sshdBinary,['-D','-e','-f',config],{env:sshEnv,stdio:['ignore','ignore','pipe']});
+  let log='';sshd.stderr.on('data',bytes=>{if(log.length<65536)log+=bytes.toString()});
+  await waitUntil(async()=>{assert.equal(sshd.exitCode,null,log);return await new Promise(resolve=>{const socket=net.connect(port,'127.0.0.1');socket.once('connect',()=>{socket.destroy();resolve(true)});socket.once('error',()=>resolve(false))})},'isolated sshd');
+  if(liveMode){live=await liveFixture({ssh:true});service=live.service;}else service=await startService({binary:paired.binary,assets:paired.assets,report});
+  const local=request=>{const result=JSON.parse(service.probe(probe,request).stdout);assert('Ok' in result,JSON.stringify(result));return result.Ok};
+  browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
+  page=await context.newPage();page.setDefaultTimeout(60000);page.on('pageerror',error=>errors.push(error.message));
+  const registration=service.register('SSH target product verification');
+  deviceApi=await requests.newContext({ignoreHTTPSErrors:true,extraHTTPHeaders:{authorization:`Bearer ${registration.token}`,'x-rsi-wire-version':'1'}});
+  await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(registration));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
+  await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();
+  const panel=page.getByRole('region',{name:'SSH targets',exact:true});await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();
+  await panel.locator('summary').filter({hasText:'Add an SSH target'}).click();
+  await panel.getByLabel('Target name',{exact:true}).fill('Isolated Linux SSH');await panel.getByLabel('Hostname or IP address',{exact:true}).fill('127.0.0.1');await panel.getByLabel('SSH account',{exact:true}).fill(user);await panel.getByLabel('SSH port',{exact:true}).fill(String(port));
+  await panel.getByRole('button',{name:'Submit target candidate',exact:true}).click();
+  const card=panel.getByRole('article',{name:'SSH target Isolated Linux SSH',exact:true});await card.waitFor();
+  assert(await card.getByRole('button',{name:'Connect target',exact:true}).isDisabled());assert.equal(await card.locator('summary').filter({hasText:'Confirm trust as Local operator'}).count(),0);checks.push('Web candidate submission confers no Use or trust authority');
+  let catalog=local({operation:'ssh_catalog'}),target=catalog.targets[0];
+  const remote=(operation,input)=>deviceApi.post(`${service.origin}/api/v1/ssh-targets/${operation}/1`,{headers:{'x-rsi-host-epoch':catalog.host_epoch},data:input});
+  const picker=(operation,request)=>deviceApi.post(`${service.origin}/api/v1/directory-picker/${operation}/2`,{headers:{'x-rsi-host-epoch':catalog.host_epoch},data:{location:{kind:'ssh',target:target.candidate.target},request}});
+  const ungrantedPicker=await picker('list',{path:service.workspace});assert([401,403].includes(ungrantedPicker.status()));
+  const ungrantedCreate=await picker('create',{parent:service.workspace,name:'ungranted'});assert([401,403].includes(ungrantedCreate.status()));
+  checks.push('remote picker listing and creation denied before Use');
+  const beforeUse=await remote('resolve-directory',{connection:{selection:{host_epoch:catalog.host_epoch,target:target.candidate.target,revision:target.revision},expected_connection_epoch:null},path:service.workspace});
+  assert([401,403].includes(beforeUse.status()));checks.push('actual authenticated HTTP directory request denied without Use');
+  const publicKey=(await readFile(`${hostKey}.pub`,'utf8')).trim().split(/\s+/);const fingerprint='SHA256:'+createHash('sha256').update(Buffer.from(publicKey[1],'base64')).digest('base64').replace(/=+$/,'');
+  target=local({operation:'ssh_trust',request:{selection:{host_epoch:catalog.host_epoch,target:target.candidate.target,revision:target.revision},host_key:{algorithm:publicKey[0],base64:publicKey[1]},fingerprint,identity_path:identity}});
+  const scope={principal:{kind:'device',id:registration.id},scope:{kind:'ssh_use',target:target.candidate.target}};
+  const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
+  grant(true);await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();await card.getByRole('button',{name:'Connect target',exact:true}).click();
+  await waitUntil(()=>card.getByRole('button',{name:'Reconnect target',exact:true}).count(),'actual helper connection',60000);
+  catalog=local({operation:'ssh_catalog'});target=catalog.targets[0];assert(target.connected);const oldEpoch=target.connection_epoch;checks.push('real generated SSH config and receipt-verified musl helper connected');
+  await card.getByLabel('Target directory',{exact:true}).fill(service.workspace);await card.getByRole('button',{name:'Check target directory',exact:true}).click();await panel.getByRole('status').filter({hasText:'Resolved target directory:'}).waitFor();checks.push('directory canonicalized through live target ExecutionLease');
+  const pickerStatus=await picker('status',null);assert.equal(pickerStatus.status(),200);assert.deepEqual(await pickerStatus.json(),{supported:true,allowed:true});
+  const targetHome=boundedRun('/usr/bin/getent',['passwd',user],{encoding:'utf8'}).stdout.trim().split(':')[5];
+  const defaultDirectory=await picker('list',{path:null});assert.equal(defaultDirectory.status(),200);assert.equal((await defaultDirectory.json()).home,targetHome);
+  checks.push('picker defaults to target account HOME, independently of isolated Service HOME');
+  await verifySshMcp({page,service,report,local,registration,target,checks});
+  await page.getByRole('button',{name:'Close settings',exact:true}).click();
+  await page.getByTestId('new-conversation').click();
+  const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});await dialog.waitFor();
+  await dialog.getByLabel('Execution location',{exact:true}).selectOption(target.candidate.target);
+  await dialog.getByRole('button',{name:'Edit directory path',exact:true}).waitFor();
+  await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path',{exact:true}).fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
+  await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name',{exact:true}).fill('picked-on-target');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
+  await dialog.getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
+  const listed=await picker('list',{path:service.workspace});assert.equal(listed.status(),200);assert((await listed.json()).entries.some(entry=>entry.name==='picked-on-target'));
+  checks.push('actual Web picker selects SSH, browses target and creates one directory through current lease');
+  for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]])for(const theme of ['light','dark']){
+    await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
+    const geometry=await dialog.evaluate(node=>({overflow:document.documentElement.scrollWidth-innerWidth,dialogOverflow:node.scrollWidth-node.clientWidth,location:node.querySelector('select').value,rowForeground:getComputedStyle(node.querySelector('.directory-entry')).color,rowBackground:getComputedStyle(node.querySelector('.directory-entry')).backgroundColor}));
+    assert(geometry.overflow<=1&&geometry.dialogOverflow<=1,JSON.stringify({width,theme,geometry}));assert.equal(geometry.location,target.candidate.target);
+    const file=`picker-ssh-${width}-${theme}.png`;await page.screenshot({path:join(report,file)});screens.push({width,height,theme,file,...geometry});
+  }
+  await page.setViewportSize({width:1440,height:900});
+  if(liveMode)session=await verifySshSession({page,service,report,dialog,target,checks});
+  else {await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();}
+  const connection={selection:{host_epoch:catalog.host_epoch,target:target.candidate.target,revision:target.revision},expected_connection_epoch:oldEpoch};
+  await card.getByRole('button',{name:'Reconnect target',exact:true}).click();
+  await waitUntil(()=>{const current=local({operation:'ssh_catalog'}).targets[0];return current.connected && current.connection_epoch!==oldEpoch},'fresh connection epoch',60000);
+  const stale=JSON.parse(service.probe(probe,{operation:'ssh_disconnect',request:connection}).stdout);assert.equal(stale.Err.kind,'conflict');checks.push('stale disconnect rejected after explicit reconnect');
+  const currentTarget=local({operation:'ssh_catalog'}).targets[0];
+  const currentRequest={connection:{selection:{host_epoch:catalog.host_epoch,target:currentTarget.candidate.target,revision:currentTarget.revision},expected_connection_epoch:currentTarget.connection_epoch},path:service.workspace};
+  const allowed=await remote('resolve-directory',currentRequest);assert.equal(allowed.status(),200);assert.equal((await allowed.json()).path,service.workspace);
+  grant(false);for(const [operation,request] of [['list',{path:service.workspace}],['create',{parent:service.workspace,name:'revoked'}]]){const rejected=await picker(operation,request);assert([401,403].includes(rejected.status()));}checks.push('same picker list/create operations rejected after Use withdrawal');const denied=await remote('resolve-directory',currentRequest);assert([401,403].includes(denied.status()));checks.push('same live HTTP directory request denied immediately after Use revocation');await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();await waitUntil(()=>card.getByRole('button',{name:'Reconnect target',exact:true}).isDisabled(),'revoked Use display');
+  target=local({operation:'ssh_catalog'}).targets[0];assert(target.connected);checks.push('Use revocation keeps connection while denying new device operations');
+  for(const [width,height] of [[1440,900],[390,844]])for(const theme of ['light','dark']){
+    await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});await panel.scrollIntoViewIfNeeded();
+    const geometry=await page.evaluate(()=>({overflow:document.documentElement.scrollWidth-innerWidth,trustControls:[...document.querySelectorAll('.ssh-targets summary')].filter(node=>node.textContent.includes('Confirm trust')).length}));
+    assert(geometry.overflow<=1,JSON.stringify({width,theme,geometry}));assert.equal(geometry.trustControls,0);
+    const file=`ssh-${width}-${theme}.png`;await page.screenshot({path:join(report,file)});screens.push({width,height,theme,file,...geometry});
+  }
+  checks.push(await verifyTargetIsolation({remote,local,epoch:catalog.host_epoch,device:registration.id,endpoint:target.candidate.endpoint,hostKey:{algorithm:publicKey[0],base64:publicKey[1]},fingerprint,identity,currentRequest}));
+  assert.deepEqual(errors,[]);await writeFile(join(report,'result.json'),JSON.stringify({family:paired.receipt.family_sha256,browser:browser.version(),reduced_motion:true,live_model:live?.model,session,mock_model_requests:service.provider.requests.length,checks,screens,errors},null,2));
+} catch(error) {if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.txt'),String(error));}throw error;}
+finally {if(deviceApi)await deviceApi.dispose();if(browser)await browser.close();if(live)await live.close();else if(service)await service.close();if(sshd&&sshd.exitCode===null){sshd.kill('SIGKILL');await new Promise(resolve=>sshd.once('exit',resolve))}await rm(root,{recursive:true,force:true});await rm(authorized,{recursive:true,force:true});}

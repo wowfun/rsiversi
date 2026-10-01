@@ -90,6 +90,74 @@ fn ticket(preview: &Preview) -> Ticket {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exhausted_grant_revision_rejects_revocation_without_closing_its_scope() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let page = catalog(&running, CallOrigin::Local, "fixture").await;
+    let target = page
+        .leaves
+        .iter()
+        .find(|leaf| leaf.target.leaf == "fixture-provider")
+        .unwrap()
+        .target
+        .clone();
+    let scope = Grant {
+        principal: Principal::Local,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target: target.clone(),
+            operation: ChangeKind::Disable,
+        },
+    };
+    grant(&running, scope.clone(), true).await;
+    assert!(running.shutdown().await.is_clean());
+    let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+    let bytes: Vec<u8> = database.query_row(
+        "SELECT value FROM rsi_storage_records WHERE domain='rsi.profile-leaves' AND key='grants'",
+        [], |row| row.get(0)).unwrap();
+    let mut grants: Grants = serde_json::from_slice(&bytes).unwrap();
+    grants.revision = u64::MAX.to_string();
+    grants.validate().unwrap();
+    let bytes = serde_json::to_vec(&grants).unwrap();
+    database.execute("UPDATE rsi_storage_records SET value=?1 WHERE domain='rsi.profile-leaves' AND key='grants'", [&bytes]).unwrap();
+    drop(database);
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    assert!(matches!(
+        call::<Grants>(
+            &running,
+            CallOrigin::Local,
+            Operation::SetGrant,
+            &SetGrant {
+                expected: grants.revision.clone(),
+                scope: scope.clone(),
+                granted: false
+            }
+        )
+        .await,
+        Err(ApiError::Capacity)
+    ));
+    let unchanged: Grants = call(&running, CallOrigin::Local, Operation::Grants, &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.revision, grants.revision);
+    assert_eq!(unchanged.scopes, grants.scopes);
+    let page = catalog(&running, CallOrigin::Local, "fixture").await;
+    let leaf = page
+        .leaves
+        .iter()
+        .find(|leaf| leaf.target == target)
+        .unwrap();
+    assert!(leaf.allowed.contains(&ChangeKind::Disable));
+    assert!(running.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[expect(
     clippy::too_many_lines,
     reason = "One public owner lifecycle preserves the causal grant, source, and receipt sequence"
@@ -136,8 +204,10 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
     assert_eq!(denied.unwrap().unwrap_err(), Failure::Unauthorized);
     let scope = Grant {
         principal: Principal::Local,
-        target: leaf.target.clone(),
-        operation: ChangeKind::Disable,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target: leaf.target.clone(),
+            operation: ChangeKind::Disable,
+        },
     };
     grant(&running, scope.clone(), true).await;
     let preview: Preview = call(&running, CallOrigin::Local, Operation::Preview, &request)
@@ -326,8 +396,10 @@ async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposal
         &running,
         Grant {
             principal: Principal::Local,
-            target: target.clone(),
-            operation: ChangeKind::Disable,
+            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                target: target.clone(),
+                operation: ChangeKind::Disable,
+            },
         },
         true,
     )
@@ -342,8 +414,10 @@ async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposal
     ));
     let scope = Grant {
         principal: Principal::Device(device.record.id.clone()),
-        target,
-        operation: ChangeKind::Disable,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target,
+            operation: ChangeKind::Disable,
+        },
     };
     grant(&running, scope.clone(), true).await;
     let preview: Preview = call(&running, origin.clone(), Operation::Preview, &request)
@@ -482,8 +556,10 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
     };
     let scope = Grant {
         principal: Principal::Local,
-        target: target.clone(),
-        operation: ChangeKind::Configuration,
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target: target.clone(),
+            operation: ChangeKind::Configuration,
+        },
     };
     grant(&running, scope.clone(), true).await;
     let bad = PreviewRequest {
@@ -528,6 +604,43 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
     .unwrap();
     preview.abort();
     assert!(preview.await.unwrap_err().is_cancelled());
+    let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER fixture_reject_grants BEFORE INSERT ON rsi_storage_records
+         WHEN NEW.domain = 'rsi.profile-leaves'
+         BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;",
+        )
+        .unwrap();
+    let failed: Reply<Grants> = call(
+        &running,
+        CallOrigin::Local,
+        Operation::SetGrant,
+        &SetGrant {
+            expected: read.revision.clone(),
+            scope: scope.clone(),
+            granted: false,
+        },
+    )
+    .await;
+    assert!(matches!(failed, Err(ApiError::Unavailable)));
+    database
+        .execute_batch("DROP TRIGGER fixture_reject_grants")
+        .unwrap();
+    drop(database);
+    grant(&running, scope.clone(), true).await;
+    // A fresh preview crosses the renewed gate and reaches preparation.
+    assert_eq!(
+        call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &bad)
+            .await
+            .unwrap()
+            .unwrap_err(),
+        Failure::Preparation
+    );
+    let read: Grants = call(&running, CallOrigin::Local, Operation::Grants, &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
     let revoke = SetGrant {
         expected: read.revision,
         scope: scope.clone(),
@@ -554,10 +667,12 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
     })
     .await
     .expect("revocation must publish without waiting for the paused preparation");
-    let unrelated = Grant {
-        operation: ChangeKind::Disable,
-        ..scope.clone()
+    let mut unrelated = scope.clone();
+    let rsi_configuration_api::leaf::GrantScope::Profile { operation, .. } = &mut unrelated.scope
+    else {
+        panic!("profile fixture")
     };
+    *operation = ChangeKind::Disable;
     let changed: Grants = call(
         &running,
         CallOrigin::Local,
@@ -652,8 +767,10 @@ async fn profile_commit_reply_loss_reconciles_the_original_ticket_and_directory_
         &running,
         Grant {
             principal: Principal::Local,
-            target: target.clone(),
-            operation: ChangeKind::Disable,
+            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                target: target.clone(),
+                operation: ChangeKind::Disable,
+            },
         },
         true,
     )
@@ -784,8 +901,10 @@ async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident
         &running,
         Grant {
             principal: Principal::Local,
-            target: target.clone(),
-            operation: ChangeKind::Disable,
+            scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                target: target.clone(),
+                operation: ChangeKind::Disable,
+            },
         },
         true,
     )
@@ -854,3 +973,89 @@ async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ssh_scope_roundtrip_keeps_profile_authority_separate_and_requires_local_issuance() {
+    use rsi_configuration_api::leaf::GrantScope;
+    let fixture = fixture("http://127.0.0.1:1");
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let device = running
+        .device_administration()
+        .unwrap()
+        .register("ssh-grantee")
+        .await
+        .unwrap();
+    let origin = CallOrigin::Device(
+        running
+            .device_authentication()
+            .unwrap()
+            .authenticate(&device.token)
+            .unwrap(),
+    );
+    let target = serde_json::from_value(json!("a".repeat(32))).unwrap();
+    let scopes = [
+        GrantScope::SshUse { target },
+        GrantScope::SshManage {
+            target: serde_json::from_value(json!("a".repeat(32))).unwrap(),
+        },
+    ];
+    for scope in scopes {
+        let grant_scope = Grant {
+            principal: Principal::Device(device.record.id.clone()),
+            scope,
+        };
+        assert!(matches!(
+            call::<Grants>(
+                &running,
+                origin.clone(),
+                Operation::SetGrant,
+                &SetGrant {
+                    expected: "0".into(),
+                    scope: grant_scope.clone(),
+                    granted: true
+                }
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
+        grant(&running, grant_scope, true).await;
+    }
+    let grants: Grants = call(&running, CallOrigin::Local, Operation::Grants, &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grants.scopes.len(), 2);
+    assert!(
+        catalog(&running, CallOrigin::Local, "fixture")
+            .await
+            .leaves
+            .iter()
+            .all(|leaf| leaf.allowed.is_empty())
+    );
+    assert!(running.shutdown().await.is_clean());
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let restored: Grants = call(&running, CallOrigin::Local, Operation::Grants, &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.scopes, grants.scopes);
+    grant(&running, restored.scopes[0].clone(), false).await;
+    let remaining: Grants = call(&running, CallOrigin::Local, Operation::Grants, &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(remaining.scopes, vec![restored.scopes[1].clone()]);
+    assert!(running.shutdown().await.is_clean());
+}
+
+#[path = "ssh_targets.rs"]
+mod ssh_targets;
+
+#[path = "mcp_ssh.rs"]
+mod mcp_ssh;

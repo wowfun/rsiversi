@@ -18,6 +18,12 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def source_identity(info):
+    # Reads may update atime; identity, content timestamps and permissions may not change.
+    return tuple(getattr(info, field) for field in (
+        'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode'))
+
+
 def capture(root, destination, names):
     """Do not resolve symlinks, omit dirty files, or silently follow changing input."""
     before = {name: (root / name).lstat() for name in names}
@@ -39,7 +45,7 @@ def capture(root, destination, names):
             records[name] = {'kind': 'symlink', 'target': link}
         elif stat.S_ISREG(info.st_mode):
             with path.open('rb') as source:
-                if os.fstat(source.fileno()) != info:
+                if source_identity(os.fstat(source.fileno())) != source_identity(info):
                     raise ValueError(f"source changed while opening: {name}")
                 data = source.read()
             executable = bool(info.st_mode & 0o111)
@@ -55,7 +61,7 @@ def capture(root, destination, names):
     for name, info in before.items():
         after = (root / name).lstat()
         # Access times are allowed to change when a captured file is read.
-        if any(getattr(info, field) != getattr(after, field) for field in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode')):
+        if source_identity(info) != source_identity(after):
             raise ValueError(f"source changed during capture: {name}")
     return records
 
@@ -165,6 +171,13 @@ def build(root, cache, args, parser):
         raise
 
 
+def helper_target(native):
+    cpu = native.split('-')[0]
+    if cpu not in {'x86_64', 'aarch64'} or '-linux-' not in native:
+        raise ValueError('SSH helper publication requires a same-CPU Linux x86_64 or aarch64 host')
+    return cpu + '-unknown-linux-musl'
+
+
 def build_captured(root, cache, args, output, managed):
     work = cache / 'build'; work.mkdir(exist_ok=True)
     source = work / 'source'
@@ -192,14 +205,25 @@ def build_captured(root, cache, args, output, managed):
     def version(command): return subprocess.check_output(command, cwd=source, env=environment, text=True).strip()
     rustc = version(['rustc', '-vV']); cargo = version(['cargo', '-V'])
     target = next(line.removeprefix('host: ') for line in rustc.splitlines() if line.startswith('host: '))
+    musl_target = helper_target(target)
+    musl_cc = os.environ.get('RSI_MUSL_CC', 'musl-gcc')
+    if 'RSI_MUSL_CC' in os.environ and not Path(musl_cc).is_absolute():
+        raise ValueError('RSI_MUSL_CC must be an absolute compiler path')
+    musl_cc = shutil.which(musl_cc, path=environment.get('PATH'))
+    if not musl_cc:
+        raise ValueError('missing musl-gcc or explicit RSI_MUSL_CC')
+    environment['CARGO_TARGET_' + musl_target.upper().replace('-', '_') + '_LINKER'] = musl_cc
+    environment['CC_' + musl_target.replace('-', '_')] = musl_cc
+    helper = {'target': musl_target, 'profile': 'release', 'compiler': version([musl_cc, '--version']),
+              'compiler_sha256': digest(Path(musl_cc).read_bytes())}
     toolchain = {'node': version(['node', '--version']), 'pnpm': version(['pnpm', '--version']),
                  'wasm_bindgen': version([environment.get('RSI_WASM_BINDGEN', 'wasm-bindgen'), '--version'])}
     if args.kind == 'desktop':
         toolchain.update(gtk3=version(['pkg-config', '--modversion', 'gtk+-3.0']), webkitgtk41=version(['pkg-config', '--modversion', 'webkit2gtk-4.1']))
-    packages = ['rsi-cli', *(['rsi-desktop'] if args.kind == 'desktop' else []), 'rsi-web']
+    packages = ['rsi-cli', *(['rsi-desktop'] if args.kind == 'desktop' else []), 'rsi-web', 'rsi-ssh-helper-app']
     manifest = {'format': 1, 'files': records, 'rustc': rustc, 'cargo': cargo,
                 'document_toolchain': toolchain, 'target': target, 'worker_target': 'wasm32-unknown-unknown',
-                'profile': profile, 'packages': packages, 'default_features': True, 'features': [],
+                'profile': profile, 'helper': helper, 'packages': packages, 'default_features': True, 'features': [],
                 'flags': {key: environment.get(key, '') for key in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')}}
     manifest_bytes = (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode()
     if len(manifest_bytes) > 16 * 1024 * 1024: raise ValueError('build family manifest exceeds 16 MiB')
@@ -216,18 +240,23 @@ def build_captured(root, cache, args, output, managed):
             subprocess.run(command, cwd=cwd, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
         native = ['rsi-cli', *(['rsi-desktop'] if args.kind == 'desktop' else [])]
         run(['cargo', 'build', '--locked', '--target', target, *[part for package in native for part in ['-p', package]], '--bins', *flags])
+        run(['cargo', 'build', '--locked', '--target', musl_target, '-p', 'rsi-ssh-helper-app', '--release'])
         run(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--store-dir', str(cache / 'pnpm-store')], source / 'apps/web')
         run(['node', 'apps/web/build.mjs', str(bundle / 'assets'), *(['--dev'] if args.debug else [])])
     verify_capture(source, records)
     artifacts = {}
     for name in ['rsi', *(['rsi-desktop'] if args.kind == 'desktop' else [])]:
         shutil.copy2(work / 'target' / target / profile / name, bundle / name)
+        (bundle / name).chmod(0o755)
         artifacts[name] = digest((bundle / name).read_bytes())
+    shutil.copy2(work / 'target' / musl_target / 'release/rsi-ssh-helper', bundle / 'rsi-ssh-helper')
+    (bundle / 'rsi-ssh-helper').chmod(0o755)
+    artifacts['rsi-ssh-helper'] = digest((bundle / 'rsi-ssh-helper').read_bytes())
     for path in sorted((bundle / 'assets').iterdir()):
         if path.is_file(): artifacts['assets/' + path.name] = digest(path.read_bytes())
     (bundle / 'build-family.json').write_bytes(manifest_bytes)
     (bundle / 'receipt.json').write_text(json.dumps({'format': 1, 'family_sha256': family, 'target': target, 'profile': profile,
-        'kind': args.kind, 'mode': 'published', 'artifacts': artifacts}, indent=2) + '\n')
+        'kind': args.kind, 'mode': 'published', 'helper_target': musl_target, 'artifacts': artifacts}, indent=2) + '\n')
     if managed:
         temporary = cache / 'current.next'
         temporary.unlink(missing_ok=True)

@@ -71,6 +71,10 @@ impl PluginFactory for McpApiFactory {
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<McpOwnerContract>()
+            .requiring_local::<rsi_storage_domain::DomainFacilityContract>()
+            .requiring_local::<crate::profile_management::Contract>()
+            .requiring_local::<rsi_execution::ExecutionResolverContract>()
+            .requiring_local::<rsi_api_protocol::ConnectionDescriptionContract>()
             .requiring_local::<ConfigurationAccessContract>()
             .requiring_local::<ApiRegistrarContract>()
             .requiring_local::<CredentialsStatusContract>()
@@ -82,7 +86,17 @@ impl PluginFactory for McpApiFactory {
         let grant = plan.local::<ConfigurationAccessContract>()?;
         let credentials = plan.local::<CredentialsStatusContract>()?;
         let admin = plan.local::<CredentialsAdminContract>()?;
-        let mut registrations: Vec<ApiRegistration> = vec![];
+        let (ssh, mut registrations): (_, Vec<ApiRegistration>) = crate::mcp_ssh::register(
+            owner.clone(),
+            plan.local::<rsi_storage_domain::DomainFacilityContract>()?,
+            plan.local::<crate::profile_management::Contract>()?,
+            plan.local::<rsi_execution::ExecutionResolverContract>()?,
+            plan.local::<rsi_api_protocol::ConnectionDescriptionContract>()?
+                .host_epoch
+                .clone(),
+            registrar.clone(),
+        )
+        .await?;
         let observed = owner.clone();
         let authority = grant.clone();
         registrations.push(
@@ -114,6 +128,13 @@ impl PluginFactory for McpApiFactory {
                         async move {
                             input.validate()?;
                             // This check precedes every effect; a grant never grants remote process launch.
+                            if input
+                                .server
+                                .as_deref()
+                                .is_some_and(|id| owner.is_ssh_stdio(id))
+                            {
+                                return Err(ApiError::Unauthorized);
+                            }
                             if input.server.as_deref().is_some_and(|id| owner.is_stdio(id))
                                 && !matches!(context.origin, CallOrigin::Local)
                             {
@@ -228,6 +249,7 @@ impl PluginFactory for McpApiFactory {
             "close MCP configuration API",
             Box::new(move || {
                 Box::pin(async move {
+                    ssh.close().await;
                     for registration in registrations {
                         registration.close().await;
                     }

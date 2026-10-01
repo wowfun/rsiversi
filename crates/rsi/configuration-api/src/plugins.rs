@@ -418,7 +418,11 @@ impl PluginStatusPage {
 #[async_trait::async_trait]
 pub trait PluginStatusSource: std::fmt::Debug + Send + Sync + 'static {
     /// Produces one redacted page without preparing or executing a plugin.
-    async fn plugins(&self, request: PluginStatusRequest) -> Result<PluginStatusPage>;
+    async fn plugins(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        request: PluginStatusRequest,
+    ) -> Result<PluginStatusPage>;
 }
 impl ConfigurationClient {
     /// Reads one grant-gated page without reusing Local Inspector authority.

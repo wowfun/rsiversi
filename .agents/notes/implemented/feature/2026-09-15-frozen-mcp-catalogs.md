@@ -41,9 +41,13 @@ the authority that admitted the automatic input.
 
 Public names include a digest of the exact `(server, tool)` tuple for every
 identity, including short ASCII names. Delimiter joining alone confuses valid
-pairs such as `(a, b__c)` and `(a__b, c)`. Manifest codec 2 makes this change
-explicit for cold restore, including empty MCP domains; pre-release saved codec
-1 is rejected rather than silently reinterpreting its tool catalog.
+pairs such as `(a, b__c)` and `(a__b, c)`. Cold restoration validates tuple-hashed
+names even for otherwise empty MCP domains. The current codec and frozen reader
+are defined by the [manifest contract](../../../../crates/rsi-mcp/protocol/README.md);
+older pre-release codecs are rejected rather than reinterpreted. The
+[templates and images decision](../../implemented/feature/2026-09-29-mcp-templates-and-context-images.md)
+extends the resource and Context contracts while preserving these naming and
+snapshot guarantees.
 
 [MCP SSE framing](../bug-fix/2026-09-17-mcp-sse-framing.md) owns event parsing and
 request settlement. [Duplex stdout settlement](../bug-fix/2026-09-17-duplex-stdout-settlement.md)

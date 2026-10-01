@@ -9,12 +9,20 @@ renderer watching. The frontend invokes `dev web`; its Vite document source over
 is explicitly outside the immutable bootstrap claim, while the upstream native and
 Worker stay paired. Provider secrets are not inherited by build or default dev.
 
-`dist web` publishes rsi and assets; `dist desktop` also publishes the Desktop
-executable and its rsi companion. An optional new absolute output directory is
+`dist web` publishes rsi, assets and a same-CPU Linux musl SSH helper; `dist desktop`
+also publishes the Desktop executable and its rsi companion. The helper always
+uses the release profile, even when the main application selects debug. Published
+Linux executables have mode 0755 independent of the build artifact mode. The build
+family records its target, compiler identity and profile; the distribution receipt
+binds its exact SHA-256 alongside the native and Web artifacts. Missing musl tooling
+fails publication without replacing the current generation.
+An optional new absolute output directory is
 caller-owned. Without an output, managed generations live under target/rsi-app.
 `--debug` selects a debug build. Source capture is serialized at one stable path,
 with shared Cargo and pnpm caches. Frozen bytes, symlinks and read-only file modes
-are checked before and after compilation. A failed build never replaces current.
+are checked before and after compilation. Source capture checks file identity,
+content timestamps and mode; access-time changes caused by concurrent readers do
+not invalidate unchanged input. A failed build never replaces current.
 
 `gc` retains current, the previous successful generation, the newest failed
 build diagnostic and every locked live generation. Successful publication and failed managed builds also
@@ -67,7 +75,8 @@ cleanup and retains the environment. Builds and default runs never load provider
 keys from the developer's environment or `.local/dev/.env`.
 
 Paired publication requires Linux or WSL, Python 3.11+, the repository's pinned
-Rust toolchain with `wasm32-unknown-unknown`, Node 22+, pnpm 12.6.0, and
+Rust toolchain with `wasm32-unknown-unknown` and the same-CPU Linux musl target,
+`musl-gcc` (or an explicit absolute `RSI_MUSL_CC`), Node 22+, pnpm 12.6.0, and
 `wasm-bindgen-cli` 0.2.127 on PATH (or `RSI_WASM_BINDGEN`). Desktop publication
 also requires `pkg-config` and GTK 3 / WebKitGTK 4.1 development libraries.
 The tools validate and record their versions in the build family; they do not

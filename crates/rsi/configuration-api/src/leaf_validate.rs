@@ -1,6 +1,6 @@
 use super::{
-    ApiError, Catalog, CatalogRequest, ChangeKind, Commit, Failure, Grant, Grants, HostEpoch,
-    Outcome, Preview, Receipt, Result, SetGrant, Target, Ticket,
+    ApiError, Catalog, CatalogRequest, ChangeKind, Commit, Failure, Grant, GrantScope, Grants,
+    HostEpoch, Outcome, Preview, Receipt, Result, SetGrant, Target, Ticket,
 };
 fn invalid() -> ApiError {
     ApiError::Invalid("Invalid Profile leaf metadata".into())
@@ -59,7 +59,33 @@ impl Target {
 impl Grant {
     /// Validates a scope before persistence or presentation.
     pub fn validate(&self) -> Result<()> {
-        self.target.validate()
+        self.scope.validate()
+    }
+}
+impl GrantScope {
+    /// Bounds each authority variant before persistence, lookup or presentation.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Profile { target, .. } => target.validate(),
+            Self::SshUse { .. } | Self::SshManage { .. } => Ok(()),
+            Self::SshStdio {
+                server,
+                credentials,
+                ..
+            } => {
+                rsi_mcp_protocol::validate_server_id(server).map_err(|_| invalid())?;
+                if credentials.len() > 32 || credentials.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(invalid());
+                }
+                for reference in credentials {
+                    reference.validate().map_err(|_| invalid())?;
+                    if reference.owner.as_str() != rsi_mcp_protocol::CREDENTIAL_OWNER {
+                        return Err(invalid());
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 impl SetGrant {

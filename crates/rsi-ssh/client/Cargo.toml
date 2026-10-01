@@ -1,0 +1,29 @@
+[package]
+name = "rsi-ssh-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-ssh-protocol = { path = "../protocol" }
+rsi-ssh-transport = { path = "../transport" }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "process", "io-util", "fs"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

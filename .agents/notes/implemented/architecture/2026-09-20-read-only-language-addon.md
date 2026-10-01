@@ -51,3 +51,15 @@ The provider and Tool remain independent of standard-product crates. The
 [product UI adapter](../../../../crates/rsi/lsp-ui/README.md) owns Session-controller
 and Service-UI integration; its target-scoped requirements are resolved on the
 selected native conversation, not at provider-root activation.
+
+Execution location is part of source authority. Each query retains one complete
+ExecutionLease for Files, program resolution, Sandbox and Duplex, and the pool
+includes that exact lease generation. DSH `packages/lsp/lsp-stdio/src/host.ts`
+reads through the filesystem capability paired with subprocess execution;
+`index.ts` keys the pool by the host filesystem target identity. RSI additionally
+needs the original revocable delegation and provider epoch in that key: path or
+location equality cannot allow a new caller to borrow a previous process's grant.
+Remote executable/environment configuration is separate from Local configuration,
+so target account defaults never come from the Service's environment snapshot.
+The product UI publishes its source capability only after binding the actual API
+origin, before controller activation; each finite worker retains that authority.

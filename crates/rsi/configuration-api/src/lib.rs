@@ -11,6 +11,10 @@ use std::sync::Arc;
 mod exa;
 /// Reviewed Host Profile leaf management, separate from Settings grants.
 pub mod leaf;
+/// Exact target/server MCP stdio configuration, separate from HTTP configuration.
+pub mod mcp_ssh;
+/// Candidate and Local-trusted SSH target management.
+pub mod ssh;
 pub use exa::*;
 
 /// Closed grant operation identities and their exact admission policy.

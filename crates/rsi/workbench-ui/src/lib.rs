@@ -17,8 +17,8 @@ pub use navigation::{
     NavigationCommand, NavigationFeature, NavigationFeatureContract, NavigationFeatureFactory,
 };
 pub use plugins::{
-    LeafCommand, LeafView, PluginsCommand, PluginsFeature, PluginsFeatureContract,
-    PluginsFeatureFactory, PluginsView,
+    LeafCommand, LeafView, McpSshCommand, McpSshView, PluginsCommand, PluginsFeature,
+    PluginsFeatureContract, PluginsFeatureFactory, PluginsView, SshCommand, SshView,
 };
 pub use setup::{
     CredentialView, Receipt, SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory,

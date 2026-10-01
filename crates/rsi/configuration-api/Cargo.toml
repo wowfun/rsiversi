@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ssh-protocol = { path = "../../rsi-ssh/protocol" }
+rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
 async-trait.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-session-protocol = { path = "../session-protocol" }

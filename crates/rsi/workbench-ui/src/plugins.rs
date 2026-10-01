@@ -11,12 +11,26 @@ use rsi_configuration_api::{
 };
 use serde::{Deserialize, Serialize};
 mod leaves;
+mod mcp_ssh;
+pub use mcp_ssh::{McpSshCommand, McpSshView};
+mod ssh;
 pub use leaves::{LeafCommand, LeafView};
+pub use ssh::{SshCommand, SshView};
 
 /// Explicit read/refresh and version-bound page navigation.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginsCommand {
+    /// Exact target/server MCP stdio administration.
+    McpSsh {
+        /// Explicit bounded operation.
+        command: McpSshCommand,
+    },
+    /// Explicit SSH target management with Local-only trust controls.
+    Ssh {
+        /// Closed target operation.
+        command: SshCommand,
+    },
     /// Reviewed single-leaf Host source management, with separate explicit grants.
     Leaves {
         /// Closed bounded owner operation.
@@ -75,8 +89,12 @@ pub enum PluginsCommand {
 /// Bounded projection retained by both product clients.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PluginsView {
+    /// Exact SSH MCP configuration and uncertainty state.
+    pub mcp_ssh: McpSshView,
     /// Separate reviewed Host source state; never contains configuration values.
     pub leaves: LeafView,
+    /// Redacted SSH targets and exact selected connection state.
+    pub ssh: SshView,
     /// Whether this connection negotiated Exa credential management.
     pub exa_available: bool,
     /// Explicit redacted credential observation.
@@ -107,9 +125,12 @@ pub struct PluginsView {
 pub struct PluginsFeature {
     client: ConfigurationClient,
     mcp: Option<McpClient>,
+    mcp_ssh: Option<rsi_configuration_api::mcp_ssh::Client>,
     exa: Option<ExaClient>,
     leaves: Option<rsi_configuration_api::leaf::Client>,
     leaf_grants: bool,
+    ssh: Option<rsi_configuration_api::ssh::Client>,
+    ssh_trust: bool,
     state: Mutex<PluginsView>,
     work: Work,
 }
@@ -121,8 +142,11 @@ impl PluginsFeature {
     pub fn snapshot(&self) -> PluginsView {
         let mut view = self.state.lock().expect("plugin view poisoned").clone();
         view.mcp_available = self.mcp.is_some();
+        view.mcp_ssh.available = self.mcp_ssh.is_some();
         view.exa_available = self.exa.is_some();
         view.leaves.available = self.leaves.is_some();
+        view.ssh.available = self.ssh.is_some();
+        view.ssh.can_trust = self.ssh_trust;
         view.leaves.can_grant = self.leaf_grants
             && view.leaves.catalog.as_ref().is_some_and(|catalog| {
                 matches!(
@@ -172,6 +196,12 @@ impl PluginsFeature {
     pub fn command(self: &Arc<Self>, command: PluginsCommand) -> BoxFuture<'static, Result<()>> {
         let owner = self.clone();
         self.work.run(async move {
+            if let PluginsCommand::McpSsh { command } = command {
+                return owner.mcp_ssh_command(command).await;
+            }
+            if let PluginsCommand::Ssh { command } = command {
+                return owner.ssh_command(command).await;
+            }
             if let PluginsCommand::Leaves { command } = command {
                 return owner.leaf_command(command).await;
             }
@@ -403,12 +433,33 @@ impl PluginFactory for PluginsFeatureFactory {
         let feature = Arc::new(PluginsFeature {
             client: ConfigurationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?)
                 .map_err(meta)?,
+            mcp_ssh: {
+                use rsi_configuration_api::mcp_ssh::{Client, Operation};
+                let api = plan.local::<rsi_api_protocol::ApiClientContract>()?;
+                [
+                    Operation::Get,
+                    Operation::Put,
+                    Operation::Remove,
+                    Operation::Refresh,
+                ]
+                .iter()
+                .all(|operation| api.operations().contains(&operation.spec()))
+                .then(|| Client::new(api))
+            },
             mcp: McpClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?).ok(),
             exa: ExaClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?).ok(),
             leaves: rsi_configuration_api::leaf::Client::new(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
             )
             .ok(),
+            ssh: rsi_configuration_api::ssh::Client::new(
+                plan.local::<rsi_api_protocol::ApiClientContract>()?,
+            )
+            .ok(),
+            ssh_trust: plan
+                .local::<rsi_api_protocol::ApiClientContract>()?
+                .operations()
+                .contains(&rsi_configuration_api::ssh::Operation::ConfirmTrust.spec()),
             leaf_grants: plan
                 .local::<rsi_api_protocol::ApiClientContract>()?
                 .operations()

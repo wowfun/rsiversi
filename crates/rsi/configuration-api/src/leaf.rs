@@ -49,16 +49,45 @@ pub struct Target {
     /// Existing all-tree plugin leaf identity.
     pub leaf: String,
 }
-/// One separately granted principal, exact source and mutation class.
+/// Exact independently granted authority; no variant implies another.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GrantScope {
+    /// One source leaf and mutation class.
+    Profile {
+        /// Exact existing source selection.
+        target: Target,
+        /// Only this mutation is authorized.
+        operation: ChangeKind,
+    },
+    /// Use an exact SSH target for execution and workspace access.
+    SshUse {
+        /// Stable target identity; no host alias or command.
+        target: rsi_execution_protocol::ExecutionTargetId,
+    },
+    /// Manage one target's bounded candidate configuration, without trusting it.
+    SshManage {
+        /// Stable target identity.
+        target: rsi_execution_protocol::ExecutionTargetId,
+    },
+    /// Manage one target/server stdio configuration with exact credential addresses.
+    SshStdio {
+        /// Stable execution target.
+        target: rsi_execution_protocol::ExecutionTargetId,
+        /// Exact MCP server identity.
+        server: String,
+        /// Sorted unique permitted references, never secret values.
+        credentials: Vec<rsi_credentials_protocol::CredentialRef>,
+    },
+}
+/// One separately granted principal and exact authority scope.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     /// Actual caller identity selected by a Local administrator.
     pub principal: Principal,
-    /// Source selection.
-    pub target: Target,
-    /// Only this operation is authorized.
-    pub operation: ChangeKind,
+    /// Only this exact authority is granted.
+    pub scope: GrantScope,
 }
 /// Local-only durable grant observation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -381,7 +410,7 @@ impl Operation {
                     Self::Grants => "grants",
                     Self::SetGrant => "set-grant",
                 },
-                1,
+                2,
             )
             .expect("static profile operation"),
             access: if matches!(self, Self::Grants | Self::SetGrant) {

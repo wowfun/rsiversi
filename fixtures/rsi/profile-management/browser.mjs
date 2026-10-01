@@ -21,7 +21,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   const target=local({operation:'catalog',query:{profile:'editable',after:null}}).leaves.find(leaf=>leaf.target.leaf==='rsi-inspector-api')?.target;
   assert(target,'fixture leaf must be on the first source page');
   const registration=service.register(`${name} Profile review`);
-  const scope={principal:{kind:'device',id:registration.id},target,operation:'disable'};
+  const scope={principal:{kind:'device',id:registration.id},scope:{kind:'profile',target,operation:'disable'}};
   const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
   const browser=await engine.launch({headless:true});let page;const errors=[];
   try {

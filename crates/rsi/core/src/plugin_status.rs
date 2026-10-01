@@ -39,12 +39,18 @@ fn desired(
 }
 #[async_trait::async_trait]
 impl PluginStatusSource for Source {
-    async fn plugins(&self, request: PluginStatusRequest) -> Result<PluginStatusPage> {
+    async fn plugins(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        request: PluginStatusRequest,
+    ) -> Result<PluginStatusPage> {
         request.validate()?;
         match &request.target {
             PluginStatusTarget::Host => self.host_plugins(&request),
             PluginStatusTarget::Preset { id } => self.preset_plugins(&request, id).await,
-            PluginStatusTarget::Session { target } => self.session_plugins(&request, target).await,
+            PluginStatusTarget::Session { target } => {
+                self.session_plugins(origin, &request, target).await
+            }
         }
     }
 }
@@ -192,6 +198,7 @@ impl Source {
 
     async fn session_plugins(
         &self,
+        origin: rsi_api_protocol::CallOrigin,
         request: &PluginStatusRequest,
         target: &rsi_session_protocol::SessionTarget,
     ) -> Result<PluginStatusPage> {
@@ -200,9 +207,12 @@ impl Source {
             .lookup_local::<rsi_session_protocol::SessionReadContract>()
             .ok_or(ApiError::Unavailable)?;
         let lease = reads
-            .acquire(target)
+            .acquire(origin, target)
             .await
-            .map_err(|_| ApiError::Unavailable)?;
+            .map_err(|error| match error {
+                rsi_session_protocol::SessionError::Api(error) => error,
+                _ => ApiError::Unavailable,
+            })?;
         let source = self
             .context
             .lookup_local::<rsi_agent_turn_protocol::SessionProjectionsContract>()

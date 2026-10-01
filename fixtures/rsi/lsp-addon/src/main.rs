@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 let result = service
                     .query(
-                        workspace.clone(),
+                        rsi_lsp::LanguageWorkspace::local(workspace.clone()).unwrap(),
                         query.clone(),
                         tokio_util::sync::CancellationToken::new(),
                     )

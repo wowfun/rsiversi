@@ -13,7 +13,9 @@ policy belong to the [configuration owner](../configuration-access/README.md).
 `configuration/plugins/3` is a separate grant-gated read. Its explicit target is
 Host observations, a current preset preview, or a Session's resident generation.
 Preset compilation is pure; Session reads validate the Header correlation and
-peek at residency without pinning, preparing or building a generation. A cold
+the actual ingress caller's execution-location access in addition to the
+configuration grant. The source receives that origin without Local substitution.
+Session reads peek at residency without pinning, preparing or building a generation. A cold
 Session reports `not_resident`; it is never presented as the current preset.
 Pages contain at most
 64 flat instance/plugin identities and closed observed lifecycle states, within
@@ -65,6 +67,21 @@ Typed intermediate snapshots are neither revalidated nor serialized merely to
 measure them. Field/count bounds alone do not bound JSON-escaped reply size.
 
 MCP configuration uses separate finite `mcp-configuration.* / 1` operations.
+The `ssh-get`, `ssh-put`, `ssh-remove` and `ssh-refresh` operations use exact
+target/server stdio grants, independently of ordinary configuration permission.
+One grant must include every referenced credential; permissions from separate
+grants are never combined. Refresh also obtains the caller's target Use lease.
+Checks precede credential resolution and remote process work. Local stdio entries
+cannot be changed through these operations.
+
+The product persists the complete bounded SSH stdio document in its own Storage
+Domain (eight servers, 256 KiB). Its monotonic document revision fences every
+mutation and refresh, including deletion and recreation. Reads return only the
+selected authorized server and the document revision. A committed mutation may
+report a connection-apply error separately; it never pretends to roll back durable
+configuration. Cold startup restores configuration without reconnecting; explicit
+refresh supplies current authority. The MCP owner merges HTTP, Local stdio and SSH
+stdio identities before applying them, rejecting collisions and aggregate limits.
 Status, explicit refresh and credential setup each require a held configuration
 grant in their Host handlers. Status contains closed readiness/error categories,
 transport kind, epochs, last verified digests and bounded Tool name choices, without
@@ -81,12 +98,20 @@ The Plugins wire contract is v3. It includes an explicit target, asynchronous
 resident-generation lookup, health/watcher evidence and the typed last update
 attempt. Earlier versions are unsupported; in-tree clients use v3 together.
 
-Host Profile leaf management uses separate `profile-leaves` version 1 operations.
+Host Profile leaf management uses separate `profile-leaves` version 2 operations.
 Its exact root identity, user Profile, leaf and enable/disable/configuration
 operation require an explicit Local-issued scope grant, including for a Local
 caller. Device callers also retain their existing configuration admission;
 Agent tools have a distinct Session principal and cannot inherit human authority.
 Local grant changes are unavailable through remote authentication.
+
+The same grant document owns a closed scope union: Profile leaf change, exact SSH
+target use, exact SSH target management, or exact target/server stdio management.
+The latter binds a sorted unique list of at most 32 `rsi.mcp` credential references.
+No scope implies another scope, and ordinary configuration grants imply none of
+these SSH scopes. Local host-key and authentication-identity trust remains a
+separate Local-only operation. Grant storage uses domain version 2 and retains
+the existing CAS, gate-close, Storage-fence and admitted-operation drain contract.
 
 The source owner returns bounded redacted catalog metadata and prepared previews.
 A preview binds its proposal, original source, dependencies and frozen catalog to
@@ -105,7 +130,33 @@ Requests are at most 128 KiB, configuration 64 KiB / depth 32 / 4,096 values,
 catalog pages 64 leaves, responses 64 KiB, and grants 256 exact scopes. The owner
 retains at most four previews and 256 receipts, with two nonqueued read/prepare
 slots, four retained grant-change slots, and one source/grant writer. Admitted preparation and writes survive response
-loss; revocation closes scope admission before waiting for already admitted work.
+loss; revocation validates and encodes the replacement grants before closing
+scope admission immediately before durable publication. Preflight rejection leaves
+the existing grant open. Revocation then waits for already admitted work.
+A known pre-commit storage failure leaves that scope closed. A later explicit
+grant reopens admission while retaining every previously admitted task, so a
+subsequent revocation still drains all of them.
 The revoked grant is published before that drain; unrelated mutations can proceed
 while old admitted work settles. Revocation acknowledgement still waits for the
 drain, and it never overwrites a subsequently issued grant revision.
+
+## SSH targets
+
+The `ssh-targets` version 1 operations provide a bounded catalog, candidate CAS,
+Local-only trust confirmation, connection, disconnection and target directory resolution. Candidates contain
+only an identity, display name and strict literal endpoint. Expected revisions
+are canonical decimal strings; zero means creation and is never a stored revision.
+Responses reveal a pinned host-key fingerprint, current connection epoch and
+missing program selectors, never identity paths, private bytes or credential values.
+Every mutation names the negotiated Host epoch. Catalogs contain at most 64 targets;
+request and response limits are 32 KiB and 128 KiB. Unknown fields are rejected.
+The owner uses the existing leaf grant union's exact SSH Use and Manage scopes.
+An authenticated device's ordinary configuration grant permits candidate submission,
+not trust confirmation or connection. Local trust explicitly supplies and confirms
+the public-key fingerprint and selects a bounded absolute identity path.
+
+Directory resolution requires current Use and an exact target revision. The pinned
+Execution lease performs canonicalization on the target; returned coordinates are
+validated data and do not authorize subsequent registration or file access.
+Connection mutations also compare the last observed connection epoch, so an old
+view cannot disconnect a replacement connection.

@@ -27,6 +27,11 @@ explicit leaf grants authorize this reviewed source operation. The existing
 closed Settings namespace policy remains authoritative for Settings writes;
 no Device gains general Profile authoring or addon Settings authority.
 
+The same persisted grant owner also admits closed execution-location scopes.
+The [SSH decision](../feature/2026-09-29-ssh-execution-and-helper-lifecycle.md)
+owns their separate Use, target-management and exact stdio authority. Reusing
+gate closure and draining does not turn a leaf grant into any of these scopes.
+
 Retain admitted work and exact receipts independently of response waiters.
 The review digest includes the native source directory identity, so rebuilding
 the in-memory proposal cannot accept an identically populated replacement directory.

@@ -1,0 +1,11 @@
+html,body,#root{margin:0;width:100%;height:100%;overflow:hidden}
+*{box-sizing:border-box}
+body{font-family:var(--dsw-font-family);font-size:14px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+#root{padding:24px}
+#root>.resource-dock{height:100%}
+.resource-dock>[data-dockkit-surface]{height:100%}
+[hidden]{display:none!important}
+.fixture-content{padding:24px;font-size:14px;line-height:24px}
+.fixture-content h2{font:500 16px/24px var(--dsw-font-family);margin:0 0 16px}
+.fixture-content p{margin:0 0 16px}
+.fixture-content pre{font:12px/20px monospace;margin:0}

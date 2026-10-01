@@ -86,8 +86,11 @@ fn feature(
         Arc::new(PluginsFeature {
             client: ConfigurationClient::new(remote.clone()).unwrap(),
             mcp: None,
+            mcp_ssh: None,
             exa: None,
             leaves: None,
+            ssh: None,
+            ssh_trust: false,
             leaf_grants: false,
             state: Mutex::default(),
             work: Work::new(Execution::native(tokio::runtime::Handle::current())),
@@ -206,8 +209,11 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
     let owner = Arc::new(PluginsFeature {
         client: configuration.client.clone(),
         mcp: None,
+        mcp_ssh: None,
         exa: Some(ExaClient::new(remote.clone()).unwrap()),
         leaves: None,
+        ssh: None,
+        ssh_trust: false,
         leaf_grants: false,
         state: Mutex::default(),
         work: Work::new(Execution::native(tokio::runtime::Handle::current())),

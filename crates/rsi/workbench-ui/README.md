@@ -2,6 +2,9 @@
 
 Plugin status guidance includes the last completed Host update separately from current health; its observation revision fences pagination. Polling and Busy admission do not manufacture completed attempts.
 
+An automatic full navigation refresh already supplies the newest cursor and skips
+the redundant head comparison query in that round.
+
 Navigation observes the bounded attention API with at most one poll or explicit
 navigation operation in flight. An unchanged page backs off from one to eight
 seconds; a local invalidation or changed page resets that delay. A failed refresh
@@ -106,3 +109,27 @@ to an admitted user action: cancellation releases their serialized read owner
 before that action runs. Background reads do not occupy the user-operation slot.
 Cancelled refresh notifications remain pending. User mutations retain normal
 owned-work semantics and are never cancelled or replayed by this preemption.
+
+Manual navigation retains one complete coordinate-scoped order seed under a fresh
+view ticket. A later summary command may request only 64 distinct members of that
+seed and retains their requested order. Document-side persistence owns the device
+order; Rust owns seed validity, metadata revision, exact coordinates and summary
+publication. A metadata change discards the presentation seed, never the device's
+saved order. Activity changes leave the seed valid. Background head observations
+mark newer activity without replacing a continued page or its controls.
+
+The SSH panel retains only the bounded caller-visible target catalog, one resolved
+target directory and a safe outcome. Candidate edits, trust and connection controls
+use the exact displayed Host, target revision and connection epoch. Trust is offered
+only when the Local-only operation was negotiated. Authentication paths are ephemeral
+commands and never retained in views. An uncertain mutation blocks further writes
+until an explicit catalog read; no reconnect or trust mutation is retried.
+
+SSH MCP administration selects one exact target/server and reads its current
+configuration revision before any change. The workbench retains one authorized
+configuration observation, with explicit save, remove and connect actions. It
+never resolves or displays credential values. Saved configuration and connection
+application have separate outcomes; a committed save with apply failure remains
+committed. Unknown outcomes clear the observation and fence mutations until an
+explicit read. Selecting another server clears its editor binding. Exact stdio
+management and Use remain independently enforced by the Service API.
