@@ -16,6 +16,18 @@ spec.loader.exec_module(dist)
 
 
 class FrozenSource(unittest.TestCase):
+    def test_source_root_alias_preserves_internal_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary).resolve()
+            root = parent / 'source'; root.mkdir()
+            alias = parent / 'source-alias'; alias.symlink_to(root, target_is_directory=True)
+            output = parent / 'capture'; output.mkdir()
+            (root / 'file').write_text('captured')
+            (root / 'link').symlink_to('file')
+            records = dist.capture(alias, output, ['file', 'link'])
+            self.assertEqual(records['link'], {'kind': 'symlink', 'target': 'file'})
+            dist.verify_capture(output, records)
+
     def test_helper_target_is_linux_and_same_cpu(self):
         self.assertEqual(dist.helper_target('x86_64-unknown-linux-gnu'), 'x86_64-unknown-linux-musl')
         self.assertEqual(dist.helper_target('aarch64-unknown-linux-musl'), 'aarch64-unknown-linux-musl')

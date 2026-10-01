@@ -13,12 +13,13 @@ export async function closeDetails(page) {
   }
   const floating=page.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
   if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');await floating.click();await page.locator(`[data-dockkit-content="${id}"]`).waitFor({state:'detached'});return;}
-  const active=page.locator('[data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]');
+  const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
   const tab=await active.count()?active:page.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
-  const id=await tab.getAttribute('data-dockkit-tab');
+  const closing=await tab.elementHandle();
   await tab.click({button:'right'});
   await page.getByRole('menuitem',{name:'Close resource tab',exact:true}).click();
-  await page.locator(`[data-dockkit-tab="${id}"]`).waitFor({state:'detached'});
+  await page.waitForFunction(element=>!element.isConnected,closing);
+  await closing.dispose();
 }
 export async function openResource(page,name) {
   await resources(page);
@@ -47,6 +48,7 @@ export async function externalAgents(page) {
 }
 export async function selectSurface(page,key) {
   const tab=page.locator(`#pane-tab-${key}`);
+  if(await tab.getAttribute('aria-pressed')==='true')return;
   if(await tab.isVisible())await tab.click();
   else {const menu=page.locator('.conversation-menu');await menu.locator('summary').click();await page.getByLabel('Active conversation',{exact:true}).selectOption(key);await menu.locator('summary').click();}
 }

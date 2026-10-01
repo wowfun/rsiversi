@@ -51,7 +51,9 @@ mod api_composition;
 mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::probe_service_host;
+#[cfg(target_os = "linux")]
 mod acp_inputs;
+#[cfg(target_os = "linux")]
 mod acp_owner;
 mod composition;
 mod integration_source;

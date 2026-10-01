@@ -1,6 +1,8 @@
 # RSI desktop product fixture
 
 The Python fixtures require Python 3.11 or newer.
+External ACP scenarios also require `npm ci --ignore-scripts --prefix fixtures/rsi/acp`
+from the checkout root before starting the native application.
 
 `verify.py --binary /absolute/rsi-desktop --driver /absolute/WebKitWebDriver
 --assets /absolute/bundle --report /absolute/new-directory` exercises the real

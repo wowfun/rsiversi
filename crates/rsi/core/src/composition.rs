@@ -1981,6 +1981,7 @@ fn register(
 }
 
 fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+    #[cfg(target_os = "linux")]
     builder.register_local_contract::<crate::acp_inputs::InputsContract>()?;
     builder.register_local_contract::<rsi_files_protocol::FilesContract>()?;
     builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;

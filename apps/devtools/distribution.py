@@ -26,6 +26,7 @@ def source_identity(info):
 
 def capture(root, destination, names):
     """Do not resolve symlinks, omit dirty files, or silently follow changing input."""
+    root = root.resolve()
     before = {name: (root / name).lstat() for name in names}
     records = {}
     for name in names:

@@ -5,6 +5,7 @@ import sys
 import time
 
 workspace, mode = sys.argv[1:]
+workspace = os.path.realpath(workspace)
 assert os.environ.get('FIXTURE_SECRET') == 'private-fixture-secret'
 with open(os.path.join(workspace, 'peer-pids'), 'a', encoding='utf-8') as out:
     out.write(str(os.getpid()) + '\n')

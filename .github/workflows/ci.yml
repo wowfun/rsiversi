@@ -382,7 +382,12 @@ jobs:
           RSI_WEB_BINARY: ${{ github.workspace }}/target/rsi-app/current/rsi
           RSI_WEB_ASSETS: ${{ github.workspace }}/target/rsi-app/current/assets
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-export-evidence
-        run: node export-verify.mjs
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          node export-verify.mjs
       - name: Preserve paired addon evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
@@ -593,7 +598,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 275
+    timeout-minutes: 290
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -636,6 +641,10 @@ jobs:
           cargo clippy --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
           if [[ "$RUNNER_OS" == Linux ]]; then
+            setting=kernel.apparmor_restrict_unprivileged_userns
+            previous=$(sysctl -n "$setting")
+            trap 'sudo sysctl -w "$setting=$previous"' EXIT
+            sudo sysctl -w "$setting=0"
             rustup component add rust-analyzer
             cargo build --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
             python3 fixtures/rsi/lsp-addon/verify.py --binary "$CARGO_TARGET_DIR/debug/rsi-language-addon-example" --analyzer "$(rustup which rust-analyzer)" --report "$RUNNER_TEMP/rsi-language-addon-evidence"
@@ -697,7 +706,7 @@ jobs:
         timeout-minutes: 35
       - name: Exercise development TUI smoke
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}
-        timeout-minutes: 5
+        timeout-minutes: 20
         run: |
           declare -A previous_policy
           restore_policy() {
@@ -715,6 +724,7 @@ jobs:
           done
           cargo run --locked -p rsi-app-tools -- dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
             smoke_status=$?
+            tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/build.log" || true
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
             exit "$smoke_status"
           }
@@ -747,6 +757,8 @@ jobs:
               fi
             done
           fi
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          free -h
           python3 crates/rsi/core/eval/session_api.py --self-test --pressure --output "$RUNNER_TEMP/rsi-session-api-evaluation"
       - name: Preserve Session API evaluation evidence
         if: runner.os == 'Linux' && always()
@@ -772,6 +784,7 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-linked-template-evidence
             ${{ runner.temp }}/rsi-language-addon-evidence
+            ${{ runner.temp }}/rsi-dev-smoke/logs
           if-no-files-found: warn
       - name: Preserve PTY evidence
         if: always()
@@ -897,7 +910,12 @@ jobs:
           systemd-run --user --pipe --wait --collect --expand-environment=no /usr/bin/true
           bwrap --unshare-user --unshare-pid --ro-bind / / /usr/bin/true
       - name: Verify generated OpenSSH policy and trust
-        run: cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --nocapture
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --nocapture
       - name: Verify target lifecycle and cgroup cleanup
         run: |
           setting=kernel.apparmor_restrict_unprivileged_userns
@@ -991,7 +1009,9 @@ jobs:
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
       - name: Install pinned frontend package manager
         timeout-minutes: 5
-        run: npm install --global pnpm@12.6.0
+        run: |
+          npm install --global pnpm@12.6.0
+          npm ci --ignore-scripts --prefix fixtures/rsi/acp
       - name: Build shared document and desktop
         id: build
         if: ${{ !cancelled() }}

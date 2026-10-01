@@ -47,6 +47,7 @@ impl Manager {
             })
             .ok_or(ApiError::Unauthorized)
     }
+    #[cfg(target_os = "linux")]
     pub(crate) fn execution_visibility(
         &self,
         origin: &CallOrigin,

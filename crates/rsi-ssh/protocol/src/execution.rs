@@ -17,7 +17,7 @@ pub struct Preparation {
     pub pty: bool,
     /// Target-resolved absolute executable.
     pub program: String,
-    /// Exact argv, excluding argv[0].
+    /// Exact argv, excluding `argv[0]`.
     pub arguments: Vec<String>,
     /// Target-canonical working directory candidate.
     pub cwd: String,

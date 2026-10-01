@@ -213,7 +213,7 @@ which includes the standard preset and disables its human-question contribution.
 Both sources are hashed and byte-verified together. Ordinary preset catalogs
 grant authority to the exact `standard` directory only; ACP explicitly derives
 an isolated catalog for `acp-internal`, with no user roots or default override.
-ACP private input preparation is supplied by the Service's ordinary composition
+On Linux, ACP private input preparation is supplied by the Service's ordinary composition
 source owner. It binds each root Session ID and canonical cwd to a private MCP
 service and generation before draft creation. Environment values resolve through
 ephemeral credential references; only the frozen MCP manifest enters Agent

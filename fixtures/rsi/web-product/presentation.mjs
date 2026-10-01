@@ -73,7 +73,7 @@ export async function waitForSavedPresentation(page, timeout = 5000) {
   const deadline = Date.now() + timeout;
   do {
     const saved = await page.evaluate(async()=>{
-      const opened=await new Promise((resolve,reject)=>{const request=indexedDB.open('rsi.presentation',1);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});
+      const opened=await new Promise((resolve,reject)=>{const request=indexedDB.open('rsi.presentation');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});
       try {
         const records=await new Promise((resolve,reject)=>{const request=opened.transaction('layouts').objectStore('layouts').getAll();request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});
         return records.length>0;

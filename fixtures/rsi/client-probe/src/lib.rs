@@ -28,8 +28,10 @@ pub async fn run_probe() -> Result<String, JsValue> {
     assert_eq!(decoded.created_at_ms(), 1_788_778_132_168);
     for path in ["/workspace", r"C:\workspace", r"\\server\share\workspace", r"\\?\C:\workspace"] {
         let mut value: serde_json::Value = serde_json::from_str(&header).unwrap();
-        value["canonical_cwd"] = path.into();
-        serde_json::from_value::<rsi_agent_session_protocol::SessionHeader>(value).unwrap();
+        value["coordinates"]["path"] = path.into();
+        let decoded = serde_json::from_value::<rsi_agent_session_protocol::SessionHeader>(value)
+            .map_err(|error| JsValue::from_str(&format!("foreign header path {path}: {error}")))?;
+        assert_eq!(decoded.canonical_cwd(), path);
         let request = rsi_approval_protocol::ApprovalRequest {
             subject: rsi_approval_protocol::ApprovalSubject::new("session", "turn", "effect").unwrap(),
             id: "review".into(), action: "Run a command".into(), reason: "Prepared fixture".into(),

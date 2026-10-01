@@ -998,7 +998,10 @@ mod tests {
         let output: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(output["args"], json!([argument]));
         assert_eq!(output["home"], json!(directory.join("home")));
-        assert_eq!(output["cwd"], json!(directory.join("workspace")));
+        assert_eq!(
+            output["cwd"],
+            json!(directory.join("workspace").canonicalize().unwrap())
+        );
         assert!(output["private"].is_null());
         assert!(
             output["cargo"].is_null(),
@@ -1078,7 +1081,12 @@ mod tests {
         let cargo = bin.join("cargo");
         // Competing builds write the same Cargo output. A lock over compilation
         // alone would allow the second build to replace the first one's copy.
-        std::fs::write(&cargo, "#!/bin/sh\nset -eu\nwhile [ $# -gt 0 ]; do case $1 in --manifest-path) shift; label=$1;; --target-dir) shift; target=$1;; --target) shift; triple=$1;; esac; shift; done\nmkdir -p \"$target/$triple/debug\"\nprintf '%s' \"$label\" > \"$target/$triple/debug/libfixture.so\"\nsleep 0.1\n").unwrap();
+        let artifact = format!(
+            "{}fixture{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
+        std::fs::write(&cargo, "#!/bin/sh\nset -eu\nwhile [ $# -gt 0 ]; do case $1 in --manifest-path) shift; label=$1;; --target-dir) shift; target=$1;; --target) shift; triple=$1;; esac; shift; done\nmkdir -p \"$target/$triple/debug\"\nprintf '%s' \"$label\" > \"$target/$triple/debug/libfixture.so\"\nsleep 0.1\n".replace("libfixture.so", &artifact)).unwrap();
         std::fs::set_permissions(cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
         let options = Options::parse(&["tui".into()]).unwrap();
         let first = Development::create(root.path().into(), &options).unwrap();
@@ -1097,10 +1105,8 @@ mod tests {
         assert!(a.unwrap().success() && b.unwrap().success());
         for (dev, expected) in [(&first, "first ' literal"), (&second, "second $(literal)")] {
             assert_eq!(
-                std::fs::read_to_string(
-                    root.path().join(dev.native_output()).join("libfixture.so")
-                )
-                .unwrap(),
+                std::fs::read_to_string(root.path().join(dev.native_output()).join(&artifact))
+                    .unwrap(),
                 expected
             );
             assert_eq!(

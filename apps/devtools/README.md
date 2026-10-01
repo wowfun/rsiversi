@@ -19,7 +19,9 @@ fails publication without replacing the current generation.
 An optional new absolute output directory is
 caller-owned. Without an output, managed generations live under target/rsi-app.
 `--debug` selects a debug build. Source capture is serialized at one stable path,
-with shared Cargo and pnpm caches. Frozen bytes, symlinks and read-only file modes
+with shared Cargo and pnpm caches. Capture resolves the checkout root before
+checking relative symlink containment; captured symlinks retain their literal targets.
+Frozen bytes, symlinks and read-only file modes
 are checked before and after compilation. Source capture checks file identity,
 content timestamps and mode; access-time changes caused by concurrent readers do
 not invalidate unchanged input. A failed build never replaces current.

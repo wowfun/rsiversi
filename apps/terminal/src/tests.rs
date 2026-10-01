@@ -375,7 +375,11 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         Ok(SessionHeader::new_local(
             SessionId::new("session-reconcile").unwrap(),
             1,
-            std::env::temp_dir().to_str().unwrap(),
+            std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap(),
             AgentPresetId::new("test").unwrap(),
             FrozenAgentSettings::new(
                 "test",

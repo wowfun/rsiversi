@@ -1,13 +1,15 @@
 // Real Session terminal UI, native Bubblewrap shell and bounded independent stream.
 import assert from 'node:assert/strict';
+import {resources} from './controls.mjs';
 import {readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {waitUntil} from './service.mjs';
 export async function verifyTerminals(page,service,report,name){
  const stylesBefore=await page.evaluate(()=>document.adoptedStyleSheets.length);
  const panel=page.getByRole('region',{name:'Session terminals'});
- await page.getByRole('button',{name:'Terminal',exact:true}).click();
- await panel.getByRole('button',{name:'New terminal',exact:true}).click();
+ await resources(page);
+ const roster=page.getByRole('region',{name:'Terminals',exact:true});
+ await roster.getByRole('button',{name:'New terminal',exact:true}).click();
  await panel.getByRole('status').filter({hasText:'You have control'}).waitFor();
  const typography=await panel.locator('.xterm-rows').evaluate(element=>{const style=getComputedStyle(element);return {family:style.fontFamily,size:style.fontSize,space:style.whiteSpace}});
  assert.match(typography.family,/monospace/,'terminal dynamic CSS did not apply under the product CSP');
@@ -34,8 +36,8 @@ export async function verifyTerminals(page,service,report,name){
  await waitUntil(async()=>await readFile(join(service.workspace,'pty-ready.txt'),'utf8').catch(()=>null)==='ready','persistent shell setup');
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();
  await waitUntil(async()=>await page.evaluate(()=>document.adoptedStyleSheets.length)===stylesBefore,'terminal styles disposed');
- await page.getByRole('button',{name:'Terminal',exact:true}).click();
- await panel.getByRole('button',{name:'Terminal 1 · running',exact:true}).click();
+ await resources(page);
+ await roster.getByRole('button',{name:'Terminal 1 · running',exact:true}).click();
  await panel.getByRole('status').filter({hasText:'Read only'}).waitFor();
  await waitUntil(async()=>(await panel.locator('.xterm-rows').innerText()).includes('hidden-linkAFTER-SHORT-CONTROLS'),'reattached snapshot actually rendered');
  await page.screenshot({path:join(report,`${name}-terminal-readonly.png`)});
@@ -48,6 +50,8 @@ export async function verifyTerminals(page,service,report,name){
  await waitUntil(async()=>await readFile(join(service.workspace,'pty-retained.txt'),'utf8').catch(()=>null)==='retained','shell environment survived pane detach');
  const wideSize=await panel.locator('.terminal-footer').innerText();
  await page.setViewportSize({width:760,height:900});
+ await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));
+ await resources(page);
  await waitUntil(async()=>{const text=await panel.locator('.terminal-footer').innerText();return text!==wideSize&&/\d+ × \d+/.test(text)},'terminal resized');
  await page.screenshot({path:join(report,`${name}-terminal-narrow.png`)});
  await page.setViewportSize({width:1440,height:980});
@@ -56,7 +60,8 @@ export async function verifyTerminals(page,service,report,name){
  await page.screenshot({path:join(report,`${name}-terminal-exited.png`)});
  await panel.getByRole('button',{name:'Terminate terminal',exact:true}).click();
  await panel.locator('.terminal-empty').waitFor();
- await waitUntil(async()=>await panel.locator('.terminal-tabs button').count()===0,'terminal roster refreshed after close');
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();
+ await roster.getByRole('button',{name:'Refresh terminals',exact:true}).click();
+ await waitUntil(async()=>await roster.getByRole('button',{name:/^Terminal \d+ ·/}).count()===0,'terminal roster refreshed after close');
  await writeFile(join(report,`${name}-terminal.json`),JSON.stringify({native_shell:true,unicode:true,admission_backpressure_recovered:true,takeover_resized:true,bridge_controls_filtered:true,oversized_osc_filtered:true,short_application_controls_filtered:true,readonly_reattach:true,explicit_takeover:true,shell_environment_retained:true,resize:true,exit_code:7,explicit_close:true},null,2));
 }

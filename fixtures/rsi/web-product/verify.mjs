@@ -1,4 +1,4 @@
-import {closeDetails,details} from "./controls.mjs";
+import {closeDetails,details,openResource,resources} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import './paired-env.mjs';
 import { verifyPairing } from "./pairing.mjs";
@@ -250,21 +250,22 @@ try {
       });
       try {
         await sourceButton.click();
-        await page.locator("[data-dockkit-tab]").filter({hasText:"Block sources"}).waitFor();
+        await page.locator("[data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible").filter({hasText:"Block sources"}).waitFor();
       } finally {
         await writeFile(join(report, `${name}-source-pointer.json`), JSON.stringify(await page.evaluate(() => {
           window.sourcePointerEvents.abort();
           return window.sourcePointerEvidence;
         }), null, 2));
       }
-      assert.equal(await page.locator(".source-reference").count(), 64);
-      const firstReference = await page.locator(".source-reference").first().innerText();
-      await page.getByRole("button", { name: "Next sources", exact: true }).click();
-      await page.locator(".block-sources .hint").filter({ hasText: "Sources 65–" }).waitFor();
-      assert.notEqual(await page.locator(".source-reference").first().innerText(), firstReference);
-      await page.getByRole("button", { name: "Previous sources", exact: true }).click();
-      await page.locator(".block-sources .hint").filter({ hasText: "Sources 1–" }).waitFor();
-      assert.equal(await page.locator(".source-reference").first().innerText(), firstReference);
+      const blockSources = details(page).locator('.block-sources');
+      assert.equal(await blockSources.locator(".source-reference").count(), 64);
+      const firstReference = await blockSources.locator(".source-reference").first().innerText();
+      await blockSources.getByRole("button", { name: "Next sources", exact: true }).click();
+      await blockSources.locator(".hint").filter({ hasText: "Sources 65–" }).waitFor();
+      assert.notEqual(await blockSources.locator(".source-reference").first().innerText(), firstReference);
+      await blockSources.getByRole("button", { name: "Previous sources", exact: true }).click();
+      await blockSources.locator(".hint").filter({ hasText: "Sources 1–" }).waitFor();
+      assert.equal(await blockSources.locator(".source-reference").first().innerText(), firstReference);
       assert.equal(await details(page).evaluate(dialog => {
         const bounds = dialog.getBoundingClientRect();
         const heading = dialog.closest("[data-dockkit-content]").querySelector("[data-dockkit-strip]").getBoundingClientRect();
@@ -272,7 +273,7 @@ try {
         return heading.bottom <= bounds.top + 2 && controls.bottom <= innerHeight && dialog.scrollTop === 0;
       }), true, "source-list paging keeps title and controls in view");
       await page.screenshot({ path: join(report, `${name}-block-sources.png`) });
-      await page.locator(".source-reference").first().click();
+      await blockSources.locator(".source-reference").first().click();
       await page.locator(".source-text").filter({ hasText: "segment" }).waitFor();
       await closeDetails(page);
 
@@ -339,7 +340,7 @@ try {
       assert.match(failedTool, /fixture stdout/);
       assert.match(failedTool, /fixture stderr/);
       await page.screenshot({ path: join(report, `${name}-tool-failure.png`) });
-      await page.getByRole("button", { name: "Session details", exact: true }).click();
+      await openResource(page,"Session details");
       await page.locator(".ui-contribution").filter({ hasText: "Session:" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-contributed-session.png`) });
       await closeDetails(page);
@@ -443,6 +444,8 @@ try {
       await selectSurface(page,"main");
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();
       await left.locator(".composer-hint").filter({ hasText: "Enter to send · Shift Enter for a new line" }).waitFor();
+      await resources(page);
+      if(!await page.getByRole("button", { name: "Workspace files", exact: true }).isVisible())await page.getByRole("button", {name:"Open resources",exact:true}).click();
       await page.getByRole("button", { name: "Workspace files", exact: true }).waitFor();
       await page.getByRole("button", { name: "Session details", exact: true }).waitFor();
       const input = left.getByRole("textbox", { name: "Main message" });

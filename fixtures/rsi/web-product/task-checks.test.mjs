@@ -112,7 +112,7 @@ test("task assertions reject missing, hidden, disabled and obscured controls and
 });
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
-  test(`${name}: persistence evidence rejects an empty database and waits for a saved record`, async () => {
+  test(`${name}: persistence evidence reads the current database version and waits for a saved record`, async () => {
     const { waitForSavedPresentation } = await import('./presentation.mjs');
     const browser = await engine.launch({ headless: true });
     try {
@@ -121,7 +121,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       await page.goto('http://layout.invalid/');
       await page.evaluate(async () => {
         const db = await new Promise((resolve,reject) => {
-          const request=indexedDB.open('rsi.presentation',1);
+          const request=indexedDB.open('rsi.presentation',2);
           request.onupgradeneeded=()=>request.result.createObjectStore('layouts');
           request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
         });

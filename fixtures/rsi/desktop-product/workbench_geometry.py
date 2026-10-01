@@ -11,8 +11,11 @@ def verify(script, button, until, screenshot, call, root, report):
     for theme in ('light','dark'):
         call('POST',root+'/window/rect',{'width':1440,'height':900})
         until(lambda: script(r'return innerWidth===1440'))
+        script(r'window.fixturePreviousTheme=document.querySelector("[aria-label=\"Settings / appearance / theme\"]");return true')
         button('Appearance')
-        until(lambda: script(r'return !!document.querySelector("[aria-label=\"Settings / appearance / theme\"]")'))
+        # A closed details dialog retains its old fields until this read completes.
+        until(lambda: script(r'const e=document.querySelector("#detail[open] [aria-label=\"Settings / appearance / theme\"]");return e&&e!==window.fixturePreviousTheme'))
+        script('delete window.fixturePreviousTheme;return true')
         script(r'const e=document.querySelector("[aria-label=\"Settings / appearance / theme\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true',[theme])
         button('Save settings')
         until(lambda: script(r'return document.documentElement.dataset.theme===arguments[0]',[theme]))

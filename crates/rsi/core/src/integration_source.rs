@@ -8,6 +8,7 @@ pub(crate) struct SeededSource {
     mcp: Arc<rsi_mcp::McpOwner>,
     retrieval: Arc<rsi_retrieval::RetrievalService>,
     cached: Mutex<Option<SeedCache>>,
+    #[cfg(target_os = "linux")]
     private: std::sync::OnceLock<std::sync::Weak<crate::acp_inputs::PrivateInputs>>,
 }
 #[derive(Debug)]
@@ -28,10 +29,12 @@ impl SeededSource {
             mcp,
             retrieval,
             cached: Mutex::new(None),
+            #[cfg(target_os = "linux")]
             private: std::sync::OnceLock::new(),
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn private_snapshot(
         &self,
         mcp: rsi_agent_session_protocol::DomainSnapshot,
@@ -63,6 +66,7 @@ impl AgentCompositionSource for SeededSource {
     ) -> rsi_agent_composition_protocol::Result<
         Option<rsi_agent_composition_protocol::AgentCompositionPin>,
     > {
+        #[cfg(target_os = "linux")]
         if header.agent_preset_id().as_str() == crate::acp_inputs::PRESET {
             return self
                 .private
@@ -151,30 +155,35 @@ pub(crate) fn capture(
         plan.local::<rsi_mcp::McpOwnerContract>()?,
         plan.local::<rsi_retrieval::RetrievalContract>()?,
     ));
-    let private = crate::acp_inputs::PrivateInputs::new(
-        source.clone(),
-        plan.context().clone(),
-        paths,
-        plan.local::<rsi_process::DuplexProcessContract>()?,
-        plan.local::<rsi_sandbox::SandboxContract>()?,
-    );
-    source
-        .private
-        .set(Arc::downgrade(&private))
-        .expect("private source initialized once");
-    plan.context()
-        .provide_local::<crate::acp_inputs::InputsContract>(private.clone())?;
-    plan.defer(
-        "retire private ACP inputs",
-        Box::new(move || {
-            Box::pin(async move {
-                private
-                    .shutdown()
-                    .await
-                    .map_err(|_| "private ACP input cleanup failed".into())
-            })
-        }),
-    )?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = paths;
+    #[cfg(target_os = "linux")]
+    {
+        let private = crate::acp_inputs::PrivateInputs::new(
+            source.clone(),
+            plan.context().clone(),
+            paths,
+            plan.local::<rsi_process::DuplexProcessContract>()?,
+            plan.local::<rsi_sandbox::SandboxContract>()?,
+        );
+        source
+            .private
+            .set(Arc::downgrade(&private))
+            .expect("private source initialized once");
+        plan.context()
+            .provide_local::<crate::acp_inputs::InputsContract>(private.clone())?;
+        plan.defer(
+            "retire private ACP inputs",
+            Box::new(move || {
+                Box::pin(async move {
+                    private
+                        .shutdown()
+                        .await
+                        .map_err(|_| "private ACP input cleanup failed".into())
+                })
+            }),
+        )?;
+    }
     Ok(source)
 }
 #[cfg(not(unix))]

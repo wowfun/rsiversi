@@ -154,7 +154,10 @@ async fn settle(service: &dyn ExternalConversations, id: &ConversationId, expect
 #[tokio::test]
 async fn host_owns_peers_across_detach_reconciles_start_and_reopens_after_retirement() {
     let root = tempfile::tempdir().unwrap();
-    let (runtime, fiber, service, config) = fixture(root.path(), "normal").await;
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("workspace");
+    std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+    let (runtime, fiber, service, config) = fixture(&alias, "normal").await;
     assert_eq!(
         serde_json::to_value(service.endpoints().await.unwrap()).unwrap(),
         json!([{"id":"configured","enabled":true}])

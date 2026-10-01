@@ -313,6 +313,7 @@ impl Manager {
             .map(|gate| gate.tasks.token())
             .ok_or(Failure::Unauthorized))
     }
+    #[cfg(target_os = "linux")]
     pub(crate) fn admit_execution_scope(
         &self,
         origin: &CallOrigin,

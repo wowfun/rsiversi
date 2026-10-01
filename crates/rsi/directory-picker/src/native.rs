@@ -192,19 +192,23 @@ fn create_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::{ffi::OsStringExt, fs::symlink};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::fs::symlink;
     #[test]
     fn aliases_hidden_unicode_and_single_creation_return_physical_paths() {
         let root = tempfile::tempdir().unwrap();
-        let physical = root.path().join("home");
+        let root_path = root.path().canonicalize().unwrap();
+        let physical = root_path.join("home");
         std::fs::create_dir(&physical).unwrap();
         for name in ["zebra", ".hidden", "中文", "Alpha"] {
             std::fs::create_dir(physical.join(name)).unwrap();
         }
-        let alias = root.path().join("alias");
+        let alias = root_path.join("alias");
         symlink(&physical, &alias).unwrap();
         symlink(physical.join("Alpha"), physical.join("linked")).unwrap();
         symlink("cycle", physical.join("cycle")).unwrap();
+        #[cfg(target_os = "linux")]
         std::fs::create_dir(physical.join(std::ffi::OsString::from_vec(vec![255]))).unwrap();
         let listing = list(
             ListRequest { path: None },
@@ -214,7 +218,7 @@ mod tests {
         .unwrap();
         assert_eq!(listing.path, physical.to_str().unwrap());
         assert_eq!(listing.home.as_deref(), physical.to_str());
-        assert!(listing.unrepresentable);
+        assert_eq!(listing.unrepresentable, cfg!(target_os = "linux"));
         assert!(!listing.truncated);
         assert_eq!(
             listing
@@ -253,9 +257,11 @@ mod tests {
     #[test]
     fn physical_target_bytes_truncate_a_long_directory_window() {
         let root = tempfile::tempdir().unwrap();
-        let mut parent = root.path().to_path_buf();
-        for _ in 0..17 {
-            parent.push("p".repeat(200));
+        let root_path = root.path().canonicalize().unwrap();
+        let mut parent = root_path;
+        // JSON escaping exceeds the reply budget without exceeding macOS PATH_MAX.
+        for _ in 0..3 {
+            parent.push("\u{1}".repeat(200));
             std::fs::create_dir(&parent).unwrap();
         }
         for index in 0..700 {
@@ -277,7 +283,8 @@ mod tests {
     #[test]
     fn enumeration_is_sorted_bounded_and_cancellation_and_parent_replacement_are_explicit() {
         let root = tempfile::tempdir().unwrap();
-        let parent = root.path().join("parent");
+        let root_path = root.path().canonicalize().unwrap();
+        let parent = root_path.join("parent");
         std::fs::create_dir(&parent).unwrap();
         for index in (0..1005).rev() {
             std::fs::create_dir(parent.join(format!("dir-{index:04}"))).unwrap();
@@ -293,7 +300,7 @@ mod tests {
         stop.cancel();
         assert_eq!(list(request, None, stop).unwrap_err(), Failure::Cancelled);
         let retained = open_absolute_directory_no_follow(&parent).unwrap();
-        std::fs::rename(&parent, root.path().join("renamed")).unwrap();
+        std::fs::rename(&parent, root_path.join("renamed")).unwrap();
         std::fs::create_dir(&parent).unwrap();
         assert!(
             create_at(
@@ -305,6 +312,6 @@ mod tests {
             .is_err()
         );
         assert!(!parent.join("never-created").exists());
-        assert!(!root.path().join("renamed/never-created").exists());
+        assert!(!root_path.join("renamed/never-created").exists());
     }
 }
