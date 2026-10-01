@@ -199,31 +199,30 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             request.clone()
         )
         .await,
-        Err(ApiError::OutcomeUnknown)
+        Err(ApiError::Unavailable)
     ));
+    assert_eq!(
+        query(&running, CallOrigin::Local, false)
+            .await
+            .metadata_revision,
+        "2"
+    );
     database
         .execute_batch("DROP TRIGGER fixture_reject_navigation;")
         .unwrap();
-    assert!(matches!(
-        wire(
-            &running,
-            CallOrigin::Local,
-            NavigationOperation::Replace,
-            request
-        )
-        .await,
-        Err(ApiError::OutcomeUnknown)
-    ));
-    assert!(matches!(
-        wire(
-            &running,
-            CallOrigin::Local,
-            NavigationOperation::Query,
-            json!({"filter":NavigationFilter::default(),"after":null})
-        )
-        .await,
-        Err(ApiError::OutcomeUnknown)
-    ));
+    let receipt = wire(
+        &running,
+        CallOrigin::Local,
+        NavigationOperation::Replace,
+        request,
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt["revision"], "3");
+    assert_eq!(
+        query(&running, CallOrigin::Local, true).await.entries[0].metadata,
+        metadata
+    );
     drop(database);
     drop(handle);
     assert!(running.shutdown().await.is_clean());

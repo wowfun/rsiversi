@@ -121,24 +121,23 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn failed_provider_storage_closes_writes_until_durable_truth_is_reloaded() {
+async fn known_provider_storage_rejection_preserves_revision_and_allows_a_later_edit() {
     let fixture = fixture("http://127.0.0.1:1");
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
             .await
             .unwrap();
     let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
-    database.execute_batch("CREATE TRIGGER fixture_reject_provider BEFORE INSERT ON rsi_storage_records WHEN NEW.domain = 'rsi.managed-providers' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
-    assert!(matches!(
-        replace(&running, "0", vec![deployment("blocked")]).await,
-        Err(ApiError::OutcomeUnknown)
-    ));
     database
-        .execute_batch("DROP TRIGGER fixture_reject_provider;")
+        .execute_batch(
+            "CREATE TRIGGER fixture_reject_provider BEFORE INSERT ON rsi_storage_records
+         WHEN NEW.domain = 'rsi.managed-providers'
+         BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;",
+        )
         .unwrap();
     assert!(matches!(
-        replace(&running, "0", vec![deployment("cannot-replay")]).await,
-        Err(ApiError::OutcomeUnknown)
+        replace(&running, "0", vec![deployment("blocked")]).await,
+        Err(ApiError::Unavailable)
     ));
     let status = call(
         &running,
@@ -149,20 +148,99 @@ async fn failed_provider_storage_closes_writes_until_durable_truth_is_reloaded()
     .await
     .unwrap();
     assert_eq!(status.desired_revision, "0");
-    assert!(status.diagnostic.unwrap().contains("unknown"));
+    assert!(status.diagnostic.is_none());
+    database
+        .execute_batch("DROP TRIGGER fixture_reject_provider;")
+        .unwrap();
+    assert_eq!(
+        replace(&running, "0", vec![deployment("accepted")])
+            .await
+            .unwrap()
+            .applied_revision,
+        "1"
+    );
     drop(database);
     assert!(running.shutdown().await.is_clean());
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
             .await
             .unwrap();
+    let status = call(
+        &running,
+        CallOrigin::Local,
+        ProvidersOperation::Read,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status.desired_revision, "1");
+    assert_eq!(status.deployments[0].config["deployment"], "accepted");
+    assert!(running.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_provider_commit_preserves_reads_and_allows_edit_without_host_restart() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+    // The body succeeds; the actual backend connection fails only at COMMIT.
+    database.execute_batch(
+        "CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY);
+         CREATE TABLE fixture_child(id INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TRIGGER fixture_commit_failure AFTER INSERT ON rsi_storage_records
+         WHEN NEW.domain = 'rsi.managed-providers'
+         BEGIN INSERT INTO fixture_child VALUES (1); END;"
+    ).unwrap();
+    assert!(matches!(
+        replace(&running, "0", vec![deployment("rejected")]).await,
+        Err(ApiError::Unavailable)
+    ));
+    let status = call(
+        &running,
+        CallOrigin::Local,
+        ProvidersOperation::Read,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status.desired_revision, "0");
+    assert!(status.deployments.is_empty());
+    assert!(status.diagnostic.is_none());
+    running
+        .device_administration()
+        .unwrap()
+        .register("after rejected provider commit")
+        .await
+        .unwrap();
+    database.execute_batch(
+        "DROP TRIGGER fixture_commit_failure; DROP TABLE fixture_child; DROP TABLE fixture_parent;"
+    ).unwrap();
     assert_eq!(
-        replace(&running, "0", vec![deployment("reconciled")])
+        replace(&running, "0", vec![deployment("accepted")])
             .await
             .unwrap()
             .applied_revision,
         "1"
     );
+    drop(database);
+    assert!(running.shutdown().await.is_clean());
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let status = call(
+        &running,
+        CallOrigin::Local,
+        ProvidersOperation::Read,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status.desired_revision, "1");
+    assert_eq!(status.deployments[0].config["deployment"], "accepted");
     assert!(running.shutdown().await.is_clean());
 }
 
@@ -197,6 +275,16 @@ async fn managed_provider_public_api_preflights_converges_and_reconstructs_witho
             .authenticate(&device.token)
             .unwrap(),
     );
+    assert!(matches!(
+        call(
+            &running,
+            origin.clone(),
+            ProvidersOperation::Read,
+            json!({})
+        )
+        .await,
+        Err(ApiError::Unauthorized)
+    ));
     assert!(matches!(
         call(
             &running,
