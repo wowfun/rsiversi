@@ -420,7 +420,10 @@ Bash and apply-patch results with DeepSeek, inspects Files/Review, and exercises
 SSH terminal. No key is read without this explicit mode. Reports retain model
 facts and transport/build identity; credentials are redacted on cleanup.
 
-`review-lifecycle.mjs` runs current React and storage modules through an isolated
+`review-lifecycle.mjs` also delays a restored navigation read across another
+window's Updated selection, checking that automatic reconciliation preserves the
+committed mode and empty saved order for both Session and workspace navigation.
+It runs current React and storage modules through an isolated
 Vite server in Chromium. It retires Dock initialization during open, read and
 reopen; verifies no late focus/subscription installation; checks content-only host
 snapshot stability; and inspects actual IndexedDB writes during concurrent intents.

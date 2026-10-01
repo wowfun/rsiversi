@@ -71,6 +71,33 @@ try{
     return {before,after:[await store.read('orders','sessions'),await store.read('preferences')],error};
   });
   assert.deepEqual(atomic.before,atomic.after);assert.match(atomic.error,/preferences/);assert.deepEqual(atomic.after[0].value.ids,[]);
+  for(const [scope,preference] of [['sessions:all','sessionOrder'],['workspaces','workspaceOrder']]){
+    const active=await one.evaluate(async({scope,preference})=>{
+      const before=await store.apply('preferences',{kind:'patch',patch:{[preference]:'manual'}});
+      const [order,after]=await store.reconcileNavigation(scope,[{id:'member',partition:'group'}]);
+      return {before,after,order};
+    },{scope,preference});
+    assert.deepEqual(active.before,active.after);assert.deepEqual(active.order.value.ids,['member']);
+    await Promise.all([
+      one.evaluate(scope=>store.reconcileNavigation(scope,[{id:'later',partition:'group'}]),scope),
+      two.evaluate(({scope,preference})=>store.applyAll([
+        {bucket:'orders',scope,intent:{kind:'updated'}},
+        {bucket:'preferences',scope:'',intent:{kind:'patch',patch:{[preference]:'updated'}}},
+      ]),{scope,preference}),
+    ]);
+    const cleared=await one.evaluate(async scope=>{
+      const before=[await store.read('orders',scope),await store.read('preferences')];
+      return {before,after:await store.reconcileNavigation(scope,[{id:'stale',partition:'group'}])};
+    },scope);
+    assert.deepEqual(cleared.before,cleared.after);assert.deepEqual(cleared.after[0].value.ids,[]);assert.equal(cleared.after[1].value[preference],'updated');
+  }
+  const malformedGuard=await one.evaluate(async()=>{
+    const {DeviceStore}=await import('/device-store.js'),broken=await DeviceStore.open('corrupt-navigation');
+    await new Promise((resolve,reject)=>{const tx=broken.database.transaction('preferences','readwrite');tx.objectStore('preferences').put({key:broken.key,value:null,revision:'1',used:1});tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error)});
+    let error;try{await broken.reconcileNavigation('sessions:all',[{id:'member',partition:'group'}])}catch(e){error=e.message}
+    const order=await broken.read('orders','sessions:all');broken.close();return {error,order};
+  });
+  assert.match(malformedGuard.error,/preferences/);assert.equal(malformedGuard.order.revision,'0');assert.deepEqual(malformedGuard.order.value.ids,[]);
   const isolation=await one.evaluate(async()=>{
     const {DeviceStore}=await import('/device-store.js');const other=await DeviceStore.open('different-principal');
     const value=await other.read('orders','sessions');await other.apply('preferences',{kind:'patch',patch:{view:'flat'}});other.close();
@@ -82,6 +109,6 @@ try{
     return {value,corrupt,draft,preferences:await store.read('preferences')};
   });
   assert.deepEqual(isolation.value.value.ids,[]);assert.match(isolation.corrupt,/layout/);assert.equal(isolation.draft,'unchanged draft');assert.equal(isolation.preferences.value.view,'workspace');
-  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:2,realIndexedDb:true,windows:2,migratedRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true};
+  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:2,realIndexedDb:true,windows:2,migratedRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true};
   await mkdir(report,{recursive:true});await writeFile(join(report,'result.json'),JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence));
 }finally{await browser?.close();await server.close();}

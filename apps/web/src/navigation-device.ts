@@ -110,8 +110,8 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
     if(!ready || moreWorkspaces || preferences.workspaceOrder!=='manual' || workspaceReconciled.current===workspaceKey)return
     const store=owner.current;if(!store)return
     workspaceReconciled.current=workspaceKey
-    void store.apply('orders',{kind:'reconcile',members:JSON.parse(workspaceKey)},'workspaces').then(
-      order=>{if(owner.current===store)setWorkspaceIds(order.value.ids)},
+    void store.reconcileNavigation('workspaces',JSON.parse(workspaceKey)).then(
+      ([order,prefs])=>{if(owner.current===store){setWorkspaceIds(order.value.ids);setPreferences(prefs.value)}},
       error=>{if(owner.current===store)setNotice(String(error))},
     )
   },[ready,moreWorkspaces,preferences.workspaceOrder,workspaceKey])
@@ -144,7 +144,11 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
   useEffect(()=>{
     if(!ready || preferences.sessionOrder!=='manual' || !nav?.order || nav.order.seed.membership.kind!=='available' || lastReconciled.current===ticket)return
     lastReconciled.current=ticket??''
-    void commit({kind:'reconcile',members:members(nav.order)},'manual').catch(error=>setNotice(String(error)))
+    const store=owner.current;if(!store)return
+    void store.reconcileNavigation(scope,members(nav.order)).then(
+      ([order,prefs])=>{if(owner.current===store){setOrdered(order.value.ids);setPreferences(prefs.value)}},
+      error=>{if(owner.current===store)setNotice(String(error))},
+    )
   },[ready,preferences.sessionOrder,ticket])
   const complete=nav?.order?.seed.membership
   const manual=preferences.sessionOrder==='manual' && complete?.kind==='available' && !nav?.filter.query

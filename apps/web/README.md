@@ -568,6 +568,10 @@ commits its preference and order intents together across the two object stores.
 A failed record or quota check aborts both; notification failure after commit does
 not downgrade the durable receipt. The shared Host pin/archive metadata remains
 outside this device transaction.
+Automatic membership reconciliation reads the current preference in that same
+transaction. It preserves the mode and changes saved membership only while that
+scope is still manual. A stale restored view cannot undo Updated mode or refill
+the order it cleared, including when another window made that choice.
 
 Navigation view and Session/workspace order are device preferences. Manual moves
 use complete membership before reading 64 ordered summaries; first use initializes

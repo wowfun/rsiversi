@@ -12,12 +12,40 @@ import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {ResourceDocks} from './src/resource-dock.tsx';
 import {DeviceStore} from './device-store.js';
+import {useDeviceNavigation} from './src/navigation-device.ts';
 import {emptyDock,dockIntent} from './src/dock-state.ts';
 import {presentationIdentity,LayoutContext,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {source,installActions} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
 window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
+window.staleNavigationRead=async(kind)=>{
+ const identity='navigation-race:'+kind,scope=kind==='sessionOrder'?'sessions:all':'workspaces',store=await DeviceStore.open(identity);
+ const members=[{id:'session-a',partition:'group'}];
+ await store.applyAll([{bucket:'orders',scope,intent:{kind:'reconcile',members}},{bucket:'preferences',scope:'',intent:{kind:'patch',patch:{[kind]:'manual'}}}]);
+ let release,entered;const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);
+ const read=DeviceStore.prototype.read;let held=false;
+ DeviceStore.prototype.read=async function(bucket,scope=''){
+  const result=await read.call(this,bucket,scope);
+  if(this!==store&&this.key===identity&&bucket==='preferences'&&!held){held=true;entered();await gate}
+  return result;
+ };
+ const nav={ticket:'navigation',metadata_revision:'1',filter:{query:'',archived:false},order:{ticket:'order',requested:['session-a'],entries:[],seed:{scope:{kind:'all'},metadata_revision:'1',membership:{kind:'available',members:[{session:'session-a',group:'group',pinned:false,archived:false,last_activity_ms:'1',workspace:null}]}}}};
+ source.set({navigation:nav,surfaces:{},application_surfaces:[]});presentationIdentity.set(identity);
+ installActions({command:async()=>{},call:async()=>'',open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
+ const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
+ const workspaces=[{id:'workspace-a',path:'/workspace',location:{kind:'local'}}];
+ function Probe(){const device=useDeviceNavigation(nav,workspaces,false);return <output data-ready={device.ready}>{device.preferences[kind]}</output>}
+ try{
+  root.render(<Probe/>);await started;
+  await store.applyAll([{bucket:'orders',scope,intent:{kind:'updated'}},{bucket:'preferences',scope:'',intent:{kind:'patch',patch:{[kind]:'updated'}}}]);
+  release();
+  const deadline=performance.now()+10000;
+  while(performance.now()<deadline&&(node.querySelector('output')?.dataset.ready!=='true'||node.querySelector('output')?.textContent!=='updated'))await new Promise(resolve=>setTimeout(resolve,10));
+  if(node.querySelector('output')?.dataset.ready!=='true')throw Error('Restored navigation never became ready');
+  return {preferences:(await read.call(store,'preferences')).value,order:(await read.call(store,'orders',scope)).value,displayed:node.querySelector('output').textContent};
+ }finally{release();root.unmount();node.remove();DeviceStore.prototype.read=read;store.close()}
+};
 window.mountResize=()=>{
  const node=document.createElement('main');node.id='workbench';document.body.append(node);const root=createRoot(node);
  function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></>}
@@ -71,6 +99,10 @@ let browser;const errors=[],checks=[];
 try{
  await mkdir(report,{recursive:true});await server.listen();browser=await chromium.launch();
  const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
+ for(const kind of ['sessionOrder','workspaceOrder']){
+  const navigation=await page.evaluate(kind=>window.staleNavigationRead(kind),kind);
+  assert.equal(navigation.preferences[kind],'updated');assert.equal(navigation.displayed,'updated');assert.deepEqual(navigation.order.ids,[]);checks.push({staleNavigationRead:kind,...navigation});
+ }
  await page.setViewportSize({width:1440,height:900});await page.evaluate(()=>window.mountVisibility());
  await page.waitForFunction(()=>window.oldVisibilityCallback);
  await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>document.querySelector('output')?.dataset.narrow==='true');
