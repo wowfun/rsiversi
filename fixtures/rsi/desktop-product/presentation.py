@@ -2,12 +2,18 @@
 import json
 
 
+def open_appearance(script, until, open_details):
+    script(r'window.fixturePreviousTheme=document.querySelector("[aria-label=\"Settings / appearance / theme\"]");return true')
+    open_details()
+    until(lambda: script(r'const e=document.querySelector("#detail[open] [aria-label=\"Settings / appearance / theme\"]");return e&&e!==window.fixturePreviousTheme'))
+    script('delete window.fixturePreviousTheme;return true')
+
+
 def verify(script, button, fill, until, screenshot, report, system_theme=None):
     results = []
 
     def theme(value, size):
-        button('Appearance')
-        until(lambda: script('return Boolean(document.querySelector("select[aria-label=\\"Settings / appearance / theme\\"]"))'))
+        open_appearance(script, until, lambda: button('Appearance'))
         script('const e=document.querySelector("select[aria-label=\\"Settings / appearance / theme\\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true', [value])
         fill('input[aria-label="Settings / appearance / content_font_size"]', str(size))
         button('Save settings')

@@ -59,10 +59,10 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       IDBDatabase.prototype.transaction=function(...args){if(this.name==='rsi.presentation')throw new DOMException('fixture layout failure','UnknownError');return transaction.apply(this,args)};
     });
     await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
-    await page.getByRole('alert').filter({hasText:'Layout preferences could not be saved'}).waitFor();
+    await page.getByRole('alert').filter({hasText:'Layout changes could not be saved'}).waitFor();
     await page.evaluate(()=>window.restoreLayoutTransactions());
     await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
-    await page.getByRole('alert').filter({hasText:'Layout preferences could not be saved'}).waitFor({state:'hidden'});
+    await page.getByRole('alert').filter({hasText:'Layout changes could not be saved'}).waitFor({state:'hidden'});
     await page.addInitScript(()=>{
       const transaction=IDBDatabase.prototype.transaction;
       IDBDatabase.prototype.transaction=function(...args){if(this.name==='rsi.presentation')throw new DOMException('fixture layout failure','UnknownError');return transaction.apply(this,args)};

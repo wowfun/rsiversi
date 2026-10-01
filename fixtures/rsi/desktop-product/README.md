@@ -19,6 +19,8 @@ Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
 After scenarios close a dialog, the final composer geometry check waits for the
 closed document view; native click delivery alone does not settle a Rust command.
+Appearance checks wait for the new Settings read to replace the previous dialog's
+theme field before editing; reopening the dialog can temporarily retain old fields.
 The frame-admission probe holds one real document ACK before requesting a second
 frame, then releases that same ACK. It cannot assume the ordinary polling loop
 always occupies the frame lane or consume an unacknowledged frame itself. Each
@@ -52,7 +54,10 @@ The export scenario exercises cancellation before a reservation is claimed and a
 late cancellation of the previous token while a replacement chooser is open. The
 replacement must still save; the cancelled chooser retains its waiter until its
 actual callback. Native lane capacity and positively classified control retries
-have separate unit coverage.
+have separate unit coverage. The read-pressure scenario records both native Busy
+rejections and the API client's separate Subscription-capacity rejection. It
+requires native Busy with its admission flags and exact-once terminal input;
+only output polling continues after the exact API-capacity error, never mutations.
 The paired `rsi` companion must already be beside the desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
