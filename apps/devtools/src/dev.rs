@@ -249,7 +249,13 @@ impl Development {
                     .into_os_string(),
             ));
         }
-        for name in ["RSI_WASM_BINDGEN", "CARGO_BUILD_JOBS"] {
+        for name in [
+            "RSI_WASM_BINDGEN",
+            "CARGO_BUILD_JOBS",
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_TEST_DEBUG",
+        ] {
             if let Some(value) = std::env::var_os(name) {
                 environment.push((name, value));
             }
@@ -1018,6 +1024,45 @@ mod tests {
         std::fs::remove_dir_all(&dev.runtime_directory).unwrap();
     }
     #[test]
+    fn build_options_are_inherited_without_reaching_product_children() {
+        const PROBE: &str = "RSI_BUILD_ENVIRONMENT_PROBE";
+        let settings = [
+            ("CARGO_INCREMENTAL", "0"),
+            ("CARGO_BUILD_JOBS", "2"),
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+            ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
+        ];
+        if std::env::var_os(PROBE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dev::tests::build_options_are_inherited_without_reaching_product_children",
+                ])
+                .env(PROBE, "1")
+                .envs(settings)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let options = Options::parse(&["tui".into()]).unwrap();
+        let dev = Development::create(root.path().into(), &options).unwrap();
+        let build = dev.build_environment();
+        let product = dev.environment();
+        for (name, value) in settings {
+            assert!(
+                build
+                    .iter()
+                    .any(|(key, actual)| *key == name && actual == value)
+            );
+            assert!(!product.iter().any(|(key, _)| *key == name));
+        }
+        assert!(!build.iter().any(|(key, _)| *key == PROBE));
+        std::fs::remove_dir_all(&dev.runtime_directory).unwrap();
+    }
+
+    #[test]
     fn smoke_requires_matching_provider_text_and_durable_completion() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("smoke.jsonl");
@@ -1072,6 +1117,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn shared_build_cache_copies_each_concurrent_build_before_unlocking() {
         use std::os::unix::fs::PermissionsExt as _;

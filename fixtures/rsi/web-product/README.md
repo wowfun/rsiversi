@@ -294,7 +294,10 @@ bytes, semantic diagnostics, filename hints and unchanged provider request count
 
 The download transport probe additionally transfers over 32 MiB with a gated
 producer, rejects Blob buffering, and checks cancellation and abnormal EOF at
-the application and Service Worker boundaries. It records browser download-manager
+the application and Service Worker boundaries. It gates abnormal EOF until the
+browser admits the download, so response failure cannot race initial download
+observation. Per-mode progress is retained in `download-stream-trace.json` even
+when the transport check fails. It records browser download-manager
 failure separately in `download-stream.json`. Firefox currently can leave an
 errored streaming download pending after the producer is released and the
 application reports failure; the fixture explicitly cancels that browser artifact

@@ -16,6 +16,9 @@ RSI_RUST_ANALYZER="$(rustup which --toolchain 1.97.0 rust-analyzer)" cargo test 
 This asserts `rust-analyzer 1.97.0 (2d8144b 2026-07-07)`, uses actual Bubblewrap,
 creates a private dependency-free Rust project and verifies all four semantic
 results, including a cursor after an emoji. Source bytes remain unchanged.
+The opt-in acceptance waits within one bounded indexing window for nonempty
+results and repeats a read rejected with LSP ContentModified (-32801). Other
+query errors still fail immediately; the product does not replay queries.
 
 `prepare.py` checks the exact native rust-analyzer version, creates an isolated
 Rust project, and appends explicit language and UI Host leaves. Browser and

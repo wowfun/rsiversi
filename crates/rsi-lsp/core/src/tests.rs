@@ -833,14 +833,22 @@ async fn pinned_rust_analyzer_four_queries_under_native_read_only_sandbox() {
         };
         let output = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
-                let output = service
+                let output = match service
                     .query(
                         LanguageWorkspace::local(workspace.clone()).unwrap(),
                         query.clone(),
                         CancellationToken::new(),
                     )
                     .await
-                    .unwrap();
+                {
+                    Ok(output) => output,
+                    Err(Error::Server(-32801)) => {
+                        // The server may invalidate a snapshot while initial indexing runs.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    Err(error) => panic!("native query failed: {error:?}"),
+                };
                 let ready = match &output.result {
                     QueryResult::Locations { locations } => !locations.is_empty(),
                     QueryResult::Hover { text, .. } => !text.is_empty(),

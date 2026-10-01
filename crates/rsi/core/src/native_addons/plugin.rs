@@ -94,7 +94,7 @@ impl PluginFactory for SharedNativeAddonFactory {
                     manager: self.staging.manager.clone(),
                     presets: self.presets.clone(),
                 }),
-                self.paths.clone(),
+                &self.paths,
             )?)?;
         plan.context()
             .provide_local::<NativeAddonControlContract>(self.staging.control.clone())?;
@@ -226,7 +226,7 @@ impl PluginFactory for NativeAddonFactory {
         })??;
         let source: Arc<dyn rsi_agent_composition::AgentCompositionSource> =
             if self.capture_service_inputs {
-                crate::integration_source::capture(&plan, manager.clone(), self.paths.clone())?
+                crate::integration_source::capture(&plan, manager.clone(), &self.paths)?
             } else {
                 manager.clone()
             };

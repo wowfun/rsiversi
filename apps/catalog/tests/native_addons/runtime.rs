@@ -117,7 +117,13 @@ async fn native_pin_outlives_shutdown_waiter_and_drains_after_release() {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "native pin failed: {error:?}; profile: {:?}; addons: {:?}",
+                bootstrap.control().status(),
+                control.inspect()
+            )
+        });
     drop(service);
     let first = runtime.shutdown().await;
     assert!(
