@@ -76,6 +76,7 @@ pub(super) fn remote_error(error: &Value) -> Result<McpError> {
             .and_then(Value::as_i64)
             .ok_or(McpError::Protocol)?
         {
+            -32601 => McpError::MethodNotFound,
             -32020 => McpError::HeaderMismatch,
             -32021 => McpError::RequiredCapability,
             -32022 => McpError::UnsupportedVersion,

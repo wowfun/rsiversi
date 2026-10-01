@@ -43,6 +43,9 @@ HTTP request bodies are bounded and encoded once before dispatch.
 Business requests retain their exact connection epoch through preparation and
 waiting. At most nine requests may be outstanding per connection, including
 preparation and the single active exchange; further requests fail with Busy.
+The endpoint gate bounds preparation across connection replacement; the transport
+gate bounds framed RPCs, including discovery that does not enter the business gate.
+Both use the same outstanding-request ceiling and retain their distinct lifetimes.
 Prepared requests wait fairly at the exchange gate with at most 1 MiB of encoded
 payload each. The 30-second business deadline includes preparation, waiting and
 exchange, and is never renewed on dispatch. Caller cancellation or timeout before
@@ -68,6 +71,10 @@ new composition input unavailable until an explicit connection refresh applies a
 verifies the saved target. Startup performs one bounded refresh attempt. A refresh
 never replays a previously started Tool call. The current saved HTTP configuration
 and redacted actual endpoint observations have separate meanings in the workbench.
+SSH refresh preflights current Use authority before retiring an old connection.
+Credential resolution retains one Use permit for that read only; target resolution,
+preparation, spawn and discovery exchanges each retain their own Execution permit.
+The refresh does not hold an additional permit across those self-admitting steps.
 
 The ordinary SSE exchange byte budget applies to input admitted through its first
 correlated response. A transport chunk may include a trailing suffix beyond
@@ -82,3 +89,9 @@ reconnection or Last-Event-ID replay. Event names reset at every blank line.
 Failed process settlement remains a service shutdown error. Configuration reports
 settlement failure for entries retired by that operation; historical failure in a
 different entry does not reject later unrelated configuration changes.
+The Settings owner validates the complete HTTP/Local/SSH candidate and acquires
+service configuration admission before publishing SSH inputs. Rejection preserves
+the previous inputs and pending state. Once endpoint replacement is accepted,
+the owner retains those exact inputs even if its waiter disappears or retirement
+fails; pending clears only after a successful explicit apply. Retirement failure
+cannot roll the service back to the previous inputs.

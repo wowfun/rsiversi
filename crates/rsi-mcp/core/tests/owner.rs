@@ -11,6 +11,56 @@ use serde_json::json;
 use std::sync::Arc;
 use support::*;
 use tokio_util::sync::CancellationToken;
+#[allow(dead_code)]
+#[path = "../../../../fixtures/rsi/execution/metadata.rs"]
+mod execution_fixture;
+
+#[tokio::test]
+async fn ssh_refresh_does_not_nest_use_permits_and_revocation_precedes_credentials() {
+    use std::sync::atomic::Ordering;
+    let credentials = Arc::new(Credentials::default());
+    let service = rsi_mcp::McpService::new(
+        credentials.clone(),
+        Arc::new(NoProcess),
+        Arc::new(TestSandbox),
+    );
+    let target = rsi_execution::ExecutionTargetId::parse("a".repeat(32)).unwrap();
+    let config = serde_json::from_value(json!({"servers":[{
+        "id":"remote","enabled":true,"transport":{"kind":"ssh_stdio","target":target,"command":"fixture","cwd":"/tmp",
+        "environment":{"TOKEN":{"kind":"credential","reference":{"owner":"rsi.mcp","slot":"fixture"}}}}
+    }]})).unwrap();
+    service.configure(config).await.unwrap();
+    let gate = Arc::new(execution_fixture::Gate {
+        maximum: Some(1),
+        ..Default::default()
+    });
+    let lease = execution_fixture::lease(
+        rsi_execution::ExecutionLocation::Ssh { target },
+        gate.clone(),
+        1,
+    );
+    // The inert backend rejects target-program resolution as Unsupported. Reaching
+    // that boundary proves the sole permit was not consumed by an outer refresh.
+    assert_eq!(
+        service
+            .refresh("remote", Some(lease.clone()), CancellationToken::new())
+            .await
+            .unwrap_err(),
+        rsi_mcp::McpError::ProcessUnavailable
+    );
+    assert_eq!(credentials.resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.active.load(Ordering::SeqCst), 0);
+    gate.revoked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        service
+            .refresh("remote", Some(lease), CancellationToken::new())
+            .await
+            .unwrap_err(),
+        rsi_mcp::McpError::ProcessUnavailable
+    );
+    assert_eq!(credentials.resolutions.load(Ordering::SeqCst), 1);
+    service.shutdown().await.unwrap();
+}
 #[derive(Debug)]
 struct Capabilities;
 #[async_trait]
@@ -66,10 +116,11 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     .await;
     let capabilities = activate(&runtime, "capabilities", Capabilities, json!(null)).await;
     let stdio = json!({"servers":[{"id":"private-local","enabled":false,"transport":{"kind":"stdio","program":"/private/local-program","cwd":"/private/local-cwd","arguments":["private-launch-argument"],"environment":{}}}]});
-    let mcp = activate(&runtime, "mcp", McpFactory, stdio).await;
+    let mcp = activate(&runtime, "mcp", McpFactory, stdio.clone()).await;
     let owner = runtime.root().lookup_local::<McpOwnerContract>().unwrap();
     assert!(owner.seed().is_ok());
     assert!(owner.is_stdio("private-local"));
+    check_remote_rejection_and_abandonment(&runtime, &owner, stdio).await;
     let access = runtime
         .root()
         .lookup_local::<SettingsAccessContract>()
@@ -111,4 +162,70 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     assert!(provider.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
     fixture.shutdown().await;
+}
+
+async fn check_remote_rejection_and_abandonment(
+    runtime: &Runtime,
+    owner: &rsi_mcp::McpOwner,
+    stdio: ConfigValue,
+) {
+    let remote = |id: &str| {
+        serde_json::from_value(json!({"servers":[{
+            "id":id,"enabled":false,"transport":{"kind":"ssh_stdio",
+            "target":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":"fixture","cwd":"/tmp"}
+        }]}))
+        .unwrap()
+    };
+    owner.set_remote_stdio(remote("remote-good")).await.unwrap();
+    assert!(!owner.settings_pending());
+    assert_eq!(
+        owner.set_remote_stdio(remote("private-local")).await,
+        Err(rsi_mcp::McpError::Protocol)
+    );
+    assert!(owner.is_ssh_stdio("remote-good"));
+    assert!(!owner.is_ssh_stdio("private-local"));
+    assert!(!owner.settings_pending());
+    owner.refresh(None, CancellationToken::new()).await.unwrap();
+    {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let service = runtime
+            .root()
+            .lookup_local::<rsi_mcp::McpContract>()
+            .unwrap();
+        let mut busy: rsi_mcp::McpConfig = serde_json::from_value(stdio).unwrap();
+        busy.servers.extend(remote("remote-good").servers);
+        let mut configure = Box::pin(service.configure(busy));
+        assert!(matches!(
+            configure
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert_eq!(
+            owner.set_remote_stdio(remote("remote-busy")).await,
+            Err(rsi_mcp::McpError::Busy)
+        );
+        assert!(owner.is_ssh_stdio("remote-good"));
+        assert!(!owner.is_ssh_stdio("remote-busy"));
+        assert!(!owner.settings_pending());
+        configure.await.unwrap();
+        let mut abandoned = Box::pin(owner.set_remote_stdio(remote("remote-new")));
+        assert!(matches!(
+            abandoned
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        drop(abandoned);
+        assert!(owner.is_ssh_stdio("remote-new"));
+        assert!(owner.settings_pending());
+        // Let the already accepted retirement release configuration admission.
+        tokio::task::yield_now().await;
+        owner.refresh(None, CancellationToken::new()).await.unwrap();
+        assert!(!owner.settings_pending());
+        assert!(owner.is_ssh_stdio("remote-new"));
+    }
 }

@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 /// Stable owning Agent Domain; codec identity is independent of connection epochs.
 pub const MANIFEST_DOMAIN: &str = "rsi.mcp.manifest";
-/// Tuple-hashed public Tool identities; older codecs are not supported.
-pub const MANIFEST_CODEC_VERSION: u32 = 2;
+/// Frozen template discovery and resource reader contract; older codecs are rejected.
+pub const MANIFEST_CODEC_VERSION: u32 = 3;
 /// Negotiated protocol revisions implemented by this integration.
 pub const PROTOCOL_VERSIONS: &[&str] = &[
     LATEST_PROTOCOL_VERSION,
@@ -88,6 +88,8 @@ pub struct ServerManifest {
     pub tools: Vec<FrozenTool>,
     /// Full listed resource set.
     pub resources: Vec<McpResource>,
+    /// Explicit opt-in discovery state and complete parameterized resources.
+    pub templates: crate::TemplateCatalog,
 }
 /// One complete typed Domain value; never truncated or sharded.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -162,7 +164,10 @@ impl ServerManifest {
                 .as_ref()
                 .is_some_and(|value| value.len() > 32768)
             || self.tools.len() > MAXIMUM_TOOLS
-            || (self.resources.len() + usize::from(self.instructions.is_some())) > MAXIMUM_RESOURCES
+            || (self.resources.len()
+                + self.templates.entries().len()
+                + usize::from(self.instructions.is_some()))
+                > MAXIMUM_RESOURCES
         {
             return Err("Invalid MCP server manifest".into());
         }
@@ -176,6 +181,7 @@ impl ServerManifest {
             }
         }
         let mut resources = BTreeSet::new();
+        self.templates.validate()?;
         for resource in &self.resources {
             if !name(&resource.uri, 4096)
                 || !name(&resource.name, 256)
@@ -211,6 +217,7 @@ pub fn validate_manifest_catalog<'a>(
         tools = tools.saturating_add(server.tools.len());
         resources = resources
             .saturating_add(server.resources.len())
+            .saturating_add(server.templates.entries().len())
             .saturating_add(usize::from(server.instructions.is_some()));
         if index >= MAXIMUM_SERVERS
             || previous.is_some_and(|id| id >= server.id.as_str())

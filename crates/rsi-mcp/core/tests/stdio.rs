@@ -37,6 +37,8 @@ async fn owner_selection(
         .unwrap();
     let process: Arc<dyn rsi_process::DuplexProcess> = if mode == "settlement-failure" {
         Arc::new(FailedSettlementProcess(process))
+    } else if mode == "unknown-start" {
+        Arc::new(UnknownStartProcess(std::sync::atomic::AtomicUsize::new(0)))
     } else {
         process
     };
@@ -59,6 +61,7 @@ async fn owner_selection(
     service
         .configure(McpConfig {
             servers: vec![ServerConfig {
+                resource_templates: false,
                 id: "stdio".into(),
                 enabled: true,
                 tools,
@@ -87,7 +90,7 @@ async fn explicit_private_discovery_selects_tools_without_changing_configured_na
         let (runtime, fiber, service) =
             owner_selection(directory.path(), "modern", vec![], all).await;
         let frozen = service
-            .refresh("stdio", CancellationToken::new())
+            .refresh("stdio", None, CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(frozen.tools.len(), 1);
@@ -97,6 +100,7 @@ async fn explicit_private_discovery_selects_tools_without_changing_configured_na
                 &frozen,
                 "echo",
                 json!({"message":"private owner"}),
+                None,
                 CancellationToken::new(),
             )
             .await;
@@ -124,7 +128,7 @@ async fn idle_stdout_half_close_invalidates_readiness_and_reaps_without_another_
     );
     let (runtime, fiber, service) = owner(directory.path(), "half-close").await;
     service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     assert!(service.status()[0].ready);
@@ -151,7 +155,7 @@ async fn modern_stdio_discovers_subscribes_and_correlates_catalog_changes() {
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "modern-changed").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(frozen.protocol_version, "2026-07-28");
@@ -162,13 +166,14 @@ async fn modern_stdio_discovers_subscribes_and_correlates_catalog_changes() {
             &frozen,
             "echo",
             json!({"message":"modern stdio 中文"}),
+            None,
             CancellationToken::new(),
         )
         .await;
     if let Ok(value) = result {
         assert_eq!(value["content"][0]["text"], "modern stdio 中文");
     } else {
-        assert_eq!(result.unwrap_err(), McpError::CatalogChanged);
+        assert_eq!(result.unwrap_err(), McpError::OutcomeUnknown);
     }
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while service.status()[0].ready {
@@ -189,7 +194,7 @@ async fn silent_legacy_stdio_probe_is_reaped_before_one_handshake_only_restart()
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "legacy-silent-probe").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(frozen.protocol_version, "2025-11-25");
@@ -210,6 +215,7 @@ async fn silent_legacy_stdio_probe_is_reaped_before_one_handshake_only_restart()
             &frozen,
             "echo",
             json!({"message":"once"}),
+            None,
             CancellationToken::new(),
         )
         .await
@@ -225,7 +231,7 @@ async fn stdio_preserves_multiple_large_frames_and_drains_stderr_through_the_rea
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "echo").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     for text in ["中文\n\u{0000}".repeat(40000), "second message".into()] {
@@ -234,6 +240,7 @@ async fn stdio_preserves_multiple_large_frames_and_drains_stderr_through_the_rea
                 &frozen,
                 "echo",
                 json!({"message":text}),
+                None,
                 CancellationToken::new(),
             )
             .await
@@ -251,7 +258,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "stall").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     let marker = directory.path().join("started");
@@ -260,7 +267,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
     let schema = frozen.clone();
     let cancelled = cancel.clone();
     let call = tokio::spawn(async move {
-        peer.call(&schema, "echo", json!({"message":"once"}), cancelled)
+        peer.call(&schema, "echo", json!({"message":"once"}), None, cancelled)
             .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -278,6 +285,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
         &frozen,
         "echo",
         json!({"message":"queued"}),
+        None,
         queued_cancel.clone(),
     ));
     assert!(futures_util::poll!(&mut queued).is_pending());
@@ -290,6 +298,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
             &frozen,
             "echo",
             json!({"message":"never sent"}),
+            None,
             CancellationToken::new(),
         ));
         assert!(futures_util::poll!(&mut request).is_pending());
@@ -297,13 +306,13 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
     }
     assert_eq!(
         service
-            .call(&frozen, "echo", json!({}), CancellationToken::new())
+            .call(&frozen, "echo", json!({}), None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Busy
     );
     cancel.cancel();
-    assert_eq!(call.await.unwrap().unwrap_err(), McpError::Cancelled);
+    assert_eq!(call.await.unwrap().unwrap_err(), McpError::OutcomeUnknown);
     for request in waiting {
         assert_eq!(request.await.unwrap_err(), McpError::Disconnected);
     }
@@ -313,6 +322,7 @@ async fn stdio_cancelled_started_call_is_reaped_and_never_replayed() {
                 &frozen,
                 "echo",
                 json!({"message":"again"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -335,7 +345,7 @@ async fn oversized_unterminated_stdio_frame_closes_and_reaps_the_child_without_p
     let (runtime, fiber, service) = owner(directory.path(), "oversize").await;
     assert_eq!(
         service
-            .refresh("stdio", CancellationToken::new())
+            .refresh("stdio", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Capacity
@@ -354,7 +364,7 @@ async fn dropping_a_refresh_waiter_keeps_admission_until_its_child_is_reaped() {
     let (runtime, fiber, service) = owner(directory.path(), "initialize-stall").await;
     let peer = service.clone();
     let refresh =
-        tokio::spawn(async move { peer.refresh("stdio", CancellationToken::new()).await });
+        tokio::spawn(async move { peer.refresh("stdio", None, CancellationToken::new()).await });
     let marker = directory.path().join("started");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !marker.exists() {
@@ -369,7 +379,7 @@ async fn dropping_a_refresh_waiter_keeps_admission_until_its_child_is_reaped() {
     assert!(refresh.await.unwrap_err().is_cancelled());
     assert_eq!(
         service
-            .refresh("stdio", CancellationToken::new())
+            .refresh("stdio", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Busy
@@ -390,7 +400,7 @@ async fn server_requests_cannot_stop_stdout_while_a_large_client_frame_is_writin
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "duplex-cycle").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     let text = "x".repeat(512 * 1024);
@@ -400,6 +410,7 @@ async fn server_requests_cannot_stop_stdout_while_a_large_client_frame_is_writin
             &frozen,
             "echo",
             json!({"message":text}),
+            None,
             CancellationToken::new(),
         ),
     )
@@ -421,15 +432,21 @@ async fn cancelled_call_waits_for_child_settlement_before_returning() {
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "cancel-write").await;
     let frozen = service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     let stop = CancellationToken::new();
     let peer = service.clone();
     let cancellation = stop.clone();
     let mut call = tokio::spawn(async move {
-        peer.call(&frozen, "echo", json!({"message":"once"}), cancellation)
-            .await
+        peer.call(
+            &frozen,
+            "echo",
+            json!({"message":"once"}),
+            None,
+            cancellation,
+        )
+        .await
     });
     let wait_file = |path: std::path::PathBuf| async move {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -461,7 +478,7 @@ async fn cancelled_call_waits_for_child_settlement_before_returning() {
         !returned_early,
         "call returned while the controlled writer was still held"
     );
-    assert_eq!(result.unwrap().unwrap_err(), McpError::Cancelled);
+    assert_eq!(result.unwrap().unwrap_err(), McpError::OutcomeUnknown);
     assert_eq!(
         std::fs::read_to_string(directory.path().join("started.late")).unwrap(),
         "settled write"
@@ -471,12 +488,13 @@ async fn cancelled_call_waits_for_child_settlement_before_returning() {
 
 #[derive(Debug)]
 struct FailedSettlementProcess(Arc<dyn rsi_process::DuplexProcess>);
+#[async_trait::async_trait]
 impl rsi_process::DuplexProcess for FailedSettlementProcess {
-    fn spawn(
+    async fn spawn(
         &self,
         spec: rsi_process::DuplexProcessSpec,
     ) -> rsi_process::Result<rsi_process::ManagedDuplexProcess> {
-        self.0.spawn(spec).map(|process| {
+        self.0.spawn(spec).await.map(|process| {
             rsi_process::ManagedDuplexProcess::new(Arc::new(FailedSettlement(process)))
         })
     }
@@ -515,12 +533,12 @@ async fn failed_settlement_survives_connection_replacement_and_shutdown() {
     let directory = tempfile::tempdir().unwrap();
     let (runtime, fiber, service) = owner(directory.path(), "settlement-failure").await;
     service
-        .refresh("stdio", CancellationToken::new())
+        .refresh("stdio", None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
         service
-            .refresh("stdio", CancellationToken::new())
+            .refresh("stdio", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Disconnected
@@ -539,4 +557,37 @@ async fn failed_settlement_survives_connection_replacement_and_shutdown() {
     drop(service);
     assert!(fiber.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[derive(Debug)]
+struct UnknownStartProcess(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl rsi_process::DuplexProcess for UnknownStartProcess {
+    async fn spawn(
+        &self,
+        _: rsi_process::DuplexProcessSpec,
+    ) -> rsi_process::Result<rsi_process::ManagedDuplexProcess> {
+        assert_eq!(
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            0,
+            "unknown startup was replayed"
+        );
+        Err(rsi_process::ProcessError::OutcomeUnknown)
+    }
+}
+#[tokio::test]
+async fn unknown_process_start_survives_discovery_without_era_retry_or_catalog_publication() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_runtime, fiber, service) = owner(directory.path(), "unknown-start").await;
+    assert_eq!(
+        service
+            .refresh("stdio", None, CancellationToken::new())
+            .await
+            .unwrap_err(),
+        McpError::OutcomeUnknown
+    );
+    let status = service.status();
+    assert_eq!(status[0].error, Some(McpError::OutcomeUnknown));
+    service.shutdown().await.unwrap();
+    assert!(fiber.dispose().await.is_clean());
 }

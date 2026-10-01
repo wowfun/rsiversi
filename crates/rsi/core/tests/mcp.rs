@@ -95,6 +95,71 @@ fn assert_seed_reused(owner: &rsi_mcp::McpOwner) {
 }
 
 #[tokio::test]
+async fn template_only_catalog_registers_the_final_reader_and_restores_offline() {
+    let fixture = HttpFixture::start(Mode {
+        templates_only: true,
+        templates: Some(
+            json!({"resourceTemplates":[{"name":"parameterized","uriTemplate":"fixture:{?q}"}]}),
+        ),
+        ..Mode::default()
+    })
+    .await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let host = composition(&root)
+        .build()
+        .unwrap()
+        .start(Profile::default())
+        .await
+        .unwrap();
+    product::ready(&host).await;
+    let mut config = fixture.config();
+    config.servers[0].resource_templates = true;
+    config.servers[0].tools.clear();
+    let settings = host
+        .lookup_local::<SettingsContract>()
+        .unwrap()
+        .scope("rsi.mcp")
+        .unwrap();
+    settings
+        .replace(0, serde_json::to_value(config).unwrap())
+        .await
+        .unwrap();
+    let owner = host.lookup_local::<McpOwnerContract>().unwrap();
+    owner.refresh(None, CancellationToken::new()).await.unwrap();
+    let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
+    let preset = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap();
+    let frozen = resolver.pin(&preset, None).await.unwrap();
+    let definitions = frozen.tools().definitions();
+    let readers = definitions
+        .iter()
+        .filter(|tool| tool.name() == "mcp_resource_read")
+        .collect::<Vec<_>>();
+    assert_eq!(readers.len(), 1);
+    let encoded = serde_json::to_value(readers[0]).unwrap();
+    assert!(encoded.to_string().contains("parameters"));
+    let saved = AgentGenerationSeed::new(frozen.domains().baseline().to_vec()).unwrap();
+    settings.replace(1, json!({"servers":[]})).await.unwrap();
+    owner.refresh(None, CancellationToken::new()).await.unwrap();
+    drop((owner, resolver, frozen));
+    assert!(host.shutdown().await.is_clean());
+    fixture.shutdown().await;
+    let host = composition(&root)
+        .build()
+        .unwrap()
+        .start(Profile::default())
+        .await
+        .unwrap();
+    product::ready(&host).await;
+    let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
+    let restored = resolver.pin(&preset, Some(&saved)).await.unwrap();
+    assert_eq!(restored.tools().definitions(), definitions);
+    assert_eq!(restored.domains().baseline(), saved.states());
+    drop((resolver, restored));
+    assert!(host.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn real_standard_composition_freezes_manifest_reports_drift_as_tool_result_and_restores_offline()
  {
     let fixture = HttpFixture::start(Mode::default()).await;
@@ -259,7 +324,7 @@ async fn real_grants_fence_status_and_hold_refresh_through_reply_loss_and_revoca
         .unwrap();
     let revoke = tokio::spawn(revoke);
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while grant.allowed(&origin) {
+        while grant.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
         }
     })
@@ -670,4 +735,79 @@ async fn saved_codec_one_cannot_restore_even_with_an_empty_mcp_manifest() {
     );
     drop((current, resolver));
     assert!(host.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn started_mcp_cancellation_is_retained_as_uncertain_without_model_error_text() {
+    let fixture = HttpFixture::start(Mode {
+        wait_call: true,
+        ..Mode::default()
+    })
+    .await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let host = composition(&root)
+        .build()
+        .unwrap()
+        .start(Profile::default())
+        .await
+        .unwrap();
+    product::ready(&host).await;
+    let settings = host
+        .lookup_local::<SettingsContract>()
+        .unwrap()
+        .scope("rsi.mcp")
+        .unwrap();
+    settings
+        .replace(0, serde_json::to_value(fixture.config()).unwrap())
+        .await
+        .unwrap();
+    let owner = host.lookup_local::<McpOwnerContract>().unwrap();
+    owner.refresh(None, CancellationToken::new()).await.unwrap();
+    let resolver = host.lookup_local::<AgentCompositionContract>().unwrap();
+    let pin = resolver
+        .pin(&AgentPresetId::new(DEFAULT_AGENT_PRESET_ID).unwrap(), None)
+        .await
+        .unwrap();
+    let prepared = pin
+        .tools()
+        .prepare(
+            "uncertain-mcp",
+            ToolCall {
+                id: "uncertain-mcp".into(),
+                name: rsi_mcp::public_tool_name("fixture", "echo"),
+                arguments: json!({"message":"once"}),
+            },
+        )
+        .unwrap();
+    let identity = prepared.identity().clone();
+    let cancellation = CancellationToken::new();
+    let task = tokio::spawn(prepared.start(ToolStart {
+        cancellation: cancellation.clone(),
+        policy: ToolExecutionPolicy {
+            mode: rsi_sandbox::SandboxMode::ReadOnly,
+            cwd: root.clone(),
+            workspace: root,
+        },
+        sandbox: host.lookup_local::<rsi_sandbox::SandboxContract>().unwrap(),
+        job_scope: None,
+        extensions: rsi_tools_protocol::ToolExecutionExtensions::default(),
+    }));
+    fixture.started.notified().await;
+    cancellation.cancel();
+    assert_eq!(
+        task.await.unwrap().unwrap_err(),
+        rsi_tools_protocol::ToolError::OutcomeUnknown
+    );
+    assert!(
+        matches!(pin.tools().query(&identity).unwrap(), rsi_tools_protocol::RetainedToolResult::Failed(failure)
+        if failure.kind == rsi_tools_protocol::RetainedToolFailureKind::OutcomeUnknown)
+    );
+    assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
+    assert!(!owner.status()[0].ready);
+    pin.tools().commit(&identity).unwrap();
+    fixture.release.notify_one();
+    drop((pin, resolver, owner, settings));
+    assert!(host.shutdown().await.is_clean());
+    fixture.shutdown().await;
 }

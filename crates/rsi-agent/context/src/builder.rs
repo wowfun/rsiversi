@@ -2,7 +2,7 @@
 
 use crate::{ContextError, ContextLimits, MAXIMUM_CONTEXT_CHECKPOINT_BYTES, Result};
 use rsi_agent_session_protocol::{SessionFact, SessionHeader};
-use rsi_ai_protocol::{LanguageRequest, LanguageRequestOptions};
+use rsi_ai_protocol::{LanguageProfile, LanguageRequest, LanguageRequestOptions};
 use rsi_meta::LocalContract;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -146,7 +146,11 @@ pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     /// On error, discard the cursor and rebuild from its authoritative Facts.
     fn ingest(&mut self, page: ContextPage<'_>) -> Result<()>;
     /// Builds a request preserving the complete frozen options from the Agent pin.
-    fn build(&self, options: LanguageRequestOptions) -> Result<LanguageRequest>;
+    fn build(
+        &self,
+        options: LanguageRequestOptions,
+        profile: &LanguageProfile,
+    ) -> Result<LanguageRequest>;
     /// Plans internal compaction from exact cursor inputs; unsupported builders decline.
     fn plan_compaction(
         &self,
@@ -232,8 +236,12 @@ impl ModelContextState {
         self.cursor.ingest(page)
     }
     /// Builds the next bounded request preserving the pin's complete frozen options.
-    pub fn build(&self, options: LanguageRequestOptions) -> Result<LanguageRequest> {
-        self.cursor.build(options)
+    pub fn build(
+        &self,
+        options: LanguageRequestOptions,
+        profile: &LanguageProfile,
+    ) -> Result<LanguageRequest> {
+        self.cursor.build(options, profile)
     }
     /// Plans a bounded no-Tool summary using the selected pure cursor.
     pub fn plan_compaction(

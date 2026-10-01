@@ -7,7 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
 base64.workspace = true
+iri-string.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }

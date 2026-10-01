@@ -7,17 +7,21 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
 rsi-mcp-protocol = { path = "../protocol" }
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -27,6 +31,10 @@ tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-media = { path = "../../rsi-media/core" }
+rsi-media-testkit = { path = "../../rsi-media/testkit" }
+image.workspace = true
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-settings-testkit = { path = "../../rsi-settings/testkit" }

@@ -47,8 +47,9 @@ impl CredentialsResolve for Credentials {
 }
 #[derive(Debug)]
 pub struct NoProcess;
+#[async_trait::async_trait]
 impl DuplexProcess for NoProcess {
-    fn spawn(&self, _: DuplexProcessSpec) -> rsi_process::Result<ManagedDuplexProcess> {
+    async fn spawn(&self, _: DuplexProcessSpec) -> rsi_process::Result<ManagedDuplexProcess> {
         panic!("HTTP must not launch a process")
     }
 }
@@ -88,6 +89,10 @@ impl Sandbox for TestSandbox {
     reason = "Independent transport fault switches are intentionally composable."
 )]
 pub struct Mode {
+    pub templates: Option<Value>,
+    pub resource_reply: Option<Value>,
+    pub template_error: Option<i64>,
+    pub templates_only: bool,
     pub modern: bool,
     pub modern_fault: Option<&'static str>,
     pub watch: bool,
@@ -168,6 +173,7 @@ impl HttpFixture {
     pub fn config(&self) -> McpConfig {
         McpConfig {
             servers: vec![ServerConfig {
+                resource_templates: false,
                 id: "fixture".into(),
                 enabled: true,
                 tools: vec!["echo".into()],
@@ -340,6 +346,13 @@ async fn serve(
         .await;
         return;
     }
+    if method == "resources/templates/list"
+        && (selected.template_error.is_some() || selected.templates.is_none())
+    {
+        let body = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":selected.template_error.unwrap_or(-32601),"message":"fixture template discovery failure"}})).unwrap();
+        let _ = response(&mut socket, "200 OK", "application/json", &body).await;
+        return;
+    }
     if method == "server/discover" {
         let body = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32602,"message":"initialize first"}})).unwrap();
         let _ = response(&mut socket, "400 Bad Request", "application/json", &body).await;
@@ -355,7 +368,11 @@ async fn serve(
     }
     let result = match method {
         "initialize" => {
-            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":true},"resources":{}},"serverInfo":{"name":"fixture","version":"1"},"instructions":"External fixture instructions"})
+            let mut result = json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":true},"resources":{}},"serverInfo":{"name":"fixture","version":"1"},"instructions":"External fixture instructions"});
+            if selected.templates_only {
+                result.as_object_mut().unwrap().remove("instructions");
+            }
+            result
         }
         "tools/list" if selected.oversize => {
             let _ = response(
@@ -392,11 +409,13 @@ async fn serve(
             }
             result
         }
+        "resources/templates/list" => selected.templates.clone().expect("configured templates"),
+        "resources/list" if selected.templates_only => json!({"resources":[]}),
         "resources/list" => {
             json!({"resources":[{"uri":"fixture://text","name":"Fixture text","mimeType":"text/plain"}]})
         }
         "resources/read" => {
-            json!({"contents":[{"uri":"fixture://text","text":"Frozen-catalog resource 中文"}]})
+            selected.resource_reply.clone().unwrap_or_else(|| json!({"contents":[{"uri":request["params"]["uri"],"text":"Frozen-catalog resource 中文"}]}))
         }
         "tools/call" => {
             calls.fetch_add(1, Ordering::AcqRel);

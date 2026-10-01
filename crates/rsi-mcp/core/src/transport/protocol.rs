@@ -109,7 +109,7 @@ impl Connection {
                     return Ok((LATEST_PROTOCOL_VERSION.into(), response));
                 }
                 // Era detection is confined to the side-effect-free probe.
-                Err(McpError::RemoteError) => {}
+                Err(McpError::RemoteError | McpError::MethodNotFound) => {}
                 Err(error) => {
                     if error == McpError::Timeout {
                         self.silent_probe

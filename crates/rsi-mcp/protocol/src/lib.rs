@@ -9,14 +9,29 @@ pub use headers::{
     HttpParameter, MAXIMUM_HTTP_PARAMETER_BYTES, encode_header_value, http_parameters,
 };
 mod status;
+mod templates;
 pub use config::*;
 pub use manifest::*;
 use sha2::{Digest, Sha256};
 pub use status::*;
+pub use templates::*;
 /// MCP-owned Credentials address space.
 pub const CREDENTIAL_OWNER: &str = "rsi.mcp";
 /// Maximum enabled or disabled configured server identities.
 pub const MAXIMUM_SERVERS: usize = 8;
+
+/// Validates an exact server identity without interpreting it as an endpoint or program.
+pub fn validate_server_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'.' | b'_' | b'-'))
+    {
+        return Err("Invalid MCP server identity".into());
+    }
+    Ok(())
+}
 /// Maximum complete RPC request or response frame before JSON materialization.
 pub const MAXIMUM_FRAME_BYTES: usize = 1024 * 1024;
 /// Complete discovery/manifest tool ceiling, also constrained by the shared registrar.

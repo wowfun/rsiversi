@@ -23,7 +23,7 @@ async fn modern_started_calls_keep_fresh_credentials_and_cancel_without_replay()
     }
     service.configure(config).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     fixture.mode.lock().unwrap().wait_call = true;
@@ -34,7 +34,7 @@ async fn modern_started_calls_keep_fresh_credentials_and_cancel_without_replay()
         let cancel = cancel.clone();
         async move {
             service
-                .call(&frozen, "echo", json!({"message":"once"}), cancel)
+                .call(&frozen, "echo", json!({"message":"once"}), None, cancel)
                 .await
         }
     });
@@ -42,7 +42,7 @@ async fn modern_started_calls_keep_fresh_credentials_and_cancel_without_replay()
         .await
         .unwrap();
     cancel.cancel();
-    assert_eq!(call.await.unwrap(), Err(McpError::Cancelled));
+    assert_eq!(call.await.unwrap(), Err(McpError::OutcomeUnknown));
     fixture.release.notify_one();
     assert!(!service.status()[0].ready);
     assert_eq!(fixture.calls.load(Ordering::Acquire), 1);
@@ -72,7 +72,7 @@ async fn modern_http_metadata_headers_results_resources_and_subscription_use_rea
         let service = fixture.service(Arc::new(Credentials::default()));
         service.configure(fixture.config()).await.unwrap();
         let frozen = service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(frozen.protocol_version, "2026-07-28");
@@ -82,6 +82,7 @@ async fn modern_http_metadata_headers_results_resources_and_subscription_use_rea
                 &frozen,
                 "echo",
                 json!({"message":" 中文\r\n","nested":{"id":9_007_199_254_740_991_i64}}),
+                None,
                 CancellationToken::new(),
             )
             .await
@@ -89,7 +90,7 @@ async fn modern_http_metadata_headers_results_resources_and_subscription_use_rea
         assert_eq!(result["structuredContent"], json!([true, null, "exact"]));
         assert_eq!(
             service
-                .resource(&frozen, "fixture://中文", CancellationToken::new())
+                .resource(&frozen, "fixture://中文", None, CancellationToken::new())
                 .await
                 .unwrap()["contents"][0]["text"],
             "resource text"
@@ -109,6 +110,7 @@ async fn modern_http_metadata_headers_results_resources_and_subscription_use_rea
                     &frozen,
                     "echo",
                     json!({"message":"stale"}),
+                    None,
                     CancellationToken::new()
                 )
                 .await,
@@ -142,7 +144,7 @@ async fn modern_discovery_errors_and_bad_subscription_acknowledgments_never_down
         service.configure(fixture.config()).await.unwrap();
         assert_eq!(
             service
-                .refresh("fixture", CancellationToken::new())
+                .refresh("fixture", None, CancellationToken::new())
                 .await
                 .unwrap_err(),
             expected,
@@ -160,8 +162,8 @@ async fn unfinished_or_unknown_modern_results_cannot_be_published_as_success_or_
     for (fault, expected, ready) in [
         ("input-required", McpError::InputRequired, true),
         ("client-input", McpError::RequiredCapability, true),
-        ("unknown-result", McpError::Protocol, false),
-        ("missing-result", McpError::Protocol, false),
+        ("unknown-result", McpError::OutcomeUnknown, false),
+        ("missing-result", McpError::OutcomeUnknown, false),
     ] {
         let fixture = HttpFixture::start(Mode {
             modern: true,
@@ -172,7 +174,7 @@ async fn unfinished_or_unknown_modern_results_cannot_be_published_as_success_or_
         let service = fixture.service(Arc::new(Credentials::default()));
         service.configure(fixture.config()).await.unwrap();
         let frozen = service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(
@@ -181,6 +183,7 @@ async fn unfinished_or_unknown_modern_results_cannot_be_published_as_success_or_
                     &frozen,
                     "echo",
                     json!({"message":"once"}),
+                    None,
                     CancellationToken::new()
                 )
                 .await,

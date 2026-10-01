@@ -14,7 +14,7 @@ export function boundedResource(data, mime, admitPixels) {
   const raster = prefix.startsWith('\x89PNG\r\n\x1a\n') || prefix.startsWith('GIF8') ||
     prefix.startsWith('\xff\xd8') || prefix.startsWith('BM') ||
     (prefix.startsWith('RIFF') && prefix.slice(8) === 'WEBP') || prefix.startsWith('\0\0\x01\0');
-  if (mime.startsWith('image/') || raster) return boundedImage(data, mime, admitPixels);
+  if (mime.startsWith('image/') || raster) return boundedImage(data, mime, admitPixels).bytes;
   // Non-image resources are text or the supported font containers. Unknown binary
   // formats must not become browser-sniffable image blobs through a false MIME label.
   if (['wOFF','wOF2','OTTO','true','ttcf','\0\x01\0\0'].includes(prefix.slice(0,4))) return data;
@@ -64,7 +64,7 @@ export function boundedImage(data, mime, admitPixels = () => {}) {
     root.setAttribute('width', String(width)); root.setAttribute('height', String(height));
     root.style.setProperty('width', `${width}px`, 'important'); root.style.setProperty('height', `${height}px`, 'important');
     admitPixels(pixels);
-    return new TextEncoder().encode(new XMLSerializer().serializeToString(root));
+    return {bytes:new TextEncoder().encode(new XMLSerializer().serializeToString(root)),intrinsic:{width,height}};
   }
   if (data.length < 10) bad();
   if (tag(0, 8) === '\x89PNG\r\n\x1a\n') {
@@ -147,5 +147,5 @@ export function boundedImage(data, mime, admitPixels = () => {}) {
     }
   } else bad();
   admitPixels(pixels);
-  return data;
+  return {bytes:data,intrinsic:null};
 }

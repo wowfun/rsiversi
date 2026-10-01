@@ -126,6 +126,24 @@ pub(crate) async fn discover(
     } else {
         vec![]
     };
+    let templates = if !config.resource_templates {
+        rsi_mcp_protocol::TemplateCatalog::Disabled
+    } else if capabilities.get("resources").is_none() {
+        rsi_mcp_protocol::TemplateCatalog::Unsupported
+    } else {
+        match list(
+            connection,
+            "resources/templates/list",
+            "resourceTemplates",
+            MAXIMUM_RESOURCES,
+        )
+        .await
+        {
+            Ok(templates) => rsi_mcp_protocol::TemplateCatalog::Available { templates },
+            Err(McpError::MethodNotFound) => rsi_mcp_protocol::TemplateCatalog::Unsupported,
+            Err(error) => return Err(error),
+        }
+    };
     let manifest = ServerManifest {
         id: config.id.clone(),
         target_sha256: config.target_sha256(),
@@ -135,6 +153,7 @@ pub(crate) async fn discover(
         instructions,
         tools,
         resources,
+        templates,
     };
     let manifest = Arc::new(FrozenServer::new(manifest)?);
     validate_frozen_servers(std::slice::from_ref(&manifest))?;

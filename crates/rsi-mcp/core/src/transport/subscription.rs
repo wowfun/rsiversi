@@ -143,15 +143,27 @@ impl Connection {
         self.state.request_meta(&mut params)?;
         let request =
             json!({"jsonrpc":"2.0","id":id,"method":"subscriptions/listen","params":params});
-        match &self.transport {
-            Transport::Http(peer) => peer.subscribe(&request).await?,
-            Transport::Stdio(peer) => {
-                peer.exchange(wire::encode(&request)?, None).await?;
+        let exchange = match &self.transport {
+            Transport::Http(peer) => {
+                peer.subscribe(&request).await?;
+                None
             }
-        }
-        tokio::select! {
+            Transport::Stdio(peer) => {
+                let exchange = peer.admit(None)?;
+                peer.exchange(wire::encode(&request)?, None, None, &exchange)
+                    .await?;
+                Some(exchange)
+            }
+        };
+        let result = tokio::select! {
             () = self.state.stop.cancelled() => Err(self.failure().unwrap_or(McpError::Disconnected)),
             result = tokio::time::timeout(std::time::Duration::from_secs(10), wait) => result.map_err(|_| McpError::Timeout)?.map_err(|_| McpError::Disconnected),
+        };
+        if result.is_ok()
+            && let Some(exchange) = exchange
+        {
+            exchange.finish();
         }
+        result
     }
 }

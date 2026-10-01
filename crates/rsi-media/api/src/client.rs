@@ -23,22 +23,26 @@ impl MediaClient {
 }
 #[async_trait]
 impl Media for MediaClient {
-    async fn import_image(&self, source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image_with_options(
+        &self,
+        source: bytes::Bytes,
+        options: rsi_media_protocol::ImageImportOptions,
+    ) -> rsi_media_protocol::Result<MediaRef> {
         let spec = Operation::Import.spec();
-        if source.is_empty() || source.len() > spec.maximum_request_bytes {
-            return Err(MediaError::InvalidInput(
-                "API Media source must contain 1 byte through 64 MiB".into(),
-            ));
-        }
+        let frame = crate::wire::import_frame(&source, &options)?;
         let input = self
             .api
             .input_budget(spec.class)
-            .copy(&source)
+            .copy(&frame)
             .map_err(MediaError::Api)?;
         match self.api.call(&spec, input).await {
             Ok(ApiOutput::Reply(message)) if message.binary.is_none() => {
-                serde_json::from_slice(message.json.as_bytes())
-                    .map_err(|_| MediaError::Api(ApiError::OutcomeUnknown))
+                let reference: MediaRef = serde_json::from_slice(message.json.as_bytes())
+                    .map_err(|_| MediaError::Api(ApiError::OutcomeUnknown))?;
+                if reference.bytes > options.maximum_output_bytes {
+                    return Err(MediaError::Api(ApiError::OutcomeUnknown));
+                }
+                Ok(reference)
             }
             Ok(_) => Err(MediaError::Api(ApiError::OutcomeUnknown)),
             Err(ApiError::Domain(bytes)) => Err(failure(&bytes, true)?),

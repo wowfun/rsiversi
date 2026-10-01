@@ -64,7 +64,8 @@ export async function mount(root,initial,host,signal) {
   let fallbackEvents=new AbortController();
   function closeFrame(){frameEvents.abort();frameEvents=new AbortController();frame?.remove();frame=undefined;}
   function clear(){++epoch;closeFrame();fallbackEvents.abort();fallbackEvents=new AbortController();fallbackRenderer=undefined;fallbackError=undefined;events.abort();events=new AbortController();for(const url of urls)URL.revokeObjectURL(url);urls=[];bytes.clear();retained-=allocation;allocation=0;}
-  function blob(data,mime,admitPixels){const url=URL.createObjectURL(new Blob([mime.startsWith('image/')?boundedImage(data,mime,admitPixels):data],{type:mime}));urls.push(url);return url;}
+  function objectUrl(data,mime){const url=URL.createObjectURL(new Blob([data],{type:mime}));urls.push(url);return url;}
+  function blob(data,mime,admitPixels){return objectUrl(mime.startsWith('image/')?boundedImage(data,mime,admitPixels).bytes:data,mime);}
   function fail(error){if(!signal.aborted)root.replaceChildren(node('p','source-error',error.message));}
   async function read(entry,version) {
     const data=new Uint8Array(entry.bytes);let offset=0;
@@ -117,10 +118,12 @@ export async function mount(root,initial,host,signal) {
       }
       content.append(markdown(decoder.decode(bytes.get('document')),images));
     }else if(data.kind==='image'){
-      const image=node('img','file-image');image.alt=data.label;image.src=blob(bytes.get('main'),data.sources[0].media_type);let scale;
+      const prepared=boundedImage(bytes.get('main'),data.sources[0].media_type);
+      const image=node('img','file-image');image.alt=data.label;image.src=objectUrl(prepared.bytes,data.sources[0].media_type);let scale;
+      const intrinsicWidth=()=>prepared.intrinsic?.width??image.naturalWidth;
       const size=node('span','hint');bar.append(size);
-      const resize=()=>{image.classList.toggle('fit',scale===undefined);image.style.width=scale===undefined?'':`${image.naturalWidth*scale}px`;size.textContent=scale===undefined?'Fit':`${Math.round(scale*100)}%`;};
-      bar.append(button('Fit',()=>{scale=undefined;resize();}),button('100%',()=>{scale=1;resize();}),button('Zoom in',()=>{scale=Math.min(8,(scale??Math.min(1,content.clientWidth/image.naturalWidth))*1.25);resize();}),button('Zoom out',()=>{scale=Math.max(.05,(scale??1)/1.25);resize();}));
+      const resize=()=>{image.classList.toggle('fit',scale===undefined);image.style.width=scale===undefined?'':`${intrinsicWidth()*scale}px`;size.textContent=scale===undefined?'Fit':`${Math.round(scale*100)}%`;};
+      bar.append(button('Fit',()=>{scale=undefined;resize();}),button('100%',()=>{scale=1;resize();}),button('Zoom in',()=>{scale=Math.min(8,(scale??Math.min(1,content.clientWidth/intrinsicWidth()))*1.25);resize();}),button('Zoom out',()=>{scale=Math.max(.05,(scale??1)/1.25);resize();}));
       image.addEventListener('load',()=>{if(image.naturalWidth*image.naturalHeight>maximumImagePixels){image.remove();content.append(node('p','source-error','Image exceeds the pixel limit'));}else resize();},{once:true});image.addEventListener('error',()=>{image.remove();content.append(node('p','source-error','Image could not be decoded'));},{once:true});image.classList.add('fit');content.append(image);
     }else if(data.kind==='html')showFrame(content,data);
   }

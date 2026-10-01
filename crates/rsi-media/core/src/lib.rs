@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageDecoder, ImageEncoder, ImageReader};
 use rsi_media_protocol::{
-    MAXIMUM_IMAGE_DESCRIPTOR_BYTES, MAXIMUM_IMAGE_INPUT_BYTES, MAXIMUM_IMAGE_PIXELS, Media,
-    MediaBackend, MediaBackendContract, MediaBody, MediaContract, MediaDescriptor, MediaError,
-    MediaId, MediaKind, MediaRead, MediaReadContract, MediaRef, Result, StoredMedia,
+    MAXIMUM_IMAGE_INPUT_BYTES, MAXIMUM_IMAGE_PIXELS, Media, MediaBackend, MediaBackendContract,
+    MediaBody, MediaContract, MediaDescriptor, MediaError, MediaId, MediaKind, MediaRead,
+    MediaReadContract, MediaRef, Result, StoredMedia,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
@@ -135,7 +135,12 @@ struct Service {
 
 #[async_trait]
 impl Media for Service {
-    async fn import_image(&self, source: bytes::Bytes) -> Result<MediaRef> {
+    async fn import_image_with_options(
+        &self,
+        source: bytes::Bytes,
+        options: rsi_media_protocol::ImageImportOptions,
+    ) -> Result<MediaRef> {
+        options.validate()?;
         if source.is_empty() || source.len() > self.config.maximum_input_bytes {
             return Err(MediaError::InvalidInput(format!(
                 "source image length must be within 1..={} bytes",
@@ -154,7 +159,8 @@ impl Media for Service {
             .map_err(|_| MediaError::Codec("Media import admission is closed".into()))?;
         let (source, working_bytes, permit, source_permit) =
             tokio::task::spawn_blocking(move || {
-                let working_bytes = probe_image(&source, maximum_pixels)?;
+                let working_bytes =
+                    probe_image(&source, maximum_pixels, options.source_mime.as_deref())?;
                 Ok::<_, MediaError>((source, working_bytes, permit, source_permit))
             })
             .await
@@ -176,7 +182,7 @@ impl Media for Service {
             let _count_permit = permit;
             let _source_permit = source_permit;
             let _decode_permit = decode_permit;
-            normalize(source, maximum_pixels)
+            normalize(source, maximum_pixels, options.maximum_output_bytes)
         })
         .await
         .map_err(|error| MediaError::Codec(format!("codec task failed: {error}")))??;
@@ -286,7 +292,11 @@ impl PluginFactory for MediaFactory {
     }
 }
 
-fn normalize(source: bytes::Bytes, maximum_pixels: u64) -> Result<StoredMedia> {
+fn normalize(
+    source: bytes::Bytes,
+    maximum_pixels: u64,
+    maximum_output_bytes: u64,
+) -> Result<StoredMedia> {
     let reader = ImageReader::new(Cursor::new(source))
         .with_guessed_format()
         .map_err(|error| MediaError::Codec(error.to_string()))?;
@@ -310,7 +320,7 @@ fn normalize(source: bytes::Bytes, maximum_pixels: u64) -> Result<StoredMedia> {
     image.apply_orientation(orientation);
     let image = image.into_rgba8();
     let (width, height) = image.dimensions();
-    let maximum_bytes = usize::try_from(MAXIMUM_IMAGE_DESCRIPTOR_BYTES).map_err(|_| {
+    let maximum_bytes = usize::try_from(maximum_output_bytes).map_err(|_| {
         MediaError::InvalidInput("canonical image byte bound is unsupported".into())
     })?;
     let mut output = BoundedWriter::new(maximum_bytes);
@@ -349,10 +359,19 @@ fn normalize(source: bytes::Bytes, maximum_pixels: u64) -> Result<StoredMedia> {
     })
 }
 
-fn probe_image(source: &[u8], maximum_pixels: u64) -> Result<usize> {
+fn probe_image(source: &[u8], maximum_pixels: u64, source_mime: Option<&str>) -> Result<usize> {
     let reader = ImageReader::new(Cursor::new(source))
         .with_guessed_format()
         .map_err(|error| MediaError::Codec(error.to_string()))?;
+    if source_mime.is_some_and(|mime| {
+        reader
+            .format()
+            .is_none_or(|format| format.to_mime_type() != mime)
+    }) {
+        return Err(MediaError::InvalidInput(
+            "source image MIME differs from decoded format".into(),
+        ));
+    }
     let decoder = reader
         .into_decoder()
         .map_err(|error| MediaError::Codec(error.to_string()))?;

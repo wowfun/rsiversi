@@ -52,8 +52,9 @@ impl ModelContextCursor for WrongPosition {
     fn build(
         &self,
         options: rsi_ai_protocol::LanguageRequestOptions,
+        profile: &rsi_ai_protocol::LanguageProfile,
     ) -> rsi_agent_context::Result<rsi_ai_protocol::LanguageRequest> {
-        self.0.build(options)
+        self.0.build(options, profile)
     }
     fn checkpoint(&self) -> rsi_agent_context::Result<Arc<[u8]>> {
         self.0.checkpoint()
@@ -142,7 +143,10 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
     fold.apply(&history).unwrap();
     assert_eq!(
         state
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &super::compaction::profile()
+            )
             .unwrap(),
         fold.request(limits, rsi_ai_protocol::LanguageRequestOptions::default())
             .unwrap()
@@ -153,10 +157,16 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
     assert_eq!(restored.position(), state.position());
     assert_eq!(
         restored
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &super::compaction::profile()
+            )
             .unwrap(),
         state
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &super::compaction::profile()
+            )
             .unwrap()
     );
     assert_eq!(builder.opened.load(Ordering::SeqCst), 3);
@@ -231,7 +241,10 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
     assert!(
         serde_json::to_string(
             &child
-                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .build(
+                    rsi_ai_protocol::LanguageRequestOptions::default(),
+                    &super::compaction::profile()
+                )
                 .unwrap()
         )
         .unwrap()

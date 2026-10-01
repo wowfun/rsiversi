@@ -10,6 +10,8 @@ pub enum McpError {
     CredentialUnavailable,
     /// Endpoint or protocol stream is no longer verified.
     Disconnected,
+    /// A dispatched invocation has no verified result and must not be replayed.
+    OutcomeUnknown,
     /// Saved definitions differ from the currently verified catalog.
     CatalogChanged,
     /// Another bounded operation owns this endpoint.
@@ -20,6 +22,8 @@ pub enum McpError {
     Capacity,
     /// The server returned a JSON-RPC error.
     RemoteError,
+    /// The server explicitly does not implement this JSON-RPC method.
+    MethodNotFound,
     /// The server implements no mutually supported modern protocol version.
     UnsupportedVersion,
     /// The operation requires a client capability this integration does not advertise.
@@ -45,6 +49,7 @@ impl fmt::Display for McpError {
             Self::Disconnected => {
                 "MCP server is disconnected; refresh its connection before retrying"
             }
+            Self::OutcomeUnknown => "MCP outcome is unknown; do not replay",
             Self::CatalogChanged => {
                 "MCP catalog changed; start a new Session to use its current definitions"
             }
@@ -52,6 +57,7 @@ impl fmt::Display for McpError {
             Self::Protocol => "MCP server returned an invalid protocol response",
             Self::Capacity => "MCP operation exceeded its complete response or catalog limit",
             Self::RemoteError => "MCP server returned a protocol error",
+            Self::MethodNotFound => "MCP server does not implement this method",
             Self::UnsupportedVersion => "MCP server does not support a compatible protocol version",
             Self::RequiredCapability => "MCP operation requires an unavailable client capability",
             Self::HeaderMismatch => "MCP request headers do not match; refresh the server catalog",
@@ -96,6 +102,8 @@ pub enum McpTransportKind {
     Http,
     /// Local-only configured process.
     Stdio,
+    /// Explicit target process, independent of Local stdio configuration.
+    SshStdio,
 }
 /// A last-verified Tool name and its exact frozen selection flag.
 #[derive(Clone, Debug, Serialize, Deserialize)]

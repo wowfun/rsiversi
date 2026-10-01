@@ -136,3 +136,6 @@ and does not encode the controls again. `LanguageRequest::new_with_options` chec
 message structure, cross-message relationships and encoded message bytes against
 that allowance without revalidating the frozen controls. Complete requests remain closed; independent
 `with_*` updates and deserialization retain their validation.
+Consuming a request can transfer its validated messages without cloning them.
+Reassembling changed messages still crosses the complete-request constructor and
+its aggregate relationship and byte checks.

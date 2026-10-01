@@ -25,6 +25,9 @@ pub struct ServerConfig {
     /// Exact raw Tool names; empty means expose no model Tools.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Operator opt-in to this server's parameterized resource range.
+    #[serde(default)]
+    pub resource_templates: bool,
     /// Explicit transport and credential references.
     pub transport: TransportConfig,
 }
@@ -50,6 +53,21 @@ pub enum TransportConfig {
         /// Absolute working directory.
         cwd: PathBuf,
         /// Complete explicit child environment.
+        #[serde(default)]
+        environment: BTreeMap<String, EnvironmentValue>,
+    },
+    /// Explicit target process; configuration grants do not imply execution authority.
+    SshStdio {
+        /// Exact target identity, never a hostname alias.
+        target: rsi_execution::ExecutionTargetId,
+        /// Absolute target executable or target-PATH basename.
+        command: String,
+        /// Explicit target argv.
+        #[serde(default)]
+        arguments: Vec<String>,
+        /// Absolute target working directory.
+        cwd: String,
+        /// Explicit extra environment, with separately authorized secret references.
         #[serde(default)]
         environment: BTreeMap<String, EnvironmentValue>,
     },
@@ -96,14 +114,17 @@ impl McpConfig {
         }
         Ok(())
     }
-    /// Whether a remote replacement preserves every existing Local stdio entry
-    /// and introduces no new one. HTTP entries remain subject to configuration grants.
+    /// Whether a remote replacement preserves every existing Local or SSH stdio
+    /// entry and introduces no new one. HTTP entries still require configuration grants.
     pub fn remote_replacement_of(&self, current: &Self) -> bool {
         let stdio = |config: &Self| {
             config
                 .servers
                 .iter()
-                .filter(|server| matches!(server.transport, TransportConfig::Stdio { .. }))
+                .filter(|server| match server.transport {
+                    TransportConfig::Stdio { .. } | TransportConfig::SshStdio { .. } => true,
+                    TransportConfig::StreamableHttp { .. } => false,
+                })
                 .map(|server| (server.id.clone(), server.clone()))
                 .collect::<BTreeMap<_, _>>()
         };
@@ -113,15 +134,7 @@ impl McpConfig {
 impl ServerConfig {
     /// Validates complete explicit target configuration without acquiring authority.
     pub fn validate(&self) -> Result<()> {
-        if self.id.is_empty()
-            || self.id.len() > 64
-            || !self
-                .id
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'.' | b'_' | b'-'))
-        {
-            return Err("Invalid MCP server identity".into());
-        }
+        super::validate_server_id(&self.id)?;
         if self.tools.len() > MAXIMUM_TOOLS
             || self.tools.iter().any(|tool| !name(tool, 256))
             || self.tools.iter().collect::<BTreeSet<_>>().len() != self.tools.len()
@@ -177,31 +190,40 @@ impl ServerConfig {
                 {
                     return Err("MCP stdio requires absolute bounded program and cwd".into());
                 }
-                if arguments.len() > 256
-                    || arguments.iter().any(|value| value.contains('\0'))
-                    || arguments.iter().map(String::len).sum::<usize>() > 65536
-                    || environment.len() > 64
-                {
-                    return Err("MCP stdio arguments or environment exceed limits".into());
+                validate_process_inputs(arguments, environment)?;
+            }
+            TransportConfig::SshStdio {
+                target,
+                command,
+                arguments,
+                cwd,
+                environment,
+            } => {
+                rsi_execution::ExecutionCoordinates::new(
+                    rsi_execution::ExecutionLocation::Ssh {
+                        target: target.clone(),
+                    },
+                    cwd,
+                )
+                .map_err(|_| "Invalid MCP target working directory")?;
+                validate_process_inputs(arguments, environment)?;
+                rsi_execution::TargetProgram {
+                    command: command.clone(),
+                    environment: environment
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.clone(),
+                                match value {
+                                    EnvironmentValue::Literal { value } => value.clone(),
+                                    EnvironmentValue::Credential { .. } => String::new(),
+                                },
+                            )
+                        })
+                        .collect(),
                 }
-                let mut bytes = 0;
-                for (key, value) in environment {
-                    if key.is_empty() || key.len() > 256 || key.contains(['=', '\0']) {
-                        return Err("Invalid MCP environment name".into());
-                    }
-                    match value {
-                        EnvironmentValue::Literal { value } => {
-                            if value.contains('\0') {
-                                return Err("Invalid MCP environment value".into());
-                            }
-                            bytes += value.len();
-                        }
-                        EnvironmentValue::Credential { reference } => credential(reference)?,
-                    }
-                    if bytes > 65536 {
-                        return Err("MCP literal environment exceeds 64 KiB".into());
-                    }
-                }
+                .validate()
+                .map_err(|_| "Invalid MCP target program policy")?;
             }
         }
         Ok(())
@@ -210,4 +232,48 @@ impl ServerConfig {
     pub fn target_sha256(&self) -> String {
         digest(self)
     }
+    /// Exact references which the product must authorize before target export.
+    pub fn ssh_credentials(&self) -> BTreeSet<CredentialRef> {
+        match &self.transport {
+            TransportConfig::SshStdio { environment, .. } => environment
+                .values()
+                .filter_map(|value| match value {
+                    EnvironmentValue::Credential { reference } => Some(reference.clone()),
+                    EnvironmentValue::Literal { .. } => None,
+                })
+                .collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+}
+fn validate_process_inputs(
+    arguments: &[String],
+    environment: &BTreeMap<String, EnvironmentValue>,
+) -> Result<()> {
+    if arguments.len() > 256
+        || arguments.iter().any(|value| value.contains('\0'))
+        || arguments.iter().map(String::len).sum::<usize>() > 65536
+        || environment.len() > 64
+    {
+        return Err("MCP stdio arguments or environment exceed limits".into());
+    }
+    let mut bytes = 0;
+    for (key, value) in environment {
+        if key.is_empty() || key.len() > 256 || key.contains(['=', '\0']) {
+            return Err("Invalid MCP environment name".into());
+        }
+        match value {
+            EnvironmentValue::Literal { value } => {
+                if value.contains('\0') {
+                    return Err("Invalid MCP environment value".into());
+                }
+                bytes += value.len();
+            }
+            EnvironmentValue::Credential { reference } => credential(reference)?,
+        }
+        if bytes > 65536 {
+            return Err("MCP literal environment exceeds 64 KiB".into());
+        }
+    }
+    Ok(())
 }

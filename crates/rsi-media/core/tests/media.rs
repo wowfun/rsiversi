@@ -10,6 +10,108 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[tokio::test]
+async fn caller_encoding_limit_and_mime_mismatch_fail_before_backend_publication() {
+    use async_trait::async_trait;
+    use rsi_media_protocol::{
+        ImageImportOptions, MediaBackend, MediaBackendContract, MediaId, StoredMedia,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug, Default)]
+    struct CountWrites(AtomicUsize);
+    #[async_trait]
+    impl MediaBackend for CountWrites {
+        async fn put(&self, _: StoredMedia) -> rsi_media_protocol::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn get(&self, id: &MediaId) -> rsi_media_protocol::Result<StoredMedia> {
+            Err(MediaError::NotFound(id.clone()))
+        }
+    }
+    #[derive(Debug)]
+    struct TestBackend(Arc<CountWrites>);
+    #[async_trait]
+    impl rsi_meta::PluginFactory for TestBackend {
+        fn prepare(
+            &self,
+            _: &rsi_meta::ConfigValue,
+        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+            Ok(rsi_meta::PreparedActivation::new(Value::Null))
+        }
+        async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+            let supply = plan
+                .context()
+                .provide_local::<MediaBackendContract>(self.0.clone())?;
+            plan.defer(
+                "remove test backend",
+                Box::new(move || {
+                    Box::pin(async move {
+                        drop(supply);
+                        Ok(())
+                    })
+                }),
+            )
+        }
+    }
+    let runtime = Runtime::default();
+    let backend = Arc::new(CountWrites::default());
+    let supply = runtime
+        .root()
+        .apply(
+            linked("backend", Arc::new(TestBackend(backend.clone()))),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let service = runtime
+        .root()
+        .apply(linked("media", Arc::new(MediaFactory)), Value::Null)
+        .await
+        .unwrap();
+    let media = runtime.root().lookup_local::<MediaContract>().unwrap();
+    let image =
+        image::DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 2, Rgba([1, 2, 3, 255])));
+    let mut png = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .unwrap();
+    for options in [
+        ImageImportOptions {
+            maximum_output_bytes: 1,
+            source_mime: Some("image/png".into()),
+        },
+        ImageImportOptions {
+            source_mime: Some("image/jpeg".into()),
+            ..ImageImportOptions::default()
+        },
+    ] {
+        assert!(matches!(
+            media
+                .import_image_with_options(png.clone().into(), options)
+                .await,
+            Err(MediaError::InvalidInput(_))
+        ));
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    }
+    let reference = media.import_image(png.clone().into()).await.unwrap();
+    assert_eq!(backend.0.load(Ordering::SeqCst), 1);
+    media
+        .import_image_with_options(
+            png.into(),
+            ImageImportOptions {
+                maximum_output_bytes: reference.bytes,
+                source_mime: Some("image/png".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(backend.0.load(Ordering::SeqCst), 2);
+    drop(media);
+    assert!(service.dispose().await.is_clean());
+    assert!(supply.dispose().await.is_clean());
+}
+
 fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
 }

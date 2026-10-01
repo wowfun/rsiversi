@@ -11,12 +11,14 @@ use std::sync::{
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 mod http;
+pub(crate) mod process;
 mod protocol;
 mod stdio;
 mod subscription;
 mod wire;
 
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const MAXIMUM_OUTSTANDING_REQUESTS: usize = 9;
 
 #[derive(Debug)]
 pub(crate) struct State {
@@ -89,6 +91,7 @@ impl Connection {
         credentials: Arc<dyn CredentialsResolve>,
         process: Arc<dyn DuplexProcess>,
         sandbox: Arc<dyn Sandbox>,
+        execution: Option<&rsi_execution::ExecutionLease>,
     ) -> Result<Arc<Self>> {
         let state = State::new();
         let transport = match &config.transport {
@@ -113,6 +116,15 @@ impl Connection {
                 )
                 .await?,
             ),
+            TransportConfig::SshStdio { .. } => Transport::Stdio(
+                stdio::Stdio::spawn_target(
+                    config,
+                    execution.ok_or(McpError::ProcessUnavailable)?,
+                    credentials.as_ref(),
+                    state.clone(),
+                )
+                .await?,
+            ),
         };
         Ok(Arc::new(Self {
             transport,
@@ -120,12 +132,17 @@ impl Connection {
             next: AtomicU64::new(1),
             silent_probe: AtomicBool::new(false),
             admission: Semaphore::new(1),
-            outstanding: Semaphore::new(9),
+            outstanding: Semaphore::new(MAXIMUM_OUTSTANDING_REQUESTS),
             parameters: Mutex::new(std::collections::BTreeMap::new()),
         }))
     }
     pub fn valid(&self) -> bool {
         self.state.valid()
+    }
+    pub fn seal_bootstrap(&self) {
+        if let Transport::Stdio(peer) = &self.transport {
+            peer.seal();
+        }
     }
     pub fn failure(&self) -> Option<McpError> {
         self.state.failure()
@@ -159,8 +176,28 @@ impl Connection {
     pub async fn request_until(
         &self,
         method: &str,
+        params: Value,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value> {
+        self.request_observed(method, params, deadline, None).await
+    }
+    pub async fn request_observed(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: tokio::time::Instant,
+        dispatched: Option<&AtomicBool>,
+    ) -> Result<Value> {
+        self.request_authorized(method, params, deadline, dispatched, None)
+            .await
+    }
+    pub async fn request_authorized(
+        &self,
+        method: &str,
         mut params: Value,
         deadline: tokio::time::Instant,
+        dispatched: Option<&AtomicBool>,
+        execution: Option<&rsi_execution::ExecutionLease>,
     ) -> Result<Value> {
         if let Some(error) = self.failure() {
             return Err(error);
@@ -184,14 +221,26 @@ impl Connection {
         if tokio::time::Instant::now() >= deadline {
             return Err(McpError::Timeout);
         }
+        let exchange = match &self.transport {
+            Transport::Stdio(peer) => Some(peer.admit(execution)?),
+            Transport::Http(_) => None,
+        };
         let mut guard = ExchangeGuard {
             connection: self,
             settled: false,
         };
         let future = async {
             match &self.transport {
-                Transport::Http(peer) => peer.exchange(body, &headers, Some(&id)).await,
-                Transport::Stdio(peer) => peer.exchange(body.into_bytes(), Some(&id)).await,
+                Transport::Http(peer) => peer.exchange(body, &headers, Some(&id), dispatched).await,
+                Transport::Stdio(peer) => {
+                    peer.exchange(
+                        body.into_bytes(),
+                        Some(&id),
+                        dispatched,
+                        exchange.as_ref().expect("stdio exchange"),
+                    )
+                    .await
+                }
             }
         };
         let value = tokio::select! {
@@ -204,10 +253,16 @@ impl Connection {
             || matches!(
                 value,
                 Err(McpError::RemoteError
+                    | McpError::MethodNotFound
                     | McpError::HeaderMismatch
                     | McpError::RequiredCapability
                     | McpError::UnsupportedVersion)
             );
+        if guard.settled
+            && let Some(exchange) = &exchange
+        {
+            exchange.finish();
+        }
         if let Err(error) = value
             && !guard.settled
         {
@@ -233,12 +288,14 @@ impl Connection {
             match &self.transport {
                 Transport::Http(peer) => {
                     peer.set_version(version);
-                    peer.exchange(http::RequestBody::new(&request, bytes), &[], None)
+                    peer.exchange(http::RequestBody::new(&request, bytes), &[], None, None)
                         .await?;
                     peer.watch().await?;
                 }
                 Transport::Stdio(peer) => {
-                    peer.exchange(bytes, None).await?;
+                    let exchange = peer.admit(None)?;
+                    peer.exchange(bytes, None, None, &exchange).await?;
+                    exchange.finish();
                 }
             }
             Ok::<_, McpError>(())

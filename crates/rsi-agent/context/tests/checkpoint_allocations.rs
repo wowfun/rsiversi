@@ -61,7 +61,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 #[test]
 fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy() {
-    let header = SessionHeader::new(
+    let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
         "/workspace",
@@ -127,9 +127,13 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
         hex::encode(Sha256::digest(&bytes))
     );
     // The v10 fold carries complete model Tool identity alongside Program provenance; the generic
-    // v6 outer envelope is unchanged; Session 18 changes its header binding.
+    // v6 outer envelope is unchanged; Session 19 and builder 2.8.0 bind the current cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
+    assert_eq!(metadata["builder"]["semantic_version"], "2.8.0");
+    println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
     let fold_magic = b"rsi-agent-context-checkpoint-v10\0";
     assert!(payload.starts_with(fold_magic));
@@ -146,7 +150,7 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "4c2c2e6d2ce5f717122a1fd0371547dbe86b3a8fee1a1f197c2efbb32528dd4b"
+        "70d9f950326c0b2aaa8838e355468b8e2e8b21112d7042e8a5e9b46f6b632fca"
     );
     assert!(
         additional < 3 * bytes.len(),

@@ -1297,6 +1297,11 @@ impl LanguageRequest {
         &self.messages
     }
 
+    /// Consumes this request, transferring its messages without cloning them.
+    pub fn into_messages(self) -> Vec<Message> {
+        self.messages
+    }
+
     /// Returns caller-executed function tools exposed to the model.
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools

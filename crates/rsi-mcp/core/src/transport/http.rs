@@ -8,7 +8,10 @@ use reqwest::{
 use rsi_credentials_protocol::{CredentialRef, CredentialsResolve};
 use rsi_mcp_protocol::MAXIMUM_FRAME_BYTES;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::task::JoinHandle;
 /// The single bounded encoding plus only the metadata needed after dispatch.
 pub(super) struct RequestBody {
@@ -59,6 +62,7 @@ impl Inner {
         method: Method,
         body: Option<RequestBody>,
         extra: &[(String, String)],
+        dispatched: Option<&AtomicBool>,
     ) -> Result<Response> {
         let mut request = self
             .client
@@ -108,7 +112,15 @@ impl Inner {
                 .header(CONTENT_TYPE, "application/json")
                 .body(body.bytes);
         }
-        let response = request.send().await.map_err(|_| McpError::Disconnected)?;
+        let request = request.build().map_err(|_| McpError::Protocol)?;
+        if let Some(dispatched) = dispatched {
+            dispatched.store(true, Ordering::Release);
+        }
+        let response = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|_| McpError::Disconnected)?;
         if response
             .headers()
             .get_all("content-encoding")
@@ -175,7 +187,7 @@ impl Inner {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client capability is not available"}})
             };
             let response = self
-                .send(Method::POST, Some(RequestBody::encode(&reply)?), &[])
+                .send(Method::POST, Some(RequestBody::encode(&reply)?), &[], None)
                 .await?;
             if !matches!(
                 response.status(),
@@ -290,7 +302,7 @@ impl Http {
     pub async fn subscribe(&self, request: &Value) -> Result<()> {
         let response = self
             .inner
-            .send(Method::POST, Some(RequestBody::encode(request)?), &[])
+            .send(Method::POST, Some(RequestBody::encode(request)?), &[], None)
             .await?;
         if response.status() != StatusCode::OK {
             return self
@@ -336,11 +348,12 @@ impl Http {
         request: RequestBody,
         headers: &[(String, String)],
         id: Option<&str>,
+        dispatched: Option<&AtomicBool>,
     ) -> Result<Option<Value>> {
         let method = request.method.clone();
         let response = self
             .inner
-            .send(Method::POST, Some(request), headers)
+            .send(Method::POST, Some(request), headers, dispatched)
             .await?;
         let Some(id) = id else {
             return if matches!(
@@ -409,7 +422,7 @@ impl Http {
         }
     }
     pub async fn watch(&self) -> Result<()> {
-        let response = self.inner.send(Method::GET, None, &[]).await?;
+        let response = self.inner.send(Method::GET, None, &[], None).await?;
         // Streamable HTTP explicitly allows servers to decline a separate event stream.
         if response.status() == StatusCode::METHOD_NOT_ALLOWED {
             return Ok(());

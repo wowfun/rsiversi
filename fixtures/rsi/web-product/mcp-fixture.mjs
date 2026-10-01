@@ -1,7 +1,8 @@
 import http from 'node:http';
 import {once} from 'node:events';
 import assert from 'node:assert/strict';
-export async function startMcpFixture({requireCredential=true,protocol="2026-07-28"}={}) {
+import {png} from './images.mjs';
+export async function startMcpFixture({requireCredential=true,protocol="2026-07-28",templates=false,images=false}={}) {
   const sockets=new Set(); const evidence={requests:0,authorized:0,calls:0,revision:1,protocol,initializations:0,methods:[]};
   const server=http.createServer(async(request,response)=>{
     if(request.url!=='/mcp'){response.writeHead(404).end();return}
@@ -34,8 +35,9 @@ export async function startMcpFixture({requireCredential=true,protocol="2026-07-
     else if(value.method==='initialize'){evidence.initializations++;result={protocolVersion:'2025-11-25',capabilities:{tools:{},resources:{}},serverInfo:{name:'isolated-mcp',version:'1'},instructions:'External fixture instructions; never a system message'};}
     else if(value.method==='tools/list')result={tools:[{name:'echo',description:`Fixture echo revision ${evidence.revision}`,inputSchema:{type:'object',properties:{message:{type:'string',...(modern?{'x-mcp-header':'Message'}:{})}},required:['message'],additionalProperties:false},annotations:{readOnlyHint:true}}]};
     else if(value.method==='resources/list')result={resources:[{uri:'fixture://document',name:'Fixture document',mimeType:'text/plain'}]};
-    else if(value.method==='resources/read')result={contents:[{uri:'fixture://document',text:'Finite MCP resource 中文'}]};
-    else if(value.method==='tools/call'){evidence.calls++;result={content:[{type:'text',text:value.params.arguments.message}],structuredContent:{revision:evidence.revision}}}
+    else if(value.method==='resources/templates/list' && templates)result={resourceTemplates:[{uriTemplate:'fixture://catalog/{item}{?query}',name:'Template verification',description:'Returns the exact expanded URI and a verification token',mimeType:'text/plain'}]};
+    else if(value.method==='resources/read')result={contents:[{uri:value.params.uri,text:templates&&value.params.uri.startsWith('fixture://catalog/')?`MCP_TEMPLATE_CONFIRMED ${value.params.uri}`:'Finite MCP resource 中文'}]};
+    else if(value.method==='tools/call'){evidence.calls++;result={content:[{type:'text',text:value.params.arguments.message},...(images?[{type:'image',mimeType:'image/png',data:png(80,60,[180,45,60,255]).toString('base64')},{type:'text',text:'MCP_IMAGE_CONFIRMED'}]:[])],structuredContent:{revision:evidence.revision}}}
     else {response.writeHead(400).end();return}
     if(modern)Object.assign(result,{resultType:'complete',ttlMs:1000,cacheScope:'private'});
     response.writeHead(200,{'content-type':'application/json',...(!modern?{'mcp-session-id':'isolated-session'}:{})}).end(JSON.stringify({jsonrpc:'2.0',id:value.id,result}));

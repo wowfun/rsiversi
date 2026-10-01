@@ -1,5 +1,11 @@
 # rsi-agent-context
 
+Target-specific Tool image fallback consumes the assembled messages before request
+construction, moving unaffected messages and request options without cloning. Only Tool results containing
+images are rebuilt; complete-request validation still bounds the projection.
+The allocation golden deliberately binds builder 2.8.0 and Session format 19,
+while retaining the v10 fold and v6 envelope formats.
+
 The single deep module for prompt projection, incremental model context, and
 deterministic compaction. It consumes validated session Facts and emits bounded
 provider-neutral Language messages. It never reads a Workspace implicitly and
@@ -60,7 +66,17 @@ results cannot invalidate a raw-only retention decision. Their byte accounting
 reuses retained per-Turn totals and serializes only synthesized outcomes.
 Raw Facts remain unchanged.
 
-Retention and emission are distinct. Each attempt freezes validated Language
+Retention and emission are distinct. Each attempt supplies its described target
+LanguageProfile along with frozen Language request options. Builder 2.8.0 emits
+nested ToolResult images only when that profile positively declares image Tool
+results. No or Unknown uses deterministic descriptor text in the same block
+position, without reading Media or changing call IDs and error status. Ordinary
+user images retain the AI provider's validation contract. The rich fold and
+checkpoints retain image descriptors, so a later vision request can consume them.
+This final request projection does not change compaction sources, selection or
+digests. Its complete message and request budgets are checked after projection.
+
+Each attempt freezes validated Language
 request options before planning. The effective message budget intersects the
 configured limits with the AI message ceiling and the exact bytes remaining in
 the complete request. System, summary and interruption explanations count.

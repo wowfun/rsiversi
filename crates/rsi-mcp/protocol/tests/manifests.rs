@@ -2,6 +2,7 @@ use rsi_mcp_protocol::*;
 use serde_json::json;
 fn server(id: &str) -> ServerManifest {
     ServerManifest {
+        templates: rsi_mcp_protocol::TemplateCatalog::Disabled,
         id: id.into(),
         target_sha256: "a".repeat(64),
         protocol_version: PROTOCOL_VERSIONS[0].into(),
@@ -129,6 +130,7 @@ fn endpoints_and_credentials_have_explicit_owners_and_no_ambient_resolution() {
     ] {
         let config = McpConfig {
             servers: vec![ServerConfig {
+                resource_templates: false,
                 id: "fixture".into(),
                 enabled: true,
                 tools: vec![],
@@ -208,5 +210,63 @@ fn every_public_name_has_a_tuple_digest_even_when_raw_names_are_safe() {
     assert_ne!(public_tool_name("a", "b__c"), public_tool_name("a__b", "c"));
     assert_ne!(public_tool_name("a", "中文"), public_tool_name("a", "__"));
     let empty = McpManifest::default().snapshot().unwrap();
-    assert_eq!(empty.identity().version(), 2);
+    assert_eq!(empty.identity().version(), 3);
+}
+
+#[test]
+fn complete_template_metadata_affects_manifest_identity_and_shares_resource_budget() {
+    let mut server = server("fixture");
+    let template: McpResourceTemplate = serde_json::from_value(json!({
+        "uriTemplate":"fixture:{?name}","name":"Lookup",
+        "_meta":{"unknown":{"exact":18_446_744_073_709_551_615_u64}}
+    }))
+    .unwrap();
+    server.templates = TemplateCatalog::Available {
+        templates: vec![template.clone()],
+    };
+    let digest = server.sha256();
+    let TemplateCatalog::Available { templates } = &mut server.templates else {
+        unreachable!()
+    };
+    templates[0]
+        .extensions
+        .insert("title".into(), json!("new title"));
+    assert_ne!(server.sha256(), digest);
+    server.resources = (0..255)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "uri":format!("fixture://{i}"), "name":format!("item{i}")
+            }))
+            .unwrap()
+        })
+        .collect();
+    McpManifest {
+        servers: vec![server.clone()],
+    }
+    .snapshot()
+    .unwrap();
+    server
+        .resources
+        .push(serde_json::from_value(json!({"uri":"fixture://256","name":"overflow"})).unwrap());
+    assert!(
+        McpManifest {
+            servers: vec![server.clone()]
+        }
+        .snapshot()
+        .is_err()
+    );
+    server.resources.clear();
+    let TemplateCatalog::Available { templates } = &mut server.templates else {
+        unreachable!()
+    };
+    templates[0]
+        .extensions
+        .insert("opaque".into(), json!("x".repeat(256 * 1024)));
+    assert!(
+        McpManifest {
+            servers: vec![server]
+        }
+        .snapshot()
+        .is_err()
+    );
 }

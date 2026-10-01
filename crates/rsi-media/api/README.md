@@ -2,8 +2,8 @@
 
 The [Media contract](../protocol/README.md) owns the shared domain types and semantics.
 
-Ordinary endpoint and client plugins expose `media/import/1` and `media/read/1`.
-Import accepts a bounded raw source body of at most 64 MiB; the Media service
+Ordinary endpoint and client plugins expose `media/import/2` and `media/read/1`.
+Import accepts the bounded options-and-source frame defined by the [family contract](../README.md), at most 64 MiB in total; the Media service
 owns raster decoding, canonicalization, digest calculation and publication.
 Read accepts an exact canonical `MediaRef` and returns that metadata plus the
 separate PNG bytes. Client reads revalidate metadata, length and SHA-256 before

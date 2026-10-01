@@ -1160,7 +1160,7 @@ mod view_tests {
     fn summary_install_preserves_untouched_vectors_and_stages_before_mutation() {
         use crate::{DefaultContextBuilder, ModelContextBuilder, ProjectedTurn};
         use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("remap").unwrap(),
             1,
             "/workspace",

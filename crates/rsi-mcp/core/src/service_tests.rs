@@ -2,6 +2,7 @@ use super::*;
 
 fn catalog_server(id: &str, tools: usize, resources: usize) -> ServerManifest {
     ServerManifest {
+        templates: rsi_mcp_protocol::TemplateCatalog::Disabled,
         id: id.into(),
         target_sha256: "a".repeat(64),
         protocol_version: rsi_mcp_protocol::LATEST_PROTOCOL_VERSION.into(),
@@ -132,8 +133,9 @@ impl Sandbox for Unused {
         unreachable!()
     }
 }
+#[async_trait::async_trait]
 impl DuplexProcess for Unused {
-    fn spawn(
+    async fn spawn(
         &self,
         _: rsi_process::DuplexProcessSpec,
     ) -> rsi_process::Result<rsi_process::ManagedDuplexProcess> {
@@ -145,6 +147,7 @@ async fn configuration_wait_is_bounded_but_retirement_keeps_admission_until_sett
     let service = McpService::new(Arc::new(Unused), Arc::new(Unused), Arc::new(Unused));
     let entry = Arc::new(Entry::new(
         ServerConfig {
+            resource_templates: false,
             id: "held".into(),
             enabled: true,
             tools: vec![],

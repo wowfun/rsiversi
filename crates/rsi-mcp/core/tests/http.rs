@@ -27,7 +27,7 @@ async fn complete_discovery_preserves_metadata_and_credentials_are_resolved_for_
         service.configure(config).await.unwrap();
         assert_eq!(service.manifest().unwrap_err(), McpError::Disconnected);
         let frozen = service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap();
         let manifest = service.manifest().unwrap();
@@ -43,6 +43,7 @@ async fn complete_discovery_preserves_metadata_and_credentials_are_resolved_for_
                     &frozen,
                     "echo",
                     json!({"message":"binary-free 中文"}),
+                    None,
                     CancellationToken::new()
                 )
                 .await
@@ -51,14 +52,19 @@ async fn complete_discovery_preserves_metadata_and_credentials_are_resolved_for_
         );
         assert_eq!(
             service
-                .resource(&frozen, "fixture://text", CancellationToken::new())
+                .resource(&frozen, "fixture://text", None, CancellationToken::new())
                 .await
                 .unwrap()["contents"][0]["text"],
             "Frozen-catalog resource 中文"
         );
         assert_eq!(
             service
-                .resource(&frozen, "http://127.0.0.1/other", CancellationToken::new())
+                .resource(
+                    &frozen,
+                    "http://127.0.0.1/other",
+                    None,
+                    CancellationToken::new()
+                )
                 .await
                 .unwrap_err(),
             McpError::NotFound
@@ -78,12 +84,12 @@ async fn reconnect_never_substitutes_old_schema_and_retains_last_verified_manife
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let old = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     fixture.mode.lock().unwrap().changed = true;
     let new = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     assert_ne!(old, new);
@@ -93,6 +99,7 @@ async fn reconnect_never_substitutes_old_schema_and_retains_last_verified_manife
                 &old,
                 "echo",
                 json!({"message":"old"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -103,7 +110,7 @@ async fn reconnect_never_substitutes_old_schema_and_retains_last_verified_manife
     fixture.mode.lock().unwrap().oversize = true;
     assert_eq!(
         service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Capacity
@@ -127,7 +134,7 @@ async fn list_changed_invalidates_the_idle_epoch_before_a_tool_can_start() {
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     fixture.events.send(()).unwrap();
@@ -144,6 +151,7 @@ async fn list_changed_invalidates_the_idle_epoch_before_a_tool_can_start() {
                 &frozen,
                 "echo",
                 json!({"message":"stale"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -164,7 +172,7 @@ async fn cancellation_after_send_closes_epoch_and_does_not_replay_the_call() {
     let service = Arc::new(fixture.service(Arc::new(Credentials::default())));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let cancel = CancellationToken::new();
@@ -172,20 +180,27 @@ async fn cancellation_after_send_closes_epoch_and_does_not_replay_the_call() {
     let schema = frozen.clone();
     let cancellation = cancel.clone();
     let call = tokio::spawn(async move {
-        peer.call(&schema, "echo", json!({"message":"once"}), cancellation)
-            .await
+        peer.call(
+            &schema,
+            "echo",
+            json!({"message":"once"}),
+            None,
+            cancellation,
+        )
+        .await
     });
     fixture.started.notified().await;
     let overlap = service.call(
         &frozen,
         "echo",
         json!({"message":"overlap"}),
+        None,
         CancellationToken::new(),
     );
     tokio::pin!(overlap);
     assert!(futures_util::poll!(&mut overlap).is_pending());
     cancel.cancel();
-    assert_eq!(call.await.unwrap().unwrap_err(), McpError::Cancelled);
+    assert_eq!(call.await.unwrap().unwrap_err(), McpError::OutcomeUnknown);
     assert_eq!(overlap.await.unwrap_err(), McpError::Disconnected);
     fixture.release.notify_one();
     assert_eq!(
@@ -194,6 +209,7 @@ async fn cancellation_after_send_closes_epoch_and_does_not_replay_the_call() {
                 &frozen,
                 "echo",
                 json!({"message":"again"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -221,7 +237,7 @@ async fn malformed_correlation_and_repeated_cursors_never_publish_a_partial_mani
         service.configure(fixture.config()).await.unwrap();
         assert_eq!(
             service
-                .refresh("fixture", CancellationToken::new())
+                .refresh("fixture", None, CancellationToken::new())
                 .await
                 .unwrap_err(),
             McpError::Protocol
@@ -242,7 +258,7 @@ async fn remote_error_remains_explicit_and_does_not_discard_a_verified_connectio
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -251,6 +267,7 @@ async fn remote_error_remains_explicit_and_does_not_discard_a_verified_connectio
                 &frozen,
                 "echo",
                 json!({"message":"failure"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -273,7 +290,7 @@ async fn encoded_responses_fail_before_decoding_or_manifest_publication() {
     service.configure(fixture.config()).await.unwrap();
     assert_eq!(
         service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Protocol
@@ -290,7 +307,7 @@ async fn removed_endpoint_invalidates_frozen_calls_without_dispatch() {
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     service
@@ -303,6 +320,7 @@ async fn removed_endpoint_invalidates_frozen_calls_without_dispatch() {
                 &frozen,
                 "echo",
                 json!({"message":"removed"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -311,7 +329,7 @@ async fn removed_endpoint_invalidates_frozen_calls_without_dispatch() {
     );
     assert_eq!(
         service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::NotFound
@@ -342,7 +360,7 @@ async fn sse_exchange_and_watch_accept_legal_framing_independently_of_writes() {
                 service.configure(fixture.config()).await.unwrap();
                 let frozen = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    service.refresh("fixture", CancellationToken::new()),
+                    service.refresh("fixture", None, CancellationToken::new()),
                 )
                 .await
                 .unwrap()
@@ -353,6 +371,7 @@ async fn sse_exchange_and_watch_accept_legal_framing_independently_of_writes() {
                         &frozen,
                         "echo",
                         json!({"message":"中文"}),
+                        None,
                         CancellationToken::new(),
                     ),
                 )
@@ -390,7 +409,7 @@ async fn streaming_watch_ignores_large_comment_traffic_but_remains_cancellable()
         let service = fixture.service(Arc::new(Credentials::default()));
         service.configure(fixture.config()).await.unwrap();
         service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap();
         fixture.events.send(()).unwrap();
@@ -442,7 +461,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
     }
     service.configure(config).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let cancel = CancellationToken::new();
@@ -452,7 +471,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
         let stop = cancel.clone();
         tokio::spawn(async move {
             service
-                .call(&frozen, "echo", json!({"message":"mutation"}), stop)
+                .call(&frozen, "echo", json!({"message":"mutation"}), None, stop)
                 .await
         })
     };
@@ -465,6 +484,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
             &frozen,
             "echo",
             json!({"message":"peer"}),
+            None,
             CancellationToken::new(),
         ));
         match futures_util::poll!(request.as_mut()) {
@@ -480,7 +500,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
     busy_ns.sort_unstable();
     let begin = std::time::Instant::now();
     cancel.cancel();
-    assert_eq!(running.await.unwrap(), Err(McpError::Cancelled));
+    assert_eq!(running.await.unwrap(), Err(McpError::OutcomeUnknown));
     let cancel_ns = begin.elapsed().as_nanos();
     for request in waiting {
         assert_eq!(request.await, Err(McpError::Disconnected));
@@ -492,6 +512,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
                 &frozen,
                 "echo",
                 json!({"message":"stale"}),
+                None,
                 CancellationToken::new()
             )
             .await,
@@ -502,7 +523,7 @@ async fn single_flight_case(modern: bool, callers: usize, report: bool) {
     let requests_before = credentials.resolutions.load(Ordering::Acquire);
     let begin = std::time::Instant::now();
     service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let refresh_ns = begin.elapsed().as_nanos();
@@ -536,7 +557,7 @@ async fn first_sse_response_survives_duplicate_and_mismatched_coalesced_tail() {
         let service = fixture.service(Arc::new(Credentials::default()));
         service.configure(fixture.config()).await.unwrap();
         let frozen = service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap();
         let value = tokio::time::timeout(
@@ -545,6 +566,7 @@ async fn first_sse_response_survives_duplicate_and_mismatched_coalesced_tail() {
                 &frozen,
                 "echo",
                 json!({"message":"first response"}),
+                None,
                 CancellationToken::new(),
             ),
         )
@@ -573,7 +595,7 @@ async fn sse_first_response_at_the_total_limit_ignores_coalesced_trailing_bytes(
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let manifest = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let value = service
@@ -581,6 +603,7 @@ async fn sse_first_response_at_the_total_limit_ignores_coalesced_trailing_bytes(
             &manifest,
             "echo",
             json!({"message":"near-limit"}),
+            None,
             CancellationToken::new(),
         )
         .await
@@ -604,7 +627,7 @@ async fn sse_prefix_overflow_still_rejects_without_publishing_a_catalog() {
     service.configure(fixture.config()).await.unwrap();
     assert_eq!(
         service
-            .refresh("fixture", CancellationToken::new())
+            .refresh("fixture", None, CancellationToken::new())
             .await
             .unwrap_err(),
         McpError::Capacity
@@ -620,7 +643,7 @@ async fn oversized_encoded_request_fails_before_http_dispatch_and_keeps_readines
     let service = fixture.service(Arc::new(Credentials::default()));
     service.configure(fixture.config()).await.unwrap();
     let manifest = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -629,6 +652,7 @@ async fn oversized_encoded_request_fails_before_http_dispatch_and_keeps_readines
                 &manifest,
                 "echo",
                 json!({"message":"x".repeat(rsi_mcp::MAXIMUM_FRAME_BYTES)}),
+                None,
                 CancellationToken::new()
             )
             .await,
@@ -650,7 +674,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
     let service = Arc::new(fixture.service(Arc::new(Credentials::default())));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let peer = service.clone();
@@ -660,6 +684,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
             &schema,
             "echo",
             json!({"message":"active"}),
+            None,
             CancellationToken::new(),
         )
         .await
@@ -674,6 +699,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
                 &frozen,
                 "echo",
                 json!({"message":format!("queued-{index}")}),
+                None,
                 token.clone(),
             ))
         })
@@ -687,6 +713,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
                 &frozen,
                 "echo",
                 json!({"message":"overflow"}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -704,6 +731,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
                 &frozen,
                 "echo",
                 json!({"message":"x".repeat(rsi_mcp_protocol::MAXIMUM_FRAME_BYTES)}),
+                None,
                 CancellationToken::new()
             )
             .await
@@ -714,6 +742,7 @@ async fn connection_waiting_is_bounded_cancellable_and_preserves_prepared_order(
         &frozen,
         "echo",
         json!({"message":"last"}),
+        None,
         CancellationToken::new(),
     ));
     assert!(futures_util::poll!(last.as_mut()).is_pending());
@@ -745,7 +774,7 @@ async fn queued_business_call_keeps_its_original_deadline_after_dispatch() {
     let service = Arc::new(fixture.service(Arc::new(Credentials::default())));
     service.configure(fixture.config()).await.unwrap();
     let frozen = service
-        .refresh("fixture", CancellationToken::new())
+        .refresh("fixture", None, CancellationToken::new())
         .await
         .unwrap();
     let peer = service.clone();
@@ -755,6 +784,7 @@ async fn queued_business_call_keeps_its_original_deadline_after_dispatch() {
             &schema,
             "echo",
             json!({"message":"first"}),
+            None,
             CancellationToken::new(),
         )
         .await
@@ -768,6 +798,7 @@ async fn queued_business_call_keeps_its_original_deadline_after_dispatch() {
             &schema,
             "echo",
             json!({"message":"second"}),
+            None,
             CancellationToken::new(),
         )
         .await
@@ -783,7 +814,7 @@ async fn queued_business_call_keeps_its_original_deadline_after_dispatch() {
     fixture.started.notified().await;
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(11)).await;
-    assert_eq!(second.await.unwrap().unwrap_err(), McpError::Timeout);
+    assert_eq!(second.await.unwrap().unwrap_err(), McpError::OutcomeUnknown);
     tokio::time::resume();
     fixture.release.notify_one();
     assert_eq!(fixture.calls.load(Ordering::Acquire), 2);

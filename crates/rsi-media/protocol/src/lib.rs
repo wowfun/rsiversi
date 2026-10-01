@@ -421,10 +421,69 @@ impl LocalContract for MediaBackendContract {
 }
 
 /// Bounded image normalization and durable reference service.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageImportOptions {
+    /// Caller-tightened bound on canonical PNG bytes, enforced before publication.
+    pub maximum_output_bytes: u64,
+    /// If supplied, must match the decoder's actual source raster format.
+    pub source_mime: Option<String>,
+}
+
+impl Default for ImageImportOptions {
+    fn default() -> Self {
+        Self {
+            maximum_output_bytes: MAXIMUM_IMAGE_DESCRIPTOR_BYTES,
+            source_mime: None,
+        }
+    }
+}
+
+impl ImageImportOptions {
+    /// Validates import limits and bounded raster MIME declarations.
+    pub fn validate(&self) -> Result<()> {
+        if self.maximum_output_bytes == 0
+            || self.maximum_output_bytes > MAXIMUM_IMAGE_DESCRIPTOR_BYTES
+        {
+            return Err(MediaError::InvalidInput(
+                "canonical image limit is out of bounds".into(),
+            ));
+        }
+        if self.source_mime.as_ref().is_some_and(|mime| {
+            !matches!(
+                mime.as_str(),
+                "image/png"
+                    | "image/jpeg"
+                    | "image/gif"
+                    | "image/webp"
+                    | "image/bmp"
+                    | "image/tiff"
+                    | "image/x-icon"
+                    | "image/avif"
+            )
+        }) {
+            return Err(MediaError::InvalidInput(
+                "unsupported source image MIME".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Bounded image normalization and durable reference service.
 #[async_trait]
 pub trait Media: fmt::Debug + Send + Sync + 'static {
     /// Decodes, canonicalizes, and durably publishes one raster image.
-    async fn import_image(&self, source: bytes::Bytes) -> Result<MediaRef>;
+    async fn import_image(&self, source: bytes::Bytes) -> Result<MediaRef> {
+        self.import_image_with_options(source, ImageImportOptions::default())
+            .await
+    }
+    /// Applies caller-tightened limits and checks declared MIME before durable publication.
+    async fn import_image_with_options(
+        &self,
+        source: bytes::Bytes,
+        options: ImageImportOptions,
+    ) -> Result<MediaRef>;
     /// Loads canonical bytes for one exact reference.
     async fn read(&self, reference: &MediaRef) -> Result<StoredMedia>;
 }

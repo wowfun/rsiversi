@@ -39,10 +39,8 @@ impl ApiHandler for Handler {
         };
         match self.operation {
             Operation::Import => {
-                if input.is_empty() {
-                    return Err(ApiError::Invalid("empty Media source".into()));
-                }
-                match self.media.import_image(input.into_bytes()).await {
+                let (source, options) = wire::parse_import(&input.into_bytes())?;
+                match self.media.import_image_with_options(source, options).await {
                     Ok(reference) => {
                         reference.validate().map_err(|_| {
                             ApiError::Backend("invalid published Media reference".into())

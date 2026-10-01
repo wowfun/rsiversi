@@ -1,3 +1,4 @@
+import {closeDetails} from "./controls.mjs";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
 import { join } from "node:path";
@@ -32,7 +33,7 @@ export async function verifyImages(page, pane, service, report, name) {
   const firstUrl = await page.locator(".image-preview").getAttribute("src");
   assert.match(firstUrl, /^blob:/);
   await page.screenshot({ path: join(report, `${name}-image-preview.png`) });
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
+  await closeDetails(page);
   await rows.last().getByRole("button", { name: "Move image earlier", exact: true }).click();
   await rows.first().filter({ hasText: "120 × 80" }).waitFor();
   await page.screenshot({ path: join(report, `${name}-ordered-images.png`) });
@@ -49,7 +50,7 @@ export async function verifyImages(page, pane, service, report, name) {
   await page.waitForFunction(() => document.querySelector(".image-preview")?.naturalWidth === 80);
   assert.equal(await page.locator(".image-preview").getAttribute("src"), firstUrl, "draft and exact durable source reuse the same canonical object URL");
   await page.screenshot({ path: join(report, `${name}-durable-image-source.png`) });
-  await page.getByRole("button", { name: "Close details", exact: true }).click();
+  await closeDetails(page);
   // Removing an independently imported image starts no model call.
   await picker.setInputFiles({ name: "remove.png", mimeType: "image/png", buffer: png(16, 12, [15, 120, 80, 255]) });
   await rows.first().waitFor();

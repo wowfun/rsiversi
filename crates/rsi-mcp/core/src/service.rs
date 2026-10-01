@@ -86,6 +86,7 @@ struct Entry {
     retired: AtomicBool,
     epoch: AtomicU64,
     refresh: Arc<Semaphore>,
+    requests: Arc<Semaphore>,
     stop: CancellationToken,
     tasks: TaskTracker,
     verified: Mutex<Option<Verified>>,
@@ -103,6 +104,9 @@ impl Entry {
             retired: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             refresh: Arc::new(Semaphore::new(1)),
+            requests: Arc::new(Semaphore::new(
+                crate::transport::MAXIMUM_OUTSTANDING_REQUESTS,
+            )),
             stop: CancellationToken::new(),
             tasks: TaskTracker::new(),
             verified: Mutex::new(None),
@@ -243,6 +247,11 @@ impl McpService {
     /// # Panics
     /// Panics if an earlier panic poisoned the owner state lock.
     pub async fn configure(&self, config: McpConfig) -> Result<()> {
+        Self::settle_configuration(self.begin_configuration(config)?).await
+    }
+    // All rejection is synchronous and precedes publication. The Settings owner
+    // publishes its matching inputs before yielding to retirement.
+    pub(crate) fn begin_configuration(&self, config: McpConfig) -> Result<oneshot::Receiver<bool>> {
         config.validate().map_err(|_| McpError::Protocol)?;
         let permit = self
             .configure
@@ -285,6 +294,9 @@ impl McpService {
             drop(permit);
             let _ = send.send(failed);
         });
+        Ok(receive)
+    }
+    pub(crate) async fn settle_configuration(receive: oneshot::Receiver<bool>) -> Result<()> {
         let failed = tokio::time::timeout(std::time::Duration::from_secs(30), receive)
             .await
             .map_err(|_| McpError::Timeout)?
@@ -376,10 +388,11 @@ impl McpService {
                     transport: match entry.config.transport {
                         TransportConfig::StreamableHttp { .. } => McpTransportKind::Http,
                         TransportConfig::Stdio { .. } => McpTransportKind::Stdio,
+                        TransportConfig::SshStdio { .. } => McpTransportKind::SshStdio,
                     },
                     credential: match &entry.config.transport {
                         TransportConfig::StreamableHttp { credential, .. } => credential.clone(),
-                        TransportConfig::Stdio { .. } => None,
+                        TransportConfig::Stdio { .. } | TransportConfig::SshStdio { .. } => None,
                     },
                     tools: last.as_ref().map_or_else(Vec::new, |manifest| {
                         manifest
@@ -404,9 +417,25 @@ impl McpService {
     pub async fn refresh(
         &self,
         id: &str,
+        execution: Option<rsi_execution::ExecutionLease>,
         cancellation: CancellationToken,
     ) -> Result<Arc<FrozenServer>> {
         let entry = self.entry(id)?;
+        if let TransportConfig::SshStdio { target, .. } = &entry.config.transport {
+            let lease = execution.as_ref().ok_or(McpError::ProcessUnavailable)?;
+            if lease.binding().location()
+                != &(rsi_execution::ExecutionLocation::Ssh {
+                    target: target.clone(),
+                })
+            {
+                return Err(McpError::ProcessUnavailable);
+            }
+            drop(
+                lease
+                    .admit()
+                    .map_err(crate::transport::process::process_error)?,
+            );
+        }
         let permit = entry
             .refresh
             .clone()
@@ -423,7 +452,8 @@ impl McpService {
         let (send, receive) = oneshot::channel();
         let owned = entry.clone();
         entry.tasks.spawn(async move {
-            let result = refresh_owned(owned, credentials, process, sandbox, cancelled).await;
+            let result =
+                refresh_owned(owned, credentials, process, sandbox, execution, cancelled).await;
             // Reply loss cannot release admission before actual failed-connection settlement.
             drop(permit);
             let _ = send.send(result);
@@ -436,6 +466,7 @@ impl McpService {
         frozen: &FrozenServer,
         raw_name: &str,
         arguments: Value,
+        execution: Option<rsi_execution::ExecutionLease>,
         cancellation: CancellationToken,
     ) -> Result<Value> {
         let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
@@ -450,6 +481,7 @@ impl McpService {
             frozen,
             "tools/call",
             json!({"name":raw_name,"arguments":arguments}),
+            execution,
             cancellation,
             deadline,
         )
@@ -460,6 +492,7 @@ impl McpService {
         &self,
         frozen: &FrozenServer,
         uri: &str,
+        execution: Option<rsi_execution::ExecutionLease>,
         cancellation: CancellationToken,
     ) -> Result<Value> {
         let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
@@ -470,16 +503,48 @@ impl McpService {
             frozen,
             "resources/read",
             json!({"uri":uri}),
+            execution,
             cancellation,
             deadline,
         )
         .await
     }
+    /// Expands one frozen, explicitly enabled template and reads it on that same server.
+    pub async fn template_resource(
+        &self,
+        frozen: &FrozenServer,
+        index: usize,
+        parameters: &rsi_mcp_protocol::TemplateParameters,
+        execution: Option<rsi_execution::ExecutionLease>,
+        cancellation: CancellationToken,
+    ) -> Result<(String, Value)> {
+        let template = frozen
+            .templates
+            .entries()
+            .get(index)
+            .ok_or(McpError::NotFound)?;
+        let uri = template
+            .expand(parameters)
+            .map_err(|_| McpError::Protocol)?;
+        let value = self
+            .request(
+                frozen,
+                "resources/read",
+                json!({"uri":uri}),
+                execution,
+                cancellation,
+                tokio::time::Instant::now() + REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok((uri, value))
+    }
+
     async fn request(
         &self,
         frozen: &FrozenServer,
         method: &str,
         params: Value,
+        execution: Option<rsi_execution::ExecutionLease>,
         cancellation: CancellationToken,
         deadline: tokio::time::Instant,
     ) -> Result<Value> {
@@ -497,14 +562,27 @@ impl McpService {
         if current.sha256 != frozen.sha256 {
             return Err(McpError::CatalogChanged);
         }
-        let result = tokio::select! { biased; () = cancellation.cancelled() => Err(McpError::Cancelled), value = connection.request_until(method, params, deadline) => value };
-        // Dropping an unconfirmed started exchange retires its epoch. Return only
-        // after the controlled writer has settled; queued cancellation stays cheap.
-        if !connection.valid() {
-            entry.close_connection(&connection).await?;
-        }
-        result
+        let permit = entry
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| McpError::Busy)?;
+        let cancelled = cancellation.child_token();
+        let _cancel_on_drop = cancelled.clone().drop_guard();
+        let method = method.to_owned();
+        let (send, receive) = oneshot::channel();
+        let owned = entry.clone();
+        entry.tasks.spawn(async move {
+            let _permit = permit;
+            let result = request_owned(
+                owned, connection, method, params, execution, cancelled, deadline,
+            )
+            .await;
+            let _ = send.send(result);
+        });
+        receive.await.map_err(|_| McpError::OutcomeUnknown)?
     }
+
     /// Stops admission and awaits all endpoint/child settlement.
     ///
     /// # Panics
@@ -561,6 +639,7 @@ async fn refresh_owned(
     credentials: Arc<dyn CredentialsResolve>,
     process: Arc<dyn DuplexProcess>,
     sandbox: Arc<dyn Sandbox>,
+    execution: Option<rsi_execution::ExecutionLease>,
     cancellation: CancellationToken,
 ) -> Result<Arc<FrozenServer>> {
     entry.epoch.fetch_add(1, Ordering::AcqRel);
@@ -579,6 +658,7 @@ async fn refresh_owned(
             credentials.clone(),
             process.clone(),
             sandbox.clone(),
+            execution.as_ref(),
         )
         .await?;
         guard.connection = Some(connection.clone());
@@ -588,12 +668,20 @@ async fn refresh_owned(
             && matches!(
                 entry.config.transport,
                 rsi_mcp_protocol::TransportConfig::Stdio { .. }
+                    | rsi_mcp_protocol::TransportConfig::SshStdio { .. }
             )
         {
             // Only a silent discovery probe permits one legacy restart. It has
             // executed no Tool, and its process is reaped before reconnecting.
             entry.close_connection(&connection).await?;
-            connection = Connection::connect(&entry.config, credentials, process, sandbox).await?;
+            connection = Connection::connect(
+                &entry.config,
+                credentials,
+                process,
+                sandbox,
+                execution.as_ref(),
+            )
+            .await?;
             guard.connection = Some(connection.clone());
             discovered = discover(&connection, &entry.config, true, entry.all_tools).await;
         }
@@ -601,6 +689,7 @@ async fn refresh_owned(
         if entry.retired.load(Ordering::Acquire) {
             return Err(McpError::Disabled);
         }
+        connection.seal_bootstrap();
         Ok((manifest, connection))
     };
     let outcome = tokio::select! {
@@ -633,3 +722,43 @@ async fn refresh_owned(
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+async fn request_owned(
+    entry: Arc<Entry>,
+    connection: Arc<Connection>,
+    method: String,
+    params: Value,
+    execution: Option<rsi_execution::ExecutionLease>,
+    cancellation: CancellationToken,
+    deadline: tokio::time::Instant,
+) -> Result<Value> {
+    let dispatched = AtomicBool::new(false);
+    let result = tokio::select! { biased; () = cancellation.cancelled() => Err(McpError::Cancelled), value = connection.request_authorized(&method, params, deadline, Some(&dispatched), execution.as_ref()) => value };
+    let result = result.map_err(|error| {
+        if dispatched.load(Ordering::Acquire)
+            && !matches!(
+                error,
+                McpError::RemoteError
+                    | McpError::MethodNotFound
+                    | McpError::HeaderMismatch
+                    | McpError::RequiredCapability
+                    | McpError::UnsupportedVersion
+                    | McpError::InputRequired
+                    | McpError::CredentialUnavailable
+            )
+        {
+            McpError::OutcomeUnknown
+        } else {
+            error
+        }
+    });
+    // Dropping an unconfirmed started exchange retires its epoch. Return only
+    // after the controlled writer has settled; queued cancellation stays cheap.
+    if !connection.valid() {
+        let closed = entry.close_connection(&connection).await;
+        if result != Err(McpError::OutcomeUnknown) {
+            closed?;
+        }
+    }
+    result
+}

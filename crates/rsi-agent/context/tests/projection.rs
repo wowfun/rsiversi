@@ -18,9 +18,11 @@ mod builders;
 mod compaction;
 #[path = "projection/contributions.rs"]
 mod contributions;
+#[path = "projection/images.rs"]
+mod images;
 
 fn header(system: &str) -> SessionHeader {
-    SessionHeader::new(
+    SessionHeader::new_local(
         SessionId::new("session-1").unwrap(),
         1,
         "/secret/workspace-name",
@@ -113,15 +115,13 @@ fn facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<SessionFact>
         .collect()
 }
 
-#[test]
-#[allow(clippy::too_many_lines)] // Full replay fixture includes correlated Tool intent, start, and result Facts.
-fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
+#[allow(clippy::too_many_lines)] // Complete correlated model and Tool Fact fixture.
+fn tool_result_facts(result: ToolResult) -> Vec<SessionFact> {
     let turn = TurnId::new("turn-1").unwrap();
     let effect = EffectId::new("model-1").unwrap();
     let tool_identity =
         ToolResultIdentity::new("tool-f1-g1-r1", "effect-1", "tool-call", "b".repeat(64)).unwrap();
-    let mut fold = ContextFold::new(header("")).unwrap();
-    fold.apply(&facts(vec![
+    facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: turn.clone(),
@@ -203,10 +203,18 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             turn_id: turn,
             effect_id: EffectId::new("tool-1").unwrap(),
             identity: tool_identity,
-            result: ToolResult::new(json!({"answer": 42}), vec![], false).unwrap(),
+            result,
             conclusion: None,
         },
-    ]))
+    ])
+}
+
+#[test]
+fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
+    let mut fold = ContextFold::new(header("")).unwrap();
+    fold.apply(&tool_result_facts(
+        ToolResult::new(json!({"answer":42}), vec![], false).unwrap(),
+    ))
     .unwrap();
     let projected = fold.project(ContextLimits::default()).unwrap();
     assert_eq!(

@@ -6,7 +6,7 @@ use rsi_ai_protocol::{
 };
 use std::sync::Arc;
 
-fn profile() -> LanguageProfile {
+pub(super) fn profile() -> LanguageProfile {
     LanguageProfile::new(
         100_000,
         1000,
@@ -157,7 +157,10 @@ fn pressure_without_selectable_history_is_optional_but_forced_pressure_is_a_limi
     append(&mut state, &mut history, bodies);
     assert!(
         state
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &profile()
+            )
             .is_ok()
     );
     for state in [
@@ -254,7 +257,10 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
         assert!(count >= 2);
         assert!(
             state
-                .build(rsi_ai_protocol::LanguageRequestOptions::default())
+                .build(
+                    rsi_ai_protocol::LanguageRequestOptions::default(),
+                    &profile()
+                )
                 .is_ok()
         );
         let mut replay = cursor();
@@ -695,7 +701,7 @@ fn encoded_plan_bound_keeps_long_identifier_history_recoverable() {
         } else {
             format!("session-{}", "a".repeat(32))
         };
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new(session).unwrap(),
             1,
             "/workspace",
@@ -778,7 +784,7 @@ fn encoded_plan_bound_keeps_long_identifier_history_recoverable() {
         assert!(wire(&state).contains("current task"));
     }
 }
-fn append(
+pub(super) fn append(
     state: &mut ModelContextState,
     history: &mut Vec<Arc<SessionFact>>,
     bodies: Vec<SessionFactBody>,
@@ -790,7 +796,7 @@ fn append(
     state.ingest(ContextPage::Canonical(&page)).unwrap();
     history.extend(page);
 }
-fn accepted(id: &str, text: &str) -> SessionFactBody {
+pub(super) fn accepted(id: &str, text: &str) -> SessionFactBody {
     SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new(id).unwrap(),
@@ -800,7 +806,7 @@ fn accepted(id: &str, text: &str) -> SessionFactBody {
         require_approval: false,
     }
 }
-fn model_bodies(
+pub(super) fn model_bodies(
     turn: &str,
     effect: &str,
     purpose: ModelPurpose,
@@ -911,7 +917,10 @@ fn plan(state: &ModelContextState) -> ContextCompactionPlan {
 fn wire(state: &ModelContextState) -> String {
     serde_json::to_string(
         &state
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &profile(),
+            )
             .unwrap(),
     )
     .unwrap()
@@ -1258,7 +1267,10 @@ fn long_lived_turns(replace_instructions: bool) {
             summaries += 1;
         }
         state
-            .build(rsi_ai_protocol::LanguageRequestOptions::default())
+            .build(
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+                &profile(),
+            )
             .unwrap();
         if replace_instructions {
             assert!(wire(&state).contains(&format!("Active instruction version {index}.")));
@@ -1655,7 +1667,10 @@ fn superseded_live_calls_have_prompt_only_outcomes_and_stable_replay() {
     });
     append(&mut state, &mut history, bodies);
     let request = state
-        .build(rsi_ai_protocol::LanguageRequestOptions::default())
+        .build(
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+            &profile(),
+        )
         .unwrap();
     let messages = request.messages();
     let calls = messages
@@ -1786,11 +1801,18 @@ fn emission_pressure_respects_ai_message_limit_above_configured_default() {
         assert_eq!(planned.is_some(), count > rsi_ai_protocol::MAX_MESSAGES);
         if count <= rsi_ai_protocol::MAX_MESSAGES {
             assert_eq!(
-                state.build(options.clone()).unwrap().messages().len(),
+                state
+                    .build(options.clone(), &profile())
+                    .unwrap()
+                    .messages()
+                    .len(),
                 count
             );
         } else {
-            assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+            assert_eq!(
+                state.build(options.clone(), &profile()),
+                Err(ContextError::TooLarge)
+            );
             let planned = planned.unwrap();
             append(
                 &mut state,
@@ -1806,7 +1828,11 @@ fn emission_pressure_respects_ai_message_limit_above_configured_default() {
             );
             assert!(state.summary_installed(&EffectId::new("summary-emission").unwrap()));
             assert!(
-                state.build(options.clone()).unwrap().messages().len()
+                state
+                    .build(options.clone(), &profile())
+                    .unwrap()
+                    .messages()
+                    .len()
                     <= rsi_ai_protocol::MAX_MESSAGES
             );
         }
@@ -1858,10 +1884,17 @@ fn bounded_partial_summaries_remain_replayable_until_the_request_fits() {
             assert!(state.summary_installed(&EffectId::new(&effect).unwrap()));
             state = state.restored(&state.checkpoint().unwrap()).unwrap();
             if batch == 0 {
-                assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+                assert_eq!(
+                    state.build(options.clone(), &profile()),
+                    Err(ContextError::TooLarge)
+                );
             } else {
                 assert!(
-                    state.build(options.clone()).unwrap().messages().len()
+                    state
+                        .build(options.clone(), &profile())
+                        .unwrap()
+                        .messages()
+                        .len()
                         <= rsi_ai_protocol::MAX_MESSAGES
                 );
             }
@@ -1926,7 +1959,10 @@ fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_indepe
         vec![],
     )
     .unwrap();
-    assert_eq!(state.build(options.clone()), Err(ContextError::TooLarge));
+    assert_eq!(
+        state.build(options.clone(), &profile()),
+        Err(ContextError::TooLarge)
+    );
     let planned = state
         .plan_compaction(&options, &model, &profile(), None, false)
         .unwrap()
@@ -1953,7 +1989,7 @@ fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_indepe
         ),
     );
     assert!(state.summary_installed(&EffectId::new("catalog-summary").unwrap()));
-    let built = state.build(options.clone()).unwrap();
+    let built = state.build(options.clone(), &profile()).unwrap();
     assert!(built.canonical_bytes().unwrap().len() <= rsi_ai_protocol::MAX_REQUEST_BYTES);
     let mut replay = ModelContextState::open(
         Arc::new(DefaultContextBuilder::default()),
@@ -1962,13 +1998,10 @@ fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_indepe
     )
     .unwrap();
     replay.ingest(ContextPage::Canonical(&history)).unwrap();
-    assert_eq!(
-        replay
-            .build(LanguageRequestOptions::default())
-            .unwrap()
-            .messages(),
-        built.messages()
-    );
+    let rebuilt = replay
+        .build(LanguageRequestOptions::default(), &profile())
+        .unwrap();
+    assert_eq!(rebuilt.messages(), built.messages());
 }
 
 #[test]

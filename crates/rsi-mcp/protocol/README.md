@@ -7,6 +7,15 @@ owner-local `rsi.mcp` references. Stdio programs and working directories are abs
 with explicit argv and non-ambient environment. Configuration and request values
 are bounded before execution; no annotation changes authorization.
 
+`ssh_stdio` is distinct from Local stdio. It selects an exact Execution target,
+an absolute target cwd and a bounded command (absolute or target-PATH basename).
+Arguments and environment use the same finite limits as Local stdio. Execution's
+target-program validation rejects overrides of target account and helper lifecycle
+environment before credential resolution. Configuration retains references only;
+the product checks the precise target/server grant and allowed references before
+launching or exporting their values. Both stdio kinds are excluded from ordinary
+remote HTTP configuration replacement.
+
 A complete frozen manifest retains selected flags, original server Tool definitions,
 resource descriptors, protocol version, capabilities and attributed instructions.
 It contains at most 64 advertised Tools and 256 resource entries (including attributed instructions) across its servers;
@@ -19,7 +28,7 @@ public Tool names always contain a tuple-derived suffix: the ASCII-normalized
 the first 12 hexadecimal SHA-256 digits of the canonical JSON `(server, tool)`
 tuple. Names are at most 64 bytes and independent of catalog order or selection.
 Final collision detection rejects any duplicate identity. Raw names are retained
-independently for RPC calls. The manifest Domain uses codec version 2; older
+independently for RPC calls. The manifest Domain uses codec version 3; older
 codecs are explicitly unsupported, including saved empty manifests. Restoration
 never renames saved Tools or substitutes a current catalog.
 

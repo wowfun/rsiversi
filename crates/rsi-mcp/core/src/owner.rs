@@ -13,7 +13,10 @@ use rsi_settings_protocol::{
     ValidateWith,
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// Owner-local HTTP Settings namespace; stdio remains Local Profile configuration.
@@ -43,6 +46,8 @@ pub struct McpOwner {
     service: Arc<McpService>,
     settings: Arc<dyn SettingsScope>,
     stdio: Vec<ServerConfig>,
+    remote: Mutex<McpConfig>,
+    remote_pending: AtomicBool,
     applied: Mutex<Option<Value>>,
     refresh: Semaphore,
     stop: CancellationToken,
@@ -54,9 +59,11 @@ impl McpOwner {
     /// # Panics
     /// Panics if an earlier panic poisoned the owner state lock.
     pub fn settings_pending(&self) -> bool {
-        self.settings.get().map_or(true, |snapshot| {
-            self.applied.lock().expect("MCP settings poisoned").as_ref() != Some(&snapshot.value)
-        })
+        self.remote_pending.load(Ordering::Acquire)
+            || self.settings.get().map_or(true, |snapshot| {
+                self.applied.lock().expect("MCP settings poisoned").as_ref()
+                    != Some(&snapshot.value)
+            })
     }
     /// Reads actual bounded endpoint observations without endpoint addresses or launch paths.
     pub fn status(&self) -> Vec<ServerStatus> {
@@ -93,6 +100,79 @@ impl McpOwner {
     pub fn is_stdio(&self, id: &str) -> bool {
         self.stdio.iter().any(|server| server.id == id)
     }
+    /// Whether a server belongs to the separately authorized SSH configuration owner.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned configuration ownership.
+    pub fn is_ssh_stdio(&self, id: &str) -> bool {
+        self.remote
+            .lock()
+            .expect("MCP SSH configuration")
+            .servers
+            .iter()
+            .any(|server| server.id == id)
+    }
+    fn merged(&self, http: &Value, remote: &McpConfig) -> std::result::Result<McpConfig, McpError> {
+        remote.validate().map_err(|_| McpError::Protocol)?;
+        if remote
+            .servers
+            .iter()
+            .any(|server| !matches!(server.transport, TransportConfig::SshStdio { .. }))
+        {
+            return Err(McpError::Protocol);
+        }
+        let mut config = self::http(http).map_err(|_| McpError::Protocol)?;
+        config.servers.extend(self.stdio.clone());
+        config.servers.extend(remote.servers.clone());
+        config.servers.sort_by(|a, b| a.id.cmp(&b.id));
+        config.validate().map_err(|_| McpError::Protocol)?;
+        Ok(config)
+    }
+    /// Preflights the complete configuration before its product owner commits a document.
+    pub fn validate_remote_stdio(&self, config: &McpConfig) -> std::result::Result<(), McpError> {
+        self.merged(
+            &self.settings.get().map_err(|_| McpError::Protocol)?.value,
+            config,
+        )
+        .map(|_| ())
+    }
+    /// Applies already authorized durable SSH configuration without launching processes.
+    /// The product retains admission and reports durable success separately from apply failure.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned configuration ownership.
+    pub async fn set_remote_stdio(&self, remote: McpConfig) -> std::result::Result<(), McpError> {
+        let _permit = self
+            .refresh
+            .acquire()
+            .await
+            .map_err(|_| McpError::Disabled)?;
+        let snapshot = self.settings.get().map_err(|_| McpError::Protocol)?;
+        let config = self.merged(&snapshot.value, &remote)?;
+        let retirement = self.service.begin_configuration(config)?;
+        self.remote_pending.store(true, Ordering::Release);
+        *self.remote.lock().expect("MCP SSH configuration") = remote;
+        McpService::settle_configuration(retirement).await?;
+        *self.applied.lock().expect("MCP settings poisoned") = Some(snapshot.value);
+        self.remote_pending.store(false, Ordering::Release);
+        Ok(())
+    }
+    /// Refreshes one configured SSH server using current exact target authority.
+    pub async fn refresh_ssh(
+        &self,
+        id: &str,
+        execution: rsi_execution::ExecutionLease,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<(), McpError> {
+        let _permit = self.refresh.try_acquire().map_err(|_| McpError::Busy)?;
+        if !self.is_ssh_stdio(id) || self.settings_pending() {
+            return Err(McpError::CatalogChanged);
+        }
+        self.service
+            .refresh(id, Some(execution), cancellation)
+            .await
+            .map(|_| ())
+    }
     /// Applies saved HTTP settings and explicitly verifies selected endpoints.
     /// `None` refreshes HTTP endpoints; explicit stdio refresh requires a Local caller.
     pub async fn refresh(
@@ -110,10 +190,13 @@ impl McpOwner {
     ) -> std::result::Result<(), McpError> {
         let _permit = self.refresh.try_acquire().map_err(|_| McpError::Busy)?;
         let snapshot = self.settings.get().map_err(|_| McpError::Protocol)?;
-        let mut config = http(&snapshot.value).map_err(|_| McpError::Protocol)?;
-        config.servers.extend(self.stdio.clone());
-        config.servers.sort_by(|one, two| one.id.cmp(&two.id));
-        config.validate().map_err(|_| McpError::Protocol)?;
+        if id.is_some_and(|id| self.is_ssh_stdio(id)) {
+            return Err(McpError::ProcessUnavailable);
+        }
+        let config = self.merged(
+            &snapshot.value,
+            &self.remote.lock().expect("MCP SSH configuration"),
+        )?;
         if id.is_some_and(|id| {
             !config
                 .servers
@@ -128,7 +211,7 @@ impl McpOwner {
             .filter(|server| {
                 server.enabled
                     && id.map_or(
-                        all_stdio
+                        all_stdio && matches!(server.transport, TransportConfig::Stdio { .. })
                             || matches!(server.transport, TransportConfig::StreamableHttp { .. }),
                         |id| server.id == id,
                     )
@@ -137,12 +220,13 @@ impl McpOwner {
             .collect::<Vec<_>>();
         self.service.configure(config).await?;
         *self.applied.lock().expect("MCP settings poisoned") = Some(snapshot.value);
+        self.remote_pending.store(false, Ordering::Release);
         let mut failure = None;
         // Per-endpoint service work owns cancellation and retirement; all eight may progress independently.
         let results = futures_util::future::join_all(
             targets
                 .iter()
-                .map(|id| self.service.refresh(id, cancellation.child_token())),
+                .map(|id| self.service.refresh(id, None, cancellation.child_token())),
         )
         .await;
         for result in results {
@@ -213,6 +297,8 @@ impl PluginFactory for McpFactory {
             service: service.clone(),
             settings: registration.scope.clone(),
             stdio: stdio.servers,
+            remote: Mutex::new(McpConfig::default()),
+            remote_pending: AtomicBool::new(false),
             applied: Mutex::new(None),
             refresh: Semaphore::new(1),
             stop: CancellationToken::new(),

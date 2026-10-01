@@ -577,7 +577,7 @@ mod tests {
     };
 
     fn fold() -> (ContextFold, TurnId) {
-        let header = SessionHeader::new(
+        let header = SessionHeader::new_local(
             SessionId::new("session").unwrap(),
             1,
             "/workspace",

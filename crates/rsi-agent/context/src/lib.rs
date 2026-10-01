@@ -10,6 +10,7 @@ mod outcomes;
 mod pruning;
 pub use compaction::{PlannedCompaction, validate_summary_output};
 mod default_provider;
+mod emission;
 
 pub use builder::{
     ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
@@ -782,12 +783,19 @@ impl ContextFold {
         limits: ContextLimits,
         options: LanguageRequestOptions,
     ) -> Result<LanguageRequest> {
-        let limits = emission_limits(limits, &options)?;
-        let messages = self.project_view(limits, true)?.messages;
-        let messages = without_unscoped_provider_state(messages)?;
+        let messages = self.request_messages(limits, &options)?;
         // Projection proved the limits; removing provider-private blocks only shrinks it.
         LanguageRequest::new_with_options(messages, options)
             .map_err(|error| ContextError::Invalid(error.to_string()))
+    }
+
+    fn request_messages(
+        &self,
+        limits: ContextLimits,
+        options: &LanguageRequestOptions,
+    ) -> Result<Vec<Message>> {
+        let limits = emission_limits(limits, options)?;
+        without_unscoped_provider_state(self.project_view(limits, true)?.messages)
     }
 
     fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
