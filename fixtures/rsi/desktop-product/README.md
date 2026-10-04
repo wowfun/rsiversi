@@ -11,6 +11,9 @@ RSI paths and an empty configuration, then uses actual WebDriver input to config
 the deterministic provider, select a model, create a conversation and submit it.
 Button clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
+Workflow resource controls must be visible and enabled before dispatch. A
+completed run and a rendered result button can still coexist with a pending
+detail read, which temporarily disables the control.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
