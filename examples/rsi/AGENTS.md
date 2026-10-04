@@ -1,0 +1,3 @@
+- These tutorials demonstrate the standard RSI product. Keep schema, trust and lifecycle contracts in their owning crates and link to them from examples.
+- Install sample Skills only in an explicitly selected tutorial workspace; examples must not change the repository's global Skill catalog.
+- Workflow tutorials require explicit Node opt-in and an enforced read-only Session. Keep default verification keyless and isolated.

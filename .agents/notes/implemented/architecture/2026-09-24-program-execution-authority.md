@@ -115,7 +115,9 @@ Node by executing an approved Session workflow; configuration does not spawn a p
 The shared Session contribution supplies Web/Desktop/TUI control and read-only
 child history inspection. An interactive child pane and phase-child grouping are
 outside this surface: current durable ChildAdmitted records have no phase field,
-so showing the current phase as child membership would invent evidence.
+so showing the current phase as child membership would invent evidence. Tutorial
+Skills are installed per workspace and require an enforced read-only Session;
+prose restrictions alone cannot make parallel child collection read-only.
 
 ## Alternatives considered
 
