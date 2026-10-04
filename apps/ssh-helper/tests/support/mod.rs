@@ -11,7 +11,7 @@ use std::{
 
 pub struct Server {
     child: Child,
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     _authorized: tempfile::TempDir,
     endpoint: SshEndpoint,
     key: SshHostKey,
@@ -21,8 +21,35 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(destination) = std::env::var_os("RSI_TEST_SSH_LOG_DIR") {
+            let destination = PathBuf::from(destination);
+            if let Err(error) = preserve_log(self.directory.path(), &destination) {
+                eprintln!("Could not preserve SSH fixture log: {error}");
+            }
+        }
     }
 }
+fn preserve_log(directory: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("SSH fixture has no directory name"))?;
+    fs::copy(
+        directory.join("sshd.log"),
+        destination.join(name).with_extension("log"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn fixture_log_failure_is_reportable_without_panicking() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("not-a-directory");
+    fs::write(&destination, b"occupied").unwrap();
+    assert!(preserve_log(root.path(), &destination).is_err());
+    assert_eq!(fs::read(destination).unwrap(), b"occupied");
+}
+
 fn env_path(name: &str) -> PathBuf {
     std::env::var_os(name)
         .unwrap_or_else(|| panic!("explicit opt-in requires {name}"))
@@ -77,7 +104,7 @@ impl Server {
             endpoint: SshEndpoint::new("127.0.0.1", port, user).unwrap(),
             key: SshHostKey::parse(public(&host).trim()).unwrap(),
             identity,
-            _directory: directory,
+            directory,
             _authorized: authorized,
         };
         for _ in 0..200 {

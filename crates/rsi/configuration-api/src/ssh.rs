@@ -250,6 +250,8 @@ pub enum Failure {
     HelperUnavailable {},
     /// SSH initialization did not publish a connection.
     ConnectionFailed {},
+    /// Remote cache admission expired; this is not evidence of absent remote effects.
+    CacheContentionTimeout {},
 }
 /// Known domain outcome is distinct from transport uncertainty.
 pub type Reply<T> = Result<std::result::Result<T, Failure>>;

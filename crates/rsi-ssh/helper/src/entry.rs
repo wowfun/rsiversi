@@ -1,10 +1,21 @@
 use crate::{
-    ArtifactCache, ArtifactLease, ExecutionServer, HelperError, Result, SystemdWatchdog,
-    TransientUnit, lifecycle::runtime_directory, native::NativeRuntime, stdio::Port,
+    ArtifactCache, ArtifactLease, CacheError, ExecutionServer, HelperError, Result,
+    SystemdWatchdog, TransientUnit, WriterLockPolicy, lifecycle::runtime_directory,
+    native::NativeRuntime, stdio::Port,
 };
 use rsi_ssh_protocol::rpc::{Reply, Request};
 use rsi_ssh_transport::{Connection, Incoming, RequestKind, Role};
-use std::{ffi::OsString, time::Duration};
+use std::{
+    ffi::OsString,
+    time::{Duration, Instant},
+};
+
+fn cache_error(error: CacheError) -> HelperError {
+    match error {
+        CacheError::ContentionTimeout => HelperError::CacheContentionTimeout,
+        _ => HelperError::Unavailable,
+    }
+}
 
 /// Closed helper entry selection; all coordinates are checked before native work.
 #[derive(Debug)]
@@ -80,13 +91,17 @@ impl Invocation {
                 .map_err(|_| HelperError::Unavailable)?;
             let mut image = std::fs::File::open("/proc/self/exe").map_err(|_| HelperError::Io)?;
             cache
-                .publish(digest, &mut image)
-                .map_err(|_| HelperError::Unavailable)
+                .publish(
+                    digest,
+                    &mut image,
+                    WriterLockPolicy::WaitUntil(Instant::now() + Duration::from_secs(2)),
+                )
+                .map_err(cache_error)
         })
         .await
         .map_err(|_| HelperError::Io)??;
         let unit = TransientUnit::new(&self.service, self.epoch)?;
-        let mut command = unit.command(lease.path())?;
+        let mut command = unit.command(&lease.executable())?;
         command.args([
             "serve",
             &self.service,
@@ -103,6 +118,9 @@ impl Invocation {
             let status = child.wait().await.map_err(|_| HelperError::Io)?;
             if status.success() {
                 Ok(())
+            } else if status.code() == Some(i32::from(rsi_ssh_protocol::CACHE_CONTENTION_EXIT_CODE))
+            {
+                Err(HelperError::CacheContentionTimeout)
             } else {
                 Err(HelperError::Unavailable)
             }
@@ -114,12 +132,16 @@ impl Invocation {
         let service = self.service.clone();
         let digest = self.digest;
         let lease: ArtifactLease = tokio::task::spawn_blocking(move || {
-            ArtifactCache::open(&runtime_directory(), &service)
-                .and_then(|cache| cache.acquire(digest))
+            ArtifactCache::open(&runtime_directory(), &service).and_then(|cache| {
+                cache.acquire(
+                    digest,
+                    WriterLockPolicy::WaitUntil(Instant::now() + Duration::from_secs(2)),
+                )
+            })
         })
         .await
         .map_err(|_| HelperError::Io)?
-        .map_err(|_| HelperError::Unavailable)?;
+        .map_err(cache_error)?;
         let unit = TransientUnit::new(&self.service, self.epoch)?;
         let watchdog = SystemdWatchdog::verify(&unit).await?;
         let native = NativeRuntime::new().await?;

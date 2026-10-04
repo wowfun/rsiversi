@@ -11,6 +11,7 @@ name = "rsi-ssh-helper"
 path = "src/main.rs"
 
 [dependencies]
+rsi-ssh-protocol = { path = "../../crates/rsi-ssh/protocol" }
 rsi-directory-picker = { path = "../../crates/rsi/directory-picker" }
 rsi-agent-workspace-context = { path = "../../crates/rsi-agent/workspace-context" }
 rsi-apply-patch = { path = "../../crates/rsi-apply-patch/core" }

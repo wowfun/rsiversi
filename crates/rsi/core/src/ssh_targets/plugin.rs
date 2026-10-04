@@ -66,6 +66,7 @@ impl PluginFactory for Factory {
             configuration: plan.local::<rsi_configuration_access::ConfigurationAccessContract>()?,
             epoch: description.host_epoch.clone(),
             service: description.endpoint_id.as_str().into(),
+            artifact: tokio::sync::OnceCell::new(),
             state: Mutex::new(State {
                 closed: false,
                 records,

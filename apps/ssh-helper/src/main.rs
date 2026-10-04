@@ -21,7 +21,11 @@ async fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("SSH helper: {error}");
-            std::process::ExitCode::FAILURE
+            if error == rsi_ssh_helper::HelperError::CacheContentionTimeout {
+                std::process::ExitCode::from(rsi_ssh_protocol::CACHE_CONTENTION_EXIT_CODE)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
         }
     }
 }

@@ -88,6 +88,7 @@ pub(crate) struct Manager {
     configuration: Arc<rsi_configuration_access::ConfigurationAccess>,
     epoch: HostEpoch,
     service: String,
+    artifact: tokio::sync::OnceCell<rsi_ssh_client::HelperArtifact>,
     state: Mutex<State>,
     writer: Arc<Semaphore>,
     target_writers: TargetWriters,
@@ -426,7 +427,7 @@ impl Manager {
         )
         .map_err(|_| ApiError::Unavailable)?;
         drop(identity);
-        let Ok(artifact) = artifact::installed().await else {
+        let Ok(artifact) = self.artifact.get_or_try_init(artifact::installed).await else {
             return Ok(Err(wire::Failure::HelperUnavailable {}));
         };
         let (epoch, previous) = {
@@ -445,7 +446,7 @@ impl Manager {
         let connected = match rsi_ssh_client::connect(
             prepared,
             std::path::Path::new("/usr/bin/ssh"),
-            artifact,
+            artifact.clone(),
             &self.service,
             epoch,
             target_programs(),
@@ -453,6 +454,9 @@ impl Manager {
         .await
         {
             Ok(value) => Arc::new(value),
+            Err(rsi_ssh_client::SshClientError::CacheContentionTimeout) => {
+                return Ok(Err(wire::Failure::CacheContentionTimeout {}));
+            }
             Err(_) => return Ok(Err(wire::Failure::ConnectionFailed {})),
         };
         let provider = rsi_ssh_client::execution_provider(

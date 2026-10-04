@@ -167,6 +167,9 @@ fn failure(value: wire::Failure) -> &'static str {
         wire::Failure::ConnectionFailed {} => {
             "SSH initialization failed; check target trust and runtime prerequisites"
         }
+        wire::Failure::CacheContentionTimeout {} => {
+            "SSH helper cache is contended; retry explicitly after other startup work finishes"
+        }
     }
 }
 

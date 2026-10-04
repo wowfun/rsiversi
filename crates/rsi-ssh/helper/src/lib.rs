@@ -16,7 +16,7 @@ mod server;
 #[cfg(target_os = "linux")]
 mod stdio;
 #[cfg(target_os = "linux")]
-pub use cache::{ArtifactCache, ArtifactLease, CacheError};
+pub use cache::{ArtifactCache, ArtifactLease, CacheError, WriterLockPolicy};
 #[cfg(target_os = "linux")]
 pub use entry::Invocation;
 #[cfg(target_os = "linux")]
@@ -27,6 +27,9 @@ pub use server::ExecutionServer;
 /// Closed lifecycle failures without including target environment contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum HelperError {
+    /// The remote cache writer did not admit startup within its deadline.
+    #[error("SSH helper cache contention deadline exceeded")]
+    CacheContentionTimeout,
     /// An external launch coordinate or manager reply is malformed.
     #[error("invalid SSH helper lifecycle input")]
     Invalid,

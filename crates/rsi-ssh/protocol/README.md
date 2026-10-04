@@ -56,3 +56,7 @@ Preparation carries an explicit source-reader choice, valid only for ReadOnly
 pipes. This selects the pinned Sandbox view; a program name or marker does not
 implicitly change confinement. The reply's enforcement evidence must confirm
 read-only Host scratch and isolated networking.
+
+`CACHE_CONTENTION_EXIT_CODE` is the shared process-exit contract for refused
+cache-writer admission. Clients classify it only after the child is reaped;
+other startup failures do not imply contention or authorize replay.

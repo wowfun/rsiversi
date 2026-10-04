@@ -60,12 +60,19 @@ Bootstrap accepts a bounded locally verified same-CPU Linux helper artifact and 
 fixed command containing only validated hexadecimal identifiers and decimal bounds.
 It uploads exactly the declared byte length into a private target runtime staging
 directory, verifies SHA-256 before execution, then invokes the cache installer.
+An observed SSH exit code 75 during initialization reports CacheContentionTimeout.
+Signals, other codes and missing exit status remain general initialization failures.
+Reaping success is recorded separately from the exit status. This diagnostic never
+permits automatic replay of bootstrap or an accepted remote unit.
 The shell removes only its own staging directory. No forwarded sockets, ambient
 SSH configuration, user-provided shell fragment or automatic replay participates.
 Connect publication is retained independently of its waiter; unpublished owners
 close and reap. Stderr is drained with a fixed budget and never exposed as an error
 containing identities or server-supplied text. Bootstrap and initialization have a
-45-second deadline. Only the target's advertised digest completes initialization.
+45-second deadline. Startup failure classification waits at most five seconds
+for the supervisor's reap receipt, preserving the original error without that
+evidence. The supervisor retains child cleanup ownership after this wait expires;
+only an actual reaped contention exit can change the classification. Only the target's advertised digest completes initialization.
 
 The Files proxy records the exact opaque caller/binding with each remote token.
 Foreign bindings reject before a request is sent. Open publication retains cleanup

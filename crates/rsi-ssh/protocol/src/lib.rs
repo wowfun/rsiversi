@@ -15,6 +15,9 @@ use base64::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Helper startup refused bounded cache-writer admission before bootstrap.
+pub const CACHE_CONTENTION_EXIT_CODE: u8 = 75;
+
 /// Invalid external connection data, without echoing its contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SshInputError {

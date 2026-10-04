@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 const MAXIMUM_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
+const STARTUP_REAP_DEADLINE: Duration = Duration::from_secs(5);
+type Reaped = Option<std::result::Result<std::process::ExitStatus, ()>>;
 
 /// Verified same-CPU Linux image whose bytes cannot change during deployment.
 #[derive(Clone)]
@@ -127,7 +129,7 @@ impl ConnectedSsh {
 pub(crate) struct Lifetime {
     connection: Connection,
     stop: CancellationToken,
-    reaped: tokio::sync::watch::Receiver<Option<bool>>,
+    reaped: tokio::sync::watch::Receiver<Reaped>,
 }
 impl Lifetime {
     fn close(&self) {
@@ -137,8 +139,8 @@ impl Lifetime {
     async fn join(&self) -> Result<()> {
         let mut reaped = self.reaped.clone();
         loop {
-            if let Some(ok) = *reaped.borrow_and_update() {
-                return if ok { Ok(()) } else { Err(SshClientError::Io) };
+            if let Some(result) = *reaped.borrow_and_update() {
+                return result.map(|_| ()).map_err(|()| SshClientError::Io);
             }
             reaped.changed().await.map_err(|_| SshClientError::Io)?;
         }
@@ -209,12 +211,18 @@ async fn establish(
     let mut guard = CancelOnDrop(Some(stop.clone()));
     let (send, reaped) = tokio::sync::watch::channel(None);
     tokio::spawn(supervise(prepared, child, errors, stop.clone(), send));
-    tokio::select! {
-        () = stop.cancelled() => return Err(SshClientError::Initialization),
-        result = input.write_all(&artifact.bytes) => result.map_err(|_| SshClientError::Io)?,
+    let uploaded = tokio::select! {
+        () = stop.cancelled() => Err(SshClientError::Initialization),
+        result = input.write_all(&artifact.bytes) => result.map_err(|_| SshClientError::Io),
+    };
+    if let Err(error) = uploaded {
+        drop(input);
+        drop(output);
+        return Err(startup_failure(&stop, &reaped, error).await);
     }
-    let (connection, _) = Connection::start(output, input, Role::Client, epoch)
-        .map_err(|_| SshClientError::Initialization)?;
+    let Ok((connection, _)) = Connection::start(output, input, Role::Client, epoch) else {
+        return Err(startup_failure(&stop, &reaped, SshClientError::Initialization).await);
+    };
     let lifetime = Arc::new(Lifetime {
         connection: connection.clone(),
         stop: stop.clone(),
@@ -222,10 +230,15 @@ async fn establish(
     });
     tokio::spawn(heartbeat(connection.clone(), stop));
     let client = ProcessConnection::managed(connection, lifetime.clone());
-    let unavailable = client
-        .initialize(configuration, &artifact.digest)
-        .await
-        .map_err(|_| SshClientError::Initialization)?;
+    let Ok(unavailable) = client.initialize(configuration, &artifact.digest).await else {
+        lifetime.close();
+        return Err(startup_failure(
+            &lifetime.stop,
+            &lifetime.reaped,
+            SshClientError::Initialization,
+        )
+        .await);
+    };
     // Ownership transfers to Lifetime only after the handshake succeeds.
     guard.0.take();
     Ok(ConnectedSsh {
@@ -239,7 +252,7 @@ async fn supervise(
     mut child: tokio::process::Child,
     errors: tokio::process::ChildStderr,
     stop: CancellationToken,
-    reaped: tokio::sync::watch::Sender<Option<bool>>,
+    reaped: tokio::sync::watch::Sender<Reaped>,
 ) {
     let mut drain = tokio::spawn(drain_errors(errors, stop.clone()));
     let result = tokio::select! {
@@ -258,7 +271,33 @@ async fn supervise(
         drain.abort();
         let _ = drain.await;
     }
-    reaped.send_replace(Some(result.is_ok()));
+    reaped.send_replace(Some(result.map_err(|_| ())));
+}
+async fn startup_failure(
+    stop: &CancellationToken,
+    reaped: &tokio::sync::watch::Receiver<Reaped>,
+    fallback: SshClientError,
+) -> SshClientError {
+    stop.cancel();
+    let mut reaped = reaped.clone();
+    let deadline = tokio::time::Instant::now() + STARTUP_REAP_DEADLINE;
+    loop {
+        if let Some(result) = *reaped.borrow_and_update() {
+            return if result.is_ok_and(|status| {
+                status.code() == Some(i32::from(rsi_ssh_protocol::CACHE_CONTENTION_EXIT_CODE))
+            }) {
+                SshClientError::CacheContentionTimeout
+            } else {
+                fallback
+            };
+        }
+        if !matches!(
+            tokio::time::timeout_at(deadline, reaped.changed()).await,
+            Ok(Ok(()))
+        ) {
+            return fallback;
+        }
+    }
 }
 async fn drain_errors(mut errors: tokio::process::ChildStderr, stop: CancellationToken) {
     let mut buffer = [0u8; 4096];
@@ -335,6 +374,48 @@ printf '%s  %s\n' '{digest}' "$stage/helper" | /usr/bin/sha256sum --status -c -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn missing_reap_evidence_returns_the_original_failure_within_local_deadline() {
+        let (_sender, reaped) = tokio::sync::watch::channel(None);
+        let stop = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            startup_failure(&stop, &reaped, SshClientError::Initialization),
+        )
+        .await
+        .expect("startup classification must not wait indefinitely for a reap receipt");
+        assert!(matches!(result, SshClientError::Initialization));
+        assert!(stop.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_reaped_exit_75_is_cache_contention_and_other_failures_are_not_replayed() {
+        for (script, contention) in [
+            ("exit 75", true),
+            ("exit 255", false),
+            ("kill -TERM $$", false),
+        ] {
+            let status = tokio::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .status()
+                .await
+                .unwrap();
+            let (_sender, reaped) = tokio::sync::watch::channel(Some(Ok(status)));
+            let stop = CancellationToken::new();
+            let result = startup_failure(&stop, &reaped, SshClientError::Initialization).await;
+            assert!(stop.is_cancelled());
+            assert_eq!(
+                matches!(result, SshClientError::CacheContentionTimeout),
+                contention
+            );
+        }
+        let (_sender, reaped) = tokio::sync::watch::channel(Some(Err(())));
+        assert!(matches!(
+            startup_failure(&CancellationToken::new(), &reaped, SshClientError::Io).await,
+            SshClientError::Io
+        ));
+    }
     #[test]
     fn bootstrap_rejects_shell_syntax_and_places_verification_before_execution() {
         assert!(bootstrap("$(touch /tmp/unsafe)", 1, [0; 32], 64).is_err());

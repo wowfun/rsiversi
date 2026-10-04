@@ -24,3 +24,7 @@ helper. The fixture uses the installed sshd's normal subprocess paths by default
 `RSI_TEST_SSH_SESSION` and `RSI_TEST_SSH_AUTH` select explicit subprocess paths
 only when using an extracted newer OpenSSH package. No developer SSH settings or
 keys are read. The aggregate CI contract requires this job.
+The cache-contention scenario observes the native SSH launch before cancelling
+its waiter, checks cleanup of every later successful epoch, and corrupts an
+inactive image in its own private namespace to verify recovery through a fresh
+upload and the actual installer.

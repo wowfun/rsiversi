@@ -247,3 +247,203 @@ async fn saturated_terminal(client: &ProcessConnection, workspace: &Path) {
     let _ = bounded(terminal.wait()).await;
     drop(terminal);
 }
+
+#[tokio::test]
+#[ignore = "requires explicit isolated sshd, musl helper and Linux user systemd"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one isolated SSH namespace covers concurrent refusal, caller loss and later independent epochs"
+)]
+async fn concurrent_ssh_cache_contention_is_typed_and_cancelled_startup_is_not_replayed() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        process::Stdio,
+    };
+    let server = support::Server::new();
+    let image = artifact().await;
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).unwrap();
+    let service = hex::encode(random);
+    let uid = std::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .unwrap();
+    assert!(uid.status.success());
+    let uid = String::from_utf8(uid.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let runtime = std::path::PathBuf::from(format!("/run/user/{uid}"));
+    let cache = rsi_ssh_helper::ArtifactCache::open(&runtime, &service).unwrap();
+    cache
+        .collect(rsi_ssh_helper::WriterLockPolicy::Immediate)
+        .unwrap();
+    let writer = runtime.join("rsi-ssh").join(&service).join("writer.lock");
+    let mut locked = std::process::Command::new("/usr/bin/flock")
+        .arg(&writer)
+        .args(["/bin/sh", "-c", "printf 'ready\\n'; read ignored"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    BufReader::new(locked.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let started = Instant::now();
+    let (first, second) = tokio::join!(
+        bounded(rsi_ssh_client::connect(
+            server.prepare(),
+            Path::new("/usr/bin/ssh"),
+            image.clone(),
+            &service,
+            1,
+            configuration()
+        )),
+        bounded(rsi_ssh_client::connect(
+            server.prepare(),
+            Path::new("/usr/bin/ssh"),
+            image.clone(),
+            &service,
+            2,
+            configuration()
+        ))
+    );
+    assert!(
+        matches!(
+            first,
+            Err(rsi_ssh_client::SshClientError::CacheContentionTimeout)
+        ),
+        "{first:?}"
+    );
+    assert!(
+        matches!(
+            second,
+            Err(rsi_ssh_client::SshClientError::CacheContentionTimeout)
+        ),
+        "{second:?}"
+    );
+    assert!(unit_absent(&service, 1) && unit_absent(&service, 2));
+    println!("contention_pair_ms={}", started.elapsed().as_millis());
+    let prepared = server.prepare();
+    let path = prepared.directory().to_path_buf();
+    let launch = tempfile::tempdir().unwrap();
+    let executable = launch.path().join("ssh");
+    std::fs::write(
+        &executable,
+        b"#!/bin/sh\nprintf 'started\\n' >> \"$0.started\"\nexec /usr/bin/ssh \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let started_path = launch.path().join("ssh.started");
+    let pending_image = image.clone();
+    let pending_service = service.clone();
+    let pending = tokio::spawn(async move {
+        rsi_ssh_client::connect(
+            prepared,
+            &executable,
+            pending_image,
+            &pending_service,
+            3,
+            configuration(),
+        )
+        .await
+    });
+    bounded(async {
+        while !started_path.exists() {
+            assert!(
+                !pending.is_finished(),
+                "startup ended before the native launch barrier"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    await_absent(&service, 3, &path).await;
+    assert_eq!(std::fs::read_to_string(&started_path).unwrap(), "started\n");
+    locked
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(locked.wait().unwrap().success());
+    let first_prepared = server.prepare();
+    let first_path = first_prepared.directory().to_path_buf();
+    let second_prepared = server.prepare();
+    let second_path = second_prepared.directory().to_path_buf();
+    let started = Instant::now();
+    let (first, second) = tokio::join!(
+        bounded(rsi_ssh_client::connect(
+            first_prepared,
+            Path::new("/usr/bin/ssh"),
+            image.clone(),
+            &service,
+            4,
+            configuration()
+        )),
+        bounded(rsi_ssh_client::connect(
+            second_prepared,
+            Path::new("/usr/bin/ssh"),
+            image.clone(),
+            &service,
+            5,
+            configuration()
+        ))
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    println!("uncontended_pair_ms={}", started.elapsed().as_millis());
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+    await_absent(&service, 4, &first_path).await;
+    await_absent(&service, 5, &second_path).await;
+    assert_eq!(std::fs::read_to_string(&started_path).unwrap(), "started\n");
+    let installed = runtime
+        .join("rsi-ssh")
+        .join(&service)
+        .join(hex::encode(image.digest()));
+    let inode = std::fs::metadata(&installed).unwrap().ino();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&installed, b"corrupt inactive helper").unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(matches!(
+        cache.acquire(image.digest(), rsi_ssh_helper::WriterLockPolicy::Immediate),
+        Err(rsi_ssh_helper::CacheError::Digest)
+    ));
+    let repaired_prepared = server.prepare();
+    let repaired_path = repaired_prepared.directory().to_path_buf();
+    let repaired = bounded(rsi_ssh_client::connect(
+        repaired_prepared,
+        Path::new("/usr/bin/ssh"),
+        image.clone(),
+        &service,
+        6,
+        configuration(),
+    ))
+    .await
+    .unwrap();
+    let lease = cache
+        .acquire(image.digest(), rsi_ssh_helper::WriterLockPolicy::Immediate)
+        .unwrap();
+    assert_ne!(std::fs::metadata(lease.path()).unwrap().ino(), inode);
+    assert_eq!(
+        std::fs::metadata(lease.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o500
+    );
+    drop(lease);
+    repaired.shutdown().await.unwrap();
+    await_absent(&service, 6, &repaired_path).await;
+    println!(
+        "actual_installer_digest_repair=true; successful_epochs_reaped=4,5,6; cancelled_native_launches=1"
+    );
+}

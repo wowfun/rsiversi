@@ -82,6 +82,12 @@ of connect publication. Process clients and accepted work retain the connection;
 heartbeat and reaper tasks hold no authority-owning reference back to that lifetime.
 This prevents a background task cycle from keeping an abandoned connection alive.
 
+The product manager caches successful receipt verification once per service
+generation, retaining the verified immutable bytes rather than rereading a path
+on every connection. Replacing or removing the installed family does not revoke
+those bytes; adopting another family requires service restart. Failed verification
+is never cached, and live target grants remain independently checked.
+
 The cache uses a persistent writer inode and independently opened artifact leases.
 Lock guards explicitly unlock when their owner finishes; CLOEXEC alone does not
 prevent an unrelated concurrent fork from temporarily retaining the open file
@@ -89,6 +95,21 @@ description. This follows the same ownership issue already handled by the produc
 `writer_lock.rs`. Publication order uses bounded atomic metadata rather than mtime,
 so wall-clock changes cannot choose the two retained versions. Unknown filesystem
 types, including overlay whose backing store locality is not established, fail closed.
+Publication retains the shared artifact lease while hashing outside the writer
+lock, so independent publishers and collection can proceed. New or repaired bytes are
+digest-verified by staging before artifact collection; a healthy cache hit verifies
+the retained inode and leaves its input untouched for possible repair. Recording publication order in the same writer
+section as rename avoids exposing pending publishers as unindexed orphans: a
+second writer could otherwise import and reorder them during reconciliation.
+Execution resolves the live launcher's procfs descriptor, not the cache pathname,
+so a directory replacement after verification cannot redirect the unit. The launcher
+retains that descriptor through systemd-run settlement.
+The final leased-inode verification still precedes returning executable authority;
+failure there can follow cache mutation and does not authorize whole-SSH replay.
+Digest corruption can be repaired from a subsequent verified upload under an
+exclusive inactive-inode lease. Replacing a live inode would invalidate retained
+executable authority, so that case still refuses; unsafe shapes require operator
+cleanup after all helper owners stop. The repair never retries accepted Tool work.
 
 A candidate reserves a caller-selected random identity with revision CAS, so a lost
 create response cannot allocate another target on retry. Candidate submission

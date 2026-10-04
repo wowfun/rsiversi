@@ -59,27 +59,59 @@ a recognized local filesystem (tmpfs, ext, XFS or Btrfs). Unknown filesystems,
 network mounts and overlay mounts fail closed; an overlay type alone does not prove
 its backing store is local. Cache directories are private and separated by Service
 namespace. Each artifact is at most 128 MiB, named by its SHA-256, published by an
-atomic no-replace rename, and stored as a single-link 0500 regular file.
+initial atomic no-replace rename, and stored as a single-link 0500 regular file.
 Mount policy is checked on the runtime root, family directory and actual Service
 cache directory; a nested mount cannot inherit approval from its parent filesystem.
 
-One persistent writer-lock inode serializes publication, lease acquisition and GC.
-Contending operations return Busy before publication. Each acquisition opens its
+One persistent writer-lock inode serializes cache mutation, lease acquisition and GC.
+Callers select immediate admission or an absolute writer-lock deadline. Only writer
+flock contention waits; the deadline is never refreshed. Native install and serve
+each allow two seconds, backing off from one to at most fifty milliseconds.
+Artifact-lease contention can occur after publication and is not replayable.
+Writer timeout is reported as CacheContentionTimeout, including helper exit code
+75 through the launcher. That diagnostic does not establish absence of remote effects.
+Each acquisition opens its
 own lock description; cloned descriptors do not accidentally share lock ownership.
 Owned lock guards explicitly unlock at completion, so unrelated concurrent forks
 cannot extend an operation merely by briefly inheriting its CLOEXEC descriptor.
-Artifacts themselves carry shared advisory leases. GC can unlink one only while
+Artifacts themselves carry shared advisory leases. Acquisition and publication take
+the shared inode lease under the writer and release the writer before hashing;
+no unverified lease or pathname is returned. Staging checks the complete incoming
+digest before rename. Publication records its order and opens the shared lease in
+that same writer critical section, then hashes the leased inode after releasing
+the writer. Other publishers and GC can progress during this final verification
+without treating an in-flight publication as an orphan or deleting its inode.
+A final verification failure can follow committed cache mutation; it does not
+establish absence of publication effects. Publishing again with correct bytes
+repairs a digest-mismatched regular artifact: after verification fails, one new
+writer admission and an exclusive artifact lease permit a verified staged image
+to atomically replace the inactive inode. A live shared lease refuses replacement;
+the writer deadline is not refreshed and the incoming image is not replayed.
+Unsafe file shapes or unknown entries fail closed rather than being automatically
+deleted. An operator must stop the Service's helper units and release its leases
+before removing that private cache namespace and reconnecting.
+GC can unlink one only while
 holding both the writer lock and an exclusive artifact lock. The writer lock is
 never unlinked, and live artifact inodes are never replaced or unlinked.
 Every operation also verifies the current cache pathname still names its pinned
-directory before acquiring a writer or issuing an executable pathname.
+directory before acquiring a writer or issuing a lease. The cache pathname is diagnostic data;
+execution uses the live launcher's `/proc/<pid>/fd/<fd>` path to the verified inode,
+retained until the systemd-run child settles. Directory replacement cannot redirect
+that execution. The local kernel, procfs and target account remain trusted.
 
-A bounded atomic state file records publication order, independently of wall-clock
+A healthy cache hit verifies the cached inode without consuming incoming bytes;
+input is staged and digest-verified only for installation or inactive repair.
+Staging failure precedes artifact collection. Publication is not a transaction:
+later native failures can leave synchronized cache or metadata changes.
+A bounded atomic state file records the latest publication order, including reuse
+of an existing version, independently of wall-clock
 changes. GC retains active artifacts and the newest two known versions. Interrupted
 publication can leave an immutable unindexed artifact; it is treated as older than
 recorded publications, while its live lease still prevents deletion. Interrupted GC
 may leave missing names in the state file; the next writer reconciles them. Malformed
-metadata is rejected. There are at most 32 artifacts per Service; a full set of live
+metadata is rejected. Unchanged metadata is not rewritten; artifact publication
+and collection retain their file and directory synchronization barriers.
+There are at most 32 artifacts per Service; a full set of live
 leases prevents new publication. Staging files have fixed bounded names and are
 cleaned only under the writer lock.
 
@@ -132,7 +164,8 @@ other open files. No request opens a Service-side path.
 
 The application accepts only install/launch and serve modes with a fixed Service
 namespace, epoch and artifact digest. Install/launch hashes its own image into the
-private cache and retains its artifact lease through the systemd-run child. Serve
+private cache and retains its artifact lease through the systemd-run child. The unit
+executes through that lease's pinned descriptor. Serve
 acquires an independent cache lease before accepting execution, verifies systemd,
 and probes Bubblewrap plus the actual restricted PTY/openat2 path before READY.
 The helper owns binary stdin/stdout exclusively. Native nonblocking descriptor

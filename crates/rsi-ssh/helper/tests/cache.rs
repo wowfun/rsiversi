@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use rsi_ssh_helper::{ArtifactCache, CacheError};
+use rsi_ssh_helper::{ArtifactCache, CacheError, WriterLockPolicy};
 use sha2::{Digest, Sha256};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -26,7 +26,60 @@ fn artifact(index: u8) -> (Vec<u8>, [u8; 32]) {
 }
 fn publish(cache: &ArtifactCache, index: u8) -> rsi_ssh_helper::ArtifactLease {
     let (bytes, digest) = artifact(index);
-    cache.publish(digest, &mut bytes.as_slice()).unwrap()
+    cache
+        .publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate)
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires native Linux flock and a local executable filesystem"]
+fn native_republication_repairs_corruption_without_replacing_a_live_inode() {
+    for live in [false, true] {
+        let (_runtime, cache) = fixture();
+        let lease = publish(&cache, 1);
+        let path = lease.path().to_owned();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let retained = live.then_some(lease);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"corrupted cached image").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (bytes, digest) = artifact(1);
+        assert!(matches!(
+            cache.acquire(digest, WriterLockPolicy::Immediate),
+            Err(CacheError::Digest)
+        ));
+        if live {
+            assert!(matches!(
+                cache.publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate),
+                Err(CacheError::Busy)
+            ));
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        }
+        drop(retained);
+        assert!(matches!(
+            cache.publish(
+                digest,
+                &mut b"wrong image".as_slice(),
+                WriterLockPolicy::Immediate
+            ),
+            Err(CacheError::Digest)
+        ));
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        let repaired = cache
+            .publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate)
+            .unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(repaired.path()).unwrap(), bytes);
+        let output = std::process::Command::new(repaired.executable())
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"artifact-1\n");
+        drop(repaired);
+        drop(cache.acquire(digest, WriterLockPolicy::Immediate).unwrap());
+        cache.collect(WriterLockPolicy::Immediate).unwrap();
+    }
 }
 
 #[test]
@@ -37,27 +90,41 @@ fn native_continuous_handoff_retains_live_versions_and_executes_immutable_bytes(
     let first = launcher.path().to_owned();
     let inode = std::fs::metadata(&first).unwrap().ino();
     let helper_cache = ArtifactCache::open(runtime.path(), SERVICE).unwrap();
-    let helper = helper_cache.acquire(*launcher.digest()).unwrap();
+    let helper = helper_cache
+        .acquire(*launcher.digest(), WriterLockPolicy::Immediate)
+        .unwrap();
     drop(launcher);
     drop(publish(&cache, 2));
     drop(publish(&cache, 3));
     drop(publish(&cache, 4));
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert!(first.exists());
     assert_eq!(std::fs::metadata(&first).unwrap().ino(), inode);
     assert_eq!(std::fs::metadata(&first).unwrap().mode() & 0o7777, 0o500);
-    let output = std::process::Command::new(helper.path())
+    let output = std::process::Command::new(helper.executable())
         .env_clear()
         .output()
         .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"artifact-1\n");
-    assert!(cache.acquire(artifact(2).1).is_err());
+    assert!(
+        cache
+            .acquire(artifact(2).1, WriterLockPolicy::Immediate)
+            .is_err()
+    );
     drop(helper);
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert!(!first.exists());
-    assert!(cache.acquire(artifact(3).1).is_ok());
-    assert!(cache.acquire(artifact(4).1).is_ok());
+    assert!(
+        cache
+            .acquire(artifact(3).1, WriterLockPolicy::Immediate)
+            .is_ok()
+    );
+    assert!(
+        cache
+            .acquire(artifact(4).1, WriterLockPolicy::Immediate)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -86,11 +153,11 @@ fn native_independent_process_lease_blocks_gc_and_writer_inode_is_never_replaced
     drop(launcher);
     drop(publish(&cache, 2));
     drop(publish(&cache, 3));
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert!(first.exists());
     child.stdin.take().unwrap().write_all(b"done\n").unwrap();
     assert!(child.wait().unwrap().success());
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert!(!first.exists());
     assert_eq!(std::fs::metadata(&writer).unwrap().ino(), writer_inode);
 
@@ -104,16 +171,26 @@ fn native_independent_process_lease_blocks_gc_and_writer_inode_is_never_replaced
         rustix::fs::FlockOperation::NonBlockingLockExclusive,
     )
     .unwrap();
-    assert_eq!(cache.collect(), Err(CacheError::Busy));
+    assert_eq!(
+        cache.collect(WriterLockPolicy::Immediate),
+        Err(CacheError::Busy)
+    );
     assert_eq!(
         cache
-            .publish(artifact(4).1, &mut artifact(4).0.as_slice())
+            .publish(
+                artifact(4).1,
+                &mut artifact(4).0.as_slice(),
+                WriterLockPolicy::Immediate
+            )
             .unwrap_err(),
         CacheError::Busy
     );
+    let inherited = locked.try_clone().unwrap();
+    rustix::fs::flock(&locked, rustix::fs::FlockOperation::Unlock).unwrap();
     drop(locked);
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert_eq!(std::fs::metadata(&writer).unwrap().ino(), writer_inode);
+    drop(inherited);
 }
 
 #[test]
@@ -122,17 +199,25 @@ fn native_failed_digest_and_interrupted_metadata_reconcile_without_cross_service
     let (runtime, cache) = fixture();
     assert_eq!(
         cache
-            .publish(artifact(1).1, &mut b"bad".as_slice())
+            .publish(
+                artifact(1).1,
+                &mut b"bad".as_slice(),
+                WriterLockPolicy::Immediate
+            )
             .unwrap_err(),
         CacheError::Digest
     );
-    assert!(cache.acquire(artifact(1).1).is_err());
+    assert!(
+        cache
+            .acquire(artifact(1).1, WriterLockPolicy::Immediate)
+            .is_err()
+    );
     let first = publish(&cache, 1);
     let first_path = first.path().to_owned();
     let state = first_path.parent().unwrap().join("state.json");
     // A crash after artifact rename but before metadata publication leaves an orphan.
     std::fs::remove_file(&state).unwrap();
-    cache.collect().unwrap();
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
     assert!(first.path().exists());
     let other = ArtifactCache::open(runtime.path(), &"4".repeat(32)).unwrap();
     let other_lease = publish(&other, 1);
@@ -143,14 +228,23 @@ fn native_failed_digest_and_interrupted_metadata_reconcile_without_cross_service
     assert!(other_lease.path().exists());
     assert_ne!(other_lease.path().parent(), first_path.parent());
     // A crash after an old unlink but before metadata rename leaves a missing name.
-    let old = cache.acquire(artifact(2).1).unwrap();
+    let old = cache
+        .acquire(artifact(2).1, WriterLockPolicy::Immediate)
+        .unwrap();
     let missing = old.path().to_owned();
     drop(old);
     std::fs::remove_file(missing).unwrap();
-    cache.collect().unwrap();
-    assert!(cache.acquire(artifact(3).1).is_ok());
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
+    assert!(
+        cache
+            .acquire(artifact(3).1, WriterLockPolicy::Immediate)
+            .is_ok()
+    );
     std::fs::write(state, br#"{"newest":["../outside"]}"#).unwrap();
-    assert_eq!(cache.collect(), Err(CacheError::Invalid));
+    assert_eq!(
+        cache.collect(WriterLockPolicy::Immediate),
+        Err(CacheError::Invalid)
+    );
     assert!(other_lease.path().exists());
 }
 
@@ -170,13 +264,17 @@ fn native_symlinks_hardlinks_unsafe_modes_and_noexec_roots_are_rejected() {
     let linked = path.parent().unwrap().join("unexpected");
     std::fs::hard_link(&path, &linked).unwrap();
     assert_eq!(
-        cache.acquire(*lease.digest()).unwrap_err(),
+        cache
+            .acquire(*lease.digest(), WriterLockPolicy::Immediate)
+            .unwrap_err(),
         CacheError::Unsafe
     );
     std::fs::remove_file(linked).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
-        cache.acquire(*lease.digest()).unwrap_err(),
+        cache
+            .acquire(*lease.digest(), WriterLockPolicy::Immediate)
+            .unwrap_err(),
         CacheError::Unsafe
     );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
@@ -226,15 +324,21 @@ fn native_publication_capacity_cannot_evict_live_helpers() {
         .collect::<Vec<_>>();
     let (bytes, digest) = artifact(32);
     assert_eq!(
-        cache.publish(digest, &mut bytes.as_slice()).unwrap_err(),
+        cache
+            .publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate)
+            .unwrap_err(),
         CacheError::Capacity
     );
     for lease in &live {
         assert!(lease.path().exists());
     }
     drop(live);
-    cache.collect().unwrap();
-    assert!(cache.publish(digest, &mut bytes.as_slice()).is_ok());
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
+    assert!(
+        cache
+            .publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -247,7 +351,9 @@ fn native_digest_tampering_and_replaced_directory_cannot_issue_a_lease() {
     std::fs::write(&path, b"changed bytes").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
     assert_eq!(
-        cache.acquire(*lease.digest()).unwrap_err(),
+        cache
+            .acquire(*lease.digest(), WriterLockPolicy::Immediate)
+            .unwrap_err(),
         CacheError::Digest
     );
     let directory = path.parent().unwrap();
@@ -256,9 +362,201 @@ fn native_digest_tampering_and_replaced_directory_cannot_issue_a_lease() {
     std::fs::create_dir(directory).unwrap();
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
-        cache.acquire(*lease.digest()).unwrap_err(),
+        cache
+            .acquire(*lease.digest(), WriterLockPolicy::Immediate)
+            .unwrap_err(),
         CacheError::Unsafe
     );
-    assert_eq!(cache.collect(), Err(CacheError::Unsafe));
+    assert_eq!(
+        cache.collect(WriterLockPolicy::Immediate),
+        Err(CacheError::Unsafe)
+    );
     assert!(!directory.join("writer.lock").exists());
+}
+
+#[test]
+#[ignore = "requires native Linux flock and a local executable filesystem"]
+fn native_writer_deadline_and_concurrent_admission_do_not_replay_publication() {
+    use std::time::{Duration, Instant};
+    let (runtime, cache) = fixture();
+    drop(publish(&cache, 1));
+    let writer = runtime
+        .path()
+        .join("rsi-ssh")
+        .join(SERVICE)
+        .join("writer.lock");
+    let locked = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(writer)
+        .unwrap();
+    rustix::fs::flock(
+        &locked,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+    assert_eq!(
+        cache.collect(WriterLockPolicy::Immediate),
+        Err(CacheError::Busy)
+    );
+    assert_eq!(
+        cache.collect(WriterLockPolicy::WaitUntil(
+            Instant::now() + Duration::from_millis(20)
+        )),
+        Err(CacheError::ContentionTimeout)
+    );
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let jobs = (0..2)
+        .map(|_| {
+            let cache = ArtifactCache::open(runtime.path(), SERVICE).unwrap();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                cache
+                    .acquire(
+                        artifact(1).1,
+                        WriterLockPolicy::WaitUntil(Instant::now() + Duration::from_secs(2)),
+                    )
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    rustix::fs::flock(&locked, rustix::fs::FlockOperation::Unlock).unwrap();
+    for job in jobs {
+        assert!(job.join().unwrap().path().exists());
+    }
+}
+
+#[test]
+#[ignore = "requires a native Linux local executable filesystem"]
+fn native_unchanged_publication_and_collection_preserve_metadata_inode() {
+    let (_runtime, cache) = fixture();
+    let lease = publish(&cache, 1);
+    let path = lease.path().parent().unwrap().join("state.json");
+    let before = std::fs::metadata(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    drop(publish(&cache, 1));
+    cache.collect(WriterLockPolicy::Immediate).unwrap();
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+#[ignore = "requires native Linux procfs and a working user-systemd manager"]
+fn native_execution_uses_verified_inode_after_cache_directory_replacement() {
+    let (_runtime, cache) = fixture();
+    let lease = publish(&cache, 1);
+    let original = lease.path().parent().unwrap();
+    let renamed = original.with_file_name(format!("{SERVICE}-moved"));
+    std::fs::rename(original, &renamed).unwrap();
+    std::fs::create_dir(original).unwrap();
+    std::fs::set_permissions(original, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(lease.path(), b"#!/bin/sh\nprintf 'forged\n'\n").unwrap();
+    std::fs::set_permissions(lease.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        std::process::Command::new(lease.path())
+            .output()
+            .unwrap()
+            .stdout,
+        b"forged\n"
+    );
+    for systemd in [false, true] {
+        let mut command = if systemd {
+            let mut command = std::process::Command::new("/usr/bin/systemd-run");
+            command.env_clear().env(
+                "XDG_RUNTIME_DIR",
+                format!("/run/user/{}", rustix::process::getuid().as_raw()),
+            );
+            command.args(["--user", "--pipe", "--wait", "--collect", "--quiet", "--"]);
+            command.arg(lease.executable());
+            command
+        } else {
+            let mut command = std::process::Command::new(lease.executable());
+            command.env_clear();
+            command
+        };
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"artifact-1\n", "systemd={systemd}");
+    }
+}
+
+#[test]
+#[ignore = "requires native Linux flock and a local executable filesystem"]
+fn native_republication_refreshes_order_and_failed_staging_preserves_artifacts() {
+    let (_runtime, cache) = fixture();
+    let first = publish(&cache, 1);
+    let path = first.path().to_owned();
+    drop(publish(&cache, 2));
+    drop(publish(&cache, 3));
+    drop(first);
+    let (bytes, digest) = artifact(4);
+    assert!(matches!(
+        cache.publish(
+            digest,
+            &mut b"wrong image".as_slice(),
+            WriterLockPolicy::Immediate
+        ),
+        Err(CacheError::Digest)
+    ));
+    assert!(
+        path.exists(),
+        "invalid input must fail before collecting existing artifacts"
+    );
+    drop(
+        cache
+            .publish(
+                artifact(1).1,
+                &mut b"unused input".as_slice(),
+                WriterLockPolicy::Immediate,
+            )
+            .unwrap(),
+    );
+    drop(
+        cache
+            .publish(digest, &mut bytes.as_slice(), WriterLockPolicy::Immediate)
+            .unwrap(),
+    );
+    assert!(
+        path.exists(),
+        "republication refreshes newest-two retention"
+    );
+    assert!(
+        cache
+            .acquire(artifact(3).1, WriterLockPolicy::Immediate)
+            .is_err()
+    );
+    assert!(cache.acquire(digest, WriterLockPolicy::Immediate).is_ok());
+}
+
+#[test]
+#[ignore = "requires native Linux flock and a local executable filesystem"]
+fn native_healthy_cache_hit_keeps_input_for_repair_and_refreshes_publication_order() {
+    let (_runtime, cache) = fixture();
+    let path = publish(&cache, 1).path().to_owned();
+    drop(publish(&cache, 2));
+    let mut input = std::io::Cursor::new(b"unused input");
+    drop(
+        cache
+            .publish(artifact(1).1, &mut input, WriterLockPolicy::Immediate)
+            .unwrap(),
+    );
+    assert_eq!(
+        input.position(),
+        0,
+        "healthy cache hit preserves input for possible repair"
+    );
+    drop(publish(&cache, 3));
+    assert!(
+        path.exists(),
+        "republication makes version 1 newer than version 2"
+    );
+    assert!(
+        cache
+            .acquire(artifact(2).1, WriterLockPolicy::Immediate)
+            .is_err()
+    );
 }

@@ -30,6 +30,9 @@ pub enum SshClientError {
     /// Bootstrap or target prerequisites failed without publishing execution authority.
     #[error("SSH helper initialization failed")]
     Initialization,
+    /// Remote cache writer admission expired; bootstrap must not be replayed automatically.
+    #[error("SSH helper cache contention deadline exceeded")]
+    CacheContentionTimeout,
 }
 /// Prepared client result.
 pub type Result<T> = std::result::Result<T, SshClientError>;
