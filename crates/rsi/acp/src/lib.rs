@@ -215,7 +215,7 @@ impl NativeAgent {
         let owner = self.owner.clone();
         let stopped = self.stopped.clone();
         let sessions = self.sessions.clone();
-        self.tasks.spawn(async move {
+        let task = self.tasks.spawn(async move {
             let close_abandoned=existing.is_none();
             let prepare=async {
                 let handle=work.await?;
@@ -234,7 +234,9 @@ impl NativeAgent {
             drop(operation);drop(setup);
         });
         drop(admission);
-        receive.await.map_err(|_| Failure::Backend)?
+        let result = receive.await.map_err(|_| Failure::Backend)?;
+        task.await.map_err(|_| Failure::Backend)?;
+        result
     }
 }
 impl Drop for NativeAgent {

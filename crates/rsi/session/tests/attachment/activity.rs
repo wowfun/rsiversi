@@ -171,4 +171,39 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
             .all(|row| row.status == ActivityStatus::Unknown && row.requests.is_empty())
     );
     assert!(!page.truncated);
+
+    rsi_agent_testkit::append_history_fixture(
+        store.as_ref(),
+        AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![Arc::new(
+                SessionFact::new(
+                    2,
+                    2,
+                    SessionFactBody::TurnTerminal {
+                        turn_id: TurnId::new("exact-turn").unwrap(),
+                        outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                        result: None,
+                    },
+                )
+                .unwrap(),
+            )],
+        },
+    )
+    .await
+    .unwrap();
+    roster.present.store(true, Ordering::SeqCst);
+    roster.revision.fetch_add(1, Ordering::AcqRel);
+    page = service.activity().await.unwrap();
+    let completed = page.entries.iter().find(|row| row.session == id).unwrap();
+    assert_eq!(completed.fact_seq, "2");
+    assert_eq!(
+        completed.status,
+        ActivityStatus::Idle,
+        "a closed durable cut takes precedence over a running resident sample"
+    );
+    assert!(completed.requests.is_empty());
+    assert!(!page.truncated);
 }

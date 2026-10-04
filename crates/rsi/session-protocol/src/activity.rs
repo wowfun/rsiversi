@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityStatus {
-    /// Current Kernel owns nonterminal work.
+    /// A durable Turn is open and the sampled current Kernel owns work.
     Running,
     /// No open Turn exists at the durable cut.
     Idle,

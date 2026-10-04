@@ -18,6 +18,10 @@ owner; external client sessions retain a separate observed journal. Host owns
 peers across UI detach. Executor publishes an exact-claim controlled-work
 observation through Kernel, separately from durable outcome; its proof is required
 before successful cancellation completion.
+Native preparation responses also await their retained task's admission release.
+Sending a result can wake the next operation before the producer drops its
+guards. Joining that task preserves abandoned-attachment cleanup ownership and
+prevents a successful restore from rejecting its own following load as busy.
 
 Host endpoints may also select ordered stable ACP configuration values before a
 client becomes Ready. The latest advertised choices and every acknowledgement
