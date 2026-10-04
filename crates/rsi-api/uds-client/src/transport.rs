@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct LocalTransport {
     pub config: UdsClientConfig,
     pub execution: Execution,
+    #[cfg(feature = "test-support")]
+    pub measurement: std::sync::Arc<crate::measurement::Measurement>,
 }
 fn lost() -> ApiError {
     ApiError::Backend("local API response was lost".into())
@@ -51,11 +53,15 @@ impl ConnectionTransport for LocalTransport {
             receiving: output,
             retained,
         } = output;
+        #[cfg(feature = "test-support")]
+        let started_at = std::time::Instant::now();
         let deadline = self.execution.deadline_after(Duration::from_mins(1));
         let (mut sender, connection) = tokio::select! { biased;
             () = retiring.cancelled() => return Err(ApiError::ShuttingDown),
             result = deadline.timeout(crate::io::connect(&self.config.socket)) => result.map_err(|_| lost())??,
         };
+        #[cfg(feature = "test-support")]
+        let setup_ns = started_at.elapsed().as_nanos();
         let request = self.request(operation, input, epoch)?;
         let mutation = operation.effect == OperationEffect::Mutation;
         let started = AtomicBool::new(false);
@@ -78,6 +84,8 @@ impl ConnectionTransport for LocalTransport {
             () = retiring.cancelled() => return Err(uncertain(ApiError::ShuttingDown, mutation && started.load(Ordering::Acquire))),
             result = deadline.timeout(pending) => result.map_err(|_| uncertain(lost(), mutation && started.load(Ordering::Acquire)))??,
         };
+        #[cfg(feature = "test-support")]
+        let response_head_ns = started_at.elapsed().as_nanos();
         let (head, body) = response.into_parts();
         let received_epoch = response_identity(
             &head.headers,
@@ -117,6 +125,12 @@ impl ConnectionTransport for LocalTransport {
             () = retiring.cancelled() => Err(uncertain(ApiError::ShuttingDown, mutation)),
             result = deadline.timeout(decode_response(head.status.as_u16(), &head.headers, source, capacity, mutation, &retained)) => result.unwrap_or_else(|_| Err(uncertain(lost(), mutation))),
         }?;
+        #[cfg(feature = "test-support")]
+        self.measurement.record(crate::ExchangeTiming {
+            setup_ns,
+            response_head_ns,
+            complete_ns: started_at.elapsed().as_nanos(),
+        });
         Ok((received_epoch, ApiOutput::Reply(response)))
     }
 }

@@ -25,3 +25,10 @@ mutation. They are no longer interpreted as private-protocol trailing frames.
 Tests exercise real isolated Unix listeners, malformed responses, generation and
 credential fences, cancellation and ordinary plugin retirement. Native platforms
 without Unix sockets do not expose this adapter. Browser closures exclude it.
+
+The opt-in `test-support` feature records bounded per-exchange setup, response-head
+and complete finite-response times. The ignored report benchmark holds an SSE
+subscription during finite JSON/binary traffic, reports actual accepted socket
+counts and timing distributions, and sets no performance gate. Response-head
+latency is the first HTTP response observation, not a body-byte timestamp. It
+preserves one socket per exchange, peer-UID checks and mutation uncertainty.

@@ -50,6 +50,7 @@ struct State {
     release: Semaphore,
     dropped: Semaphore,
     completed: AtomicUsize,
+    accepted: AtomicUsize,
 }
 struct Lifetime(Arc<State>);
 impl Drop for Lifetime {
@@ -145,6 +146,7 @@ impl Harness {
             release: Semaphore::new(0),
             dropped: Semaphore::new(0),
             completed: AtomicUsize::new(0),
+            accepted: AtomicUsize::new(0),
         });
         let registrations = ["echo", "binary", "events", "read", "mutate"]
             .map(|name| {
@@ -169,6 +171,7 @@ impl Harness {
         let listener = UnixListener::bind(&config.socket).unwrap();
         let stop = CancellationToken::new();
         let stopping = stop.clone();
+        let accepted = state.clone();
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
             loop {
@@ -178,6 +181,7 @@ impl Harness {
                     result = listener.accept() => {
                         let service = service.clone(); let stop = stopping.clone();
                         let (socket, _) = result.unwrap();
+                        accepted.accepted.fetch_add(1, Ordering::Relaxed);
                         tasks.spawn(async move { service.serve(socket, stop).await.unwrap(); });
                     }
                 }
@@ -400,4 +404,113 @@ async fn pipelined_bytes_cannot_dispatch_a_second_mutation_or_undo_the_first() {
     assert_eq!(harness.state.release.available_permits(), 1);
     assert_eq!(harness.state.entered.available_permits(), 0);
     harness.close().await;
+}
+
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[path = "support/measure_allocations.rs"]
+mod measure_allocations;
+
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "report-only actual Unix HTTP setup, latency, allocations and SSE lane progress"]
+async fn report_uds_exchange_cost_under_finite_and_sse_load() {
+    use std::time::Instant;
+    fn percentile(mut values: Vec<u128>) -> serde_json::Value {
+        values.sort_unstable();
+        serde_json::json!({"p50_ns": values[values.len()/2], "p95_ns": values[values.len()*95/100]})
+    }
+    fn cpu_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+    }
+    for run in 0..3 {
+        for concurrency in [1, 4] {
+            for name in ["echo", "binary"] {
+                for with_sse in [false, true] {
+                    let harness = Harness::start();
+                    let client = Arc::new(harness.client().await);
+                    let spec = operation(name);
+                    let payload = if name == "binary" {
+                        vec![7u8; 512 * 1024]
+                    } else {
+                        b"{}".to_vec()
+                    };
+                    let mut stream = if with_sse {
+                        let spec = operation("events");
+                        let ApiOutput::Stream(mut stream) = client
+                            .call(&spec, input(client.as_ref(), &spec))
+                            .await
+                            .unwrap()
+                        else {
+                            panic!("SSE")
+                        };
+                        assert!(stream.next().await.unwrap().is_ok());
+                        Some(stream)
+                    } else {
+                        None
+                    };
+                    for _ in 0..100 {
+                        client
+                            .call(
+                                &spec,
+                                client.input_budget(spec.class).copy(&payload).unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    client.take_measurements();
+                    let connections = harness.state.accepted.load(Ordering::Relaxed);
+                    let cpu = cpu_ticks();
+                    let started = Instant::now();
+                    measure_allocations::begin();
+                    let mut workers = JoinSet::new();
+                    for _ in 0..concurrency {
+                        let client = client.clone();
+                        let spec = spec.clone();
+                        let payload = payload.clone();
+                        workers.spawn(async move {
+                            for _ in 0..1000 / concurrency {
+                                client
+                                    .call(
+                                        &spec,
+                                        client.input_budget(spec.class).copy(&payload).unwrap(),
+                                    )
+                                    .await
+                                    .unwrap();
+                            }
+                        });
+                    }
+                    while let Some(result) = workers.join_next().await {
+                        result.unwrap();
+                    }
+                    let allocations = measure_allocations::end();
+                    let elapsed_ns = started.elapsed().as_nanos();
+                    let cpu_ticks = cpu_ticks() - cpu;
+                    let samples = client.take_measurements();
+                    let accepted = harness.state.accepted.load(Ordering::Relaxed) - connections;
+                    assert_eq!(accepted, 1000, "one socket per finite exchange");
+                    assert_eq!(samples.len(), 1000);
+                    assert!(
+                        stream
+                            .as_mut()
+                            .is_none_or(|stream| stream.next().now_or_never().is_none()),
+                        "holding SSE terminated under finite load"
+                    );
+                    println!(
+                        "{}",
+                        serde_json::json!({"run":run,"operation":name,"concurrency":concurrency,"holding_sse":with_sse,"warmup":100,"calls":1000,"accepted_sockets":accepted,"payload_bytes":payload.len(),"input_bytes":payload.len()*1000,"elapsed_ns":elapsed_ns,"cpu_ticks":cpu_ticks,"allocations":allocations,"setup":percentile(samples.iter().map(|s|s.setup_ns).collect()),"response_head":percentile(samples.iter().map(|s|s.response_head_ns).collect()),"complete":percentile(samples.iter().map(|s|s.complete_ns).collect())})
+                    );
+                    drop(stream);
+                    client.close().await;
+                    harness.close().await;
+                }
+            }
+        }
+    }
 }

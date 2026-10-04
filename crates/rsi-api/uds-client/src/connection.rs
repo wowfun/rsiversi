@@ -41,7 +41,10 @@ impl UdsClientConfig {
 
 /// Shared client owner using one same-UID Unix stream per API exchange.
 #[derive(Debug)]
-pub struct UdsClient(ClientConnection);
+pub struct UdsClient(
+    ClientConnection,
+    #[cfg(feature = "test-support")] Arc<crate::measurement::Measurement>,
+);
 impl UdsClient {
     /// Negotiates the selected deployment before any domain call can be issued.
     pub async fn connect(execution: Execution, config: UdsClientConfig) -> Result<Self> {
@@ -49,7 +52,11 @@ impl UdsClient {
         let deadline = execution.deadline_after(Duration::from_secs(15));
         let expected = config.host_epoch.clone();
         let endpoint = config.endpoint_id.clone();
+        #[cfg(feature = "test-support")]
+        let measurement = Arc::new(crate::measurement::Measurement::default());
         let transport = Arc::new(LocalTransport {
+            #[cfg(feature = "test-support")]
+            measurement: measurement.clone(),
             config,
             execution: execution.clone(),
         });
@@ -61,7 +68,16 @@ impl UdsClient {
             connection.close().await;
             return Err(ApiError::ShuttingDown);
         }
-        Ok(Self(connection))
+        Ok(Self(
+            connection,
+            #[cfg(feature = "test-support")]
+            measurement,
+        ))
+    }
+    /// Drains report-only timing samples; storage is capped at 4096 exchanges.
+    #[cfg(feature = "test-support")]
+    pub fn take_measurements(&self) -> Vec<crate::ExchangeTiming> {
+        self.1.take()
     }
     /// Fences local work without acquiring server shutdown authority.
     pub fn retire(&self) {

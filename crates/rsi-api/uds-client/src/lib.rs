@@ -11,3 +11,8 @@ mod io;
 mod transport;
 #[cfg(unix)]
 pub use connection::{UdsClient, UdsClientConfig, UdsClientFactory};
+
+#[cfg(all(unix, feature = "test-support"))]
+mod measurement;
+#[cfg(all(unix, feature = "test-support"))]
+pub use measurement::ExchangeTiming;
