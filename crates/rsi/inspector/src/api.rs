@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const NAMES: [&str; 4] = ["runtime", "profile", "factories", "native"];
+const NAMES: [&str; 5] = ["runtime", "profile", "factories", "native", "workflows"];
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
         id: OperationId::new("inspector", name, 1).expect("constant Inspector operation"),
@@ -38,7 +38,7 @@ impl InspectorApi {
         source: Arc<dyn InspectorSource>,
     ) -> Result<Self> {
         let runtime = source.clone();
-        let a = registrar.register(
+        let runtime_registration = registrar.register(
             operation("runtime"),
             json_handler(move |_, request: RuntimeRequest| {
                 let source = runtime.clone();
@@ -49,7 +49,7 @@ impl InspectorApi {
             }),
         )?;
         let profile = source.clone();
-        let b = registrar.register(
+        let profile_registration = registrar.register(
             operation("profile"),
             json_handler(move |_, request: PageRequest| {
                 let source = profile.clone();
@@ -63,7 +63,7 @@ impl InspectorApi {
             }),
         )?;
         let factories = source.clone();
-        let c = registrar.register(operation("factories"), json_handler(move |_, request: PageRequest| {
+        let factories_registration = registrar.register(operation("factories"), json_handler(move |_, request: PageRequest| {
             let source = factories.clone();
             async move {
                 request.validate()?;
@@ -73,14 +73,28 @@ impl InspectorApi {
                 Ok::<_, ApiError>(Ok::<_, Never>(json!({ "total": values.len(), "next_offset": (next < values.len()).then_some(next), "factories": rows })))
             }
         }))?;
-        let d = registrar.register(
+        let native = source.clone();
+        let native_registration = registrar.register(
             operation("native"),
             json_handler(move |_, _: Empty| {
-                let source = source.clone();
+                let source = native.clone();
                 async move { Ok::<_, ApiError>(Ok::<_, Never>(source.native()?)) }
             }),
         )?;
-        Ok(Self(vec![a, b, c, d]))
+        let workflow_registration = registrar.register(
+            operation("workflows"),
+            json_handler(move |_, _: Empty| {
+                let source = source.clone();
+                async move { Ok::<_, ApiError>(Ok::<_, Never>(source.workflows().await?)) }
+            }),
+        )?;
+        Ok(Self(vec![
+            runtime_registration,
+            profile_registration,
+            factories_registration,
+            native_registration,
+            workflow_registration,
+        ]))
     }
     /// Withdraws discovery/invocation and drains already admitted reads.
     pub async fn close(self) {
@@ -125,6 +139,19 @@ impl InspectorClient {
     pub async fn factories(&self, request: &PageRequest) -> Result<Value> {
         request.validate()?;
         self.call("factories", request).await
+    }
+    /// Reads bounded Local restart impact, including orphaned runs.
+    pub async fn workflows(&self) -> Result<crate::WorkflowImpact> {
+        let value = self.call("workflows", &Empty {}).await?;
+        let impact: crate::WorkflowImpact = serde_json::from_value(value)
+            .map_err(|_| ApiError::Invalid("invalid workflow impact".into()))?;
+        // A truncated impact must have filled the bounded source page.
+        if impact.unfinished > crate::MAXIMUM_WORKFLOW_IMPACT_RUNS
+            || (impact.truncated && impact.unfinished != crate::MAXIMUM_WORKFLOW_IMPACT_RUNS)
+        {
+            return Err(ApiError::Invalid("invalid workflow impact count".into()));
+        }
+        Ok(impact)
     }
     /// Reads native selection, resources and retained failure state.
     pub async fn native(&self) -> Result<Value> {

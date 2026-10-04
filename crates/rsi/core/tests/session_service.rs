@@ -955,3 +955,35 @@ mod workspace_review;
 
 #[path = "session_service/directory_picker.rs"]
 mod directory_picker;
+
+#[tokio::test]
+async fn builtin_workflow_is_discoverable_but_cannot_prepare_without_an_active_runtime() {
+    let (endpoint, provider) = provider().await;
+    let fixture = fixture(&endpoint);
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let workspace = running
+        .workspace_registry()
+        .unwrap()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    let service = running.session_service().unwrap();
+    assert!(matches!(
+        service
+            .create(CreateSession {
+                workspace_id: workspace.id,
+                session_id: SessionId::new("workflow-unavailable").unwrap(),
+                agent_preset_id: Some(
+                    rsi_agent_session_protocol::AgentPresetId::new("workflow").unwrap()
+                )
+            })
+            .await,
+        Err(rsi_session_protocol::SessionError::WorkflowUnavailable(
+            rsi_session_protocol::WorkflowRuntimeKind::Disabled
+        ))
+    ));
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}

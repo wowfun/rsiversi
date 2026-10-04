@@ -41,7 +41,11 @@ pub struct ProgramConfiguration {
     pub environment: Vec<(String, String)>,
 }
 impl ProgramConfiguration {
-    fn validate(&self) -> Result<(), String> {
+    /// Validates static native configuration without starting or probing Node.
+    ///
+    /// # Errors
+    /// Returns a diagnostic for a relative Node path or invalid/injecting environment.
+    pub fn validate(&self) -> Result<(), String> {
         if !self.node.is_absolute() {
             return Err("Node executable must be absolute".into());
         }

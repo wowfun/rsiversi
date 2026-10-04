@@ -123,6 +123,17 @@ const STANDARD_AGENT_METADATA: &[u8] = include_bytes!(concat!(
 ));
 
 const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
+    (
+        rsi_session_protocol::WORKFLOW_PRESET_ID,
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/presets/workflow/agent.profile.toml"
+        )),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/presets/workflow/preset.toml"
+        )),
+    ),
     ("standard", STANDARD_AGENT_PROFILE, STANDARD_AGENT_METADATA),
     (
         "acp-internal",
@@ -253,7 +264,7 @@ fn standard_agent_addon(
     )?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
     register(
-        "rsi.agent.program.tools",
+        rsi_session_protocol::PROGRAM_TOOLS_PLUGIN_ID,
         Arc::new(rsi_agent_program::ProgramToolsFactory),
     )?;
     register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
@@ -1382,6 +1393,11 @@ impl StandardComposition {
             AgentPresetCatalog::new(
                 AgentPresetCatalogConfig::new(standard_id.clone())
                     .with_system_preset(standard_id, system_root.join(DEFAULT_AGENT_PRESET_ID))
+                    .with_system_preset(
+                        AgentPresetId::new(rsi_session_protocol::WORKFLOW_PRESET_ID)
+                            .expect("static preset"),
+                        system_root.join(rsi_session_protocol::WORKFLOW_PRESET_ID),
+                    )
                     .with_user_root(user_agent_preset_root(&paths)),
                 compiler,
             )
@@ -1530,6 +1546,32 @@ impl StandardComposition {
             &paths,
             linux_tools_enabled,
             self.user_home.as_deref(),
+        ))?;
+        builder.register_local_contract::<rsi_session_protocol::WorkflowReadinessContract>()?;
+        register(
+            &mut builder,
+            "rsi.workflow.readiness",
+            UpdateMode::RestartRequired,
+            crate::workflow::ReadinessFactory,
+        )?;
+        builder.register_fragment(ProfileFragment::program(
+            "rsi.standard.workflow",
+            [
+                rsi_meta_profile::ProfileStep::Node(rsi_meta_profile::ProfileNode::Plugin(
+                    ProfileEntry::new(
+                        "program-runtime",
+                        rsi_session_protocol::PROGRAM_RUNTIME_PLUGIN_ID,
+                        Value::Null,
+                    ),
+                )),
+                rsi_meta_profile::ProfileStep::Patch(rsi_meta_profile::ProfilePatch::SetEnabled {
+                    target: "program-runtime".into(),
+                    enabled: false,
+                }),
+                rsi_meta_profile::ProfileStep::Node(rsi_meta_profile::ProfileNode::Plugin(
+                    ProfileEntry::new("workflow-readiness", "rsi.workflow.readiness", Value::Null),
+                )),
+            ],
         ))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
@@ -1712,7 +1754,7 @@ fn register_factories(
     )?;
     register(
         builder,
-        "rsi.agent.program.runtime",
+        rsi_session_protocol::PROGRAM_RUNTIME_PLUGIN_ID,
         UpdateMode::RestartRequired,
         rsi_agent_program::ProgramRuntimeFactory,
     )?;

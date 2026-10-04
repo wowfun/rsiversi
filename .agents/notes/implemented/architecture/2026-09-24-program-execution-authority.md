@@ -104,6 +104,14 @@ acceptance, existing terminal state and an orphan requiring restart. A lost repl
 cannot establish rejection. Frozen CAS buffers acquire admission inside the worker
 and share it until the last returned owner, including cancelled waiters and clones.
 
+The standard Host ships a disabled Runtime leaf; the opt-in Workflow preset
+includes standard and enables the entire Program tool group. Existing leaf
+preview/commit can therefore configure and enable Node without a new add-plugin
+operation. RestartRequired remains explicit, with a bounded Local-only impact
+count. Session readiness exposes only closed categories and exact-generation
+observations, preserving the existing diagnostics redaction decision. Users verify
+Node by executing an approved Session workflow; configuration does not spawn a probe.
+
 ## Alternatives considered
 
 Inventing model responses would corrupt evidence and context. Retaining old Tool

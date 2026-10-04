@@ -58,6 +58,14 @@ impl Fixture {
                 Arc::new(Validate(observed.clone())),
             )
             .unwrap();
+        builder
+            .register_linked(
+                "rsi.agent.program.runtime",
+                "1",
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_agent_program::ProgramRuntimeFactory),
+            )
+            .unwrap();
         Self {
             _temp: temp,
             catalog,
@@ -175,4 +183,40 @@ async fn inline_steps_preserve_comments_and_leaf_configuration_is_bounded_before
     edit.commit_once().unwrap();
     assert!(fs::read_to_string(&f.path).unwrap().contains("# keep"));
     f.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn workflow_runtime_preview_validates_configuration_by_plugin_identity_not_leaf_name() {
+    let f = Fixture::new(
+        "format=1\n[[steps]]\nkind='plugin'\nid='custom-node'\nplugin='rsi.agent.program.runtime'\nenabled=false\nconfig={node='/usr/bin/node'}\n",
+    );
+    f.edit("custom-node", HostLeafEdit::Enabled(true)).unwrap();
+    let unconfigured = Fixture::new(
+        "format=1\n[[steps]]\nkind='plugin'\nid='custom-node'\nplugin='rsi.agent.program.runtime'\nenabled=false\n",
+    );
+    let before = fs::read(&unconfigured.path).unwrap();
+    assert!(matches!(
+        unconfigured.edit("custom-node", HostLeafEdit::Enabled(true)),
+        Err(ProfileEditError::Preview(_))
+    ));
+    assert_eq!(fs::read(&unconfigured.path).unwrap(), before);
+    assert!(unconfigured.observed.lock().unwrap().is_empty());
+    for value in [
+        json!({"node":"relative-node"}),
+        json!({"node":"/usr/bin/node","environment":[["NODE_OPTIONS","--require secret"]]}),
+    ] {
+        assert!(matches!(
+            f.edit("custom-node", HostLeafEdit::Configuration(&value)),
+            Err(ProfileEditError::ConfigurationBounds)
+        ));
+    }
+    let value = json!({"node":"/usr/bin/node","environment":[]});
+    let original = fs::read(&f.path).unwrap();
+    f.edit("custom-node", HostLeafEdit::Configuration(&value))
+        .unwrap();
+    assert_eq!(
+        fs::read(&f.path).unwrap(),
+        original,
+        "preview does not save or activate Node"
+    );
 }

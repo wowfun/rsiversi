@@ -50,7 +50,7 @@ pub use application_bootstrap::start_application;
 mod api_composition;
 mod client_composition;
 #[cfg(target_os = "linux")]
-pub use client_composition::probe_service_host;
+pub use client_composition::{probe_service_host, workflow_restart_impact};
 #[cfg(target_os = "linux")]
 mod acp_inputs;
 #[cfg(target_os = "linux")]
@@ -64,6 +64,7 @@ mod mcp_ssh;
 #[cfg(unix)]
 mod native_addons;
 mod retrieval_api;
+mod workflow;
 #[cfg(unix)]
 pub use native_addons::{
     MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,

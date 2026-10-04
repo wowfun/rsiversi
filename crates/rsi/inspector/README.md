@@ -3,7 +3,7 @@
 Local Profile inspection includes bounded Pending dependency reasons and the last completed update categories. Dependency details remain Local-only; remote plugin status receives only closed categories.
 
 The product Inspector registers read-only `inspector.runtime`, `inspector.profile`,
-`inspector.factories` and `inspector.native` version 1 operations through the
+`inspector.factories`, `inspector.native` and `inspector.workflows` version 1 operations through the
 ordinary API registrar. All require local operator access: remote credentials
 neither discover nor invoke them. The owning plugin withdraws and drains the
 registrations during retirement. Inspection never loads artifacts, prepares a
@@ -40,3 +40,5 @@ The terminal application consumes finite JSON documents for display. It performs
 no automatic action based on their contents. Verify public API registration,
 authorization, pagination, redaction and withdrawal with isolated fixtures, then
 exercise the built product over its real local operator transport.
+
+The Local workflow restart-impact read counts at most sixteen unfinished durable run heads and reports truncation explicitly. It performs no activation, cancellation or model call. Restart reports this instantaneous count before interrupting the Host; it is not an atomic reservation against new runs.

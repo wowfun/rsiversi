@@ -165,6 +165,22 @@ pub enum NativeHealth {
     Closed,
 }
 
+/// Maximum unfinished heads counted by one Local restart-impact read.
+pub const MAXIMUM_WORKFLOW_IMPACT_RUNS: usize = 16;
+
+/// Bounded instantaneous restart impact, including orphaned durable runs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowImpact {
+    /// Number of unfinished run heads in the bounded page.
+    pub unfinished: usize,
+    /// More unfinished heads exist beyond this page.
+    pub truncated: bool,
+}
+/// An admitted Local impact read retains its source until completion.
+pub type WorkflowImpactFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<WorkflowImpact>> + Send + 'a>>;
+
 /// Explicit product-owned observation source. Queries perform no activation or loading.
 pub trait InspectorSource: std::fmt::Debug + Send + Sync + 'static {
     /// Captures actual Runtime ownership through the owning Meta inspection seam.
@@ -173,6 +189,10 @@ pub trait InspectorSource: std::fmt::Debug + Send + Sync + 'static {
     fn profile(&self) -> Result<(ProfileStatus, ProfileSnapshot)>;
     /// Returns immutable product declarations in their frozen order.
     fn factories(&self) -> &[FactoryDeclaration];
+    /// Counts bounded durable unfinished workflows without acquiring execution authority.
+    fn workflows(&self) -> WorkflowImpactFuture<'_> {
+        Box::pin(async { Err(ApiError::Unavailable) })
+    }
     /// Captures actual native state or reports that the manager is unavailable.
     fn native(&self) -> Result<NativeObservation>;
 }

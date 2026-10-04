@@ -97,6 +97,22 @@ struct Source {
     declarations: Arc<[FactoryDeclaration]>,
 }
 impl InspectorSource for Source {
+    fn workflows(&self) -> rsi_inspector::WorkflowImpactFuture<'_> {
+        Box::pin(async {
+            let store = self
+                .context
+                .lookup_local::<rsi_agent_store_protocol::SessionStoreContract>()
+                .ok_or(ApiError::Unavailable)?;
+            let page = store
+                .list_active_program_runs(None, rsi_inspector::MAXIMUM_WORKFLOW_IMPACT_RUNS)
+                .await
+                .map_err(|_| ApiError::Unavailable)?;
+            Ok(rsi_inspector::WorkflowImpact {
+                unfinished: page.runs.len(),
+                truncated: page.has_more,
+            })
+        })
+    }
     fn runtime(&self, request: InspectionRequest) -> Result<RuntimeInspection> {
         self.context
             .runtime()

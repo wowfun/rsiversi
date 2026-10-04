@@ -117,6 +117,27 @@ impl rsi_application::ProfileCatalogSource for ClientCatalog {
     }
 }
 
+/// Reads Local bounded restart impact without granting shutdown or configuration authority.
+#[cfg(target_os = "linux")]
+pub async fn workflow_restart_impact(
+    owner: &HostOwnerMetadata,
+) -> Result<rsi_inspector::WorkflowImpact> {
+    let client = Arc::new(
+        UdsClient::connect(
+            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            configuration(owner)?,
+        )
+        .await
+        .map_err(error)?,
+    );
+    let result = match rsi_inspector::InspectorClient::new(client.clone()) {
+        Ok(inspector) => inspector.workflows().await.map_err(error),
+        Err(err) => Err(error(err)),
+    };
+    client.close().await;
+    result
+}
+
 /// Negotiates the exact current local API and retires the short-lived readiness client.
 #[cfg(target_os = "linux")]
 pub async fn probe_service_host(owner: &HostOwnerMetadata) -> Result<()> {

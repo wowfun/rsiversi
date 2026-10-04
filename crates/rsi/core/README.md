@@ -739,3 +739,18 @@ Each lease retains its authenticated origin, rejects revoked devices and retires
 with its provider owner; queued and accepted operations keep their existing bounded
 permits through settlement. Session and workspace ingress must pass the lease
 as live runtime authority, independently of durable coordinates.
+
+## Local Workflow enablement
+
+Base composition ships a disabled program-runtime leaf. Copy the standard Host
+Profile, configure an absolute Node executable with an explicit complete environment,
+then enable the existing leaf through preview/commit. Runtime changes require an
+explicit Host restart and interrupt existing runs. Applications must select the
+same Host Profile. The public workflow Agent preset includes standard and enables
+the existing Program tool group. Saving configuration never executes Node; an
+explicit ordinary approved Workflow supplies actual execution evidence.
+
+Enabling a Profile leaf prepares its evaluated saved configuration through the
+resolved factory before publication. ProgramRuntimeFactory rejects missing or
+invalid Node configuration, including for custom instance names.
+Disabled leaves may remain unconfigured until an explicit configuration edit.

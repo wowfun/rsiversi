@@ -624,6 +624,16 @@ pub(super) async fn restart_host_daemon(
         .map_err(|error| RsiError::Boot(error.to_string()))?
         && owner_process_is_current(&metadata).map_err(|error| RsiError::Boot(error.to_string()))?
     {
+        match rsi::workflow_restart_impact(&metadata).await {
+            Ok(impact) => eprintln!(
+                "Host restart interrupts {}{} unfinished workflows; scripts are not replayed.",
+                if impact.truncated { "at least " } else { "" },
+                impact.unfinished
+            ),
+            Err(_) => eprintln!(
+                "Host restart interrupts unfinished workflows; current count is unavailable. Scripts are not replayed."
+            ),
+        }
         stop_host_daemon(force).await?;
     }
     start_host_daemon(profile_id, reset_state).await

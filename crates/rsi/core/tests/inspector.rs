@@ -441,8 +441,15 @@ async fn assert_local_access_and_requests(local: &Local) {
             .operations
             .iter()
             .filter(|value| value.id.domain() == "inspector")
-            .count(),
-        4
+            .map(|operation| operation.id.name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "runtime",
+            "profile",
+            "factories",
+            "native",
+            "workflows"
+        ])
     );
     for operation in local
         .operations

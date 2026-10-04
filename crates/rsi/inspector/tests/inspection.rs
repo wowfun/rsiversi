@@ -46,7 +46,10 @@ use std::sync::{
 };
 
 #[derive(Debug, Default)]
-struct Source(AtomicUsize);
+struct Source(
+    AtomicUsize,
+    std::sync::Mutex<Option<rsi_inspector::WorkflowImpact>>,
+);
 impl InspectorSource for Source {
     fn runtime(&self, _: InspectionRequest) -> rsi_api_protocol::Result<RuntimeInspection> {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -120,6 +123,10 @@ impl InspectorSource for Source {
     fn factories(&self) -> &[FactoryDeclaration] {
         &[]
     }
+    fn workflows(&self) -> rsi_inspector::WorkflowImpactFuture<'_> {
+        let impact = self.1.lock().unwrap().clone();
+        Box::pin(async move { impact.ok_or(ApiError::Unavailable) })
+    }
     fn native(&self) -> rsi_api_protocol::Result<NativeObservation> {
         Err(ApiError::Unavailable)
     }
@@ -131,7 +138,7 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
     let source = Arc::new(Source::default());
     let api = InspectorApi::register(&registry, source.clone()).unwrap();
     let operations = registry.operations();
-    assert_eq!(operations.len(), 4);
+    assert_eq!(operations.len(), 5);
     let runtime = operations
         .iter()
         .find(|operation| operation.id.name() == "runtime")
@@ -191,4 +198,86 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
     api.close().await;
     assert!(registry.operations().is_empty());
     assert!(registry.admit(&runtime.id, CallOrigin::Local).is_err());
+}
+
+#[derive(Debug)]
+struct RegisteredClient {
+    registry: Arc<ApiRegistry>,
+    operations: Vec<rsi_api_protocol::OperationSpec>,
+    description: rsi_api_protocol::ConnectionDescription,
+}
+#[async_trait::async_trait]
+impl rsi_api_protocol::ApiClient for RegisteredClient {
+    fn description(&self) -> &rsi_api_protocol::ConnectionDescription {
+        &self.description
+    }
+    fn operations(&self) -> &[rsi_api_protocol::OperationSpec] {
+        &self.operations
+    }
+    fn input_budget(&self, _: rsi_api_protocol::OperationClass) -> ByteBudget {
+        ByteBudget::default()
+    }
+    async fn call(
+        &self,
+        operation: &rsi_api_protocol::OperationSpec,
+        input: rsi_api_protocol::RetainedBytes,
+    ) -> rsi_api_protocol::Result<ApiOutput> {
+        self.registry
+            .admit(&operation.id, CallOrigin::Local)?
+            .invoke(input)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn workflow_client_checks_real_registered_impact_and_withdrawal() {
+    let registry = Arc::new(ApiRegistry::new(Execution::native(
+        tokio::runtime::Handle::current(),
+    )));
+    let source = Arc::new(Source::default());
+    let api = InspectorApi::register(registry.as_ref(), source.clone()).unwrap();
+    let client = rsi_inspector::InspectorClient::new(Arc::new(RegisteredClient {
+        operations: registry.operations(),
+        registry,
+        description: rsi_api_protocol::ConnectionDescription {
+            wire_version: 1,
+            endpoint_id: rsi_api_protocol::EndpointId::from_bytes([1; 16]),
+            host_epoch: rsi_api_protocol::HostEpoch::from_bytes([2; 16]),
+        },
+    }))
+    .unwrap();
+    assert!(matches!(
+        client.workflows().await,
+        Err(ApiError::Unavailable)
+    ));
+    for (unfinished, truncated, valid) in [
+        (0, false, true),
+        (15, false, true),
+        (16, false, true),
+        (16, true, true),
+        (0, true, false),
+        (15, true, false),
+        (17, false, false),
+        (17, true, false),
+    ] {
+        *source.1.lock().unwrap() = Some(rsi_inspector::WorkflowImpact {
+            unfinished,
+            truncated,
+        });
+        let result = client.workflows().await;
+        if valid {
+            let impact = result.unwrap();
+            assert_eq!(
+                (impact.unfinished, impact.truncated),
+                (unfinished, truncated)
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ApiError::Invalid(_))),
+                "{unfinished}/{truncated}"
+            );
+        }
+    }
+    api.close().await;
+    assert!(client.workflows().await.is_err());
 }

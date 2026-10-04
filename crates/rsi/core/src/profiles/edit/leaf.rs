@@ -112,6 +112,16 @@ impl ProfileCatalog {
         let (leaf, blocked) =
             find(previous.nodes(), instance, None).ok_or(ProfileEditError::NotLeaf)?;
         let plugin = leaf.plugin().ok_or(ProfileEditError::NotLeaf)?.clone();
+        if plugin.as_str() == rsi_session_protocol::PROGRAM_RUNTIME_PLUGIN_ID
+            && let HostLeafEdit::Configuration(value) = change
+        {
+            let configuration: rsi_agent_program::ProgramConfiguration =
+                serde_json::from_value(value.clone())
+                    .map_err(|_| ProfileEditError::ConfigurationBounds)?;
+            configuration
+                .validate()
+                .map_err(|_| ProfileEditError::ConfigurationBounds)?;
+        }
         if let (HostLeafEdit::Enabled(true), Some(parent)) = (change, blocked) {
             return Err(ProfileEditError::DisabledAncestor(parent.into()));
         }

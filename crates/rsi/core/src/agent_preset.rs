@@ -111,8 +111,8 @@ impl AgentPresetManager {
         .await
     }
 
-    /// Opens the standard Settings document with the sole byte-verified
-    /// built-in preset, without trusting sibling cache directories.
+    /// Opens the standard Settings document with byte-verified
+    /// built-in presets, without trusting sibling cache directories.
     pub async fn open_standard(
         composition: &crate::StandardComposition,
         system_root: impl Into<PathBuf>,
@@ -140,7 +140,14 @@ impl AgentPresetManager {
         Self::open_with_system_sources(
             parent,
             composition,
-            vec![SystemPresetSource::Exact { id, path }],
+            vec![
+                SystemPresetSource::Exact { id, path },
+                SystemPresetSource::Exact {
+                    id: AgentPresetId::new(rsi_session_protocol::WORKFLOW_PRESET_ID)
+                        .expect("static preset"),
+                    path: system_root.join(rsi_session_protocol::WORKFLOW_PRESET_ID),
+                },
+            ],
         )
         .await
     }
