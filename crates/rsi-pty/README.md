@@ -32,6 +32,9 @@ must not be blindly replayed. Detach releases follower queues and snapshots even
 while an admitted native write is pending. That write retains its old-epoch
 receipt and admission until settlement; takeover remains blocked until then.
 Request controller and stream epochs, and input sequences, are positive.
+Input `Capacity` refusals, including contention with resize, consume no sequence,
+retain no receipt and perform no native write. That exact refusal permits another
+attempt with the same epoch, sequence and bytes; an unknown receipt does not.
 
 Explicit close/close-all and scope or provider retirement terminate and reap
 PTYs. Pane closure and follower disconnect only detach. The standard product

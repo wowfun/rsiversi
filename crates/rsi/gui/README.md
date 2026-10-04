@@ -410,12 +410,18 @@ output cursors. The document forwards a bounded byte batch once, and acknowledge
 an opaque output-page ticket only after xterm finishes parsing that page. A lost
 reply returns the same retained page; it cannot advance the cursor twice. Input
 uncertainty blocks further input until an explicit successful takeover. A definitive
-stale-controller rejection immediately marks input read-only without receipt polling. Terminal
+stale-controller rejection immediately marks input read-only without receipt polling.
+Exact terminal input `Capacity` refusals retry the same epoch, sequence and bytes
+at most five times with 50/100/200/400 ms backoff, without receipt polling. Exhausted
+refusal restores the unused sequence; input remains usable if no prefix was
+accepted, while an already accepted prefix keeps the uncertainty latch closed
+until takeover. Cancellation and unknown outcomes still block replay. Terminal
 polling does not publish unrelated transcript frames.
 Partial native writes reduce the next batch to the accepted prefix size. A full
 acceptance doubles the next batch up to the input limit, so transient backpressure
 does not leave a paste in one-byte round trips. Batch copies total at most three
-times the original input size, even under repeated short writes.
+times the original input size, even under repeated short writes; each refused
+capacity attempt adds one bounded batch copy.
 
 Terminal output reads have 32 independent admission slots, matching the PTY
 provider's aggregate follower limit. They share command task ownership and
