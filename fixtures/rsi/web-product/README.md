@@ -330,9 +330,14 @@ and verifies the human/automatic provenance and retained allowance through CLI
 history. Browser screenshots inspect ordinary Tool results at wide and narrow
 widths. No repeating work is created, and fixture shutdown owns all live timers.
 
-`program-live.mjs` uses the same explicit live variables to compare four ordinary
+`program-live.mjs` additionally requires an absolute `RSI_TEST_NODE`. Its isolated
+Host enables the configured Node runtime and selects the builtin `workflow`
+preset, which includes the Program coordinators. It uses the same explicit live
+variables to compare four ordinary
 file reads with one `run_code` coordinator over the same files and model. It checks
-Program-origin Facts, curated output and actual provider usage. A paired sample
+Program-origin Facts, curated output and actual provider usage. Each sample opens
+its own conversation; the next sample restores All conversations before using the
+Workspace create control. A paired sample
 reports measured tokens and time; it does not establish a general speedup.
 
 `workflow-live.mjs` additionally requires the opt-in Node runtime in its isolated
@@ -456,3 +461,26 @@ negotiation. While that target is busy, it verifies an unrelated candidate write
 and a directory read on the real SSH target, and checks the same-target Busy
 response. It closes the stalled socket explicitly and requires a known connection
 failure; this is contention evidence, not a successful second SSH connection.
+
+The opt-in Workflow workbench fixture uses `RSI_TEST_NODE=/absolute/node
+RSI_WEB_REPORT=/new/report node fixtures/rsi/web-product/workflow-verify.mjs` after
+a paired build. Chromium and Firefox exercise readiness, empty and cold history,
+actual parallel child receipts, user cancellation, Node reaping, frozen script and
+CAS result reads, child inspection and narrow rendering. Its provider is keyless.
+Terminal cancellation readback rejects the actual pending-cleanup label; the
+keyless Program fixture test positively checks that this assertion rejects it.
+Intermediate UI frames may coalesce during native cleanup.
+`workflow-live.mjs` separately accepts `RSI_WORKFLOW_SKILL=workflow-collect` with
+explicit live environment/model/report inputs and records actual Skill body read,
+read-only run authorization and result evidence.
+For non-Skill runs it checks the actual submitted script/background/observation
+arguments and correlates a successful terminal `workflow_read` result to its Tool
+intent, exact run and terminal control sequence. Completion-notice text alone
+cannot satisfy that read. `RSI_WORKFLOW_MODE=foreground` exercises observation
+timeout detachment; `plan` exercises `/plan on` revocation and exact Node reaping.
+
+The CI Workflow browser gate runs `workflow-verify.mjs --dock-only`: readiness,
+canonical run/result/script/child reads, restart, narrow layout and cancellation
+with actual Node cleanup. The default command additionally checks Workflow inline
+navigation. Those inline assertions remain a separate opt-in integration check;
+passing the Dock gate does not establish inline navigation evidence.

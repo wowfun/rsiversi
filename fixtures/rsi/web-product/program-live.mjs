@@ -23,6 +23,7 @@ try {
   for(const mode of ['ordinary','program']) {
     if(mode==='program') {
       const previous=await pane.locator('.pane-session').innerText();
+      await navigationFilter(page,'all');
       await page.locator('#workspaces [data-testid=workspace-open]').first().click();
       await page.waitForFunction(previous=>document.querySelector('[aria-label="Main conversation"] .pane-session')?.textContent!==previous,previous);
     }

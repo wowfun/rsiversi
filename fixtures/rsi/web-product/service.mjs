@@ -85,7 +85,16 @@ async function startProvider(onRequest) {
         response.end(sse({content:"Custom reviewer completed its isolated task."})); return;
       }
       let name; let argumentsValue;
-      if (!completedTool && prompt.includes("delegate to Markdown reviewer")) {
+      // Forked child prompts retain the parent marker; match their exact task first.
+      if (!completedTool && prompt.includes("WORKFLOW_CHILD_")) {
+        name="report_result"; argumentsValue={n:prompt.includes("LEFT")?19:23};
+      } else if (!completedTool && prompt.includes("WORKFLOW_FIXTURE_")) {
+        name="run_workflow";
+        const task = side => ({message:`WORKFLOW_CHILD_${side}`,output_schema:{type:'object',properties:{n:{type:'integer'}},required:['n'],additionalProperties:false}});
+        const script=prompt.includes("CANCEL") ? "await workflow.phase('Await cancellation',{pid:process.pid}); await new Promise(()=>{}); return {};"
+          : `await workflow.phase('Collect evidence',{jobs:2}); const rows=await workflow.parallel([()=>workflow.agent(${JSON.stringify(task('LEFT'))}),()=>workflow.agent(${JSON.stringify(task('RIGHT'))})]); return await workflow.pipeline([async rows=>({total:rows.reduce((sum,row)=>sum+row.value.n,0)})],rows);`;
+        argumentsValue={script,background:true};
+      } else if (!completedTool && prompt.includes("delegate to Markdown reviewer")) {
         name="spawn_agent"; argumentsValue={role:"reviewer",task_name:`reviewer-${requests.length}`,message:"Review the isolated sample and return a concise finding."};
       } else if (!completedTool && prompt.includes("start an external delegation")) {
         name = "external_agent"; argumentsValue = { operation: "start", endpoint: "sdk-agent" };
@@ -180,7 +189,7 @@ export async function startService({ binary, assets, report, configure, onReques
     assert.equal(JSON.parse(ready).event, "serving");
     };
     await startProcess();
-    return { origin, workspace, run, provider, close,
+    return { origin, workspace, run, provider, close, get pid() { return child.pid; },
       probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart() { await stopProcess(); await startProcess(); },
       register(label) {

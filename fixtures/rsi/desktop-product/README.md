@@ -231,3 +231,10 @@ It also checks light/dark workbench and Settings geometry at 1440×900,
 terminal resize settle. It rejects terminal error notices and non-integer or
 out-of-range resize commands; native screenshots are reviewed separately from
 the Chromium pixel baselines.
+
+`--workflows` requires explicit `RSI_TEST_NODE=/absolute/node`. It enables the
+shipped Runtime leaf in the private Host, selects the built-in Workflow preset
+and verifies an actual Node result plus frozen script through native WebKit input.
+Its provider remains deterministic and keyless.
+`python3 fixtures/rsi/desktop-product/test_workflow.py` checks the isolated Host
+profile edit, including whitespace around an empty steps array, without WebKit.

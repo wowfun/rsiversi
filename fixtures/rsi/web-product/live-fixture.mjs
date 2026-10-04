@@ -37,16 +37,4 @@ export async function liveFixture({configure,ssh=false}={}) {
   } catch(error) { await close(); throw new Error(redact(error)); }
 }
 
-export async function configureProgram({config}) {
-  await appendFile(join(config, 'host-profiles/fixture/host.profile.toml'), `\n[[steps]]\nkind="plugin"\nid="program-runtime"\nplugin="rsi.agent.program.runtime"\nconfig={node=${JSON.stringify(process.execPath)}}\n`);
-  const settings = JSON.parse(await readFile(join(config, 'settings.json'), 'utf8'));
-  settings['rsi.agent-presets'] = {default: 'program'};
-  await writeFile(join(config, 'settings.json'), JSON.stringify(settings));
-  const preset = join(config, 'agent-presets/program');
-  await mkdir(preset, {recursive: true});
-  const profile = await readFile(resolve('crates/rsi/core/presets/standard/agent.profile.toml'), 'utf8');
-  const disabled = 'plugin = "rsi.agent.program.tools"\nenabled = false';
-  assert.equal(profile.split(disabled).length, 2, 'one standard Program contribution');
-  await writeFile(join(preset, 'agent.profile.toml'), profile.replace(disabled, disabled.replace('false', 'true')));
-  await copyFile(resolve('crates/rsi/core/presets/standard/preset.toml'), join(preset, 'preset.toml'));
-}
+export {configureProgram} from './program-fixture.mjs';

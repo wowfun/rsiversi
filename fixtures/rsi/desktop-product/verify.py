@@ -21,6 +21,7 @@ from presentation import verify as verify_presentation
 from alignment import verify as verify_alignment
 from queue_scenario import verify as verify_queue
 from tasks import ProviderControl, verify as verify_tasks
+from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
@@ -50,6 +51,7 @@ parser.add_argument('--close-timeout', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
 parser.add_argument('--tasks', action='store_true')
 parser.add_argument('--plan-review', action='store_true')
+parser.add_argument('--workflows', action='store_true')
 parser.add_argument('--terminals', action='store_true')
 parser.add_argument('--dock', action='store_true')
 parser.add_argument('--presentation', action='store_true')
@@ -113,7 +115,7 @@ class Provider(BaseHTTPRequestHandler):
         delta = {'choices': [{'delta': {'role': 'assistant', 'content': 'Desktop conversation verified. 中文输入已收到。'}, 'finish_reason': None}]}
         if args.ui_alignment: delta['choices'][0]['delta']['content'] += '\n\n```text\nnative clipboard verified\n```'
         done = {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12}}
-        delegation = (plan_reply(body) if args.plan_review else None) or (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
+        delegation = (workflow_reply(body) if args.workflows else None) or (plan_reply(body) if args.plan_review else None) or (review_reply(body) if args.workspace_review else None) or (typed_reply(body) if args.typed_results else None) or (attention_reply(body) if args.attention else None) or (external_reply(body) if args.external else None)
         if delegation:
             delta['choices'][0]['delta'] = {'role':'assistant', **delegation}
             done['choices'][0]['finish_reason'] = 'tool_calls'
@@ -136,6 +138,7 @@ if args.profiles:
     editable_source = editable / 'host.profile.toml'
     editable_source.write_text('format = 1\nsteps = []\n')
 (config / 'settings.json').write_text(json.dumps({'rsi.agent':{'require_approval':True} if args.attention else {}}))
+if args.workflows: configure_workflow(config,host/'host.profile.toml')
 workspace = args.report / 'workspace'; workspace.mkdir()
 if args.language:
     language_position = json.loads(subprocess.check_output(['python3', str(Path(__file__).parent.parent/'lsp/prepare.py'), str(workspace), str(host/'host.profile.toml'), str(args.language)],text=True))
@@ -374,6 +377,7 @@ try:
     if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace)
     if args.queue: verify_queue(script, button, fill, until, screenshot, args.report, requests)
     if args.presentation: verify_presentation(script, button, fill, until, screenshot, args.report, args.system_theme)
+    if args.workflows: verify_workflow(script,button,lambda item: call('POST',root+f'/element/{eid(item)}/click',{}),fill,until,screenshot,args.report)
     if args.plan_review: verify_plan_review(script, button, fill, until, screenshot, args.report)
     if args.export: verify_export(script, button, fill, until, screenshot, args.report, requests)
     if args.file_previews:
