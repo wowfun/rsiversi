@@ -26,6 +26,91 @@ pub const MAXIMUM_PROGRAM_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 pub const PROGRAM_TERMINAL_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
 /// One bounded progress payload.
 pub const MAXIMUM_PROGRAM_PROGRESS_BYTES: usize = 16 * 1024;
+/// Maximum UTF-8 phase name bytes.
+pub const MAXIMUM_PROGRAM_PHASE_BYTES: usize = 256;
+/// Registered detached-capable coordinator name, shared with result consumers.
+pub const RUN_WORKFLOW_TOOL_NAME: &str = "run_workflow";
+
+/// Non-authorizing locator returned by the Workflow coordinator.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunLocator {
+    /// Exact owning Session.
+    pub session_id: SessionId,
+    /// Exact accepted run.
+    pub run_id: ProgramRunId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InvocationStatus {
+    Running,
+}
+
+/// Coordinator return value shared by the producer and history presentation.
+/// `T` lets readers ignore curated JSON without allocating another owned copy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowInvocationResult<T = serde_json::Value> {
+    run: WorkflowRunLocator,
+    detached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<InvocationStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<ProgramOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<T>,
+}
+impl<T> WorkflowInvocationResult<T> {
+    /// A detached invocation has returned while its independent owner runs.
+    pub fn running(run: WorkflowRunLocator) -> Self {
+        Self {
+            run,
+            detached: true,
+            status: Some(InvocationStatus::Running),
+            outcome: None,
+            value: None,
+        }
+    }
+    /// A foreground observation has established an authoritative terminal outcome.
+    pub fn finished(run: WorkflowRunLocator, outcome: ProgramOutcome, value: T) -> Self {
+        Self {
+            run,
+            detached: false,
+            status: None,
+            outcome: Some(outcome),
+            value: Some(value),
+        }
+    }
+    /// Rejects contradictory invocation lifecycle fields at a JSON boundary.
+    pub fn validate(&self) -> Result<()> {
+        if self.detached {
+            if self.status != Some(InvocationStatus::Running)
+                || self.outcome.is_some()
+                || self.value.is_some()
+            {
+                return Err(invalid("invalid detached Workflow invocation"));
+            }
+        } else if let Some(outcome) = &self.outcome {
+            if self.status.is_some() {
+                return Err(invalid("invalid terminal Workflow invocation"));
+            }
+            outcome.validate()?;
+        } else {
+            return Err(invalid("invalid terminal Workflow invocation"));
+        }
+        Ok(())
+    }
+}
+impl WorkflowInvocationResult {
+    /// Decodes only the bounded detached locator, ignoring an optional curated value.
+    pub fn detached_run(value: &serde_json::Value) -> Result<Option<ProgramRunId>> {
+        let decoded = WorkflowInvocationResult::<serde::de::IgnoredAny>::deserialize(value)
+            .map_err(|e| invalid(&e.to_string()))?;
+        decoded.validate()?;
+        Ok(decoded.detached.then_some(decoded.run.run_id))
+    }
+}
 
 /// Execution ownership is independent of inherited history and tree presentation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -281,7 +366,12 @@ impl ProgramRunEvent {
                     return Err(invalid("program progress exceeds its bound"));
                 }
                 if let Some(phase) = phase {
-                    crate::validate_safe_text("program phase", phase, 256, false)?;
+                    crate::validate_safe_text(
+                        "program phase",
+                        phase,
+                        MAXIMUM_PROGRAM_PHASE_BYTES,
+                        false,
+                    )?;
                 }
             }
             Self::Terminal { outcome, result } => {
@@ -341,5 +431,54 @@ impl ProgramCompletionSource {
             return Err(invalid("program notice has no terminal control"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+    #[test]
+    fn invocation_codec_keeps_detached_and_terminal_results_distinct() {
+        let run = WorkflowRunLocator {
+            session_id: SessionId::new("session").unwrap(),
+            run_id: ProgramRunId::new("program-codec").unwrap(),
+        };
+        let running = serde_json::to_value(WorkflowInvocationResult::<serde_json::Value>::running(
+            run.clone(),
+        ))
+        .unwrap();
+        assert_eq!(
+            running,
+            serde_json::json!({"run":{"session_id":"session","run_id":"program-codec"},"status":"running","detached":true})
+        );
+        assert_eq!(
+            WorkflowInvocationResult::detached_run(&running).unwrap(),
+            Some(run.run_id.clone())
+        );
+        for outcome in [ProgramOutcome::Completed, ProgramOutcome::Cancelled] {
+            let terminal = serde_json::to_value(WorkflowInvocationResult::finished(
+                run.clone(),
+                outcome,
+                serde_json::json!({"total":42}),
+            ))
+            .unwrap();
+            assert_eq!(
+                WorkflowInvocationResult::detached_run(&terminal).unwrap(),
+                None
+            );
+        }
+        for patch in [
+            serde_json::json!({"detached":false}),
+            serde_json::json!({"outcome":{"status":"completed"}}),
+            serde_json::json!({"value":42}),
+            serde_json::json!({"run":{"session_id":"session","run_id":"bad/name"}}),
+        ] {
+            let mut malformed = running.clone();
+            malformed
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(WorkflowInvocationResult::detached_run(&malformed).is_err());
+        }
     }
 }

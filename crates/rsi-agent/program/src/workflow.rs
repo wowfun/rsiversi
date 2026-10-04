@@ -2,6 +2,7 @@ use crate::{ProgramError, ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     DomainIdentity, ForkTurnSelection, OutputContract, ProgramDomainGuard, ProgramOutcome,
+    RUN_WORKFLOW_TOOL_NAME, WorkflowInvocationResult, WorkflowRunLocator,
 };
 use rsi_agent_turn_protocol::{
     AgentCallerAuthority, PrepareProgram, ProgramAgentRequest, ProgramRun, TurnService,
@@ -20,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<ToolLease> {
     let definition = ToolDefinition::new(
-        "run_workflow",
+        RUN_WORKFLOW_TOOL_NAME,
         "Run a JavaScript workflow with workflow.agent({message, output_schema?}), workflow.pipeline, workflow.parallel, and awaited workflow.phase/log. Return curated JSON. Uses shell-equivalent Sandbox authority. Foreground observes for 30 seconds (maximum 60), then detaches; background detaches immediately. The background run has no total execution deadline. One run per initial human root Turn or finite Goal/Schedule round; children and completion Turns cannot start successors.",
         json!({
             "type": "object",
@@ -184,28 +185,39 @@ impl ToolExecutor for Workflow {
                 settle_workflow(owner, jobs, scope, program, retiring).await,
             ));
         });
-        let identity =
-            json!({"run_id":run.descriptor().run_id,"session_id":run.descriptor().session_id});
+        let identity = WorkflowRunLocator {
+            run_id: run.descriptor().run_id.clone(),
+            session_id: run.descriptor().session_id.clone(),
+        };
         if args.background {
-            return ToolResult::new(
-                json!({"run":identity,"status":"running","detached":true}),
-                vec![],
-                false,
-            );
+            return invocation_result(WorkflowInvocationResult::running(identity), false);
         }
         let observed=tokio::select! {biased;()=execution.cancellation.cancelled()=>{run.cancel_from_creator().await.map_err(failure)?;wait_finished(&mut receiver).await},result=wait_finished(&mut receiver)=>result,()=tokio::time::sleep(Duration::from_secs(args.observe_seconds))=>{
-            if run.detach().await.is_ok() {return ToolResult::new(json!({"run":identity,"status":"running","detached":true}),vec![],false);}
+            if run.detach().await.is_ok() {return invocation_result(WorkflowInvocationResult::running(identity),false);}
             wait_finished(&mut receiver).await
         }}.map_err(failure)?;
         if observed.0 == ProgramOutcome::Interrupted {
             return Err(ToolError::OutcomeUnknown);
         }
-        ToolResult::new(
-            json!({"run":identity,"outcome":observed.0,"value":observed.1,"detached":false}),
-            vec![],
+        invocation_result(
+            WorkflowInvocationResult::finished(
+                identity,
+                observed.0.clone(),
+                observed.1.unwrap_or(Value::Null),
+            ),
             observed.0 != ProgramOutcome::Completed,
         )
     }
+}
+fn invocation_result(
+    value: WorkflowInvocationResult,
+    failed: bool,
+) -> rsi_tools_protocol::Result<ToolResult> {
+    ToolResult::new(
+        serde_json::to_value(value).map_err(failure)?,
+        vec![],
+        failed,
+    )
 }
 fn acquire_workflow_scope(
     jobs: &dyn Jobs,

@@ -324,7 +324,10 @@ flat view can reject cross-machine/workspace moves without reading all summaries
 Groups are unique, referenced, in first-member order, and share the seed's 128 KiB
 bound. Summary pages are independent later read snapshots.
 
-CAS
+Program history selects at most sixteen canonical mechanical heads in descending
+acceptance-control order within one Session and a fixed watermark. Store owns the
+index and checks its acceptance projection; Kernel validates page count, descending
+order, cursor membership and progress before allocating views, and owns lifecycle folding. CAS
 reads accept ByteAdmission, reserve in the actual owning worker before payload
 allocation, and return RetainedBytes whose shared lease survives the last clone. Missing metadata or a missing
 CAS file returns `NotFound`; malformed files and inconsistent metadata remain

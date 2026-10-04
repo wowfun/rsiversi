@@ -1,6 +1,6 @@
 # rsi-agent-store-sqlite
 
-Schema 31 holds exact execution-coordinate and activity projections on each Session
+Schema 32 holds exact execution-coordinate and activity projections on each Session
 row. Global activity, location activity/membership, coordinate activity and coordinate membership each have a
 dedicated index. Append updates the projection in the same transaction as canonical
 records, using the Store protocol's closed activity whitelist. Activity and complete
@@ -321,7 +321,12 @@ that exact length through the caller's deferred admission, then copy a borrowed
 SQLite blob in the same read transaction. Byte pressure returns `ReadCapacity`;
 it never labels a valid cache corrupt or reserves the 64 MiB format maximum.
 
-CAS reads reject symlinks, metadata/length
+Program runs retain an indexed accepted_control_seq projection, checked against
+canonical head_json and controls. The Session acceptance index orders fixed-seed
+history without sorting all rows. A history page projects bounded head JSON and
+correlated scalar fields in that same query; point and page reads share one
+head decoder and its identity/budget checks. This exact pre-release schema rejects older
+stores; there is no automatic migration. CAS reads reject symlinks, metadata/length
 changes, unexpected trailing bytes and digest mismatches while holding worker
 byte admission through returned buffer ownership.
 Windows CAS opens retain every parent directory without delete sharing and

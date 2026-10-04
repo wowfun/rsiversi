@@ -261,6 +261,48 @@ impl SessionStore for MemoryStore {
         }
         Ok(Some(page))
     }
+    async fn list_program_history(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramHistoryPage> {
+        if limit == 0
+            || limit > rsi_agent_store_protocol::MAXIMUM_PROGRAM_HISTORY_ROWS
+            || before.is_some_and(|n| n == 0 || n > seed.saturating_add(1))
+        {
+            return Err(StoreError::Invalid(
+                "invalid program history cursor or limit".into(),
+            ));
+        }
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let selected = state
+            .sessions
+            .get(session)
+            .ok_or_else(|| StoreError::NotFound(session.to_string()))?;
+        let mut runs = Vec::with_capacity(limit + 1);
+        for (head, _) in selected.programs.values() {
+            if head.first_control_seq > seed || before.is_some_and(|n| head.first_control_seq >= n)
+            {
+                continue;
+            }
+            let index =
+                runs.partition_point(|current: &rsi_agent_store_protocol::StoreProgramHead| {
+                    current.first_control_seq > head.first_control_seq
+                });
+            if index <= limit {
+                runs.insert(index, head.clone());
+                runs.truncate(limit + 1);
+            }
+        }
+        let has_more = runs.len() > limit;
+        runs.truncate(limit);
+        Ok(rsi_agent_store_protocol::StoreProgramHistoryPage { runs, has_more })
+    }
     async fn list_active_program_runs(
         &self,
         after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,

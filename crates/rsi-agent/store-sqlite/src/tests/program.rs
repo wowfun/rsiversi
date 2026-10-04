@@ -180,3 +180,22 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
         "counterpart lookup must seek exact activation: {work:?}"
     );
 }
+
+#[tokio::test]
+async fn workflow_history_rejects_acceptance_projection_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (id, run) = program_contract(&store).await;
+    drop(store);
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection.execute("UPDATE program_runs SET accepted_control_seq=accepted_control_seq+1 WHERE session_id=?1 AND run_id=?2", params![id.as_str(), run.as_str()]).unwrap();
+    drop(connection);
+    assert!(SqliteStore::verify(root.path()).is_err());
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    assert!(
+        reopened
+            .list_program_history(&id, 10000, None, 8)
+            .await
+            .is_err()
+    );
+}

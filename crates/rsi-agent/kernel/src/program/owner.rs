@@ -1,4 +1,17 @@
 use super::*;
+
+// Once Store commit starts, unwinding cannot prove that cancellation was refused.
+struct CancellationCommitGuard {
+    cancellation: CancellationToken,
+    refused: bool,
+}
+impl Drop for CancellationCommitGuard {
+    fn drop(&mut self) {
+        if !self.refused {
+            self.cancellation.cancel();
+        }
+    }
+}
 #[async_trait]
 impl ProgramRun for LiveRun {
     fn descriptor(&self) -> &ProgramRunDescriptor {
@@ -95,8 +108,7 @@ impl ProgramRun for LiveRun {
                 return Ok(true);
             }
             if !state.cancelling {
-                self.append(ProgramRunEvent::CancellationRequested, admission)
-                    .await?;
+                self.append_cancellation(admission).await?;
             }
         }
         self.cancel_children().await?;
@@ -212,6 +224,52 @@ impl ProgramRun for LiveRun {
     }
 }
 impl LiveRun {
+    async fn append_cancellation(&self, admission: SubmissionAdmissionLease) -> TurnResult<()> {
+        let append = self
+            .kernel
+            .program_append(
+                &self.descriptor.session_id,
+                &self.descriptor.run_id,
+                ProgramRunEvent::CancellationRequested,
+            )
+            .await?;
+        let kernel = self.kernel.clone();
+        let cancellation = self.cancellation.clone();
+        self.kernel
+            .owned_commit(async move {
+                let _admission = admission;
+                let mut signal = CancellationCommitGuard {
+                    cancellation,
+                    refused: false,
+                };
+                let result = kernel
+                    .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
+                        sessions: vec![append],
+                        required_active_activations: vec![],
+                        quiescent_descendants_of: None,
+                    })
+                    .await;
+                match result {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(StoreError::Io(_))) => Err(TurnError::ExecutionOutcomeUnknown),
+                    Ok(Err(error)) => {
+                        signal.refused = true;
+                        Err(turn_store_error(error))
+                    }
+                    Err(error) => {
+                        // The first commit was refused with Conflict; draining
+                        // its existing Fact suffix failed before the retry.
+                        signal.refused = true;
+                        Err(error)
+                    }
+                }
+            })
+            .await
+            .map_err(|error| match error {
+                TurnError::Invariant(_) => TurnError::ExecutionOutcomeUnknown,
+                other => other,
+            })
+    }
     async fn wait_for_child_receipts(
         &self,
         mut cancellation_drained: bool,
@@ -241,8 +299,7 @@ impl LiveRun {
             }
         }
     }
-    async fn request_cancellation(&self) -> TurnResult<()> {
-        self.cancellation.cancel();
+    pub(super) async fn request_cancellation(&self) -> TurnResult<()> {
         {
             let admission = self
                 .kernel
@@ -255,10 +312,10 @@ impl LiveRun {
                 return Ok(());
             }
             if !state.cancelling {
-                self.append(ProgramRunEvent::CancellationRequested, admission)
-                    .await?;
+                self.append_cancellation(admission).await?;
             }
         }
+        self.cancellation.cancel();
         Ok(())
     }
     async fn record_live_event(&self, event: ProgramRunEvent) -> TurnResult<()> {
@@ -273,8 +330,7 @@ impl LiveRun {
             && (self.creator_cancellation.is_cancelled() || self.turn_cancellation.is_cancelled())
         {
             self.cancellation.cancel();
-            self.append(ProgramRunEvent::CancellationRequested, admission)
-                .await?;
+            self.append_cancellation(admission).await?;
             return Err(TurnError::Cancelled);
         }
         let append = self

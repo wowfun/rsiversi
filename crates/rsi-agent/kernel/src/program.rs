@@ -403,23 +403,6 @@ impl LiveRun {
             .read_program_state(&self.descriptor.session_id, &self.descriptor.run_id)
             .await
     }
-    async fn append(
-        &self,
-        event: ProgramRunEvent,
-        admission: SubmissionAdmissionLease,
-    ) -> TurnResult<()> {
-        let append = self
-            .kernel
-            .program_append(&self.descriptor.session_id, &self.descriptor.run_id, event)
-            .await?;
-        let kernel = self.kernel.clone();
-        self.kernel
-            .owned_commit(async move {
-                let _admission = admission;
-                kernel.commit_program_append(append).await
-            })
-            .await
-    }
     async fn active(&self) -> TurnResult<Option<rsi_execution::ExecutionOperation>> {
         self.live()?;
         let admission = execution_admission::admit(&self.header, self.execution.as_ref())?;

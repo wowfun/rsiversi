@@ -127,6 +127,15 @@ impl SessionStore for SqliteStore {
     ) -> Result<Option<rsi_agent_store_protocol::StoreProgramRecords>> {
         self.program_records_after(session, run, after).await
     }
+    async fn list_program_history(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramHistoryPage> {
+        self.program_history(session, seed, before, limit).await
+    }
     async fn list_active_program_runs(
         &self,
         after: Option<&rsi_agent_store_protocol::StoreProgramCursor>,

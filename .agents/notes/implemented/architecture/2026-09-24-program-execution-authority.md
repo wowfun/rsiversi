@@ -40,6 +40,12 @@ by the interrupted sink without changing its terminal ledger or publishing an
 ordinary completion. Live run settlement still joins receipts; later human
 activations retain their ordinary completion routing.
 
+Explicit workbench cancellation establishes its durable request before signalling the live owner,
+so a known pre-write capacity or validation refusal remains retryable without
+having interrupted execution. An uncertain admitted write still signals the
+owner; exact canonical readback can resolve a lost acknowledgement. The
+[Turn contract](../../../../crates/rsi-agent/turn-protocol/README.md) owns these outcomes.
+
 A common native Node runtime serves foreground `run_code` and workflow scripts
 through Process duplex framing and Jobs. Process owns spawn/reap and Jobs owns
 live controls; Agent owns durable provenance and run policy. Each workflow scope
@@ -72,6 +78,22 @@ The cache still verifies each incremental mechanical head and never publishes a
 precommit transition. Cancellation reuses tree snapshots but rechecks membership
 after source mutation drain; a one-time membership snapshot could miss a child
 admitted concurrently with cancellation.
+
+Kernel remains the sole lifecycle fold. Clients consume bounded snapshots and
+coalesced invalidations from the existing control observer, avoiding a second
+reducer and cold-reopen gaps. Acceptance ordering requires an indexed Store column
+because hashed run IDs are not time ordered. Cold rows replay canonical controls;
+this preserves one authority at the cost of bounded replay I/O, rather than a
+second denormalized lifecycle ledger. A detail read captures one validated
+canonical state for its child page and optional CAS references. Separate script
+and result operations repeat historical replay and can disagree after a progress
+append; a single Local request preserves snapshot correlation while each CAS
+body keeps its own admission. Canonical replay still checks the complete child
+graph before paging; SQL pagination of lifecycle rows would bypass that proof.
+Cancel receipts distinguish durable request
+acceptance, existing terminal state and an orphan requiring restart. A lost reply
+cannot establish rejection. Frozen CAS buffers acquire admission inside the worker
+and share it until the last returned owner, including cancelled waiters and clones.
 
 ## Alternatives considered
 

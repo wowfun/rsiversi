@@ -32,7 +32,8 @@ reported as missing execution authority.
 `read_program` observes one run in the exact live caller's Session, including
 complete verified result data and the run control revision. `cancel_program`
 revokes that same Session's live run, without reviving the creator Tool. Neither
-operation grants child or cross-Session control. Model adapters page the complete
+operation grants child or cross-Session control. Every cancellation receipt carries
+the exact run identity, including terminal and orphaned replies. Model adapters page the complete
 rendered observation within 8 KiB by default (16 KiB maximum) and bind continuation
 offsets to the returned revision; a changed run requires a fresh first page.
 Missing Program script/result objects report a Store failure with their CAS
@@ -375,7 +376,13 @@ execution authority. Preparation reserves live capacity but creates no run recor
 After Jobs admission, `accept` checks the creator again, then `start` records the
 run before opening the external process latch. Detached operations use the owner
 instead of a retired Tool claim. `detach` and creator cancellation serialize on
-one run transition. Child waits read the exact initial-activation receipt and
+one run transition. Workbench cancellation rechecks canonical state after observing
+owner retirement, so completed runs receive terminal receipts. Explicit workbench
+cancellation establishes its durable request before
+signalling the live run. Known capacity or validation refusal before that write
+retains its typed error and does not signal cancellation. A failed admitted
+commit with an uncertain outcome still signals the run and requires reconciliation.
+Child waits read the exact initial-activation receipt and
 return full verified structured output, or a bounded final public reply.
 
 Continuation commands retain their lease after Session busy, precommit capacity
@@ -439,3 +446,16 @@ A finalizer may return `OutcomeUnknown` when admitted effects cannot be confirme
 All hooks still settle; uncertainty takes precedence over other hook failures
 and completion blockers and causes an interrupted Turn, including when another
 owner requested cancellation. This category carries no provider diagnostic.
+
+Workflow overview and Local detail snapshots reserve their 128 KiB and 2 MiB
+encoded ceilings before cloning canonical state. Publication measures the whole
+snapshot without a payload buffer and shrinks retention to that encoded weight.
+The final clone retains the admission; these snapshot bounds are separate from
+the canonical run-record and CAS body limits.
+
+Local workbench detail reads capture one canonical run revision, then clone only
+the requested child page (at most 16 entries). Optional script and result bodies
+are authenticated against that same snapshot and retain separate CAS admission.
+A supplied revision must match before CAS reads; lifecycle changes after the
+snapshot do not mix newer references into its reply. Live owners refresh their
+cached suffix; historical runs replay canonical records once per detail read.

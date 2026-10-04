@@ -55,6 +55,7 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
         session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
         run_id TEXT NOT NULL,
         creator_turn_id TEXT NOT NULL,
+        accepted_control_seq INTEGER NOT NULL CHECK (accepted_control_seq > 0),
         terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
         head_json TEXT NOT NULL,
         PRIMARY KEY (session_id, run_id),
@@ -270,7 +271,7 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 20] = [
+const EXPECTED_INDEXES: [(&str, &str); 21] = [
     (
         "sessions_by_location_created",
         "CREATE INDEX sessions_by_location_created ON sessions (json_extract(coordinates_key, '$.location'), created_at_ms DESC, session_id DESC)",
@@ -306,6 +307,10 @@ const EXPECTED_INDEXES: [(&str, &str); 20] = [
     (
         "pending_program_notices",
         "CREATE INDEX pending_program_notices ON agent_messages(session_id, message_id) WHERE state = 'pending' AND message_source = 'program'",
+    ),
+    (
+        "program_history",
+        "CREATE UNIQUE INDEX program_history ON program_runs(session_id, accepted_control_seq)",
     ),
     (
         "active_program_runs",

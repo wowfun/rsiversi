@@ -319,8 +319,193 @@ pub async fn assert_program_store_contract(
         "{repeated:?}"
     );
     assert_eq!(store.read_watermarks(&id).await.unwrap(), before_repeat);
+    let seed = store
+        .read_watermarks(&id)
+        .await
+        .unwrap()
+        .durable_control_seq;
+    let history = store
+        .list_program_history(&id, seed, None, 8)
+        .await
+        .unwrap();
+    assert_eq!(history.runs.len(), 1);
+    assert!(history.runs[0].terminal);
+    let acceptance = history.runs[0].first_control_seq;
+    assert!(
+        store
+            .list_program_history(&id, acceptance - 1, None, 8)
+            .await
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_program_history(&id, seed, Some(acceptance), 8)
+            .await
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_program_history(&id, seed, None, 17)
+            .await
+            .is_err()
+    );
     program_notice_promotion(store, &id, &run).await;
+    assert_history_paging(store, &header, accepted, &repeat).await;
     (id, run)
+}
+
+async fn assert_history_paging(
+    store: &dyn SessionStore,
+    template: &SessionHeader,
+    accepted: &SessionFact,
+    prototype: &ProgramRunDescriptor,
+) {
+    let mut value = serde_json::to_value(template).unwrap();
+    value["session_id"] = serde_json::json!("program-history-pages");
+    let header: SessionHeader = serde_json::from_value(value).unwrap();
+    let session = header.session_id();
+    store
+        .append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![accepted.clone().into()],
+        })
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    let mut seed = 0;
+    let mut first_page = None;
+    // Deliberately nonlexical IDs ensure ordering comes from canonical acceptance.
+    for (index, name) in [
+        "history-z",
+        "history-a",
+        "history-m",
+        "history-b",
+        "history-y",
+        "history-new",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (run, acceptance) =
+            append_terminal_history_run(store, &header, prototype, index, name).await;
+        if index < 5 {
+            expected.push((run, acceptance));
+        }
+        if index == 4 {
+            seed = store
+                .read_watermarks(session)
+                .await
+                .unwrap()
+                .durable_control_seq;
+            first_page = Some(
+                store
+                    .list_program_history(session, seed, None, 2)
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+    expected.reverse();
+    let mut page = first_page.unwrap();
+    assert!(page.has_more);
+    let mut actual = Vec::new();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(
+            pages <= 3,
+            "history cursor must advance without duplicate pages"
+        );
+        assert!(!page.runs.is_empty());
+        assert!(page.runs.len() <= 2);
+        actual.extend(
+            page.runs
+                .iter()
+                .map(|head| (head.run_id.clone(), head.first_control_seq)),
+        );
+        if !page.has_more {
+            break;
+        }
+        let before = page.runs.last().unwrap().first_control_seq;
+        page = store
+            .list_program_history(session, seed, Some(before), 2)
+            .await
+            .unwrap();
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(
+        actual, expected,
+        "a run accepted after the seed must not shift older pages"
+    );
+    let fresh_seed = store
+        .read_watermarks(session)
+        .await
+        .unwrap()
+        .durable_control_seq;
+    let latest = store
+        .list_program_history(session, fresh_seed, None, 16)
+        .await
+        .unwrap();
+    assert!(!latest.has_more);
+    assert_eq!(latest.runs.len(), 6);
+    assert_eq!(latest.runs[0].run_id.as_str(), "history-new");
+    assert!(latest.runs[0].first_control_seq > seed);
+    assert_eq!(
+        latest.runs[1..]
+            .iter()
+            .map(|head| (head.run_id.clone(), head.first_control_seq))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+async fn append_terminal_history_run(
+    store: &dyn SessionStore,
+    header: &SessionHeader,
+    prototype: &ProgramRunDescriptor,
+    index: usize,
+    name: &str,
+) -> (ProgramRunId, u64) {
+    let session = header.session_id();
+    let mut descriptor = prototype.clone();
+    descriptor.session_id = session.clone();
+    descriptor.parent_header_sha256 = header.fingerprint().unwrap();
+    descriptor.creator_turn_id = TurnId::new(format!("history-turn-{index}")).unwrap();
+    descriptor.run_id = ProgramRunId::new(name).unwrap();
+    let run = descriptor.run_id.clone();
+    append_program(
+        store,
+        session,
+        &run,
+        ProgramRunEvent::Accepted {
+            descriptor: Box::new(descriptor),
+        },
+    )
+    .await
+    .unwrap();
+    let acceptance = store
+        .read_watermarks(session)
+        .await
+        .unwrap()
+        .durable_control_seq;
+    append_program(
+        store,
+        session,
+        &run,
+        ProgramRunEvent::Terminal {
+            outcome: ProgramOutcome::Cancelled,
+            result: None,
+        },
+    )
+    .await
+    .unwrap();
+    (run, acceptance)
 }
 
 async fn program_notice_promotion(store: &dyn SessionStore, id: &SessionId, run: &ProgramRunId) {

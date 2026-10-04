@@ -13,7 +13,7 @@ use rsi_agent_store_protocol::{
 const MAXIMUM_HEAD_BYTES: usize = 4096;
 
 const READ_HEAD_SQL: &str = "SELECT length(CAST(head_json AS BLOB)),
-    CASE WHEN length(CAST(head_json AS BLOB)) <= ?3 THEN head_json END, terminal, creator_turn_id
+    CASE WHEN length(CAST(head_json AS BLOB)) <= ?3 THEN head_json END, terminal, creator_turn_id, accepted_control_seq
     FROM program_runs
     WHERE session_id=?1
     AND run_id=?2";
@@ -32,8 +32,8 @@ const HAS_ACTIVE_RUN_SQL: &str = "SELECT EXISTS(SELECT 1
 const HAS_CREATOR_RUN_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM program_runs WHERE session_id=?1 AND creator_turn_id=?2)";
 const INSERT_RUN_SQL: &str =
-    "INSERT INTO program_runs(session_id,run_id,creator_turn_id,terminal,head_json)
-    VALUES(?1,?2,?3,?4,?5)";
+    "INSERT INTO program_runs(session_id,run_id,creator_turn_id,terminal,head_json,accepted_control_seq)
+    VALUES(?1,?2,?3,?4,?5,?6)";
 const UPDATE_RUN_SQL: &str = "UPDATE program_runs
     SET terminal=?3,head_json=?4
     WHERE session_id=?1
@@ -73,6 +73,46 @@ const COUNT_RUN_RECORDS_SQL: &str = "SELECT (SELECT COUNT(*)
     FROM program_records
     WHERE session_id=?1)";
 
+type HeadProjection = (i64, Option<String>, bool, String, i64);
+
+fn project_head(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeadProjection> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        bounded_text(
+            row,
+            3,
+            rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES,
+        )?,
+        row.get(4)?,
+    ))
+}
+
+fn decode_head(
+    run: &ProgramRunId,
+    (length, json, terminal, creator, accepted): HeadProjection,
+) -> Result<StoreProgramHead> {
+    let head: StoreProgramHead =
+        decode_projected_json("program index", (length, json), MAXIMUM_HEAD_BYTES)?;
+    if &head.run_id != run
+        || head.terminal != terminal
+        || head.creator_turn_id.as_str() != creator
+        || head.record_count == 0
+        || head.record_count > MAXIMUM_PROGRAM_RECORDS
+        || head.encoded_bytes == 0
+        || head.encoded_bytes > MAXIMUM_PROGRAM_RECORD_BYTES
+        || head.first_control_seq != decode_u64("program acceptance", accepted)?
+        || head.first_control_seq == 0
+        || head.last_control_seq < head.first_control_seq
+    {
+        return Err(StoreError::Corrupt(
+            "program index identity or budget mismatch".into(),
+        ));
+    }
+    Ok(head)
+}
+
 fn head(
     connection: &Connection,
     session: &SessionId,
@@ -86,40 +126,12 @@ fn head(
                 run.as_str(),
                 sqlite_u64("program index bound", MAXIMUM_HEAD_BYTES as u64)?
             ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, bool>(2)?,
-                    bounded_text(
-                        row,
-                        3,
-                        rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES,
-                    )?,
-                ))
-            },
+            project_head,
         )
         .optional()
         .map_err(sql_error)?;
-    raw.map(|(length, json, terminal, creator)| {
-        let head: StoreProgramHead =
-            decode_projected_json("program index", (length, json), MAXIMUM_HEAD_BYTES)?;
-        if &head.run_id != run
-            || head.terminal != terminal
-            || head.creator_turn_id.as_str() != creator
-            || head.record_count == 0
-            || head.record_count > MAXIMUM_PROGRAM_RECORDS
-            || head.encoded_bytes > MAXIMUM_PROGRAM_RECORD_BYTES
-            || head.first_control_seq == 0
-            || head.last_control_seq < head.first_control_seq
-        {
-            return Err(StoreError::Corrupt(
-                "program index identity or budget mismatch".into(),
-            ));
-        }
-        Ok(head)
-    })
-    .transpose()
+    raw.map(|projection| decode_head(run, projection))
+        .transpose()
 }
 pub(super) fn insert(
     connection: &Connection,
@@ -174,7 +186,8 @@ pub(super) fn insert(
                     run_id.as_str(),
                     next.creator_turn_id.as_str(),
                     next.terminal,
-                    encode_json("program head", &next)?
+                    encode_json("program head", &next)?,
+                    sqlite_u64("program acceptance", next.first_control_seq)?
                 ],
             )
             .map_err(sql_error)?;
@@ -204,6 +217,13 @@ pub(super) fn insert(
         .map_err(sql_error)?;
     Ok(())
 }
+const PROGRAM_HISTORY_SQL: &str = "SELECT length(CAST(head_json AS BLOB)),
+    CASE WHEN length(CAST(head_json AS BLOB))<=?5 THEN head_json END,
+    terminal, creator_turn_id, accepted_control_seq, run_id
+    FROM program_runs WHERE session_id=?1 AND accepted_control_seq<=?2
+    AND (?3 IS NULL OR accepted_control_seq<?3)
+    ORDER BY accepted_control_seq DESC LIMIT ?4";
+
 impl SqliteStore {
     pub(super) async fn program_records(
         &self,
@@ -415,5 +435,64 @@ impl Projection {
             ));
         }
         Ok(())
+    }
+}
+
+impl SqliteStore {
+    pub(super) async fn program_history(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreProgramHistoryPage> {
+        if limit == 0
+            || limit > rsi_agent_store_protocol::MAXIMUM_PROGRAM_HISTORY_ROWS
+            || before.is_some_and(|n| n == 0 || n > seed.saturating_add(1))
+        {
+            return Err(StoreError::Invalid(
+                "invalid program history cursor or limit".into(),
+            ));
+        }
+        self.ensure_session_validated(session).await?;
+        let session = session.clone();
+        self.with_reader(move |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let mut stmt = tx.prepare(PROGRAM_HISTORY_SQL).map_err(sql_error)?;
+            let mut rows = stmt
+                .query(params![
+                    session.as_str(),
+                    sqlite_u64("history seed", seed)?,
+                    before
+                        .map(|n| sqlite_u64("history cursor", n))
+                        .transpose()?,
+                    i64::try_from(limit + 1)
+                        .expect("bounded program history limit fits SQLite INTEGER"),
+                    i64::try_from(MAXIMUM_HEAD_BYTES).expect("head bound fits SQLite INTEGER")
+                ])
+                .map_err(sql_error)?;
+            let mut runs = Vec::new();
+            let mut has_more = false;
+            while let Some(row) = rows.next().map_err(sql_error)? {
+                if runs.len() == limit {
+                    has_more = true;
+                    break;
+                }
+                let run = ProgramRunId::new(
+                    bounded_text(
+                        row,
+                        5,
+                        rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES,
+                    )
+                    .map_err(sql_error)?,
+                )
+                .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+                runs.push(decode_head(&run, project_head(row).map_err(sql_error)?)?);
+            }
+            Ok(rsi_agent_store_protocol::StoreProgramHistoryPage { runs, has_more })
+        })
+        .await
     }
 }

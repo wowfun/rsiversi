@@ -39,6 +39,10 @@ Node latch opens. Neither mode gives the independently owned run a total elapsed
 deadline. A separate Jobs scope uses the Session and immutable run identities in the program namespace;
 ordinary executor Jobs keep their Turn scope. Script, process, child cancellation
 and final durable settlement stay owned after the Tool returns.
+The Session protocol owns the typed invocation result: a detached return reports
+running with an exact Session/run locator; a foreground return reports the
+authoritative outcome and optional curated value. Producers and presentation
+decoders share that contract.
 
 Scripts call `await workflow.agent({message, output_schema?})`, sequential
 `workflow.pipeline([async value => ...], input)`, concurrent

@@ -7,6 +7,8 @@ use rsi_agent_session_protocol::{
 use serde::{Deserialize, Serialize};
 /// Record count ceiling including reserved closure events.
 pub const MAXIMUM_PROGRAM_RECORDS: u32 = 4096;
+/// Maximum acceptance-ordered run heads returned by one history read.
+pub const MAXIMUM_PROGRAM_HISTORY_ROWS: usize = 16;
 /// One receipt per admitted child, cancellation request and final terminal record.
 const PROGRAM_CLOSURE_RECORDS: u32 = rsi_agent_session_protocol::MAXIMUM_PROGRAM_CHILDREN + 2;
 /// Exact mechanical run-index row; never live execution authority.
@@ -153,4 +155,42 @@ pub struct StoreProgramNoticePage {
     pub notices: Vec<StoreProgramNotice>,
     /// Whether another entry exists after this bounded page.
     pub has_more: bool,
+}
+
+/// Bounded acceptance-ordered positions, with canonical state interpreted by Kernel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreProgramHistoryPage {
+    /// Heads ordered by strictly descending acceptance sequence.
+    pub runs: Vec<StoreProgramHead>,
+    /// Another older run exists.
+    pub has_more: bool,
+}
+impl StoreProgramHistoryPage {
+    /// Checks bounded descending acceptance positions before consumer allocation.
+    pub fn validate(&self, seed: u64, before: Option<u64>, limit: usize) -> Result<()> {
+        if limit == 0
+            || limit > MAXIMUM_PROGRAM_HISTORY_ROWS
+            || self.runs.len() > limit
+            || self.has_more && self.runs.len() != limit
+        {
+            return Err(invalid("invalid program history page bound or progress"));
+        }
+        let mut previous = before;
+        for head in &self.runs {
+            let accepted = head.first_control_seq;
+            if accepted == 0
+                || accepted > seed
+                || previous.is_some_and(|previous| accepted >= previous)
+                || head.last_control_seq < accepted
+                || head.record_count == 0
+                || head.record_count > MAXIMUM_PROGRAM_RECORDS
+                || head.encoded_bytes == 0
+                || head.encoded_bytes > MAXIMUM_PROGRAM_RECORD_BYTES
+            {
+                return Err(invalid("invalid program history head or ordering"));
+            }
+            previous = Some(accepted);
+        }
+        Ok(())
+    }
 }

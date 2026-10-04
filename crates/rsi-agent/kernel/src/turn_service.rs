@@ -86,6 +86,30 @@ impl TurnService for AgentKernel {
     ) -> TurnResult<()> {
         self.cancel_program_owned(caller, run).await
     }
+    async fn list_session_programs(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramHistoryPage> {
+        self.session_programs(session, seed, before, limit).await
+    }
+    async fn read_session_program(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+        request: rsi_agent_turn_protocol::ProgramRead,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramDetails> {
+        self.session_program(session, run, request).await
+    }
+    async fn cancel_session_program(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        self.cancel_session_run(session, run).await
+    }
     async fn spawn_agent(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         let cancellation = request.cancellation.clone();
         if cancellation.is_cancelled() {

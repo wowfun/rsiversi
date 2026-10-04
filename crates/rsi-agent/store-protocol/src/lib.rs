@@ -42,7 +42,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 31;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 32;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -2208,6 +2208,17 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         Err(StoreError::Invalid(
             "this Store does not support Program notice indexing".into(),
         ))
+    }
+    /// Lists one Session's acceptance positions in descending order at a fixed seed.
+    async fn list_program_history(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<StoreProgramHistoryPage> {
+        let _ = (session, seed, before, limit);
+        Err(StoreError::Invalid("program history is unavailable".into()))
     }
     /// Enumerates unfinished runs without scanning dormant Session history.
     async fn list_active_program_runs(

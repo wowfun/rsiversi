@@ -9,6 +9,7 @@ pub(super) struct Child {
 #[derive(Clone, Debug)]
 pub(super) struct RunState {
     pub descriptor: ProgramRunDescriptor,
+    pub accepted_control_seq: u64,
     pub control_seq: u64,
     pub phase: Option<String>,
     pub progress: Option<String>,
@@ -30,6 +31,7 @@ impl RunState {
         };
         let mut state = Self {
             descriptor: descriptor.as_ref().clone(),
+            accepted_control_seq: records.head.first_control_seq,
             control_seq: records.head.last_control_seq,
             phase: None,
             progress: None,

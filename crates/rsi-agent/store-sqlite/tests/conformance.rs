@@ -2443,6 +2443,73 @@ async fn workflow_cas_rejects_leaf_and_directory_symlinks_without_retaining_cred
     assert_eq!(budget.used(), 0);
 }
 
+#[tokio::test]
+async fn program_history_projects_bounded_heads_and_rechecks_warm_correlations() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (session, run) = Box::pin(rsi_agent_testkit::assert_program_store_contract(
+        &store,
+        &header("history-projection"),
+        &fact(1),
+    ))
+    .await;
+    let seed = store
+        .read_watermarks(&session)
+        .await
+        .unwrap()
+        .durable_control_seq;
+    let page = store
+        .list_program_history(&session, seed, None, 16)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.runs[0],
+        store
+            .read_program_records(&session, &run)
+            .await
+            .unwrap()
+            .unwrap()
+            .head
+    );
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let original: (String, bool, String) = connection.query_row(
+        "SELECT head_json, terminal, creator_turn_id FROM program_runs WHERE session_id=?1 AND run_id=?2",
+        rusqlite::params![session.as_str(), run.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    let mut mismatched: serde_json::Value = serde_json::from_str(&original.0).unwrap();
+    mismatched["first_control_seq"] = serde_json::json!(seed + 1);
+    let mut empty_bytes: serde_json::Value = serde_json::from_str(&original.0).unwrap();
+    empty_bytes["encoded_bytes"] = serde_json::json!(0);
+    for (json, terminal, creator) in [
+        ("x".repeat(4097), original.1, original.2.clone()),
+        (original.0.clone(), !original.1, original.2.clone()),
+        (original.0.clone(), original.1, "foreign-creator".into()),
+        (mismatched.to_string(), original.1, original.2.clone()),
+        (empty_bytes.to_string(), original.1, original.2.clone()),
+    ] {
+        connection.execute("UPDATE program_runs SET head_json=?3,terminal=?4,creator_turn_id=?5 WHERE session_id=?1 AND run_id=?2",
+            rusqlite::params![session.as_str(), run.as_str(), json, terminal, creator]).unwrap();
+        assert!(matches!(
+            store.list_program_history(&session, seed, None, 16).await,
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+    connection.execute("UPDATE program_runs SET head_json=?3,terminal=?4,creator_turn_id=?5 WHERE session_id=?1 AND run_id=?2",
+        rusqlite::params![session.as_str(), run.as_str(), original.0, original.1, original.2]).unwrap();
+    assert_eq!(
+        store
+            .list_program_history(&session, seed, None, 16)
+            .await
+            .unwrap()
+            .runs,
+        page.runs
+    );
+    drop(connection);
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cas_payload_and_publication_both_reject_symlink_entries_without_retaining_credit() {

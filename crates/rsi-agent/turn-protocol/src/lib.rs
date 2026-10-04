@@ -40,7 +40,9 @@ pub use jobs::{
     TurnJobsContract, TurnJobsPage, TurnJobsRequest,
 };
 mod program;
+mod workflow;
 pub use program::*;
+pub use workflow::*;
 mod continuation;
 pub use continuation::{
     ContinuationBinding, ContinuationIssuer, ContinuationLease, SessionContinuations,
@@ -721,6 +723,38 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         let _ = (caller, run);
         Err(TurnError::Invalid(
             "this Turn service does not support program cancellation".into(),
+        ))
+    }
+    /// Trusted Local Session adapter history read; callers own external admission.
+    async fn list_session_programs(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<ProgramHistoryPage> {
+        let _ = (session, seed, before, limit);
+        Err(TurnError::Invalid("workflow history unavailable".into()))
+    }
+    /// Reads one canonical child page and optional CAS bodies at the same revision.
+    async fn read_session_program(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+        request: ProgramRead,
+    ) -> Result<ProgramDetails> {
+        let _ = (session, run, request);
+        Err(TurnError::Invalid("workflow details unavailable".into()))
+    }
+    /// Accepts durable cancellation; existing owners retain cleanup responsibility.
+    async fn cancel_session_program(
+        &self,
+        session: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<ProgramCancelReceipt> {
+        let _ = (session, run);
+        Err(TurnError::Invalid(
+            "workflow cancellation unavailable".into(),
         ))
     }
     /// Creates one durable, ready, continuable fork child.

@@ -3,8 +3,14 @@
 Program validation spans the closest protocol, Kernel, Store, Context and executor
 targets because origin and ownership change durable replay. Kernel workflow tests
 exercise exclusive receipts beyond ordinary mailbox capacity, creator retirement,
-cancel/detach ordering, policy acknowledgement loss and restart revocation. The shared mechanical Store contract checks sequence-ordered mixed mailbox/Program
-admission and exhausts progress capacity, prove suffix reads and reject unpaired child/notice graphs, then reopen SQLite. The shared budget function separately admits all 128 maximally escaped closure receipts; synthetic receipts cannot bypass Store graph validation. Default in-memory duplex tests exercise framing, RPC capacity, cancellation and
+cancel/detach ordering, policy acknowledgement loss and restart revocation.
+They also reject overlapping Session owners and a ninth live Host owner, then
+admit a replacement after terminal cleanup even while the old owner is retained.
+Acceptance-history parity checks walk multiple pages while a newer run is added;
+the original seed excludes that run, and a fresh seed includes it.
+The shared mechanical Store contract checks sequence-ordered mixed mailbox/Program
+admission, exhausts progress capacity, proves suffix reads and rejects unpaired
+child/notice graphs, then reopens SQLite. The shared budget function separately admits all 128 maximally escaped closure receipts; synthetic receipts cannot bypass Store graph validation. Default in-memory duplex tests exercise framing, RPC capacity, cancellation and
 curated-result bounds without Node. Native Node tests require explicit `RSI_TEST_NODE`
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;

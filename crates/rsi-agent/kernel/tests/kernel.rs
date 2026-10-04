@@ -77,6 +77,12 @@ enum WaitResumeFault {
     Commit(StoreError),
 }
 
+type ProgramReadBarrier = (
+    SessionId,
+    rsi_agent_session_protocol::ProgramRunId,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
@@ -107,7 +113,20 @@ struct FactReadRaceStore {
     control_page_override: Mutex<Option<rsi_agent_store_protocol::StoreControlPage>>,
     fail_agent_creation_after_apply: AtomicBool,
     fail_program_after_apply: AtomicBool,
+    panic_program_after_apply: AtomicBool,
+    program_read_fault: Mutex<
+        Option<(
+            SessionId,
+            rsi_agent_session_protocol::ProgramRunId,
+            std::num::NonZeroUsize,
+            StoreError,
+        )>,
+    >,
+    watermark_read_fault: Mutex<Option<(SessionId, StoreError)>>,
+    program_read_barrier: Mutex<Option<ProgramReadBarrier>>,
+    program_history_override: Mutex<Option<rsi_agent_store_protocol::StoreProgramHistoryPage>>,
     program_records_materialized: AtomicUsize,
+    program_record_reads: AtomicUsize,
     cas_writes: AtomicUsize,
     missing_cas: Mutex<Option<String>>,
     fail_domain_after_apply: AtomicBool,
@@ -192,7 +211,13 @@ impl FactReadRaceStore {
             control_page_override: Mutex::new(None),
             fail_agent_creation_after_apply: AtomicBool::new(false),
             fail_program_after_apply: AtomicBool::new(false),
+            panic_program_after_apply: AtomicBool::new(false),
+            program_read_fault: Mutex::new(None),
+            watermark_read_fault: Mutex::new(None),
+            program_read_barrier: Mutex::new(None),
+            program_history_override: Mutex::new(None),
             program_records_materialized: AtomicUsize::new(0),
+            program_record_reads: AtomicUsize::new(0),
             cas_writes: AtomicUsize::new(0),
             missing_cas: Mutex::new(None),
             fail_domain_after_apply: AtomicBool::new(false),
@@ -495,10 +520,41 @@ impl SessionStore for FactReadRaceStore {
         after: u64,
     ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreProgramRecords>>
     {
+        self.program_record_reads.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut fault = self.program_read_fault.lock().unwrap();
+            if let Some((selected_session, selected_run, remaining, _)) = fault.as_mut()
+                && selected_session == session
+                && selected_run == run
+            {
+                if let Some(next) = std::num::NonZeroUsize::new(remaining.get() - 1) {
+                    *remaining = next;
+                } else {
+                    return Err(fault.take().unwrap().3);
+                }
+            }
+        }
         let page = self
             .inner
             .read_program_records_after(session, run, after)
             .await?;
+        let barrier = {
+            let mut barrier = self.program_read_barrier.lock().unwrap();
+            if barrier
+                .as_ref()
+                .is_some_and(|(selected_session, selected_run, _, _)| {
+                    selected_session == session && selected_run == run
+                })
+            {
+                barrier.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, _, entered, release)) = barrier {
+            entered.send(()).unwrap();
+            release.await.unwrap();
+        }
         self.program_records_materialized.fetch_add(
             page.as_ref().map_or(0, |page| page.records.len()),
             Ordering::SeqCst,
@@ -510,6 +566,20 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionInspection> {
         self.inner.inspect_session(session_id).await
+    }
+    async fn list_program_history(
+        &self,
+        session: &SessionId,
+        seed: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreProgramHistoryPage> {
+        if let Some(page) = self.program_history_override.lock().unwrap().take() {
+            return Ok(page);
+        }
+        self.inner
+            .list_program_history(session, seed, before, limit)
+            .await
     }
     async fn list_active_program_runs(
         &self,
@@ -539,6 +609,12 @@ impl SessionStore for FactReadRaceStore {
         &self,
         id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionWatermarks> {
+        {
+            let mut fault = self.watermark_read_fault.lock().unwrap();
+            if fault.as_ref().is_some_and(|(session, _)| session == id) {
+                return Err(fault.take().unwrap().1);
+            }
+        }
         self.inner.read_watermarks(id).await
     }
 
@@ -674,6 +750,12 @@ impl SessionStore for FactReadRaceStore {
             });
         }
         let result = self.inner.commit_agent(commit).await;
+        assert!(
+            !(result.is_ok()
+                && program
+                && self.panic_program_after_apply.swap(false, Ordering::AcqRel)),
+            "injected cancellation commit panic after apply"
+        );
         if result.is_ok() && program && self.fail_program_after_apply.swap(false, Ordering::AcqRel)
         {
             return Err(StoreError::Io(
