@@ -167,3 +167,79 @@ fn program_origin_survives_suffix_repair_and_is_visible_without_a_model_source()
         7
     );
 }
+
+#[test]
+fn detached_workflow_card_reports_invocation_return_without_claiming_run_completion() {
+    let mut intent = fact(4, "intent", "owner").body().clone();
+    if let SessionFactBody::ToolIntent { name, .. } = &mut intent {
+        *name = "run_workflow".into();
+    }
+    let intent = SessionFact::new(4, 1, intent).unwrap();
+    let mut result = fact(6, "result", "owner").body().clone();
+    if let SessionFactBody::ToolResult { result, .. } = &mut result {
+        *result = rsi_tools_protocol::ToolResult::new(
+            serde_json::to_value(rsi_agent_session_protocol::WorkflowInvocationResult::<
+                serde_json::Value,
+            >::running(
+                rsi_agent_session_protocol::WorkflowRunLocator {
+                    run_id: rsi_agent_session_protocol::ProgramRunId::new("program-fixture")
+                        .unwrap(),
+                    session_id: rsi_agent_session_protocol::SessionId::new("workflow-session")
+                        .unwrap(),
+                },
+            ))
+            .unwrap(),
+            vec![],
+            false,
+        )
+        .unwrap();
+    }
+    let result = SessionFact::new(6, 1, result).unwrap();
+    let mut card = ToolState::from_fact(&intent).unwrap();
+    card.observe(&result);
+    assert_eq!(
+        card.title(),
+        "run_workflow · invocation returned · detached"
+    );
+    assert_eq!(
+        card.workflow_run.as_ref().unwrap().as_str(),
+        "program-fixture"
+    );
+    let mut suffix = ToolState::from_fact(&result).unwrap();
+    assert!(
+        suffix.workflow_run.is_none(),
+        "a result alone does not identify its Tool"
+    );
+    suffix.observe(&intent);
+    assert_eq!(
+        suffix.workflow_run, card.workflow_run,
+        "loading the exact intent must repair navigation without reloading the result"
+    );
+    assert_eq!(suffix.title(), card.title());
+    let mut foreign = intent.body().clone();
+    if let SessionFactBody::ToolIntent { name, .. } = &mut foreign {
+        *name = "foreign_tool".into();
+    }
+    let foreign = SessionFact::new(4, 1, foreign).unwrap();
+    let mut unlinked = result.body().clone();
+    if let SessionFactBody::ToolResult { result, .. } = &mut unlinked {
+        result.value = serde_json::json!({});
+    }
+    let unlinked = SessionFact::new(6, 1, unlinked).unwrap();
+    let rejected = fact(4, "rejected", "owner");
+    for foreign in [&foreign, &rejected] {
+        let mut baseline = ToolState::from_fact(foreign).unwrap();
+        baseline.observe(&unlinked);
+        for result_first in [true, false] {
+            let mut observed =
+                ToolState::from_fact(if result_first { &result } else { foreign }).unwrap();
+            observed.observe(if result_first { foreign } else { &result });
+            assert!(observed.workflow_run.is_none());
+            assert_eq!(
+                observed.owned_bytes(),
+                baseline.owned_bytes(),
+                "foreign Tool retains no workflow candidate in either load order"
+            );
+        }
+    }
+}

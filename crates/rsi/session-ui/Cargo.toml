@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-session-tree-ui = { path = "../session-tree-ui" }
 rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
 futures-util.workspace = true

@@ -580,7 +580,7 @@ async fn remote_ui(
             .iter()
             .map(|entry| entry.surface.as_str())
             .collect::<Vec<_>>(),
-        ["goal", "jobs", "session"]
+        ["goal", "jobs", "session", "workflow"]
     );
     assert!(
         page.entries

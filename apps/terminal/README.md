@@ -21,6 +21,24 @@ preparation, review acceptance and original receipt queries are explicit actions
 The bounded JSON editor passes text to Rust; leaving the panel does not cancel an
 admitted source operation. Saved source and runtime application have separate labels.
 
+`/workflows` opens the shared Workflow workbench within a Native conversation.
+Use its existing action menu to inspect a run, read children and frozen script/result
+pages, or request cancellation. The [Session UI contract](../../crates/rsi/session-ui/README.md)
+owns lifecycle feedback and readiness.
+Asynchronous standard surfaces retain the existing UI PresentationLease and one
+displayed snapshot. Opening a surface, including slash commands, cancels and
+fences the previous detail work before loading the requested presentation.
+Lifecycle invalidations refresh the open detail; actions bind
+that snapshot's revision. Refreshes of the same presentation retain edited input
+fields and an active field editor while untouched fields receive the new defaults.
+Removed fields are discarded; a different presentation starts with its own defaults.
+Editing keeps lifecycle observation active. Successful action completion accepts
+the contribution's new field values and clears transient working feedback.
+Retirement of an open presentation clears its form and working feedback quietly;
+fetch and invocation failures retain their explicit error feedback.
+Closing the detail cancels reads while already admitted
+mutations keep the contribution's existing owned drain.
+
 `/attention` is available at home and within native conversations. It reads the
 Host's bounded activity view, prioritizes exact pending requests and opens the
 selected Native or External conversation. Native requests retain Session/Turn

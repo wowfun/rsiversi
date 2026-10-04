@@ -61,6 +61,11 @@ pub struct ToolState {
     named_seq: u64,
     #[serde(skip)]
     external_candidate: Option<String>,
+    /// Exact detached run locator; it is not execution authority.
+    #[serde(default)]
+    pub workflow_run: Option<rsi_agent_session_protocol::ProgramRunId>,
+    #[serde(skip)]
+    workflow_candidate: Option<rsi_agent_session_protocol::ProgramRunId>,
 }
 impl ToolState {
     /// Starts partial metadata from any exact Tool lifecycle Fact.
@@ -80,6 +85,8 @@ impl ToolState {
             phase_seq: 0,
             named_seq: 0,
             external_candidate: None,
+            workflow_run: None,
+            workflow_candidate: None,
         };
         state.observe(fact);
         Some(state)
@@ -130,6 +137,18 @@ impl ToolState {
                                 .map(|id| id.as_str().to_owned())
                         })
                         .flatten();
+                    self.workflow_candidate = (!result.is_error
+                        && self.name.as_deref().is_none_or(|name| {
+                            name == rsi_agent_session_protocol::RUN_WORKFLOW_TOOL_NAME
+                        }))
+                    .then(|| {
+                        rsi_agent_session_protocol::WorkflowInvocationResult::detached_run(
+                            &result.value,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .flatten();
                     self.result = Some(SourceRef {
                         seq,
                         field: FactField::ToolValue,
@@ -146,11 +165,18 @@ impl ToolState {
             self.phase = phase;
             self.phase_seq = seq;
         }
+        self.workflow_run = (self.intent_present
+            && self.name.as_deref() == Some(rsi_agent_session_protocol::RUN_WORKFLOW_TOOL_NAME))
+        .then(|| self.workflow_candidate.clone())
+        .flatten();
         true
     }
     fn named(&mut self, seq: u64, name: &str, arguments: &serde_json::Value, origin: &ToolOrigin) {
         if seq >= self.named_seq {
             self.name = Some(name.into());
+            if name != rsi_agent_session_protocol::RUN_WORKFLOW_TOOL_NAME {
+                self.workflow_candidate = None;
+            }
             self.origin = Some(origin.clone());
             self.argument_summary = argument_summary(name, arguments);
             self.arguments = Some(SourceRef {
@@ -174,6 +200,9 @@ impl ToolState {
             ToolPhase::Prepared => "prepared",
             ToolPhase::Running => "running",
             ToolPhase::Rejected => "rejected",
+            ToolPhase::Settled(ToolOutcome::Completed) if self.workflow_run.is_some() => {
+                "invocation returned · detached"
+            }
             ToolPhase::Settled(ToolOutcome::Completed) => "completed",
             ToolPhase::Settled(ToolOutcome::ToolFailed) => "tool failed",
             ToolPhase::Settled(ToolOutcome::ProcessFailed) => "command failed",
@@ -200,6 +229,11 @@ impl ToolState {
                     parent_effect_id, ..
                 } => parent_effect_id.as_str().len(),
             })
+            + self.workflow_run.as_ref().map_or(0, |id| id.as_str().len())
+            + self
+                .workflow_candidate
+                .as_ref()
+                .map_or(0, |id| id.as_str().len())
             + self.external_candidate.as_ref().map_or(0, String::capacity)
             + self.name.as_ref().map_or(0, String::capacity)
             + self.argument_summary.as_ref().map_or(0, String::capacity)

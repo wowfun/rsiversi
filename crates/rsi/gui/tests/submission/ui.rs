@@ -54,7 +54,20 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
         .unwrap();
     let current = view(&app);
     let pane = &current["surfaces"]["main"];
-    assert_eq!(pane["ui_surfaces"][0]["title"], "Session details");
+    assert!(
+        pane["ui_surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|surface| surface["title"] == "Session details")
+    );
+    assert!(
+        pane["ui_surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|surface| surface["title"] == "Workflows")
+    );
     assert_eq!(pane["ui_cards"], true);
     let card = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
     app.command(&card).await.unwrap();

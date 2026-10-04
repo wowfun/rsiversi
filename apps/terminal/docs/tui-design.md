@@ -145,7 +145,10 @@ Decorative list/table glyphs and soft wraps have no copy authority. A final
 synthetic Markdown block separator does not add an empty transcript row; the
 transcript owns inter-block spacing. Explicit source newlines remain intact.
 
-Thinking and tools have concise descriptive summaries. One blank row separates
+Thinking and tools have concise descriptive summaries.
+Detached Workflow Tool summaries identify the returned invocation separately from
+the running Workflow; `/workflows` reads the canonical lifecycle and controls it.
+One blank row separates
 Thinking from preceding metadata and from the following assistant prose. When
 expanded, the lower blank row follows its reasoning content. Expanded reasoning
 uses the current Markdown mode; code preserves source whitespace.

@@ -11,6 +11,7 @@ mod references;
 mod retrieval;
 mod tasks;
 mod tool_contract;
+mod workflow;
 pub use binding::SessionUiBinderFactory;
 
 use async_trait::async_trait;
@@ -91,14 +92,16 @@ fn watch_target(
     let weak = Arc::downgrade(lease);
     let controller = plan.local::<SessionControllerContract>()?;
     let mut projections = controller.projection_changes();
+    let mut workflow = controller.workflow_changes();
     let mut goal = controller.goal_changes();
     let mut control = controller.goal_control_changes();
     let stop = CancellationToken::new();
     let stopping = stop.clone();
     let task = plan.context().runtime().execution().spawn(async move {
         loop {
-            tokio::select! { biased;
+            tokio::select! {
                 () = stopping.cancelled() => break,
+                result = workflow.changed() => { if result.is_err() { break; } },
                 result = projections.changed() => { if result.is_err() { break; } },
                 result = goal.changed() => { if result.is_err() { break; } },
                 result = control.changed() => { if result.is_err() { break; } },
@@ -124,6 +127,10 @@ impl PluginFactory for SessionUiFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(no_config(desired)?.requiring_local::<UiContract>())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one declarative contribution registration shares one atomic lease and cleanup owner"
+    )]
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let lease = plan
             .local::<UiContract>()?
@@ -132,6 +139,12 @@ impl PluginFactory for SessionUiFactory {
                 Contributions {
                     name: "rsi.session.inspection".into(),
                     surfaces: vec![
+                        SurfaceContribution {
+                            name: "workflow".into(),
+                            title: "Workflows".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(workflow::Card),
+                        },
                         SurfaceContribution {
                             name: "session".into(),
                             title: "Session details".into(),
@@ -152,6 +165,16 @@ impl PluginFactory for SessionUiFactory {
                         },
                     ],
                     actions: vec![
+                        ActionContribution {
+                            name: "read".into(),
+                            target: TargetKind::Surface,
+                            handler: rsi_session_tree_ui::history_action(),
+                        },
+                        ActionContribution {
+                            name: "workflow".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(workflow::Action),
+                        },
                         ActionContribution {
                             name: "retrieval".into(),
                             target: TargetKind::Surface,
@@ -251,6 +274,9 @@ impl BlockRenderer for ToolCard {
         _: &Context,
         block: &BlockInput<'_>,
     ) -> Result<Option<Arc<dyn SurfaceRenderer>>> {
+        if let Some(run) = block.tool.and_then(|tool| tool.workflow_run.as_ref()) {
+            return Ok(Some(Arc::new(workflow::Link(run.clone()))));
+        }
         let Some(tool) = block
             .tool
             .filter(|tool| tool.name.as_deref() == Some("apply_patch"))
@@ -310,6 +336,9 @@ impl BlockRenderer for ToolCard {
             if let Some(source) = source {
                 elements.push(source_button(label, source, 0));
             }
+        }
+        if let Some(run) = &tool.workflow_run {
+            elements.push(workflow::run_button(run.clone()));
         }
         output::buttons(target, tool, &mut elements);
         if let (Some(intent), Some(result)) = (tool.arguments, tool.result) {

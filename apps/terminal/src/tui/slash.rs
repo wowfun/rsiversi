@@ -24,6 +24,10 @@ const BUILTINS: &[(&str, &str)] = &[
     ),
     ("plugins", "Read and refresh observed plugin status"),
     (
+        "workflows",
+        "Inspect Workflow history, children, frozen script and result; cancel unfinished runs",
+    ),
+    (
         "profiles",
         "Review Host leaf changes, explicit grants and source receipts",
     ),

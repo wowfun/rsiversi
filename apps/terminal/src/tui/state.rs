@@ -436,12 +436,12 @@ impl State {
             }
             return;
         }
-        self.invalidate_detail();
-        if self.queue_edit.take().is_some() {
-            return;
-        }
         if self.ui_edit.take().is_some() {
             self.refresh_ui();
+            return;
+        }
+        self.invalidate_detail();
+        if self.queue_edit.take().is_some() {
             return;
         }
         if self.detail.take().is_some() {

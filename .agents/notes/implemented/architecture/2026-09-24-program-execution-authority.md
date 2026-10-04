@@ -112,6 +112,11 @@ count. Session readiness exposes only closed categories and exact-generation
 observations, preserving the existing diagnostics redaction decision. Users verify
 Node by executing an approved Session workflow; configuration does not spawn a probe.
 
+The shared Session contribution supplies Web/Desktop/TUI control and read-only
+child history inspection. An interactive child pane and phase-child grouping are
+outside this surface: current durable ChildAdmitted records have no phase field,
+so showing the current phase as child membership would invent evidence.
+
 ## Alternatives considered
 
 Inventing model responses would corrupt evidence and context. Retaining old Tool

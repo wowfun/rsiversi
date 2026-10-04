@@ -184,6 +184,8 @@ enum Update {
     AttentionRead,
     HistorySearch(Box<rsi_history_api::Request>, Box<rsi_history_api::Reply>),
     Ui(rsi_ui::BoundView),
+    UiPresentation(Arc<rsi_ui::PresentationLease>, rsi_ui::SnapshotPin),
+    UiRetired,
     Plugins(Box<rsi_workbench_ui::PluginsView>),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
@@ -1843,7 +1845,11 @@ async fn run_inner(
                         let save = crate::export::start(&application_work, handle, options, stopped.child_token(), ExportCharge::new(&client.exports));
                         exports.push(async move { (session, save.await) });
                     }
-                }, setup::Command::History(conversation,query) => client.search_history(conversation,query), setup::Command::Profiles => profiles.open(), setup::Command::ExternalOpen(id) => external.open_conversation(id), setup::Command::Attention => external.open_attention(), setup::Command::External => external.open(), setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
+                }, setup::Command::History(conversation,query) => client.search_history(conversation,query), setup::Command::Profiles => profiles.open(), setup::Command::ExternalOpen(id) => external.open_conversation(id), setup::Command::Attention => external.open_attention(), setup::Command::External => external.open(), setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Workflows => {
+                    match client.ui.registry.surfaces(&client.ui.surface).ok().and_then(|surfaces| surfaces.into_iter().find(|surface| surface.reference.name == "workflow")) {
+                        Some(surface) => client.ui_surface(&surface.reference), None => client.state.info("Workflow workbench is unavailable"),
+                    }
+                }, setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
                 dirty = true;
             }
             if navigation_active != (external.active, profiles.active) {
@@ -2015,9 +2021,11 @@ async fn run_inner(
                         WorkKind::Cancel => client.cancelling = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit | WorkKind::Queue => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
                         Ok(Update::Ui(view)) => client.show_ui(view),
+                        Ok(Update::UiPresentation(lease, pin)) => client.show_ui_presentation(lease, pin),
+                        Ok(Update::UiRetired) => client.ui_retired(),
                         Ok(Update::Command(result)) => { client.command_finished(result); client.state.slash.invalidate(); },
                         Err(problem) => {
                             if matches!(work.kind, WorkKind::Detail) { client.ui_failed(); }

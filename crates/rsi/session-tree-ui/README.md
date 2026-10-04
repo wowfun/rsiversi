@@ -34,7 +34,10 @@ Page display retains only its closed view; the owning Session/API history budget
 still permits larger transient valid Facts. These presentation bounds are not RSS
 limits.
 
-Every read remains tracked by its original UI action owner. Target/contribution
+Read actions remain tracked by their original UI action owner. The embedded
+first-page history helper is a model read: it observes reader retirement directly,
+while the UI presentation owner cancels its model future on target or contribution
+retirement. Its continuation buttons use the exact revision-bound read action. Target/contribution
 retirement and closing/replacing the inspector cancel its local future and reject
 late presentation; these operations never cancel Agent work. Web uses its one
 existing detail slot and TUI uses its existing contributed-card menu and detail

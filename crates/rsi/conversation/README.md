@@ -7,6 +7,11 @@ the affordance. Backfilling the intent can reveal the same hint without changing
 result provenance. This is a navigation hint, not execution or permission
 authority: the Host revalidates the conversation when a human opens it.
 
+Detached Workflow navigation decodes the shared Session-protocol invocation
+result. A result arriving before its intent retains a bounded candidate; the
+matching `run_workflow` intent reveals it without rereading the result. Invalid
+results and other Tool names cannot supply Workflow navigation authority.
+
 `ConversationIdentity` distinguishes durable native Sessions from locally observed
 external conversations. Their identifiers, source kinds and capabilities never
 convert implicitly. External sources bind the local conversation, replay epoch,

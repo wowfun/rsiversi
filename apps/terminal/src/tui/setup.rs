@@ -41,6 +41,7 @@ pub(super) enum Command {
     Export(rsi_client::ExportCommand),
     Markdown(Option<bool>),
     Plugins,
+    Workflows,
     Profiles,
     External,
     ExternalOpen(rsi_acp_protocol::observation::ConversationId),
@@ -65,6 +66,7 @@ pub(super) fn command(text: &str) -> Option<Command> {
     }
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
+        ["/workflows"] => Some(Command::Workflows),
         ["/plugins"] => Some(Command::Plugins),
         ["/profiles"] => Some(Command::Profiles),
         ["/external"] => Some(Command::External),
@@ -107,7 +109,7 @@ pub(super) fn command(text: &str) -> Option<Command> {
         [
             "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume"
             | "/reference" | "/history" | "/plugins" | "/profiles" | "/markdown" | "/external"
-            | "/attention",
+            | "/attention" | "/workflows",
             ..,
         ] => Some(Command::Invalid),
         _ => None,
@@ -1616,6 +1618,17 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workflow_command_uses_the_shared_workbench_and_rejects_extra_arguments() {
+        assert!(matches!(
+            super::command("/workflows"),
+            Some(super::Command::Workflows)
+        ));
+        assert!(matches!(
+            super::command("/workflows cancel"),
+            Some(super::Command::Invalid)
+        ));
+    }
     use super::*;
     #[test]
     fn export_dispatch_requires_a_complete_command_and_valid_options() {

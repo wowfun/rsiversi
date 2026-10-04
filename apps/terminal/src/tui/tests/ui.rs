@@ -8,6 +8,10 @@ use std::sync::{
 use termina::event::KeyEvent;
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent fixture controls for blocking, cancellation, asynchronous surfaces and success"
+)]
 struct Addon {
     calls: Mutex<Vec<ActionInput>>,
     entered: tokio::sync::Notify,
@@ -15,10 +19,15 @@ struct Addon {
     gate: tokio::sync::Notify,
     blocked: bool,
     read: bool,
+    asynchronous: bool,
+    successful: bool,
+    gate_second_model: bool,
+    models: AtomicUsize,
+    refresh_defaults: bool,
 }
-impl SurfaceRenderer for Addon {
-    fn render(&self, _: &Context) -> rsi_ui::Result<UiView> {
-        Ok(UiView {
+impl Addon {
+    fn view() -> UiView {
+        UiView {
             title: "Independent form".into(),
             elements: vec![
                 UiElement::Input {
@@ -39,6 +48,34 @@ impl SurfaceRenderer for Addon {
                     value: serde_json::json!({"operation":"save"}),
                 },
             ],
+        }
+    }
+}
+impl SurfaceRenderer for Addon {
+    fn render(&self, _: &Context) -> rsi_ui::Result<UiView> {
+        if self.asynchronous {
+            Err(UiError::Invalid("asynchronous fixture".into()))
+        } else {
+            Ok(Self::view())
+        }
+    }
+    fn model(&self, _: Context) -> futures_util::future::BoxFuture<'_, rsi_ui::Result<UiModel>> {
+        Box::pin(async move {
+            let call = self.models.fetch_add(1, Ordering::SeqCst);
+            let mut view = Self::view();
+            if self.refresh_defaults && call > 0 {
+                for element in &mut view.elements {
+                    if let UiElement::Input { value, .. } = element {
+                        *value = format!("default-{call}");
+                    }
+                }
+            }
+            if self.gate_second_model && call == 1 {
+                self.entered.notify_one();
+                self.gate.notified().await;
+                view.title = "New presentation".into();
+            }
+            UiModel::standard(view).map_err(Into::into)
         })
     }
 }
@@ -65,6 +102,9 @@ impl UiAction for Handler {
                 }
             }
             addon.finished.fetch_add(1, Ordering::SeqCst);
+            if addon.successful {
+                return Ok(Addon::view());
+            }
             Err(UiError::Action(
                 "fixture rejected; preserve the edits".into(),
             ))
@@ -123,7 +163,7 @@ async fn mount(
                 "fixture.form",
                 "test",
                 rsi_meta::UpdateMode::RestartRequired,
-                Arc::new(Factory(addon)),
+                Arc::new(Factory(addon.clone())),
             ),
             ConfigValue::Null,
         )
@@ -142,6 +182,13 @@ async fn mount(
         .unwrap()
         .1;
     client.action(action);
+    if addon.asynchronous {
+        let work = client.tasks.next().await.unwrap();
+        let Update::UiPresentation(lease, pin) = work.result.unwrap() else {
+            panic!("async surface result")
+        };
+        client.show_ui_presentation(lease, pin);
+    }
     assert!(
         client
             .state
@@ -151,6 +198,163 @@ async fn mount(
             .contains("Title: first")
     );
     fiber
+}
+
+#[tokio::test]
+async fn direct_surface_open_fences_old_watcher_while_new_ready_is_pending() {
+    let (mut client, _, runtime, surface) = client().await;
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        gate_second_model: true,
+        ..Addon::default()
+    });
+    let _fiber = mount(&mut client, &runtime, addon.clone()).await;
+    let old_stop = client.state.detail_stop.clone();
+    let form = client.state.ui_form.as_ref().unwrap();
+    let reference = client
+        .ui
+        .registry
+        .surfaces(&client.ui.surface)
+        .unwrap()
+        .into_iter()
+        .find(|surface| surface.title == "Independent form")
+        .unwrap()
+        .reference;
+    let old_lease = form.presentation.as_ref().unwrap().0.clone();
+    client.ui_surface(&reference);
+    assert!(
+        old_stop.is_cancelled(),
+        "direct surface entry must fence the old watcher"
+    );
+    loop {
+        tokio::select! {
+            () = addon.entered.notified() => break,
+            work = client.tasks.next() => assert!(work.unwrap().superseded(&client)),
+        }
+    }
+    // Invalidation races with the requested lease's gated initial snapshot.
+    old_lease.invalidate().unwrap();
+    addon.gate.notify_one();
+    loop {
+        let work = client.tasks.next().await.unwrap();
+        if work.superseded(&client) {
+            continue;
+        }
+        let Update::UiPresentation(lease, pin) = work.result.unwrap() else {
+            panic!("new surface snapshot");
+        };
+        assert!(!Arc::ptr_eq(&lease, &old_lease));
+        client.show_ui_presentation(lease, pin);
+        break;
+    }
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("New presentation")
+    );
+    let new_lease = client
+        .state
+        .ui_form
+        .as_ref()
+        .unwrap()
+        .presentation
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    assert!(new_lease.snapshot().unwrap().is_some());
+    client.state.escape();
+    while let Some(work) = client.tasks.next().await {
+        assert!(work.superseded(&client));
+    }
+    old_lease.close().await.unwrap();
+    new_lease.close().await.unwrap();
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn asynchronous_action_completion_clears_working_feedback() {
+    let (mut client, _, runtime, surface) = client().await;
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        successful: true,
+        ..Addon::default()
+    });
+    let _fiber = mount(&mut client, &runtime, addon.clone()).await;
+    client.action(action(&client, "Save"));
+    assert_eq!(client.state.status, "Working…");
+    loop {
+        let work = client.tasks.next().await.unwrap();
+        if work.superseded(&client) {
+            continue;
+        }
+        let Update::UiPresentation(lease, pin) = work.result.unwrap() else {
+            panic!("completed action snapshot")
+        };
+        client.show_ui_presentation(lease, pin);
+        break;
+    }
+    assert_eq!(addon.calls.lock().unwrap().len(), 1);
+    assert!(
+        client.state.status.is_empty(),
+        "completed action must clear its working feedback"
+    );
+    assert!(
+        client.state.detail_actions.is_some(),
+        "completed form is actionable again"
+    );
+    client.state.escape();
+    while let Some(work) = client.tasks.next().await {
+        assert!(work.superseded(&client));
+    }
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn asynchronous_surface_refresh_fences_old_actions_and_releases_on_close() {
+    let (mut client, _, runtime, surface) = client().await;
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        ..Addon::default()
+    });
+    let _fiber = mount(&mut client, &runtime, addon.clone()).await;
+    let stale = action(&client, "Save");
+    let (lease, old) = client
+        .state
+        .ui_form
+        .as_ref()
+        .unwrap()
+        .presentation
+        .clone()
+        .unwrap();
+    lease.invalidate().unwrap();
+    let work = client.tasks.next().await.unwrap();
+    let Update::UiPresentation(owner, pin) = work.result.unwrap() else {
+        panic!("refresh snapshot")
+    };
+    assert!(pin.revision() > old.revision());
+    drop(old);
+    client.show_ui_presentation(owner, pin);
+    client.action(stale);
+    assert!(
+        addon.calls.lock().unwrap().is_empty(),
+        "old displayed action must not bind a new snapshot"
+    );
+    client.state.escape();
+    assert!(client.state.ui_form.is_none());
+    while let Some(work) = client.tasks.next().await {
+        assert!(work.superseded(&client));
+    }
+    lease.close().await.unwrap();
+    drop(lease);
+    assert_eq!(client.ui.registry.presentation_usage(), (0, 0, 0));
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
 }
 fn action(client: &Client, label: &str) -> super::Action {
     client
@@ -253,7 +457,9 @@ async fn contributed_form_survives_menu_edit_discard_and_action_failure() {
     let work = client.tasks.next().await.unwrap();
     assert!(work.result.is_err());
     assert!(!work.superseded(&client));
+    let previous_detail = client.state.view_revision;
     client.ui_failed();
+    assert_ne!(client.state.view_revision, previous_detail);
     client
         .state
         .notice(work.result.as_ref().err().unwrap().to_string());
@@ -391,6 +597,141 @@ async fn contributed_source_read_uses_and_cancels_the_actual_session_controller(
     .await
     .unwrap();
     assert!(handle.cancellations.lock().unwrap().is_empty());
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn presentation_retirement_clears_detail_without_restarting_a_failed_watch() {
+    let (mut client, _, runtime, surface) = client().await;
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        ..Addon::default()
+    });
+    let _fiber = mount(&mut client, &runtime, addon).await;
+    let (lease, _) = client
+        .state
+        .ui_form
+        .as_ref()
+        .unwrap()
+        .presentation
+        .clone()
+        .unwrap();
+    lease.close().await.unwrap();
+    let work = client.tasks.next().await.unwrap();
+    assert!(matches!(work.result, Ok(Update::UiRetired)));
+    client.ui_retired();
+    assert!(client.state.ui_form.is_none());
+    assert!(client.tasks.next().await.is_none());
+    assert!(work.superseded(&client));
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+async fn receive_presentation(client: &mut Client) {
+    loop {
+        let work = client
+            .tasks
+            .next()
+            .await
+            .expect("presentation watcher remains armed");
+        if work.superseded(client) {
+            continue;
+        }
+        let Update::UiPresentation(owner, pin) = work.result.unwrap() else {
+            panic!("refresh snapshot")
+        };
+        client.show_ui_presentation(owner, pin);
+        return;
+    }
+}
+
+#[tokio::test]
+async fn asynchronous_refresh_keeps_edits_and_watches_during_field_editing() {
+    let (mut client, _, runtime, surface) = client().await;
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        refresh_defaults: true,
+        ..Addon::default()
+    });
+    let _fiber = mount(&mut client, &runtime, addon.clone()).await;
+    let lease = client
+        .state
+        .ui_form
+        .as_ref()
+        .unwrap()
+        .presentation
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    client.action(action(&client, "Edit Title"));
+    client.state.ui_paste(" edited");
+    client.state.ui_key(enter());
+    client.action(action(&client, "Edit Body"));
+    client.state.ui_paste(" in progress");
+    let stale = action(&client, "Save");
+    lease.invalidate().unwrap();
+    // Ignore work cancelled by editing, then observe the actual rearmed watcher.
+    tokio::time::timeout(Duration::from_secs(2), receive_presentation(&mut client))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("Title: first edited")
+    );
+    assert_eq!(
+        client.state.ui_edit.as_ref().unwrap().editor.text(),
+        "second in progress"
+    );
+    assert!(rendered(&client, "async-refresh-wide", 110, 30).contains("first edited"));
+    assert!(rendered(&client, "async-refresh-narrow", 42, 16).contains("Independent form"));
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("Body: default-1"),
+        "untouched fields receive refreshed defaults while the editor keeps its draft"
+    );
+    client.state.ui_key(enter());
+    client.action(stale);
+    assert!(addon.calls.lock().unwrap().is_empty());
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("Body: second in progress")
+    );
+    // Discarding an editor keeps the same presentation watcher alive as well.
+    client.action(action(&client, "Edit Title"));
+    client.state.ui_paste(" discarded");
+    client.state.escape();
+    // A later refresh still preserves dirty fields.
+    lease.invalidate().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), receive_presentation(&mut client))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("Title: first edited")
+    );
+    client.state.escape();
+    while let Some(work) = client.tasks.next().await {
+        assert!(work.superseded(&client));
+    }
+    lease.close().await.unwrap();
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }

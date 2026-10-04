@@ -273,3 +273,20 @@ impl UiAction for Read {
         })
     }
 }
+
+/// Reuses the authenticated paged child inspector from another first-party surface.
+pub async fn inspect_history(context: &Context, selected: SessionId) -> Result<UiView> {
+    let reader = reader(context)?;
+    tokio::select! { biased;
+        () = reader.stop.cancelled() => Err(UiError::Retired),
+        result = tree::read(
+            &reader, context.runtime().execution(),
+            Operation::History { selected, before: None, watermark: None },
+        ) => result,
+    }
+}
+
+/// Revision-bound continuation action for the embedded first-page history view.
+pub fn history_action() -> Arc<dyn UiAction> {
+    Arc::new(Read)
+}

@@ -109,3 +109,26 @@ Session source capability from this child: it selects the current execution leas
 for the controller's exact Header, retains finite read activity, and never infers
 Local authority from the absence of a caller. The capability is not serialized or
 exported to browser code. Each source request rechecks the same origin's Use grant.
+
+Workflows is a shared Session surface for Web, native Desktop and TUI (`/workflows`).
+Its controller watches ProgramRun invalidations on the existing Session observer
+and rereads Kernel snapshots; there is no client lifecycle reducer. Latest history
+captures a new server watermark in its history request; older pages retain their
+seed. One bounded pane
+selection retains only a history cursor, detail request or admitted child identity.
+Each render captures that selection once before I/O. Child actions carry the
+displayed canonical revision, so navigation needs only its selected child page
+and rejects a stale snapshot instead of silently recapturing a newer revision.
+The surface displays coarse Host readiness separately from captured Session tools
+and plan state, finite child receipts, frozen script/result pages and user cancel.
+Orphaned runs require startup recovery. The cancellation receipt confirms acceptance;
+the current run snapshot alone labels cleanup as pending until its canonical
+terminal outcome. Child navigation reuses the Session
+tree's existing read-only history inspector and does not open an interactive branch.
+Detached run_workflow cards describe the returned invocation and offer Open workflow;
+they never label that returned Tool result as completion of the background run.
+
+Refresh current view rereads readiness and the selected page without navigation or
+execution. Detail refresh recaptures the current canonical revision; history refresh
+keeps its fixed-watermark cursor. Host readiness is observed on reads, independently
+of the Session Program and projection invalidations.

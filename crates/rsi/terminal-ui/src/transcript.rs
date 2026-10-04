@@ -176,6 +176,9 @@ pub(crate) fn tool_title(tool: &ToolState, interrupted: bool) -> String {
         match tool.phase {
             ToolPhase::Prepared => format!("{prepared} {subject}"),
             ToolPhase::Running => format!("{running} {subject}"),
+            ToolPhase::Settled(ToolOutcome::Completed) if tool.workflow_run.is_some() => {
+                format!("Invocation returned · detached {subject}")
+            }
             ToolPhase::Settled(ToolOutcome::Completed) => format!("{settled} {subject}"),
             ToolPhase::Settled(_) => format!("Failed to {} {subject}", prepared.to_lowercase()),
             ToolPhase::Rejected => format!("Rejected: {} {subject}", prepared.to_lowercase()),
@@ -1731,6 +1734,14 @@ mod tests {
                 rsi_conversation::ToolPhase::Settled(rsi_conversation::ToolOutcome::Completed);
             assert_eq!(tool_title(&preview, false), completed);
         }
+        preview.name = Some("run_workflow".into());
+        preview.argument_summary = None;
+        preview.workflow_run =
+            Some(rsi_agent_session_protocol::ProgramRunId::new("program-test").unwrap());
+        assert_eq!(
+            tool_title(&preview, false),
+            "Invocation returned · detached run_workflow"
+        );
     }
 
     #[test]

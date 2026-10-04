@@ -7405,6 +7405,7 @@ dependencies = [
  "rsi-retrieval-protocol",
  "rsi-session-api",
  "rsi-session-protocol",
+ "rsi-session-tree-ui",
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-ui-api",

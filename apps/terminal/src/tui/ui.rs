@@ -1,6 +1,8 @@
 use super::editor::Editor;
 use super::{Action, Client, Menu, Update, error, state::State};
-use rsi_ui::{ActionInput, BoundView, Ui, UiElement, UiReference, UiTarget};
+use rsi_ui::{
+    ActionInput, BoundView, PresentationLease, SnapshotPin, Ui, UiElement, UiReference, UiTarget,
+};
 use std::{collections::BTreeMap, sync::Arc};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
@@ -13,6 +15,7 @@ pub(super) struct Form {
     view: BoundView,
     fields: BTreeMap<String, String>,
     busy: bool,
+    pub(super) presentation: Option<(Arc<PresentationLease>, SnapshotPin)>,
 }
 pub(super) struct Edit {
     pub name: String,
@@ -38,7 +41,31 @@ impl Form {
             view,
             fields,
             busy: false,
+            presentation: None,
         }
+    }
+    fn from_snapshot(lease: Arc<PresentationLease>, pin: SnapshotPin) -> rsi_ui::Result<Self> {
+        let model = pin.model().model;
+        let view = model.standard_view.ok_or_else(|| {
+            rsi_ui::UiError::Invalid("Terminal requires a standard surface view".into())
+        })?;
+        let reference = lease.identity().reference.clone();
+        let actions = model
+            .actions
+            .into_iter()
+            .map(|action| {
+                let mut bound = reference.clone();
+                bound.name.clone_from(&action.name);
+                (action.name, bound)
+            })
+            .collect();
+        let mut form = Self::new(BoundView {
+            reference,
+            view,
+            actions,
+        });
+        form.presentation = Some((lease, pin));
+        Ok(form)
     }
     fn text(&self) -> String {
         use std::fmt::Write as _;
@@ -184,6 +211,9 @@ impl Client {
             .notice("Card details · Enter actions · Ctrl+Y copies displayed text");
     }
     pub(super) fn ui_surface(&mut self, reference: &UiReference) {
+        self.state.close_ui();
+        self.state.invalidate_detail();
+        self.extension_view = None;
         let result = if self.ui.registry.matches_target(&self.ui.surface, reference)
             || self
                 .ui
@@ -196,8 +226,91 @@ impl Client {
         };
         match result {
             Ok(view) => self.show_ui(view),
+            // Snapshot-only surfaces require an asynchronous presentation lease.
+            Err(rsi_ui::UiError::Invalid(_)) => match self.ui.registry.present(reference) {
+                Ok(lease) => {
+                    let lease = Arc::new(lease);
+                    self.state.open_detail("Loading UI…".into());
+                    self.spawn_detail(async move {
+                        let pin = lease.ready().await.map_err(error)?;
+                        Ok(Update::UiPresentation(lease, pin))
+                    });
+                }
+                Err(problem) => self.state.notice(problem.to_string()),
+            },
             Err(problem) => self.state.notice(problem.to_string()),
         }
+    }
+    pub(super) fn show_ui_presentation(&mut self, lease: Arc<PresentationLease>, pin: SnapshotPin) {
+        match Form::from_snapshot(lease, pin) {
+            Ok(mut form) => {
+                let same = self.state.ui_form.as_ref().is_some_and(|previous| {
+                    previous
+                        .presentation
+                        .as_ref()
+                        .zip(form.presentation.as_ref())
+                        .is_some_and(|((old, _), (new, _))| Arc::ptr_eq(old, new))
+                        && !previous.busy
+                });
+                let edit = if same {
+                    let previous = self.state.ui_form.as_ref().expect("same presentation");
+                    for element in &previous.view.view.elements {
+                        if let UiElement::Input { name, value, .. } = element
+                            && let Some(edited) = previous.fields.get(name)
+                            && edited != value
+                            && form.fields.contains_key(name)
+                        {
+                            form.fields.insert(name.clone(), edited.clone());
+                        }
+                    }
+                    self.state
+                        .ui_edit
+                        .take()
+                        .filter(|edit| form.fields.contains_key(&edit.name))
+                } else {
+                    None
+                };
+                self.state.invalidate_detail();
+                self.state.menu = None;
+                self.state.open_detail(form.text());
+                self.state.ui_form = Some(form);
+                self.state.ui_edit = edit;
+                self.state.refresh_ui();
+                self.state.clear_info();
+                self.watch_ui_presentation();
+            }
+            Err(problem) => self.state.notice(problem.to_string()),
+        }
+    }
+    fn watch_ui_presentation(&mut self) {
+        let Some((lease, pin)) = self
+            .state
+            .ui_form
+            .as_ref()
+            .and_then(|form| form.presentation.clone())
+        else {
+            return;
+        };
+        let revision = pin.revision();
+        self.spawn_detail(async move {
+            let mut changes = lease.changes();
+            loop {
+                let status = changes.borrow_and_update().clone();
+                if status.stopped {
+                    return Ok(Update::UiRetired);
+                }
+                if status.revision > revision {
+                    let pin = match lease.snapshot() {
+                        Err(rsi_ui::UiError::Retired) => return Ok(Update::UiRetired),
+                        other => other
+                            .map_err(error)?
+                            .ok_or_else(|| error("UI snapshot unavailable"))?,
+                    };
+                    return Ok(Update::UiPresentation(lease, pin));
+                }
+                changes.changed().await.map_err(error)?;
+            }
+        });
     }
     pub(super) fn ui_card(&mut self) {
         let Some(block) = self.state.transcript.blocks.get(self.state.focused) else {
@@ -265,6 +378,8 @@ impl Client {
                     editor,
                     multiline,
                 });
+                self.state.refresh_ui();
+                self.watch_ui_presentation();
             }
             Action::UiInvoke(reference, value, revision)
                 if revision == self.state.view_revision =>
@@ -277,21 +392,42 @@ impl Client {
                     fields: form.fields.clone(),
                 };
                 form.busy = true;
+                let presentation = form.presentation.clone();
                 self.state.invalidate_detail();
                 self.state.refresh_ui();
                 let stop = self.state.detail_stop.clone();
-                let work = self.ui.registry.invoke_in_view(&reference, input, stop);
-                self.spawn_detail(async move { work.await.map(Update::Ui).map_err(error) });
-                self.state.notice("Working…");
+                if let Some((lease, pin)) = presentation {
+                    let Some(action) = pin.action(&reference.name) else {
+                        self.ui_failed();
+                        return;
+                    };
+                    let work = lease.invoke(&action, input);
+                    self.spawn_detail(async move {
+                        let pin = work.await.map_err(error)?;
+                        Ok(Update::UiPresentation(lease, pin))
+                    });
+                } else {
+                    let work = self.ui.registry.invoke_in_view(&reference, input, stop);
+                    self.spawn_detail(async move { work.await.map(Update::Ui).map_err(error) });
+                }
+                self.state.info("Working…");
             }
             _ => {}
         }
     }
+    pub(super) fn ui_retired(&mut self) {
+        self.state.invalidate_detail();
+        self.state.close_ui();
+        self.state.menu = None;
+        self.state.clear_info();
+    }
     pub(super) fn ui_failed(&mut self) {
+        self.state.invalidate_detail();
         if let Some(form) = &mut self.state.ui_form {
             form.busy = false;
         }
         self.state.refresh_ui();
+        self.watch_ui_presentation();
     }
     pub(super) fn ui_changed(&mut self) {
         if self
