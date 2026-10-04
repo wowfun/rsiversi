@@ -13,7 +13,37 @@ pub(super) struct Input {
     pub next: u64,
     pub blocked: bool,
 }
+
+async fn input_with_capacity_retry(
+    mut request: impl FnMut() -> Request,
+    call: &Call<'_>,
+    execution: &rsi_meta::Execution,
+) -> SessionResult<Reply> {
+    let mut delay = std::time::Duration::from_millis(50);
+    for attempt in 0..5 {
+        match call(request()).await {
+            Err(SessionError::Terminal(PtyError::Capacity)) if attempt < 4 => {
+                execution.sleep(delay).await;
+                delay *= 2;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final attempt returns its result")
+}
+
 impl Input {
+    fn refused(&mut self, sequence: u64, accepted_prefix: bool) -> String {
+        self.next = sequence;
+        self.blocked = accepted_prefix;
+        if accepted_prefix {
+            "Input was partially delivered; check the shell before taking control again"
+        } else {
+            "Terminal input is busy; take control before typing again"
+        }
+        .into()
+    }
+
     pub async fn write(
         &mut self,
         terminal: &str,
@@ -46,18 +76,25 @@ impl Input {
                 .next
                 .checked_add(1)
                 .ok_or("Terminal input sequence exhausted")?;
-            let result = call(Request::Operate {
-                operation: Operation::Input {
-                    terminal: terminal.into(),
-                    attachment: attachment.into(),
-                    epoch,
-                    sequence,
-                    bytes: bytes[offset..end].to_vec(),
+            let result = input_with_capacity_retry(
+                || Request::Operate {
+                    operation: Operation::Input {
+                        terminal: terminal.into(),
+                        attachment: attachment.into(),
+                        epoch,
+                        sequence,
+                        bytes: bytes[offset..end].to_vec(),
+                    },
                 },
-            })
+                call,
+                execution,
+            )
             .await;
             let mut receipt = match result {
                 Ok(Reply::Input(receipt)) => Some(receipt),
+                Err(SessionError::Terminal(PtyError::Capacity)) => {
+                    return Err(self.refused(sequence, offset != 0));
+                }
                 Err(SessionError::Terminal(PtyError::StaleController)) => {
                     self.epoch = None;
                     self.blocked = false;
@@ -189,6 +226,258 @@ mod tests {
     use super::*;
     use rsi_session_protocol::terminal::{InputReceipt, Phase, Size, Terminal};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn resize_capacity_retries_the_same_input_without_querying_an_unknown_receipt() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let call = move |request: Request| -> BoxFuture<'static, SessionResult<Reply>> {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let Request::Operate {
+                    operation:
+                        Operation::Input {
+                            epoch,
+                            sequence,
+                            bytes,
+                            ..
+                        },
+                } = &request
+                else {
+                    panic!("a pre-admission refusal has no receipt to query: {request:?}");
+                };
+                let mut requests = observed.lock().unwrap();
+                requests.push(request.clone());
+                if requests.len() == 1 {
+                    return Err(SessionError::Terminal(PtyError::Capacity));
+                }
+                Ok(Reply::Input(InputReceipt {
+                    epoch: *epoch,
+                    sequence: *sequence,
+                    result: InputState::Accepted { bytes: bytes.len() },
+                }))
+            })
+        };
+        let mut input = Input {
+            epoch: Some(1),
+            next: 1,
+            blocked: false,
+        };
+        input
+            .write(
+                "terminal",
+                "attachment",
+                b"command\n".to_vec(),
+                &call,
+                &rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(input.next, 2);
+        assert!(!input.blocked);
+    }
+
+    #[tokio::test]
+    async fn exhausted_unadmitted_input_keeps_its_sequence_available() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let call = move |request: Request| -> BoxFuture<'static, SessionResult<Reply>> {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let Request::Operate {
+                    operation:
+                        Operation::Input {
+                            epoch,
+                            sequence,
+                            bytes,
+                            ..
+                        },
+                } = &request
+                else {
+                    panic!("unadmitted input must not query a receipt")
+                };
+                let mut requests = observed.lock().unwrap();
+                requests.push(request.clone());
+                if requests.len() <= 5 {
+                    return Err(SessionError::Terminal(PtyError::Capacity));
+                }
+                Ok(Reply::Input(InputReceipt {
+                    epoch: *epoch,
+                    sequence: *sequence,
+                    result: InputState::Accepted { bytes: bytes.len() },
+                }))
+            })
+        };
+        let mut input = Input {
+            epoch: Some(1),
+            next: 1,
+            blocked: false,
+        };
+        let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+        assert!(
+            input
+                .write("terminal", "attachment", vec![b'x'], &call, &execution)
+                .await
+                .unwrap_err()
+                .contains("busy")
+        );
+        assert_eq!(input.next, 1);
+        assert!(!input.blocked);
+        input
+            .write("terminal", "attachment", vec![b'x'], &call, &execution)
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests.iter().all(|request| request == &requests[0]));
+        assert_eq!(input.next, 2);
+        assert!(!input.blocked);
+    }
+
+    #[tokio::test]
+    async fn capacity_after_an_accepted_prefix_blocks_whole_batch_replay() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let call = move |request: Request| -> BoxFuture<'static, SessionResult<Reply>> {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let Request::Operate {
+                    operation:
+                        Operation::Input {
+                            epoch, sequence, ..
+                        },
+                } = &request
+                else {
+                    panic!("capacity is not an uncertain receipt")
+                };
+                observed.lock().unwrap().push(request.clone());
+                if *sequence != 1 {
+                    return Err(SessionError::Terminal(PtyError::Capacity));
+                }
+                Ok(Reply::Input(InputReceipt {
+                    epoch: *epoch,
+                    sequence: *sequence,
+                    result: InputState::Accepted { bytes: 1 },
+                }))
+            })
+        };
+        let mut input = Input {
+            epoch: Some(1),
+            next: 1,
+            blocked: false,
+        };
+        let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+        assert!(
+            input
+                .write("terminal", "attachment", b"ab".to_vec(), &call, &execution)
+                .await
+                .unwrap_err()
+                .contains("partially delivered")
+        );
+        assert_eq!(input.next, 2);
+        assert!(input.blocked);
+        assert!(
+            input
+                .write("terminal", "attachment", b"ab".to_vec(), &call, &execution)
+                .await
+                .is_err()
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests[1..].iter().all(|request| request == &requests[1]));
+        assert!(
+            matches!(&requests[1], Request::Operate { operation: Operation::Input { bytes, sequence: 2, .. } } if bytes == b"b")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_capacity_backoff_keeps_input_fenced() {
+        use std::future::Future;
+        use std::task::Poll;
+        let call = |request: Request| -> BoxFuture<'static, SessionResult<Reply>> {
+            assert!(matches!(
+                request,
+                Request::Operate {
+                    operation: Operation::Input { .. }
+                }
+            ));
+            Box::pin(async { Err(SessionError::Terminal(PtyError::Capacity)) })
+        };
+        let mut input = Input {
+            epoch: Some(1),
+            next: 1,
+            blocked: false,
+        };
+        let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+        let mut writing =
+            Box::pin(input.write("terminal", "attachment", vec![b'x'], &call, &execution));
+        std::future::poll_fn(|cx| {
+            assert!(writing.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(writing);
+        assert!(input.blocked);
+        assert_eq!(input.next, 2);
+    }
+
+    #[tokio::test]
+    async fn generic_capacity_does_not_authorize_input_replay() {
+        for api_capacity in [false, true] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let observed = requests.clone();
+            let call = move |request: Request| -> BoxFuture<'static, SessionResult<Reply>> {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    observed.lock().unwrap().push(request.clone());
+                    match request {
+                        Request::Operate {
+                            operation: Operation::Input { .. },
+                        } => Err(if api_capacity {
+                            SessionError::Api(rsi_api_protocol::ApiError::Capacity)
+                        } else {
+                            SessionError::Capacity
+                        }),
+                        Request::Operate {
+                            operation:
+                                Operation::Receipt {
+                                    epoch, sequence, ..
+                                },
+                        } => Ok(Reply::Input(InputReceipt {
+                            epoch,
+                            sequence,
+                            result: InputState::Unknown,
+                        })),
+                        _ => panic!("unexpected operation"),
+                    }
+                })
+            };
+            let mut input = Input {
+                epoch: Some(1),
+                next: 1,
+                blocked: false,
+            };
+            let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+            assert!(
+                input
+                    .write("terminal", "attachment", vec![b'x'], &call, &execution)
+                    .await
+                    .is_err()
+            );
+            assert!(input.blocked);
+            assert_eq!(input.next, 2);
+            assert!(
+                input
+                    .write("terminal", "attachment", vec![b'x'], &call, &execution)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(requests.lock().unwrap().len(), 2);
+        }
+    }
     #[tokio::test]
     async fn transient_short_write_recovers_batch_throughput_without_replaying_bytes() {
         let observed = Arc::new(Mutex::new((Vec::new(), 0usize, 0usize)));

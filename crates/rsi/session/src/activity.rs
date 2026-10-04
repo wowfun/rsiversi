@@ -141,10 +141,10 @@ impl LocalSessionService {
             let (fact_seq, status) = match self.activity_cut(&session).await {
                 Ok((sequence, open)) => (
                     sequence.to_string(),
-                    if running {
-                        ActivityStatus::Running
-                    } else if !open {
+                    if !open {
                         ActivityStatus::Idle
+                    } else if running {
+                        ActivityStatus::Running
                     } else {
                         ActivityStatus::Unknown
                     },

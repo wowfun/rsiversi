@@ -21,6 +21,11 @@ The [language contract](../../../../crates/rsi-lsp/core/README.md) owns admissio
 budgets and retirement. A response deadline retires the whole connection because
 silently dropping an admitted JSON-RPC response would strand the server, while
 interrupting a partially written frame would corrupt the stream.
+Completing an already written RPC from buffered input must return progress before
+waiting for another I/O event. Shutdown grace rechecks its active RPC between
+steps; waiting after that RPC disappears would make a successful response time
+out and suppress the exit notification. Both read-before-write and
+write-before-read orders must preserve that progress.
 
 ## Alternatives considered
 

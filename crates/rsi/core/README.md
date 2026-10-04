@@ -655,12 +655,15 @@ The standard Host stores its rebuildable cache at `HostPaths.cache()/history/v1`
 outside the leased Agent Store root, and publishes the bounded
 [history API](../history-api/README.md) to authenticated clients.
 
-Host startup waits for enabled history/cache API instances as well as the managed
-provider owner and MCP API registration before returning the service for client
-capability negotiation. MCP endpoint discovery/readiness is independent; an offline
-endpoint must not prevent the configuration API from becoming available. Direct
+Host startup waits for enabled history/cache, navigation and Attention API owners
+as well as the managed provider owner and MCP API registration before returning
+the service for client capability negotiation. MCP endpoint discovery/readiness
+is independent; an offline endpoint must not prevent the configuration API from
+becoming available. Direct
 generic Host tests must likewise await the API owners before freezing a client
 operation table.
+A converged Profile target can still have an owner loading or pending its
+requirements; readiness checks each enabled API owner's actual Active state.
 A reconstructible cache may need asynchronous rebuilding; publishing a client
 operation snapshot before that work settles would permanently omit history from
 that connection. The existing 30-second startup deadline covers this readiness.

@@ -36,6 +36,7 @@ pub enum PtyError {
     #[error("Terminal unavailable: {0}")]
     Unavailable(String),
     /// Finite process, screen, snapshot, follower or input admission is exhausted.
+    /// For input, refusal precedes sequence consumption, receipt admission and native I/O.
     #[error("terminal capacity is exhausted")]
     Capacity,
     /// The caller no longer holds the current controller epoch.

@@ -606,7 +606,14 @@ impl Pump {
         {
             return Err(Error::Deadline);
         }
+        let rpc_pending = self.active.is_some();
         let buffered = self.decode()?;
+        if rpc_pending && self.active.is_none() {
+            if buffered {
+                tokio::task::yield_now().await;
+            }
+            return Ok(());
+        }
         self.start_next()?;
         let deadline = self.deadline();
         let commands = running

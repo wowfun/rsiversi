@@ -115,6 +115,17 @@ use profile_owner::ProfileOwner;
 use rsi_host::HostPaths;
 use std::path::{Path, PathBuf};
 
+const STARTUP_OWNERS: &[&str] = &[
+    "rsi.managed-providers",
+    "rsi-history",
+    "rsi.history.api",
+    "rsi.attention",
+    "rsi.navigation",
+    "rsi-mcp-api",
+    "rsi-workspace-review",
+    "rsi.workspace-review.api",
+];
+
 /// Running standard Host and its application-facing operations.
 #[derive(Debug)]
 pub struct RunningRsi {
@@ -252,14 +263,7 @@ impl RunningRsi {
                 {
                     let status = changes.borrow_and_update();
                     let mut pending = false;
-                    for id in [
-                        "rsi.managed-providers",
-                        "rsi-history",
-                        "rsi.history.api",
-                        "rsi-mcp-api",
-                        "rsi-workspace-review",
-                        "rsi.workspace-review.api",
-                    ] {
+                    for &id in STARTUP_OWNERS {
                         let desired = status
                             .target()
                             .iter()
@@ -538,6 +542,179 @@ pub type Result<T> = std::result::Result<T, RsiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct StartupGate;
+    impl rsi_meta::LocalContract for StartupGate {
+        const KEY: &'static str = "fixture.startup-gate";
+        type Service = ();
+    }
+
+    #[derive(Debug)]
+    struct PendingApi(bool);
+    #[async_trait::async_trait]
+    impl rsi_meta::PluginFactory for PendingApi {
+        fn prepare(
+            &self,
+            config: &rsi_meta::ConfigValue,
+        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+            let prepared = rsi_meta::PreparedActivation::new(config.clone());
+            Ok(if self.0 {
+                prepared.requiring_local::<StartupGate>()
+            } else {
+                prepared
+            })
+        }
+        async fn activate(&self, _: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+            assert!(!self.0, "the fixture keeps API activation pending");
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct StartupSession;
+    #[async_trait::async_trait]
+    impl rsi_session_protocol::SessionService for StartupSession {
+        async fn read_header(
+            &self,
+            _: &rsi_agent_session_protocol::SessionId,
+        ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+            panic!("startup does not read Session data")
+        }
+        async fn create(
+            &self,
+            _: rsi_session_protocol::CreateSession,
+        ) -> rsi_session_protocol::Result<std::sync::Arc<dyn rsi_session_protocol::SessionHandle>>
+        {
+            panic!("startup does not create a Session")
+        }
+        async fn attach(
+            &self,
+            _: &rsi_agent_session_protocol::SessionId,
+        ) -> rsi_session_protocol::Result<std::sync::Arc<dyn rsi_session_protocol::SessionHandle>>
+        {
+            panic!("startup does not attach a Session")
+        }
+        async fn list_recent(
+            &self,
+            _: Option<&rsi_session_protocol::RecentSessionCursor>,
+            _: usize,
+        ) -> rsi_session_protocol::Result<rsi_session_protocol::RecentSessionPage> {
+            panic!("startup does not discover history")
+        }
+    }
+    #[async_trait::async_trait]
+    impl rsi_meta::PluginFactory for StartupSession {
+        fn prepare(
+            &self,
+            config: &rsi_meta::ConfigValue,
+        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+            Ok(rsi_meta::PreparedActivation::new(config.clone()))
+        }
+        async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+            plan.context()
+                .provide_local::<rsi_session_protocol::SessionContract>(std::sync::Arc::new(
+                    Self,
+                ))?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn converged_profile_waits_for_enabled_navigation_api_owners() {
+        use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
+        use std::sync::Arc;
+        for id in ["rsi.attention", "rsi.navigation"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let paths = HostPaths::new(
+                temporary.path().join("config"),
+                temporary.path().join("state"),
+                temporary.path().join("cache"),
+            )
+            .unwrap();
+            let mut builder = HostBuilder::new(paths.clone());
+            builder.register_local_contract::<StartupGate>().unwrap();
+            builder
+                .register_local_contract::<rsi_session_protocol::SessionContract>()
+                .unwrap();
+            builder
+                .register_linked(
+                    "fixture.pending-api",
+                    "1",
+                    rsi_meta::UpdateMode::Replayable,
+                    Arc::new(PendingApi(true)),
+                )
+                .unwrap();
+            builder
+                .register_linked(
+                    "fixture.active-api",
+                    "1",
+                    rsi_meta::UpdateMode::Replayable,
+                    Arc::new(PendingApi(false)),
+                )
+                .unwrap();
+            builder
+                .register_linked(
+                    "fixture.session",
+                    "1",
+                    rsi_meta::UpdateMode::Replayable,
+                    Arc::new(StartupSession),
+                )
+                .unwrap();
+            let mut entries: Vec<_> = STARTUP_OWNERS
+                .iter()
+                .filter(|owner| **owner != id)
+                .map(|owner| {
+                    ProfileEntry::new(*owner, "fixture.active-api", serde_json::Value::Null)
+                })
+                .collect();
+            entries.push(ProfileEntry::new(
+                id,
+                "fixture.pending-api",
+                serde_json::Value::Null,
+            ));
+            entries.push(ProfileEntry::new(
+                "fixture.session",
+                "fixture.session",
+                serde_json::Value::Null,
+            ));
+            let runtime = rsi_meta::Runtime::default();
+            let profile = rsi_application::ScopedProfile::start(
+                &builder.build().unwrap(),
+                &runtime.root(),
+                ProfileProgram::from_profile(Profile::new(entries)),
+            )
+            .await
+            .unwrap();
+            let status = profile.profile_status();
+            assert_eq!(status.health(), rsi_host::ProfileHealth::Converged);
+            assert!(matches!(
+                status
+                    .observed()
+                    .iter()
+                    .find(|row| row.id().as_str() == id)
+                    .unwrap()
+                    .state(),
+                rsi_host::ProfileInstanceState::Pending(_)
+            ));
+            assert!(
+                profile
+                    .lookup_local::<rsi_session_protocol::SessionContract>()
+                    .is_some()
+            );
+            tokio::task::yield_now().await;
+            let mut boot = Box::pin(RunningRsi::from_started_host(ProfileOwner::Scoped {
+                paths,
+                profile: Arc::new(profile),
+            }));
+            assert!(
+                futures_util::poll!(&mut boot).is_pending(),
+                "startup must wait for enabled {id}"
+            );
+            drop(boot);
+            assert!(runtime.shutdown().await.is_clean());
+        }
+    }
 
     #[test]
     fn optional_personal_home_ignores_missing_empty_and_relative_paths() {

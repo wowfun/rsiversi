@@ -13,6 +13,9 @@ exact restored Session; unrelated Session close never waits for another setup.
 Prompt tasks are retained by the adapter independently of the requesting
 handler. Setup tasks likewise retain admission and cleanup ownership if a control
 request disappears; shutdown joins them before retiring the Session owner.
+Setup responses wait for their owned task to release preparation and operation
+admission, so the next operation does not race that task's final cleanup. An
+undelivered new attachment retains its admission through private-resource cleanup.
 Cancel targets the admitted message, including its pre-claim interval. Before
 awaiting cancellation, the adapter drops its suspended observation stream so a
 pending page cannot retain the Store read budget needed by cancellation. It

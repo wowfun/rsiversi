@@ -188,12 +188,10 @@ async fn ssh_stdio_management_requires_one_exact_credential_grant_and_live_use_t
     .unwrap();
     assert_eq!(state.revision, "2");
     assert!(state.config.is_none());
+    let rejected = raw(&running, origin.clone(), wire::Operation::Put.spec(), &put).await;
     assert!(
-        matches!(
-            raw(&running, origin.clone(), wire::Operation::Put.spec(), &put).await,
-            Err(ApiError::Domain(_))
-        ),
-        "deleted identity cannot be recreated by stale revision zero"
+        matches!(rejected, Err(ApiError::Domain(_))),
+        "deleted identity cannot be recreated by stale revision zero: {rejected:?}"
     );
     put.expected = "2".into();
     raw(&running, origin.clone(), wire::Operation::Put.spec(), &put)

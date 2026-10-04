@@ -985,6 +985,25 @@ async fn cancelled_resize_waiter_keeps_old_dimensions_until_ack_and_retains_snap
     assert_eq!(
         op(
             &scope,
+            Operation::Input {
+                terminal: "pty".into(),
+                attachment: "writer".into(),
+                epoch: 1,
+                sequence: 1,
+                bytes: vec![b'x'],
+            }
+        )
+        .await,
+        Err(PtyError::Capacity)
+    );
+    assert!(matches!(
+        op(&scope, Operation::Receipt { terminal: "pty".into(), epoch: 1, sequence: 1 }).await.unwrap(),
+        Reply::Input(receipt) if receipt.result == InputState::Unknown
+    ));
+    assert_eq!(lock(&term.inner).next_input, 1);
+    assert_eq!(
+        op(
+            &scope,
             Operation::Takeover {
                 terminal: "pty".into(),
                 attachment: "writer".into()

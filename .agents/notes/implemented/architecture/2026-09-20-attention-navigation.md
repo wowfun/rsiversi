@@ -16,6 +16,13 @@ and keeps live broker targets separate. A cheap Kernel commit revision invalidat
 the bounded metadata cache without consuming Session observer slots. Navigation joins these native observations
 with the ACP owner's eight peers and persists only explicit reading positions.
 Unknown ownership remains visible instead of inferring execution from old Facts.
+Service startup waits for the enabled navigation and Attention owners to become
+Active before client operation-table negotiation. Acceptance of a converged
+Profile target does not establish that every asynchronous owner has registered
+its endpoints; freezing the table early would omit them for that connection.
+The durable cut determines whether native work remains open. An earlier running
+roster cannot override a later terminal Fact and hide an unread completion;
+closing that cut still does not prove that external effects have settled.
 
 ## Alternatives considered
 

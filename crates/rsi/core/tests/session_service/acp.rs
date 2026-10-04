@@ -192,6 +192,84 @@ async fn many_chunks(Json(_request): Json<Value>) -> Response {
         .unwrap()
 }
 
+#[tokio::test]
+async fn acp_resume_releases_admission_before_waking_the_next_operation() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Wake, Waker},
+    };
+    type ResumeFuture =
+        Pin<Box<dyn Future<Output = Result<schema::ResumeSessionResponse, Failure>> + Send>>;
+    struct NextOperation {
+        future: Mutex<Option<ResumeFuture>>,
+        backend: Arc<NativeAgent>,
+        request: Value,
+        result: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    }
+    impl Wake for NextOperation {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let mut future = self.future.lock().unwrap();
+            let Some(pending) = future.as_mut() else {
+                return;
+            };
+            let waker = Waker::from(self.clone());
+            let mut context = Context::from_waker(&waker);
+            if let Poll::Ready(resumed) = pending.as_mut().poll(&mut context) {
+                let mut next = std::pin::pin!(self.backend.resume(dto(self.request.clone())));
+                let ready = resumed.is_ok()
+                    && !matches!(
+                        next.as_mut().poll(&mut context),
+                        Poll::Ready(Err(Failure::Busy))
+                    );
+                future.take();
+                self.result
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(ready)
+                    .unwrap();
+            }
+        }
+    }
+
+    let fixture = fixture("http://127.0.0.1:1");
+    let (running, backend, _) = boot(&fixture).await;
+    let created = backend
+        .new_session(dto(json!({"cwd":fixture.workspace,"mcpServers":[]})))
+        .await
+        .unwrap();
+    let request = json!({"sessionId":created.session_id,"cwd":fixture.workspace,"mcpServers":[]});
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let future = {
+        let backend = backend.clone();
+        let request = request.clone();
+        Box::pin(async move { backend.resume(dto(request)).await }) as ResumeFuture
+    };
+    // Poll inline when the setup result wakes its receiver. This forces the
+    // consumer to run before the producer can execute statements after send.
+    let consumer = Arc::new(NextOperation {
+        future: Mutex::new(Some(future)),
+        backend: backend.clone(),
+        request,
+        result: Mutex::new(Some(send)),
+    });
+    consumer.wake_by_ref();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .unwrap()
+            .unwrap(),
+        "a completed resume must release admission before the next operation"
+    );
+    backend.shutdown().await.unwrap();
+    assert!(running.shutdown().await.is_clean());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_acp_prompt_settles_and_load_replays_beyond_the_last_1024_facts() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

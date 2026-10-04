@@ -186,7 +186,9 @@ Activity caches at most 128 durable watermark/open-Turn pairs under the Kernel
 commit revision captured before the read. An unchanged revision avoids Store
 reads without allocating Session observers or generation pins. Providers without
 a revision fall back to fresh reads. Broker requests and resident running state
-are always sampled separately.
+are always sampled separately. A closed durable cut is Idle even when the earlier
+resident sample reports running work; Idle does not establish effect settlement.
+Running requires both an open durable Turn and a sampled current owner.
 
 `SessionService::read_header` reads one durable Store Header by SessionId without
 attaching, creating a handle, touching activity or loading transcript. Unpublished

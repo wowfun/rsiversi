@@ -87,6 +87,13 @@ idle poll can hold admission for 200 ms and must not occupy a scarce Data slot.
 The Session client retains its finite read interface and bounds capacity retries;
 Control admission remains unchanged. Definitive stale-controller rejection makes
 input read-only without treating rejected bytes as an uncertain write.
+Input can also be refused while a native resize owns its admission. That exact
+PTY capacity refusal has not consumed a sequence or created a receipt, so Rust
+retries the frozen request within a finite budget instead of asking for an
+unknown receipt. Exhaustion without an accepted prefix keeps the writer usable;
+exhaustion after a confirmed prefix fences another whole-batch attempt. Generic
+transport failures still require receipt reconciliation, and an unknown result
+never authorizes replay.
 
 ## Evidence
 

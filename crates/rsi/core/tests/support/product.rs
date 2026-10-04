@@ -8,6 +8,8 @@ pub async fn ready(host: &rsi_host::RunningHost) {
                 [
                     "rsi-history",
                     "rsi.history.api",
+                    "rsi.attention",
+                    "rsi.navigation",
                     "rsi.managed-providers",
                     "rsi-mcp-api",
                 ]
