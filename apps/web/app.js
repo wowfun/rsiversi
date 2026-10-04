@@ -5,7 +5,7 @@ import { keyboardAction } from "./composer-actions.js";
 import { presentationIdentity } from "./src/presentation.tsx";
 import { presentationKey } from "./presentation-store.js";
 import { downloadSession } from "./session-export.js";
-import { lane, limits } from "./admission.js";
+import { DocumentConnection } from "./document-connection.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { NativeDocument } from "./src/native.ts";
@@ -31,17 +31,12 @@ if (location.hash.startsWith("#rsi-launch=")) {
 }
 let localBootstrap = false;
 try { localBootstrap = localStorage.getItem("rsi.local-web") === "1"; } catch { /* Optional browser storage. */ }
-let pending = new Map();
 let connection;
 let connecting = false;
-let worker;
-let requestId = 0;
 let view;
-let mounts;
 let rendererSlots = [];
 let selected = "main";
 let connected = false;
-let closing = false;
 let catalogKey;
 let dialogKey;
 let lastNotice;
@@ -53,7 +48,7 @@ function clearImages() {
   for (const entry of imageCache.values()) URL.revokeObjectURL(entry.url);
   imageCache.clear();
 }
-async function previewImage(body, media, ticket) {
+async function previewImage(body, media, ticket, call) {
   const key = JSON.stringify(media);
   const epoch = imageEpoch;
   const status = element("p", "hint", "Loading image…");
@@ -140,27 +135,17 @@ function clearView() {
   ExternalPane.clearDrafts();
   $("detail").close();
 }
-function failWorker(error, current = connection) {
-  if (current) {
-    current.closing = true;
-    current.authenticationDone?.();
-    current.teardown ??= current.mounts.close();
-    current.teardown.catch(cleanup => {
-      if (connection === current) notify(`Renderer cleanup failed: ${cleanup.message}`);
-    });
-    for (const waiter of current.pending.values()) waiter.reject(new Error(error));
-    current.pending.clear();
-    current.worker.terminate();
-  }
+function failWorker(error, current = connection) { current?.fail(new Error(error)); }
+function connectionFailed(error, current) {
   if (current !== connection) return;
-  connected = false; closing = true; worker = undefined;
+  connected = false;
   clearView();
   $("connection-state").textContent = "Connection failed";
   $("connection-state").classList.remove("connected");
   $("login").hidden = false;
   $("workbench").hidden = true;
   $("sign-out").hidden = true;
-  notify(`${error}. Reconnect explicitly after renderer cleanup succeeds.`);
+  notify(`${error.message}. Reconnect explicitly after renderer cleanup succeeds.`);
 }
 
 let frameId;
@@ -195,7 +180,7 @@ async function presentFrame(frame, assets, current = connection) {
   if (!next?.surfaces || Array.isArray(next.surfaces) || Object.keys(next.surfaces).length > 2 || Object.keys(next.surfaces).some(key => !/^[a-z0-9_-]{1,32}$/.test(key))) throw new Error("Invalid presentation snapshot");
   for (const pane of panes.values()) if (pane.kind !== "external") { pane.stopBinding = undefined; pane.queueBinding = undefined; pane.cancel.disabled = true; pane.queueList?.querySelectorAll("button").forEach(button => {button.disabled = true;}); }
   render(next);
-  const renderer = await (current?.mounts ?? mounts).render(assets, rendererSlots);
+  const renderer = await current.render(assets, rendererSlots);
   if (current && (connection !== current || current.closing)) return false;
   if (renderer?.error) notify(`Renderer update failed: ${renderer.error}`);
   frameId = frame.frame_id;
@@ -208,48 +193,35 @@ async function presentFrame(frame, assets, current = connection) {
   }
   return { accepted: true, renderer };
 }
+function createDocumentConnection(transport, table) {
+  const current = new DocumentConnection({
+    transport, mounts: table,
+    isCurrent: () => connection === current,
+    onFrame: (frame, assets) => presentFrame(frame, assets, current),
+    onFailure: error => connectionFailed(error, current),
+    onCleanupFailure: error => notify(`Renderer cleanup failed: ${error.message}`),
+  });
+  return current;
+}
 async function makeWorker() {
+  await connection?.retire();
   const table = await MountTable.open();
-  const current = { mounts: table, pending: new Map(), closing: false, worker: undefined };
-  current.authenticated = new Promise(resolve => { current.authenticationDone = resolve; });
-  try { current.worker = location.protocol === "rsi:" ? new NativeDocument() : new Worker("/worker.js", { type: "module" }); }
+  let transport;
+  try { transport = location.protocol === "rsi:" ? new NativeDocument() : new Worker("/worker.js", { type: "module" }); }
   catch (error) { await table.close(); throw error; }
+  const current = createDocumentConnection(transport, table);
   connection = current;
-  mounts = table; pending = current.pending; worker = current.worker;
-  frameId = undefined; closing = false;
-  current.worker.onmessage = async ({ data }) => {
-    if (connection !== current) return;
-    if (data.kind === "view") {
-      await current.authenticated;
-      if (connection !== current || current.closing) return;
-      try {
-        const frame = typeof data.view === 'string' ? JSON.parse(data.view) : data.view;
-        const assets = typeof data.assets === 'string' ? JSON.parse(data.assets) : data.assets;
-        const presented = await presentFrame(frame, assets, current);
-        if (!current.closing && connection === current) current.worker.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !presented?.accepted, renderer: presented?.renderer });
-      } catch (error) { if (connection === current && !current.closing) failWorker(`View rendering failed: ${error.message}`, current); }
-    } else if (data.kind === "reply") {
-      const waiter = current.pending.get(data.id); current.pending.delete(data.id);
-      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true, retryable: data.retryable !== false })); else waiter?.resolve(data.result);
-    } else if (data.kind === "failed") { if (!current.closing) failWorker(data.error, current); }
-  };
-  current.worker.onerror = event => { event.preventDefault(); if (connection === current) failWorker("Browser Worker stopped", current); };
+  for (const pane of panes.values()) pane.switching = false;
+  frameId = undefined;
   return current;
 }
 function call(method, payload, transfer = []) {
-  const selected = lane(method, payload);
-  const lifecycle = selected === "lifecycle";
-  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(Object.assign(new Error("The application is disconnecting"), { notAdmitted: true, retryable: false }));
-  if (!worker) return Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true, retryable: false }));
-  const inflight = [...pending.values()].filter(waiter => waiter.lane === selected).length;
-  if (inflight >= limits[selected]) return Promise.reject(Object.assign(new Error("Input is busy; wait for the current action"), { notAdmitted: true }));
-  const id = ++requestId;
-  const waiters = pending;
-  return new Promise((resolve, reject) => {
-    waiters.set(id, { resolve, reject, lifecycle, lane: selected });
-    try { worker.postMessage({ kind: "call", id, method, payload }, transfer); }
-    catch (error) { waiters.delete(id); reject(Object.assign(error, { notAdmitted: true, retryable: false })); }
-  });
+  return boundCall(connection)(method, payload, transfer);
+}
+function boundCall(owner) {
+  return (method, payload, transfer = []) => owner
+    ? owner.request(method, payload, transfer)
+    : Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true, retryable: false }));
 }
 
 function command(value) { return call("command", JSON.stringify(value)); }
@@ -266,30 +238,32 @@ async function connectWith(receipt, localTicket) {
     const payload = local ? { localBootstrap: true, ticket: localTicket } : { receipt, devHttp: $("dev-http").checked };
     payload.buildFamily = documentBuildFamily;
     let identity;
-    try { identity = JSON.parse(await call("connect", payload)); }
-    finally { delete payload.ticket; localTicket = undefined; }
+    try {
+      identity = await current.authenticate(payload, async identity => {
+        try { return { drafts: await DraftStore.open(identity.endpoint_id, identity.principal) }; }
+        catch (error) {
+          return { drafts: new DraftStore(undefined, identity.endpoint_id, identity.principal.kind === "local" ? "local" : `device:${identity.principal.device_id}`),
+            storageNotice: `Draft storage is unavailable. Input cannot be saved or sent: ${error.message}` };
+        }
+      });
+    } finally { delete payload.ticket; localTicket = undefined; }
+    if (!identity || connection !== current || current.closing) return;
     if (local) {
       $("dev-http").checked = true;
       try { localStorage.setItem("rsi.local-web", "1"); } catch { /* Optional browser storage. */ }
     }
     endpoint = identity.endpoint_id;
     presentationIdentity.set(presentationKey(endpoint,identity.principal));
-    try { current.drafts = await DraftStore.open(endpoint, identity.principal); }
-    catch (error) {
-      current.drafts = new DraftStore(undefined, endpoint, identity.principal.kind === "local" ? "local" : `device:${identity.principal.device_id}`);
-      current.storageNotice = `Draft storage is unavailable. Input cannot be saved or sent: ${error.message}`;
-    }
-    current.authenticationDone();
-    if (connection !== current || current.closing) return;
     try { localStorage.setItem("rsi.endpoint", endpoint); } catch { /* Storage is optional. */ }
     connected = true;
     $("connection-state").textContent = "Connected";
     $("connection-state").classList.add("connected");
     $("login").hidden = true; $("workbench").hidden = false; $("sign-out").hidden = false;
+    $("sign-out").disabled = false;
     $("reconnect").hidden = false;
     if (current.storageNotice) notify("");
   } catch (error) {
-    if (current) { current.authenticationDone(); failWorker(error.message, current); }
+    if (current) failWorker(error.message, current);
     else notify(error.message);
   } finally {
     connecting = false;
@@ -306,42 +280,51 @@ $("login-form").addEventListener("submit", event => {
 $("dev-http-label").hidden = location.protocol !== "http:";
 $("reconnect").hidden = !endpoint;
 $("reconnect").addEventListener("click", () => perform(() => connectWith(JSON.stringify({ endpoint_id: endpoint }))));
-async function disconnectDocument() {
-  if (closing) return;
-  $("sign-out").disabled = true;
+async function cancelNativeCloseAfterDraftFailure(current, draftError) {
   try {
-    let resources;
-    closing = true;
-    const current = connection;
-    if (current) current.closing = true;
-    try {
-      const drafts = await Promise.allSettled([...panes.values()].map(pane => pane.flush(true)));
-      const failed = drafts.find(result => result.status === "rejected");
-      if (failed) {
-        closing = false;
-        if (current) current.closing = false;
-        if (location.protocol === "rsi:") {
-          const cancelled = await fetch("/_close_cancel", {method:"POST",body:""});
-          if (!cancelled.ok) throw new Error("Could not cancel native close after a failed draft save");
-        }
-        notify(`Draft is not saved: ${failed.reason?.message ?? failed.reason}. Recover the draft before closing.`);
-        return;
-      }
-      await mounts.close();
-      resources = await call("disconnect", true);
+    const cancelled = await fetch("/_close_cancel", {method:"POST",body:"",signal:AbortSignal.timeout(30_000)});
+    if (connection !== current || current.closing) return false;
+    if (!cancelled.ok) throw new Error(`Native close cancellation failed (${cancelled.status})`);
+    return true;
+  } catch (error) {
+    if (connection === current && !current.closing) {
+      failWorker(`Draft is not saved: ${draftError.message}. Could not cancel native close: ${error.message}. Recover the draft before closing.`, current);
     }
-    catch (error) { failWorker(String(error.message ?? error)); return; }
-    if (current && connection !== current) return;
+    return false;
+  }
+}
+
+async function disconnectDocument() {
+  const current = connection;
+  if (!current || current.closing) return;
+  $("sign-out").disabled = true;
+  // Capture the actual editors before the first await, not replacement panes.
+  const capturedPanes = [...panes.values()];
+  try {
+    const resources = await current.disconnect(async () => {
+      const saved = await Promise.allSettled(capturedPanes.map(pane => pane.flush(true)));
+      const failed = saved.find(result => result.status === "rejected");
+      if (failed) throw failed.reason;
+    });
+    if (connection !== current || current.phase !== "Closed") return;
     document.dispatchEvent(new CustomEvent("rsi-disconnected", { detail: resources }));
     connected = false;
-    worker.terminate(); worker = undefined;
     clearView();
     $("connection-state").textContent = "Disconnected";
     $("connection-state").classList.remove("connected");
     $("workbench").hidden = true; $("login").hidden = false; $("sign-out").hidden = true;
     notify("");
-  } finally { $("sign-out").disabled = false; }
+  } catch (error) {
+    if (connection !== current) return;
+    if (error.draftSaveFailed && !current.closing) {
+      if (location.protocol === "rsi:") {
+        if (!await cancelNativeCloseAfterDraftFailure(current, error)) return;
+      }
+      notify(`Draft is not saved: ${error.message}. Recover the draft before closing.`);
+    } else failWorker(String(error.message ?? error), current);
+  } finally { if (connection === current) $("sign-out").disabled = false; }
 }
+
 $("sign-out").addEventListener("click", () => perform(disconnectDocument));
 window.addEventListener("rsi-native-close", () => perform(disconnectDocument));
 if(location.protocol === "rsi:")setClipboardWriter(text=>call("clipboard_write",text));
@@ -490,7 +473,7 @@ class Pane {
     this.visibleFrame = requestAnimationFrame(() => { this.visibleFrame = undefined; this.syncVisible(); });
   }
   syncVisible() {
-    if (!this.generation || !this.node.isConnected || this.switching || closing) return;
+    if (!this.generation || !this.node.isConnected || this.switching || connection?.closing) return;
     const bounds = this.transcript.getBoundingClientRect();
     const entries = [...this.blocks].filter(([, entry]) => {
       const rect = entry.node.getBoundingClientRect();
@@ -503,14 +486,15 @@ class Pane {
     if (!this.visibleRunning) void this.sendVisible();
   }
   async sendVisible() {
+    const owner = connection;
     this.visibleRunning = true;
     try {
-      while (this.visiblePending && !this.switching && !closing) {
+      while (this.visiblePending && !this.switching && !connection?.closing) {
         const request = this.visiblePending; this.visiblePending = undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
-          try { await command({ action: "ui_visible", pane: this.index, ...request }); break; }
+          try { await owner.request("command", JSON.stringify({ action: "ui_visible", pane: this.index, ...request })); break; }
           catch (error) {
-            if (this.generation !== request.generation || this.switching || closing) break;
+            if (connection !== owner || this.generation !== request.generation || this.switching || owner.closing) break;
             if (attempt === 1) notify(error.message);
             else await new Promise(resolve => setTimeout(resolve, 100));
           }
@@ -519,6 +503,7 @@ class Pane {
     } finally { this.visibleRunning = false; }
   }
   renderInline(cards) {
+    const owner = connection;
     for (const [key, entry] of this.blocks) {
       const card = cards?.[key];
       entry.inline.hidden = !card;
@@ -528,8 +513,8 @@ class Pane {
       }
       rendererSlots.push({ key: `inline-${this.index}-${card.binding.epoch}`, surface: "pane", root: entry.inline,
         binding: JSON.stringify(card.binding), snapshot: { model: card.model, busy: card.busy, error: card.error },
-        host: { invoke(action, input) { return command({ action: "ui_invoke", ticket: card.ticket, name: action, input }); },
-          source(name, offset, maximum) { return call("ui_source", JSON.stringify({ ticket: card.ticket, name, offset, maximum })); } }
+        host: { invoke(action, input) { return owner.request("command", JSON.stringify({ action: "ui_invoke", ticket: card.ticket, name: action, input })); },
+          source(name, offset, maximum) { return owner.request("ui_source", JSON.stringify({ ticket: card.ticket, name, offset, maximum })); } }
       });
     }
   }
@@ -568,8 +553,9 @@ class Pane {
     }
   }
   async flush(all = false) {
+    let editors = all ? [...this.editors.values()] : undefined;
     await this.binding;
-    const editors = all ? [...this.editors.values()] : this.editor ? [this.editor] : [];
+    editors ??= this.editor ? [this.editor] : [];
     const results = await Promise.allSettled(editors.map(editor => editor.flush()));
     const failure = results.find(result => result.status === "rejected");
     if (failure) throw failure.reason;
@@ -685,10 +671,12 @@ class Pane {
   async exportSession(args) {
     if (this.exportAbort) { this.exportAbort.abort(); return; }
     if (!this.generation || !this.editor) throw new Error("Open a native conversation first");
+    const owner = connection;
+    if (!owner) throw new Error("Not connected");
     const abort = new AbortController(), generation = this.generation;
     this.exportAbort = abort; this.exportButton.textContent = "Cancel export";
     const closed = () => abort.abort(); window.addEventListener("pagehide",closed,{once:true});
-    try { await downloadSession(call,this.index,generation,args,abort.signal); }
+    try { await downloadSession(boundCall(owner),this.index,generation,args,abort.signal); }
     finally { window.removeEventListener("pagehide",closed); this.exportAbort = undefined; this.exportButton.textContent = "Export"; }
   }
   async submit(choice = "primary") {
@@ -914,7 +902,7 @@ class Pane {
       return row;
     }));
   }
-  reset() { this.exportAbort?.abort(); this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.switching = false; this.exportAbort?.abort(); this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.input.value = ""; this.render(null, []); }
   completionToken() {
     const text = this.input.value, cursor = this.input.selectionStart;
     if (this.composing || !this.generation || this.switching || this.input.selectionEnd !== cursor) return;
@@ -1257,6 +1245,7 @@ function select(index) {
   selectSurface(index);
 }
 async function openInSelected(fields) {
+  const owner = connection;
   const pane = panes.get(selected);
   if (!pane) throw new Error("Open a conversation surface first");
   if (pane.switching) throw new Error("This pane is still opening a conversation");
@@ -1267,8 +1256,9 @@ async function openInSelected(fields) {
     const editor = pane.editor;
     const reuse = fields.action === "create" && editor && !editor.dirty && !editor.failure && !editor.record.pending && !editor.text && !editor.images.length && !editor.references.length && !pane.submitting && !pane.uploading
       ? {generation:pane.generation,header:editor.record.header} : undefined;
-    await command({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) });
+    await owner.request("command", JSON.stringify({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) }));
   } catch (error) {
+    if (connection !== owner) throw error;
     pane.switching = false;
     pane.render(view?.surfaces[pane.index], view?.catalog.models ?? []);
     throw error;
@@ -1295,13 +1285,18 @@ function render(next) {
 }
 installActions({ command, open: openInSelected, select, call,
   async closeSurface(key) {
+    const owner = connection;
     const pane = panes.get(key);
     if (pane?.switching || pane?.submitting || pane?.uploading) throw new Error("Wait for this conversation's current operation before closing");
     if (pane) { pane.switching = true; pane.renderComposer(); }
-    try { if (pane) await pane.flush(true); await command({action:"close_surface",pane:key}); }
-    catch (error) { if (pane) { pane.switching = false; pane.renderComposer(); } throw error; }
+    try { if (pane) await pane.flush(true); await owner.request("command", JSON.stringify({action:"close_surface",pane:key})); }
+    catch (error) { if (pane && connection === owner) { pane.switching = false; pane.renderComposer(); } throw error; }
   },
-  async addSurface(key) { await command({action:"add_surface",pane:key}); select(key); },
+  async addSurface(key) {
+    const owner = connection;
+    await boundCall(owner)("command", JSON.stringify({action:"add_surface",pane:key}));
+    if (connection === owner) select(key);
+  },
 });
 
 let detailTrigger;
@@ -1315,7 +1310,12 @@ function showDialog(key, title, body) {
   dialogKey = key; $("detail-title").textContent = title; $("detail-body").replaceChildren(body);
   if (!$("detail").open) { detailTrigger = document.activeElement; $("detail").showModal(); }
 }
-async function closeDetail() { await command({ action: "close_detail" }); dialogKey = undefined; $("detail").close(); }
+async function closeDetail() {
+  const owner = connection, key = dialogKey;
+  await boundCall(owner)("command", JSON.stringify({action: "close_detail"}));
+  if (connection !== owner || dialogKey !== key) return;
+  dialogKey = undefined; $("detail").close();
+}
 $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
 const modalTarget = {
@@ -1351,6 +1351,8 @@ function renderResources(next) {
   publishResources();
 }
 function renderDetail(next, target) {
+  const call = boundCall(connection);
+  const command = value => call("command", JSON.stringify(value));
   if (next.image_detail) {
     const detail = next.image_detail;
     const key = `image:${detail.ticket}`;
@@ -1358,7 +1360,7 @@ function renderDetail(next, target) {
     const body = element("div", "image-detail");
     body.append(element("p", "hint", `${detail.media.width} × ${detail.media.height} · ${detail.media.bytes} bytes`));
     target.show(key, "Image preview", body);
-    previewImage(body, detail.media, detail.ticket); return;
+    previewImage(body, detail.media, detail.ticket, call); return;
   }
   if (next.ui_detail) { renderUiDetail(next.ui_detail, target); return; }
   if (next.remote_ui_catalog) {
@@ -1432,7 +1434,7 @@ function renderDetail(next, target) {
         const preview = element("div", "image-detail");
         const open = button("Preview source image", async () => {
           open.disabled = true; preview.replaceChildren();
-          await previewImage(preview, next.source_media, detail.ticket);
+          await previewImage(preview, next.source_media, detail.ticket, call);
           open.disabled = false;
         }, "quiet");
         body.append(open, preview);
@@ -1524,6 +1526,8 @@ function renderDetail(next, target) {
 
 
 function renderUiDetail(detail, target) {
+  const call = boundCall(connection);
+  const command = value => call("command", JSON.stringify(value));
   if (!detail.model || !detail.binding) {
     const body = element("p", "hint", detail.error ?? "Loading…");
     target.show(`ui-loading:${detail.ticket}:${detail.error ?? ""}`, "Card details", body);

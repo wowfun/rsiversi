@@ -4,6 +4,44 @@ import {setImmediate} from 'node:timers/promises';
 import {NativeDocument} from '../src/native.ts';
 import {TerminalInput} from '../src/terminal-input.mjs';
 
+test('native cleanup has an abort deadline and shares its failed receipt', async t => {
+  const originalFetch = globalThis.fetch;
+  t.mock.timers.enable({apis: ['setTimeout']});
+  let signal, calls = 0;
+  globalThis.fetch = (_path, init) => {
+    calls++;
+    signal = init.signal;
+    return new Promise((resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
+    });
+  };
+  try {
+    const native = new NativeDocument();
+    const first = native.terminate();
+    assert.equal(native.terminate(), first);
+    assert.ok(signal instanceof AbortSignal);
+    const failed = assert.rejects(first, {name: 'TimeoutError'});
+    t.mock.timers.tick(30_000);
+    await failed;
+    assert.equal(signal.aborted, true);
+    assert.equal(native.terminate(), first);
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('successful native cleanup releases its deadline', async t => {
+  const originalFetch = globalThis.fetch;
+  t.mock.timers.enable({apis: ['setTimeout']});
+  let signal;
+  globalThis.fetch = async (_path, init) => { signal = init.signal; return new Response('{}'); };
+  try {
+    const native = new NativeDocument();
+    await native.terminate();
+    t.mock.timers.tick(30_001);
+    assert.equal(signal.aborted, false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('native admission rejection preserves queued input through the reply contract', async () => {
   const fetch = globalThis.fetch;
   let attempts = 0;

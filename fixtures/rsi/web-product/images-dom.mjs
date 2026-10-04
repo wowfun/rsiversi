@@ -16,20 +16,20 @@ export async function verifyImageDom(page) {
     try {
       call = async () => { reads++; return new Uint8Array(8); };
       view = { media_limits: { preview_objects: 8, preview_bytes: 32 } };
-      for (let id = 0; id < 6; id++) { body.replaceChildren(); await previewImage(body, media(id), String(id)); }
+      for (let id = 0; id < 6; id++) { body.replaceChildren(); await previewImage(body, media(id), String(id), call); }
       const byteBound = { objects: imageCache.size, bytes: [...imageCache.values()].reduce((sum, entry) => sum + entry.bytes, 0), active: active.size };
-      await previewImage(body, media(2), "new-ticket");
+      await previewImage(body, media(2), "new-ticket", call);
       const reuseReads = reads;
-      body.replaceChildren(); await previewImage(body, media(6), "6");
+      body.replaceChildren(); await previewImage(body, media(6), "6", call);
       const lru = [...imageCache.keys()].map(key => JSON.parse(key).id);
       clearImages();
       const released = active.size;
       view = { media_limits: { preview_objects: 2, preview_bytes: 1024 } };
-      for (let id = 0; id < 5; id++) { body.replaceChildren(); await previewImage(body, media(id), String(id)); }
+      for (let id = 0; id < 5; id++) { body.replaceChildren(); await previewImage(body, media(id), String(id), call); }
       const objectBound = imageCache.size;
       let finish;
       call = () => new Promise(resolve => { finish = resolve; });
-      const reading = previewImage(body, media(99), "late");
+      const reading = previewImage(body, media(99), "late", call);
       clearImages(); body.remove(); finish(new Uint8Array(8)); await reading;
       return { byteBound, reuseReads, lru, released, objectBound, afterClose: imageCache.size, active: active.size };
     } finally {

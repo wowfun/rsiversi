@@ -8,6 +8,7 @@ export class NativeDocument {
   private base?: string;
   private waiting?: { id: string; resolve(value: { resync: boolean; renderer?: unknown }): void };
   private abort = new AbortController();
+  private termination?: Promise<void>;
   private async request(path: string, body?: BodyInit): Promise<Response> {
     const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', body, signal: this.abort.signal });
     if (!response.ok) {
@@ -75,9 +76,14 @@ export class NativeDocument {
       this.base = settled.resync ? undefined : frame.view.frame_id;
     }
   }
-  terminate(): void {
-    if (this.closed) return;
+  terminate(): Promise<void> {
+    if (this.termination) return this.termination;
     this.closed = true; this.waiting?.resolve({ resync: true }); this.abort.abort();
-    void fetch('/_failed', { method: 'POST', body: '' }).catch(() => {});
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(new DOMException('Native document cleanup timed out', 'TimeoutError')), 30_000);
+    this.termination = fetch('/_failed', { method: 'POST', body: '', signal: abort.signal }).then(response => {
+      if (!response.ok) throw new Error('Native document cleanup failed');
+    }).finally(() => clearTimeout(deadline));
+    return this.termination;
   }
 }

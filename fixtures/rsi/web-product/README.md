@@ -394,7 +394,11 @@ notice; a failed load remains explicit for that connection.
 
 The document-only fixture exposes the same imported presentation helpers as the
 product bootstrap, including lazy reading-position capture. It runs in both
-browsers as part of the default fixture test entry.
+browsers as part of the default fixture test entry. Controlled transport gates
+check that a native-close event during authentication waits for storage and the
+disconnect receipt, and that failed teardown blocks creation of a replacement
+Worker. These are application/DOM checks; actual native window and live transport
+evidence belongs to the desktop and opt-in live fixtures.
 
 Layout-persistence evidence polls completed IndexedDB reads until at least one
 record exists, with an explicit deadline. A Promise object is not accepted as a

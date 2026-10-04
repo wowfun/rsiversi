@@ -27,11 +27,11 @@ export async function verifyFrameDom(page, report, browser) {
     replacement.active="displayed-turn";
     await presentFrame({kind:"snapshot",frame_id:"6",view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}},window.testRendererOffer);
     const acknowledgedStop=structuredClone(panes.get("main").stopBinding);
-    const originalRender=mounts.render.bind(mounts);let release;
-    mounts.render=()=>new Promise(resolve=>{release=resolve});
+    const originalRender=connection.render.bind(connection);let release;
+    connection.render=()=>new Promise(resolve=>{release=resolve});
     const applying=presentFrame({kind:"patch",frame_id:"7",base_frame_id:"6",sections:{},surfaces:[{surface:"main",fields:{active:"new-turn"}}]},window.testRendererOffer);
     const stopFenced=panes.get("main").cancel.disabled && !panes.get("main").stopBinding;
-    release(undefined);await applying;mounts.render=originalRender;
+    release(undefined);await applying;connection.render=originalRender;
     const nextStop=panes.get("main").stopBinding.turn_id;
 
     return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced, acknowledgedStop, stopFenced, nextStop };

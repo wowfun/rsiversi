@@ -30,11 +30,18 @@ export async function verifyDom(browser, root, report, name) {
     for(const [file,names] of [['turn-presentation.js','TurnPresentation,readingPosition,readingAnchor,restoreAnchor'],['composer-actions.js','keyboardAction']]) {
       await page.addScriptTag({content:`(()=>{${(await readFile(join(root,'apps/web',file),'utf8')).replaceAll('export class ','class ').replaceAll('export function ','function ')}Object.assign(globalThis,{${names}});})();`});
     }
-    await page.addScriptTag({ content: 'const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} function installActions() {} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/document-connection.js"), "utf8")).replace(/^import .*;\n/gm, "").replace("export class ", "class ")} globalThis.DocumentConnection = DocumentConnection; })();` });
+    await page.addScriptTag({ content: 'let fixtureMounts; const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {
-      mounts = await MountTable.open();
-      connection = { drafts: await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)}), mounts, pending: new Map(), worker: { terminate() {} }, closing: false };
+      fixtureMounts = await MountTable.open();
+      const transport = {terminate(){}, postMessage(message){
+        queueMicrotask(() => this.onmessage({data: message.method === "connect"
+          ? {kind:"reply",id:message.id,result:'{}'}
+          : {kind:"reply",id:message.id,error:"No document transport in projection fixture"}}));
+      }};
+      connection = createDocumentConnection(transport, fixtureMounts);
+      await connection.authenticate({}, async () => ({drafts: await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)})}));
       for (const key of ["main", "compare"]) panes.set(key, new Pane(key));
       // These are projection fixtures: give each synthetic attachment valid metadata.
       for (const pane of panes.values()) {
@@ -201,7 +208,9 @@ export async function verifyDom(browser, root, report, name) {
     assert.deepEqual(results, ["approval", "question"].map(kind => ({ kind, initial: 1, closed: 0, reopened: 1, replaced: 1 })));
     const approvals = await page.evaluate(() => {
       const sent = [];
-      command = async input => { sent.push(input); };
+      const owner=connection, originalRequest=owner.request;
+      owner.request = async (_method, payload) => { sent.push(JSON.parse(payload)); };
+      try {
       for (const owner of ["parent-session", "child-session"]) {
         renderDetailAtFixture({ detail: { pane: "main", generation: "one", kind: "approval", request: {
           id: "call-1", subject: { session_id: owner }, reason: owner, action: "run tool", review: { owner },
@@ -210,6 +219,7 @@ export async function verifyDom(browser, root, report, name) {
       const text = $("detail").textContent;
       [...$("detail").querySelectorAll("button")].find(button => button.textContent === "Allow once").click();
       return { text, sent };
+      } finally { owner.request=originalRequest; }
     });
     assert(approvals.text.includes("child-session") && !approvals.text.includes("parent-session"));
     assert.equal(approvals.sent.length, 1);
@@ -235,6 +245,53 @@ export async function verifyDom(browser, root, report, name) {
       } finally { call = originalCall; }
     });
     assert.deepEqual(draftEcho, { retained: "locally persisted draft", submitted: "locally persisted draft", cleared: "" });
+    const pendingDraftFlush = await page.evaluate(async () => {
+      const pane = panes.get("main"), store = connection.drafts, ensure = store.ensure, edit = store.edit;
+      let release, releaseSave, savingStarted;
+      const gate = new Promise(resolve => {release = resolve;}), saveGate = new Promise(resolve => {releaseSave = resolve;});
+      const entered = new Promise(resolve => {savingStarted = resolve;});
+      const data = {session: "pending-binding", header: "c".repeat(64), creation: null};
+      try {
+        store.ensure = async (...args) => {await gate; return ensure.apply(store, args);};
+        store.edit = async (...args) => {savingStarted(); await saveGate; return edit.apply(store, args);};
+        pane.binding = pane.bindDraft(data).then(() => pane.edit("saved after binding 界"));
+        let settled = false; const saving = pane.flush().then(() => {settled = true;});
+        const unbound = pane.editor === undefined;
+        release(); await entered;
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const waitedForSave = !settled;
+        releaseSave(); await saving;
+        await pane.editor.flush();
+        const record = (await store.list(pane.index)).find(record => record.key[3] === data.session);
+        return {unbound, waitedForSave, saved: record?.text, dirty: pane.editor.dirty};
+      } finally {store.ensure = ensure; store.edit = edit;}
+    });
+    assert.deepEqual(pendingDraftFlush, {unbound: true, waitedForSave: true, saved: "saved after binding 界", dirty: false});
+    await writeFile(join(report, `${name}-pending-draft-flush.json`), JSON.stringify(pendingDraftFlush));
+    const capturedDraftFlush = await page.evaluate(async () => {
+      const pane = panes.get("main"), store = connection.drafts, edit = store.edit;
+      let releaseOld, releaseNew, savingOld, savingNew;
+      const oldGate = new Promise(resolve => {releaseOld = resolve;}), newGate = new Promise(resolve => {releaseNew = resolve;});
+      const oldEntered = new Promise(resolve => {savingOld = resolve;}), newEntered = new Promise(resolve => {savingNew = resolve;});
+      try {
+        store.edit = async (record, text, ...rest) => {
+          if (text === "captured draft") {savingOld(); await oldGate;}
+          if (text === "later draft") {savingNew(); await newGate;}
+          return edit.call(store, record, text, ...rest);
+        };
+        const old = pane.editor; pane.edit("captured draft"); await oldEntered;
+        pane.binding = pane.bindDraft({session: "later-binding", header: "c".repeat(64), creation: null})
+          .then(() => pane.edit("later draft"));
+        let settled = false; const flush = pane.flush(true).then(() => {settled = true;});
+        await newEntered; releaseOld(); await old.flush();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = {capturedSaved: !old.dirty, completed: settled, laterStillSaving: pane.editor.dirty};
+        releaseNew(); await pane.editor.flush(); await flush;
+        return result;
+      } finally {releaseOld(); releaseNew(); store.edit = edit;}
+    });
+    assert.deepEqual(capturedDraftFlush, {capturedSaved: true, completed: true, laterStillSaving: true});
+    await writeFile(join(report, `${name}-captured-draft-flush.json`), JSON.stringify(capturedDraftFlush));
     const retries = await page.evaluate(async () => {
       const pane = panes.get("main"), originalCall = call;
       const results = [];
@@ -282,7 +339,13 @@ export async function verifyDom(browser, root, report, name) {
     assert.deepEqual(failedSetup, { loading: "Loading…", failed: "Source startup rejected" });
     const contributed = await page.evaluate(async () => {
       const sent = [];
-      command = async input => { sent.push(input); };
+      const owner=connection, originalRequest=owner.request;
+      owner.request = async (method, payload) => {
+        const action=JSON.parse(payload);
+        if(action.action==="ui_invoke") sent.push(action);
+        else if(action.action!=="ui_visible") return originalRequest.call(owner,method,payload);
+      };
+      try {
       const reference = { application: "ui-nonce", target: "3", contribution: "4", name: "echo" };
       const bound = { reference, actions: { echo: reference }, view: { title: "Addon", elements: [
         { kind: "text", text: "<script>window.addonExecuted = true</script>" },
@@ -291,7 +354,7 @@ export async function verifyDom(browser, root, report, name) {
       ] } };
       const detail = { pane: "main", generation: "one", ticket: "100", binding: bound.reference, error: null, busy: false,
         model: { renderer: "rsi.standard", schema: { name: "rsi.standard.view", version: 1 }, data: null, standard_view: bound.view, actions: [{ name: "echo", title: "Apply addon" }], sources: [] } };
-      const show = async detail => { rendererSlots = []; renderDetailAtFixture({ ui_detail: detail }); await mounts.render(window.testRendererOffer, rendererSlots); };
+      const show = async detail => { rendererSlots = []; renderDetailAtFixture({ ui_detail: detail }); await fixtureMounts.render(window.testRendererOffer, rendererSlots); };
       await show(detail);
       document.querySelector("[data-ui-field]").value = "edited 界";
       document.querySelector("[data-ui-field]").dispatchEvent(new Event("input", { bubbles: true }));
@@ -303,6 +366,7 @@ export async function verifyDom(browser, root, report, name) {
       return { sent, busy, remaining: document.querySelector("[data-ui-field]").value,
         scripts: document.querySelectorAll(".ui-contribution script").length,
         executed: !!window.addonExecuted, text: document.querySelector(".ui-contribution").textContent };
+      } finally { owner.request=originalRequest; }
     });
     assert.equal(contributed.busy, true);
     assert.equal(contributed.remaining, "edited 界");
@@ -312,81 +376,292 @@ export async function verifyDom(browser, root, report, name) {
       name: "echo",
       input: { value: { expected: "original" }, fields: { message: "edited 界" } } }]);
     await page.screenshot({ path: join(report, `${name}-contributed-form-dom.png`) });
+    await page.addScriptTag({content:`async function fixtureConnect(table, transport, receive) {
+      transport.postMessage = message => {
+        if (message.method === "connect") queueMicrotask(()=>transport.onmessage({data:{kind:"reply",id:message.id,result:JSON.stringify({endpoint_id:"a".repeat(32),principal:{kind:"local"}})}}));
+        else receive?.(message, transport);
+      };
+      const current = createDocumentConnection(transport, table);
+      connection=current;await current.authenticate({},async()=>({}));return current;
+    }`});
     const staleFailure = await page.evaluate(async () => {
-      await mounts.close();
-      const NativeWorker = window.Worker, originalPresent = presentFrame;
-      class StubWorker { terminated = false; terminate() { this.terminated = true; } postMessage() {} }
+      await fixtureMounts.close();
+      const NativeWorker = window.Worker, originalPresent = presentFrame, workers=[];
+      class StubWorker { terminated = false; constructor(){workers.push(this);} terminate() { this.terminated = true; } postMessage(message) {
+        if(message.method === "connect")queueMicrotask(()=>this.onmessage({data:{kind:"reply",id:message.id,result:"{}"}}));
+      } }
       let rejectFrame;
       try {
         window.Worker = StubWorker;
         presentFrame = () => new Promise((_, reject) => { rejectFrame = reject; });
-        const old = await makeWorker(); old.authenticationDone();
-        const frame = old.worker.onmessage({ data: { kind: "view", view: "{}", assets: "{}" } });
+        const old = await makeWorker(); await old.authenticate({},async()=>({}));
+        const frame = workers[0].onmessage({ data: { kind: "view", view: "{}", assets: "{}" } });
         await Promise.resolve();
-        old.worker.onerror({ preventDefault() {} });
-        const replacement = await makeWorker(); replacement.authenticationDone();
+        workers[0].onerror({ preventDefault() {} });
+        const replacement = await makeWorker(); await replacement.authenticate({},async()=>({}));
         rejectFrame(new Error("late old-render failure")); await frame;
-        return { retained: connection === replacement, terminated: replacement.worker.terminated };
+        return { retained: connection === replacement, terminated: workers[1].terminated };
       } finally {
-        worker?.terminate(); worker = undefined;
+        await connection.fail(new Error("Fixture finished"));
         window.Worker = NativeWorker; presentFrame = originalPresent;
       }
     });
     assert.deepEqual(staleFailure, { retained: true, terminated: false });
+    const detailOwners = await page.evaluate(async () => {
+      let oldMessage;
+      const oldTransport = {terminate(){}};
+      const old = await fixtureConnect(await MountTable.open(), oldTransport, message => {oldMessage=message;});
+      showDialog("old-detail", "Old detail", element("div", "", "old"));
+      const closing = closeDetail();
+      showDialog("replacement-detail", "Replacement detail", element("div", "", "new"));
+      oldTransport.onmessage({data:{kind:"reply",id:oldMessage.id,result:null}});
+      await closing;
+      const replacementPreserved = dialogKey === "replacement-detail" && $("detail").open;
+      const readOld = boundCall(old); await old.retire();
+      const sent = [];
+      const fresh = await fixtureConnect(await MountTable.open(), {terminate(){}}, message => {sent.push(message);});
+      const preview = element("div"); document.body.append(preview);
+      try {
+        await previewImage(preview, {id:"old-owner-preview",bytes:1,width:1,height:1}, "old-ticket", readOld);
+        return {replacementPreserved, freshRequests:sent.length, rejectedOldRead:preview.textContent.includes("Image unavailable")};
+      } finally {preview.remove(); modalTarget.clear(); await fresh.retire();}
+    });
+    assert.deepEqual(detailOwners, {replacementPreserved:true,freshRequests:0,rejectedOldRead:true});
+    const drainReplacement = await page.evaluate(async () => {
+      const NativeWorker = window.Worker, workers = [];
+      class StubWorker {
+        terminated = 0;
+        constructor() {workers.push(this);}
+        terminate() {this.terminated++;}
+        postMessage(message) {
+          if (message.method === "connect") queueMicrotask(() => this.onmessage({data: {kind: "reply", id: message.id, result: "{}"}}));
+        }
+      }
+      try {
+        window.Worker = StubWorker;
+        const old = await makeWorker(); await old.authenticate({}, async () => ({}));
+        let rejectSave;
+        const closing = old.disconnect(() => new Promise((_, reject) => {rejectSave = reject;}));
+        const fresh = await makeWorker(); await fresh.authenticate({}, async () => ({}));
+        rejectSave(null); await closing;
+        return {oldPhase: old.phase, oldTerminations: workers[0].terminated,
+          freshPhase: fresh.phase, freshTerminations: workers[1].terminated};
+      } finally {
+        await connection.retire(); window.Worker = NativeWorker;
+      }
+    });
+    assert.deepEqual(drainReplacement, {oldPhase: "Closed", oldTerminations: 1, freshPhase: "Ready", freshTerminations: 0});
+    const switchingReplacement = await page.evaluate(async () => {
+      const NativeWorker = window.Worker;
+      const savedFlushes = new Map([...panes.values()].map(pane => [pane, pane.flush]));
+      class StubWorker {
+        terminate() {}
+        postMessage(message) {
+          if (message.method === "connect") queueMicrotask(() => this.onmessage({data: {kind: "reply", id: message.id, result: "{}"}}));
+        }
+      }
+      try {
+        window.Worker = StubWorker;
+        const storage = async () => ({drafts: await DraftStore.open("a".repeat(32), {kind: "local"})});
+        const pane = panes.get(selected);
+        const data = {generation: "switching-replacement", selection: "unchanged", session: "retained-session", path: "/workspace",
+          model: {deployment: "test", model: "model"}, transcript: {blocks: [], status: "Ready", omitted: false}, pending: [], notice: ""};
+        view = {surfaces: {[pane.index]: data}, catalog: {models: []}};
+        const operations = [];
+        for (const action of ["open", "close"]) {
+          const old = await makeWorker(); await old.authenticate({}, storage);
+          pane.render(data, []); await pane.binding;
+          let releaseFlush; pane.flush = () => new Promise(resolve => {releaseFlush = resolve;});
+          const selection = pane.selection, generation = pane.generation;
+          const opening = (action === "open" ? openInSelected({action: "open", session_id: "undispatched"})
+            : fixtureActions.closeSurface(pane.index)).catch(error => error.message);
+          await Promise.resolve();
+          if (!pane.switching) throw new Error("Navigation must fence the pane while its old command is pending");
+          const fresh = await makeWorker(); await fresh.authenticate({}, storage);
+          const clearedOnReplacement = pane.switching === false;
+          // Another navigation owned by the fresh connection must survive A's late rejection.
+          pane.switching = true; releaseFlush(); await opening;
+          const freshFencePreserved = pane.switching === true;
+          pane.switching = false;
+          pane.render(view.surfaces[pane.index], view.catalog.models);
+          operations.push({action, clearedOnReplacement, freshFencePreserved,
+            inputDisabled: pane.input.disabled, selectionUnchanged: pane.selection === selection,
+            generationUnchanged: pane.generation === generation});
+        }
+        pane.reset(); pane.switching = true; pane.reset();
+        return {operations, resetSwitching: pane.switching};
+      } finally { for (const [pane, flush] of savedFlushes) pane.flush = flush; await connection.retire(); window.Worker = NativeWorker; }
+    });
+    assert.deepEqual(switchingReplacement, {operations: ["open", "close"].map(action => ({action,
+      clearedOnReplacement: true, freshFencePreserved: true, inputDisabled: false,
+      selectionUnchanged: true, generationUnchanged: true})), resetSwitching: false});
     const admission = await page.evaluate(async () => {
-      const sent=[];
-      worker={postMessage(message) {sent.push(message);},terminate(){}};
-      connection={worker,mounts,pending:new Map(),closing:false};
-      pending=connection.pending; closing=false;
+      const sent=[],table=await MountTable.open(),transport={terminate(){}};
+      const current=await fixtureConnect(table,transport,message=>sent.push(message));
       const ordinary=Array.from({length:8},()=>call("command","{}"));
       const excess=await call("command","{}").then(()=>false,error=>error.notAdmitted===true);
-      closing=true;
+      let release;
+      const draining=current.disconnect(()=>new Promise(resolve=>{release=resolve;}));
       const lifecycle=call("disconnect",true);
       const afterClose=await call("command","{}").then(()=>false,error=>error.notAdmitted===true);
       const kinds=sent.map(message=>message.method);
-      for(const waiter of connection.pending.values()) waiter.resolve(null);
-      connection.pending.clear(); await Promise.all([...ordinary,lifecycle]);
+      for(const message of sent)await transport.onmessage({data:{kind:"reply",id:message.id,result:null}});
+      await Promise.all([...ordinary,lifecycle]);await current.fail(new Error("Fixture finished"));release();await draining;
       return {excess,afterClose,kinds};
     });
     assert.deepEqual(admission,{excess:true,afterClose:true,kinds:[...Array(8).fill("command"),"disconnect"]});
     const drainOrder = await page.evaluate(async () => {
-      await mounts.close();
+      const savedFlushes = new Map([...panes.values()].map(pane => [pane, pane.flush]));
+      try {
       const order = [];
       let releaseDrafts, releaseMounts, enteredMounts;
       const drafts = new Promise(resolve => { releaseDrafts = resolve; });
       const disposal = new Promise(resolve => { releaseMounts = resolve; });
       const mounted = new Promise(resolve => { enteredMounts = resolve; });
-      connected = true; closing = false;
-      mounts = { async close() { order.push("dispose-start"); enteredMounts(); await disposal; order.push("dispose-done"); } };
-      worker = { terminate() { order.push("terminate"); } };
-      connection = { mounts, pending: new Map(), worker, closing: false };
+      const table={close(){order.push("dispose-start");enteredMounts();return disposal.then(()=>order.push("dispose-done"));}};
+      const transport={terminate(){order.push("terminate");}};
+      await fixtureConnect(table,transport,(message,port)=>{order.push(message.method);queueMicrotask(()=>port.onmessage({data:{kind:"reply",id:message.id,result:{active_requests:0,pending_timers:0,active_alarms:0}}}));});
+      connected=true;
       for (const pane of panes.values()) pane.flush = () => drafts;
-      call = async method => { order.push(method); return {active_requests:0,pending_timers:0,active_alarms:0}; };
       const draining = disconnectDocument();
       await Promise.resolve(); const beforeDrafts = [...order];
       releaseDrafts(); await mounted; const beforeDisposal = [...order];
       releaseMounts(); await draining;
       return {beforeDrafts,beforeDisposal,order};
+      } finally { for (const [pane, flush] of savedFlushes) pane.flush = flush; }
     });
     assert.deepEqual(drainOrder, {beforeDrafts:[],beforeDisposal:["dispose-start"],order:["dispose-start","dispose-done","disconnect","terminate"]});
+    const openingClose = await page.evaluate(async () => {
+      const savedFlushes = new Map([...panes.values()].map(pane => [pane, pane.flush]));
+      try {
+      await connection.retire();
+      let release,entered,received;
+      const storage=new Promise(resolve=>{release=resolve;}),opening=new Promise(resolve=>{entered=resolve;});
+      const receipt=new Promise(resolve=>{received=resolve;});
+      let flushes=0,disposals=0,terminations=0,disconnects=0;
+      const transport={terminate(){terminations++;},postMessage(message){
+        if(message.method==="disconnect")disconnects++;
+        queueMicrotask(()=>this.onmessage({data:{kind:"reply",id:message.id,result:message.method==="connect"?"{}":{active_requests:0}}}));
+      }};
+      const owner=createDocumentConnection(transport,{close(){disposals++;}});connection=owner;
+      const authentication=owner.authenticate({},()=>{entered();return storage;});await opening;
+      for(const pane of panes.values())pane.flush=async()=>{flushes++;};
+      document.addEventListener("rsi-disconnected",received,{once:true});
+      window.dispatchEvent(new Event("rsi-native-close"));
+      const before={phase:owner.phase,flushes,disconnects,terminations};
+      release({});await authentication;
+      let deadline;
+      try {await Promise.race([receipt,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error("Opening native-close receipt missing")),5000);})]);}
+      finally {clearTimeout(deadline);document.removeEventListener("rsi-disconnected",received);}
+      return {before,phase:owner.phase,flushes,expectedFlushes:panes.size,disposals,terminations,disconnects,connected,label:$("connection-state").textContent};
+      } finally { for (const [pane, flush] of savedFlushes) pane.flush = flush; }
+    });
+    assert.deepEqual(openingClose,{before:{phase:"Opening",flushes:0,disconnects:0,terminations:0},phase:"Closed",flushes:openingClose.expectedFlushes,expectedFlushes:openingClose.expectedFlushes,disposals:1,terminations:1,disconnects:1,connected:false,label:"Disconnected"});
+    const closeCancellation = await page.evaluate(async () => {
+      const originalFetch=window.fetch,originalTimeout=AbortSignal.timeout,results=[];
+      try {
+        for(const failure of ["network","response","deadline"]) {
+          const current=await fixtureConnect(await MountTable.open(),{terminate(){}},()=>{});
+          if(failure==="deadline") AbortSignal.timeout=milliseconds=>{
+            if(milliseconds!==30_000)throw new Error("unexpected cancellation deadline");
+            const controller=new AbortController();queueMicrotask(()=>controller.abort(new Error("fixture close cancellation deadline")));return controller.signal;
+          };
+          window.fetch=async (path,options)=>{
+            if(path!=="/_close_cancel")throw new Error("unexpected native path");
+            if(failure==="deadline") {
+              if(options.signal.aborted)throw options.signal.reason;
+              return new Promise((_,reject)=>options.signal.addEventListener("abort",()=>reject(options.signal.reason),{once:true}));
+            }
+            if(failure==="network")throw new Error("fixture offline");
+            return new Response("refused",{status:503});
+          };
+          const accepted=await cancelNativeCloseAfterDraftFailure(current,new Error("fixture unsaved text"));
+          await current.settled();
+          results.push({accepted,phase:current.phase,notice:$("notice").textContent});
+        }
+      } finally {window.fetch=originalFetch;AbortSignal.timeout=originalTimeout;}
+      return results;
+    });
+    for(const result of closeCancellation) {
+      assert.equal(result.accepted,false);assert.equal(result.phase,"Failed");
+      assert.match(result.notice,/Draft is not saved: fixture unsaved text/);
+      assert.match(result.notice,/Could not cancel native close/);
+      assert.match(result.notice,/Recover the draft before closing/);
+    }
+    const exportReplacement = await page.evaluate(async () => {
+      const main = panes.get("main"), calls = {old:[],fresh:[]};
+      let entered, release;
+      const started = new Promise(resolve => entered=resolve);
+      const gate = new Promise(resolve => release=resolve);
+      const owner = async name => fixtureConnect(await MountTable.open(), {terminate(){}}, (message,port) => {
+        calls[name].push(message.method);
+        queueMicrotask(()=>port.onmessage({data:{kind:"reply",id:message.id,result:"{}"}}));
+      });
+      const old = await owner("old");
+      main.generation="export-owner"; main.editor ??= {text:""};
+      // The download adapter drives two requests across an explicit replacement barrier.
+      globalThis.downloadSession = async invoke => {
+        await invoke("export_open", ""); entered(); await gate;
+        return invoke("export_save", "{}");
+      };
+      const exporting = main.exportSession("").then(()=>null, error=>error.message);
+      await started;
+      await old.fail(new Error("Export owner retired"));
+      const fresh = await owner("fresh");
+      release();
+      const error = await exporting;
+      const result={calls,error,phase:fresh.phase,retained:connection===fresh};
+      delete globalThis.downloadSession;
+      await fresh.retire();
+      return result;
+    });
+    assert.deepEqual(exportReplacement.calls,{old:["export_open"],fresh:[]},"export continuations never dispatch through a replacement");
+    assert.equal(typeof exportReplacement.error,"string");
+    assert.equal(exportReplacement.phase,"Ready");
+    assert.equal(exportReplacement.retained,true);
+
+    const falsyDisconnects = await page.evaluate(async () => {
+      const results = [];
+      for (const receipt of [null, 0, ""]) {
+        let terminated = 0, received = 0;
+        const table = await MountTable.open();
+        const owner = await fixtureConnect(table, {terminate(){terminated++;}}, (message, port) => {
+          queueMicrotask(() => port.onmessage({data:{kind:"reply", id:message.id, result:receipt}}));
+        });
+        const acknowledged = () => {received++;};
+        document.addEventListener("rsi-disconnected", acknowledged);
+        connected = true;
+        $("connection-state").textContent = "Connected";
+        $("login").hidden = true; $("workbench").hidden = false;
+        for (const pane of panes.values()) pane.flush = async () => {};
+        await disconnectDocument();
+        document.removeEventListener("rsi-disconnected", acknowledged);
+        results.push({receipt, phase:owner.phase, terminated, received, connected,
+          label:$("connection-state").textContent, login:!$("login").hidden,
+          workbench:!$("workbench").hidden});
+      }
+      return results;
+    });
+    assert.deepEqual(falsyDisconnects, [null, 0, ""].map(receipt => ({receipt,
+      phase:"Closed", terminated:1, received:1, connected:false,
+      label:"Disconnected", login:true, workbench:false})));
     const disconnects = await page.evaluate(async () => {
       const results = [];
       for (const phase of ["storage", "disconnect"]) {
-        await mounts.close(); mounts = await MountTable.open();
+        const table=await MountTable.open();
         let terminated = 0, acknowledgements = 0;
         const acknowledged = () => { acknowledgements++; };
         document.addEventListener("rsi-disconnected", acknowledged);
-        connected = true; closing = false;
-        worker = { terminate() { terminated++; } };
-        connection = { mounts, pending: new Map(), worker, closing: false };
+        await fixtureConnect(table,{terminate(){terminated++;}},()=>{throw new Error("Disconnect failed");});
+        connected=true;
         $("login").hidden = true; $("workbench").hidden = false;
         for (const pane of panes.values()) pane.flush = async () => { if (phase === "storage") throw new Error("Draft storage failed"); };
-        call = async () => { throw new Error("Disconnect failed"); };
         $("sign-out").click(); await new Promise(resolve => setTimeout(resolve, 0));
         document.removeEventListener("rsi-disconnected", acknowledged);
         results.push({ phase, terminated, acknowledgements, connected,
           login: !$("login").hidden, workbench: !$("workbench").hidden,
           enabled: !$("sign-out").disabled });
+        await connection.fail(new Error("Fixture finished"));
       }
       return results;
     });
@@ -394,6 +669,71 @@ export async function verifyDom(browser, root, report, name) {
       {phase:"storage",terminated:0,acknowledgements:0,connected:true,login:false,workbench:true,enabled:true},
       {phase:"disconnect",terminated:1,acknowledgements:0,connected:false,login:true,workbench:false,enabled:true},
     ]);
+    const reconnectDuringSave = await page.evaluate(async () => {
+      const NativeWorker=window.Worker,workers=[],results=[];
+      class StubWorker {terminated=0;calls=[];constructor(){workers.push(this);}terminate(){this.terminated++;}postMessage(message){
+        this.calls.push(message.method);
+        if(message.method==="connect")queueMicrotask(()=>this.onmessage({data:{kind:"reply",id:message.id,result:JSON.stringify({endpoint_id:"a".repeat(32),principal:{kind:"local"}})}}));
+      }}
+      try {
+        window.Worker=StubWorker;
+        for(const failure of [false,true]) {
+          await connection?.fail(new Error("Fixture setup"));await connectWith("{}");
+          const old=connection,transport=workers.at(-1);let finish;
+          const save=new Promise((resolve,reject)=>{finish=()=>failure?reject(new Error("old save failed")):resolve();});
+          for(const pane of panes.values())pane.flush=()=>save;
+          const closing=disconnectDocument();transport.onerror({preventDefault(){}});
+          await connectWith("{}");const fresh=connection,newTransport=workers.at(-1);
+          finish();await closing;
+          results.push({failure,oldPhase:old.phase,newPhase:fresh.phase,retained:connection===fresh,
+            newTerminations:newTransport.terminated,newDisconnects:newTransport.calls.filter(method=>method==="disconnect").length,
+            connected,label:$("connection-state").textContent,login:!$("login").hidden,signOutEnabled:!$("sign-out").disabled,staleMessages:document.querySelectorAll(".message-text").length});
+        }
+      } finally {window.Worker=NativeWorker;}
+      return results;
+    });
+    assert.deepEqual(reconnectDuringSave,[false,true].map(failure=>({failure,oldPhase:"Failed",newPhase:"Ready",retained:true,newTerminations:0,newDisconnects:0,connected:true,label:"Connected",login:false,signOutEnabled:true,staleMessages:0})));
+    await page.screenshot({path:join(report,`${name}-connection-reconnect.png`)});
+    const failedTeardownReplacement = await page.evaluate(async () => {
+      await connection.retire();
+      const NativeWorker=window.Worker;let creations=0;
+      const owner=createDocumentConnection({terminate(){return Promise.reject(new Error("Fixture teardown failed"));},postMessage(message){
+        queueMicrotask(()=>this.onmessage({data:{kind:"reply",id:message.id,result:"{}"}}));
+      }},{close(){}});connection=owner;
+      await owner.authenticate({},()=>({}));
+      await owner.fail(new Error("Fixture disconnect" )).catch(()=>{});
+      try {
+        window.Worker=class {constructor(){creations++;throw new Error("Unexpected replacement");}};
+        await connectWith("{}");
+        return {creations,retained:connection===owner,phase:owner.phase,notice:$("notice").textContent};
+      } finally {window.Worker=NativeWorker;connection=undefined;}
+    });
+    assert.deepEqual(failedTeardownReplacement,{creations:0,retained:true,phase:"Failed",notice:"Fixture teardown failed"});
+    const authenticationFailure = await page.evaluate(async () => {
+      await connection?.retire();
+      const table=await MountTable.open();let terminated=0,frames=0,release,entered;
+      const storage=new Promise((_,reject)=>{release=reject;}),opening=new Promise(resolve=>{entered=resolve;});
+      const originalPresent=presentFrame;
+      const transport={terminate(){terminated++;},postMessage(message){
+        if(message.method==="connect")queueMicrotask(()=>this.onmessage({data:{kind:"reply",id:message.id,result:"{}"}}));
+      }};
+      const current=createDocumentConnection(transport,table);connection=current;
+      try {
+        presentFrame=()=>{frames++;return {accepted:true};};
+        const authentication=current.authenticate({},()=>{entered();return storage;}).catch(error=>error.message);
+        await opening;
+        const frame=transport.onmessage({data:{kind:"view",view:{},assets:{}}});
+        release("Draft setup fixture failed");
+        const message=await authentication;await frame;await current.settled();
+        return {message,phase:current.phase,frames,terminated,connected,
+          label:$("connection-state").textContent,login:!$("login").hidden,workbench:!$("workbench").hidden};
+      } finally {presentFrame=originalPresent;await current.retire();}
+    });
+    assert.deepEqual(authenticationFailure,{message:"Draft setup fixture failed",phase:"Failed",frames:0,terminated:1,
+      connected:false,label:"Connection failed",login:true,workbench:false});
+    await page.screenshot({path:join(report,`${name}-authentication-failure.png`)});
+    await writeFile(join(report,`${name}-connection-races.json`),JSON.stringify({staleFailure,drainReplacement,switchingReplacement,admission,drainOrder,openingClose,exportReplacement,falsyDisconnects,disconnects,reconnectDuringSave,failedTeardownReplacement,authenticationFailure,errors},null,2));
+    assert.deepEqual(errors,[],"connection races leave no uncaught browser errors");
 
   } finally { await page.close(); }
 }

@@ -75,15 +75,25 @@ and one separate lifecycle call at both bridge ends. Terminal reads and writes
 have separate 32-slot and eight-slot lanes at both ends; frame acknowledgements use
 neither lane. A failed draft flush cancels document close, keeps the current
 editor and connection available for recovery, and never reports clean disconnect.
+A completed close updates the document from its owner's Closed phase, including
+when the transport returns an empty or null disconnect receipt.
+Document close waits at most 30 seconds for each authentication, draft-save,
+renderer-disposal, disconnect-receipt and transport-cleanup stage. A draft-save
+deadline restores the current editor for recovery; a late save cannot continue
+that close attempt. Cleanup deadlines remain observable failures and block
+replacement even if the underlying operation completes later. Waiting never
+asserts that native work was cancelled or that disconnect succeeded.
+Native transport cleanup aborts its own HTTP request after 30 seconds and retains
+that failed termination receipt for subsequent callers.
 Native close cancellation also cancels that attempt's drain deadline; a later
-close starts a new attempt after recovery. Disconnect immediately fences ordinary admission and joins admitted
+close starts a new attempt after recovery. The native close-cancellation HTTP wait also expires after 30 seconds.
+Failure to cancel native close retains the draft-save
+guidance and fails the owning connection instead of escaping as a raw fetch error. Disconnect immediately fences ordinary admission and joins admitted
 work and reply delivery before reporting clean shutdown. It does not gain capacity
 by forgetting pending mutations. The document owns persistent composer drafts;
 Worker frames never overwrite editable text or ordered image references. Dynamic content enters text
 nodes or the Worker's restricted Markdown event stream, using only its closed
 element set. HTML and remote Markdown images remain inert text.
-Attachment replacement disables that pane's input until its new view arrives;
-typing cannot enter the retiring attachment between navigation and delivery.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.
@@ -185,6 +195,38 @@ for successful closure of the previous table. Closing synchronously fences new
 ownership. Any failed disposal or close deadline permanently blocks replacement
 until a page reload, even if cleanup later finishes. Reconnect and late callbacks
 retain their exact connection identity. Returning to login is not cleanup evidence.
+One document connection owns transport, pending RPCs, authentication, mounts and
+teardown. Async operations capture that owner before awaiting and cannot close or
+dispatch through a replacement. UI callbacks additionally check current identity.
+Authentication attaches only draft storage and its storage notice to the owner.
+An unexpected authentication or storage-setup rejection fails that owner, rejects
+its pending requests and starts its shared renderer and transport cleanup. The
+authentication barrier always settles with presentation fenced; the failed owner
+cannot present a waiting frame or admit further input.
+Disconnect during Opening waits for authentication and storage setup, then drains
+that same owner and publishes its disconnect receipt. Failure or replacement
+settles the pending close through the owner's actual cleanup instead.
+Disconnect closes admission synchronously once Ready; a failed draft save can restore Ready
+only while the original connection is still current and Draining. Failure and close
+settle pending requests once and share one teardown result. Replacement explicitly
+retires the old owner and awaits renderer and transport cleanup before opening
+another connection. Retirement does not wait for an abandoned draft flush; its
+late completion remains fenced. `settled()` waits for a live drain, or for actual
+cleanup after failure/retirement. Draft rejections retain a message even when
+storage rejects with a primitive value.
+Native transport cleanup requires a successful `/_failed` response. A rejected
+response or transport error remains a failed teardown and blocks replacement;
+the document must be restarted rather than opening a competing connection.
+Attachment replacement disables that pane's input until its new view arrives;
+typing cannot enter the retiring attachment between navigation and delivery.
+Connection replacement resets navigation fences even when attachment selection
+and generation are unchanged. Late retired navigation cannot retain or clear
+the replacement's fence; input controls refresh with the replacement frame.
+Single-editor draft flush waits for binding before selecting its editor. A
+disconnect flush instead captures the existing editors before awaiting binding,
+so it cannot save drafts owned by a replacement connection.
+Transport failure also retires a Draining connection and rejects pending
+receipts; draft flushing cannot suppress failure or revive a replaced owner.
 
 Bound hosts expose only declared action/source membership and requested local
 clipboard/focus capabilities. Clipboard text is limited to 64 KiB, uses browser
@@ -642,3 +684,13 @@ Session extension restoration carries its current pane and generation. Narrow
 resource-overlay visibility is transient and never writes the saved desktop
 visibility, including when opening a resource tab. Collapsing docked panes on a
 narrow viewport preserves the focused floating pane and the root dock selection.
+
+Image previews capture the rendering connection. Detail close captures both its
+connection and dialog identity before awaiting, so a late receipt cannot close a
+replacement dialog. Global navigation actions capture their owner at invocation.
+
+The document Node tests require Node 22.18 or later for direct TypeScript imports.
+
+Document request admission counts each pending waiter once in its selected lane.
+Replies (including failures), synchronous transport rejection and connection
+retirement release that count; unknown or duplicate replies release no capacity.
