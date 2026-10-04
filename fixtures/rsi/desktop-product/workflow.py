@@ -25,11 +25,12 @@ def provider_reply(body):
     return {'tool_calls':[{'index':0,'id':'desktop-workflow','type':'function','function':{'name':'run_workflow','arguments':json.dumps({'script':script,'background':True})}}]}
 
 
+def resource_button(script, click, until, label):
+    item=until(lambda: script('const b=[...document.querySelectorAll(".resource-content button")].find(b=>b.textContent===arguments[0]&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0);if(b)b.scrollIntoView({block:"center"});return b||null',[label]))
+    click(item)
+
+
 def verify(script, button, click, fill, until, screenshot, report):
-    def resource_button(label):
-        item=script('const b=[...document.querySelectorAll(".resource-content button")].find(b=>b.textContent===arguments[0]&&!b.disabled);if(b)b.scrollIntoView({block:"center"});return b||null',[label])
-        assert item is not None, label
-        click(item)
     button('Verbose')
     fill('textarea[aria-label="Main message"]','WORKFLOW_DESKTOP')
     button('Send')
@@ -38,12 +39,12 @@ def verify(script, button, click, fill, until, screenshot, report):
     until(lambda: script('return [...document.querySelectorAll("button")].some(b=>b.textContent==="Workflows")'))
     button('Workflows')
     until(lambda: script('return [...document.querySelectorAll(".resource-content button")].some(b=>b.textContent==="Open workflow")'))
-    resource_button('Open workflow')
+    resource_button(script, click, until, 'Open workflow')
     until(lambda: script('return document.querySelector(".resource-content")?.textContent.includes("Completed")&&[...document.querySelectorAll(".resource-content button")].some(b=>b.textContent==="Read result")'))
-    resource_button('Read result')
+    resource_button(script, click, until, 'Read result')
     until(lambda: script('return document.querySelector(".resource-content")?.textContent.includes(\'"total":42\')'))
     screenshot('workflow-result-native.png')
-    resource_button('Read frozen script')
+    resource_button(script, click, until, 'Read frozen script')
     until(lambda: script('return document.querySelector(".resource-content")?.textContent.includes("workflow.phase")'))
     screenshot('workflow-script-native.png')
     assert script('const e=document.querySelector(".resource-content");return e.scrollWidth<=e.clientWidth+1')
