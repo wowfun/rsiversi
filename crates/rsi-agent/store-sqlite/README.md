@@ -87,9 +87,10 @@ refresh LRU order. At most 256 evicted recent identities are remembered only as
 admission hints, never as validation proofs. Failed validations publish no hint
 or proof. The serialized validation lane checks the cache again after admission;
 miss checks alone never change queue membership. Metadata reads neither fill nor touch the cache. The
-cache is an optional hint: poisoning disables evictable-cache reuse and marking,
+cache reuse and post-commit marking are optional: poisoning disables both,
 while in-use pins remain independent. Cache failure cannot turn a successful
-durable commit into an error. Cold validation
+durable commit into an error. Cold proof publication still requires a usable cache,
+as described by the validation failure contract below. Cold validation
 still runs before any indexed execution/history read.
 Every canonical terminal Fact must have the matching non-NULL terminal index
 Fact and control sequences and prefix digests. The final control of each

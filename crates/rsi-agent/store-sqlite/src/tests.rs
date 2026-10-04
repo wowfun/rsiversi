@@ -430,15 +430,18 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
 }
 
 #[tokio::test]
-async fn poisoned_validation_hint_cannot_fail_a_valid_store_commit() {
+async fn poisoned_proof_cache_does_not_override_a_committed_write() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let cache = store.inner.validated_sessions.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = cache.lock().unwrap();
-        panic!("injected validation-cache poison");
-    })
-    .join();
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("injected validation-cache poison");
+        })
+        .join()
+        .is_err()
+    );
     let header = test_header("poisoned-hint");
     let id = header.session_id().clone();
     let commit = store
@@ -451,6 +454,9 @@ async fn poisoned_validation_hint_cannot_fail_a_valid_store_commit() {
         .await
         .expect("optional cache failure overrode Store admission or commit");
     assert_eq!(commit.durable_seq, 1);
+    drop(store);
+    SqliteStore::verify(root.path()).expect("committed write did not survive cache failure");
+    let store = SqliteStore::open(root.path()).unwrap();
     store.validate_session(&id).await.unwrap();
     assert_eq!(store.read_facts(&id, 0, 1).await.unwrap().facts.len(), 1);
 }

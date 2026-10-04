@@ -1158,10 +1158,25 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
         Err(StoreError::Corrupt(_))
     ));
     drop(reopened);
-    assert!(matches!(
-        SqliteStore::verify(root.path()),
-        Err(StoreError::Corrupt(_))
-    ));
+    let verification = runtime
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    match SqliteStore::verify(root.path()) {
+                        Err(StoreError::WriterLocked) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        result => break result,
+                    }
+                }
+            })
+            .await
+        })
+        .expect("Session-proof flight did not release its writer lease");
+    assert!(
+        matches!(&verification, Err(StoreError::Corrupt(message)) if message.contains("turn index")),
+        "offline verification returned {verification:?}"
+    );
 }
 
 #[test]
