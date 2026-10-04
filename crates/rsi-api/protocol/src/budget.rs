@@ -55,8 +55,9 @@ impl ByteBudget {
             })
             .map_err(|_| ApiError::Capacity)?;
         Ok(ByteReservation {
-            budget: self.clone(),
+            budget: Some(self.clone()),
             bytes,
+            retention: None,
         })
     }
     /// Reserves then copies a bounded external payload.
@@ -74,16 +75,101 @@ impl ByteBudget {
     }
 }
 
+/// One-shot allocation authority retained by an owned read worker until its
+/// validated length is known. Construction does not acquire byte credit.
+pub struct ByteAdmission(Box<dyn FnOnce(usize) -> Result<ByteReservation> + Send>);
+impl fmt::Debug for ByteAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("deferred byte admission")
+    }
+}
+impl ByteAdmission {
+    /// Supplies explicit allocation authority and its captured resource owner.
+    pub fn new<F>(reserve: F) -> Self
+    where
+        F: FnOnce(usize) -> Result<ByteReservation> + Send + 'static,
+    {
+        Self(Box::new(reserve))
+    }
+    /// Admits a validated length before allocation, without a waiting queue.
+    pub fn reserve(self, bytes: usize) -> Result<ByteReservation> {
+        if bytes > MAXIMUM_API_BYTES {
+            return Err(ApiError::Invalid("API read exceeds 64 MiB".into()));
+        }
+        let reservation = (self.0)(bytes)?;
+        if reservation.bytes() != bytes {
+            return Err(ApiError::Invalid(
+                "read admission must equal its requested length".into(),
+            ));
+        }
+        Ok(reservation)
+    }
+}
+impl From<ByteBudget> for ByteAdmission {
+    fn from(budget: ByteBudget) -> Self {
+        Self::new(move |bytes| budget.reserve(bytes))
+    }
+}
+
 /// Exclusive byte ownership awaiting transfer into a retained buffer.
 #[derive(Debug)]
 pub struct ByteReservation {
-    budget: ByteBudget,
+    budget: Option<ByteBudget>,
     bytes: usize,
+    retention: Option<Retentions>,
+}
+
+#[derive(Clone)]
+struct OpaqueRetention {
+    _owner: Arc<dyn Send + Sync>,
+}
+impl fmt::Debug for OpaqueRetention {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("retained owner")
+    }
+}
+
+// Copy-on-write membership keeps new guards off existing siblings; each guard
+// is a flat shared owner, so attachment depth cannot become destructor depth.
+#[derive(Clone, Debug, Default)]
+struct Retentions(Arc<Vec<OpaqueRetention>>);
+impl Retentions {
+    fn push(&mut self, owner: Arc<dyn Send + Sync>) {
+        Arc::make_mut(&mut self.0).push(OpaqueRetention { _owner: owner });
+    }
 }
 
 impl ByteReservation {
+    /// Transfers exact-length admission from another resource owner without a
+    /// second pool. Acquire the guard before allocating; the API limit still applies.
+    /// Shrinking the byte ceiling does not change the external guard's charge.
+    pub fn from_retention<T: Send + Sync + 'static>(bytes: usize, guard: T) -> Result<Self> {
+        if bytes > MAXIMUM_API_BYTES {
+            return Err(ApiError::Invalid("API read exceeds 64 MiB".into()));
+        }
+        Ok(Self {
+            budget: None,
+            bytes,
+            retention: Some(Retentions(Arc::new(vec![OpaqueRetention {
+                _owner: Arc::new(guard),
+            }]))),
+        })
+    }
+    /// Pins opaque admission through split, worker ownership and retained storage.
+    #[must_use]
+    pub fn with_retention<T: Send + Sync + 'static>(mut self, guard: T) -> Self {
+        self.retention
+            .get_or_insert_with(Retentions::default)
+            .push(Arc::new(guard));
+        self
+    }
     fn grow(&mut self, bytes: usize) -> Result<()> {
-        let mut additional = self.budget.reserve(bytes - self.bytes)?;
+        // Only ByteAccumulator calls grow; its private constructor always uses a pool.
+        let mut additional = self
+            .budget
+            .as_ref()
+            .expect("accumulator has pool admission")
+            .reserve(bytes - self.bytes)?;
         self.bytes = bytes;
         additional.bytes = 0;
         Ok(())
@@ -101,6 +187,7 @@ impl ByteReservation {
         Ok(Self {
             budget: self.budget.clone(),
             bytes,
+            retention: self.retention.clone(),
         })
     }
     /// Starts a bounded incoming body after admission, before allocating its storage.
@@ -115,10 +202,12 @@ impl ByteReservation {
         if bytes > self.bytes {
             return Err(ApiError::Invalid("cannot grow a byte reservation".into()));
         }
-        self.budget
-            .0
-            .used
-            .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+        if let Some(budget) = &self.budget {
+            budget
+                .0
+                .used
+                .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+        }
         self.bytes = bytes;
         Ok(())
     }
@@ -126,10 +215,15 @@ impl ByteReservation {
     pub fn copy(mut self, source: &[u8]) -> Result<RetainedBytes> {
         self.shrink(source.len())?;
         let data = source.to_vec();
-        Ok(RetainedBytes(Bytes::from_owner(BufferOwner {
-            data,
-            _reservation: self,
-        })))
+        let capacity = data.capacity();
+        Ok(RetainedBytes(
+            Bytes::from_owner(BufferOwner {
+                data,
+                _reservation: self,
+            }),
+            capacity,
+            None,
+        ))
     }
     /// Retains an allocation made after acquiring this reservation, without copying.
     ///
@@ -137,10 +231,15 @@ impl ByteReservation {
     /// must fit the reservation and remains charged until the last owner drops.
     pub fn retain_vec(mut self, data: Vec<u8>) -> Result<RetainedBytes> {
         self.shrink(data.capacity())?;
-        Ok(RetainedBytes(Bytes::from_owner(BufferOwner {
-            data,
-            _reservation: self,
-        })))
+        let capacity = data.capacity();
+        Ok(RetainedBytes(
+            Bytes::from_owner(BufferOwner {
+                data,
+                _reservation: self,
+            }),
+            capacity,
+            None,
+        ))
     }
     /// Encodes within an already admitted maximum, then retains its exact byte charge.
     pub fn encode<T: Serialize + ?Sized>(mut self, value: &T) -> Result<RetainedBytes> {
@@ -157,10 +256,15 @@ impl ByteReservation {
         // Keep the reservation for the retained allocation, including unused capacity.
         // Exact measurement in ByteBudget::encode normally makes these equal.
         self.shrink(writer.bytes.capacity())?;
-        Ok(RetainedBytes(Bytes::from_owner(BufferOwner {
-            data: writer.bytes,
-            _reservation: self,
-        })))
+        let capacity = writer.bytes.capacity();
+        Ok(RetainedBytes(
+            Bytes::from_owner(BufferOwner {
+                data: writer.bytes,
+                _reservation: self,
+            }),
+            capacity,
+            None,
+        ))
     }
 }
 
@@ -189,6 +293,7 @@ pub struct ByteReceiver {
 pub struct ByteAccumulator {
     receiver: ByteReceiver,
     maximum: usize,
+    pool_limit: usize,
 }
 
 impl ByteAccumulator {
@@ -202,6 +307,7 @@ impl ByteAccumulator {
         Ok(Self {
             receiver: budget.reserve(0)?.receive(),
             maximum,
+            pool_limit: budget.limit(),
         })
     }
     /// Admits growth before allocating or copying, without waiting for capacity.
@@ -217,7 +323,7 @@ impl ByteAccumulator {
             let preferred = required
                 .next_power_of_two()
                 .min(self.maximum)
-                .min(receiver.reservation.budget.limit());
+                .min(self.pool_limit);
             // Spare capacity is an optimization, never a reason to reject bytes
             // that still fit the shared receiving pool.
             if preferred < required || receiver.reservation.grow(preferred).is_err() {
@@ -256,10 +362,15 @@ impl ByteReceiver {
     }
     /// Transfers storage without copying, retaining the complete allocated capacity.
     pub fn finish(self) -> RetainedBytes {
-        RetainedBytes(Bytes::from_owner(BufferOwner {
-            data: self.data,
-            _reservation: self.reservation,
-        }))
+        let capacity = self.data.capacity();
+        RetainedBytes(
+            Bytes::from_owner(BufferOwner {
+                data: self.data,
+                _reservation: self.reservation,
+            }),
+            capacity,
+            None,
+        )
     }
     /// Releases unused allocation before handing off a completed variable-length body.
     ///
@@ -275,6 +386,10 @@ impl ByteReceiver {
     pub fn finish_into(mut self, destination: &ByteBudget) -> Result<RetainedBytes> {
         self.data.shrink_to_fit();
         let reservation = destination.reserve(self.data.capacity())?;
+        let mut reservation = reservation;
+        reservation
+            .retention
+            .clone_from(&self.reservation.retention);
         self.reservation = reservation;
         Ok(self.finish())
     }
@@ -282,7 +397,9 @@ impl ByteReceiver {
 
 impl Drop for ByteReservation {
     fn drop(&mut self) {
-        self.budget.0.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        if let Some(budget) = &self.budget {
+            budget.0.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
     }
 }
 
@@ -297,27 +414,36 @@ impl AsRef<[u8]> for BufferOwner {
 }
 
 /// Immutable bytes whose last clone or slice owns their allocation's reservation.
-#[derive(Clone, Eq, PartialEq)]
-pub struct RetainedBytes(Bytes);
+#[derive(Clone)]
+pub struct RetainedBytes(Bytes, usize, Option<Retentions>);
+
+impl PartialEq for RetainedBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for RetainedBytes {}
+impl std::ops::Deref for RetainedBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
 
 impl RetainedBytes {
+    /// Complete backing allocation weight, including unused capacity.
+    /// Opaque retention guards are not included in this weight.
+    pub fn allocation_weight(&self) -> usize {
+        self.1
+    }
     /// Retains an already acquired resource guard through byte clones, slices and
     /// transport transfer. Does not copy data or replace its byte reservation.
     #[must_use]
-    pub fn with_retention<T: Send + 'static>(self, guard: T) -> Self {
-        struct Retention<T> {
-            data: RetainedBytes,
-            _guard: T,
-        }
-        impl<T> AsRef<[u8]> for Retention<T> {
-            fn as_ref(&self) -> &[u8] {
-                self.data.as_bytes()
-            }
-        }
-        Self(Bytes::from_owner(Retention {
-            data: self,
-            _guard: guard,
-        }))
+    pub fn with_retention<T: Send + 'static>(mut self, guard: T) -> Self {
+        self.2
+            .get_or_insert_with(Retentions::default)
+            .push(Arc::new(std::sync::Mutex::new(guard)));
+        self
     }
     /// Returns a checked slice. Nonempty slices retain the complete allocation
     /// and attached guard; empty slices retain neither. Siblings are unaffected.
@@ -339,11 +465,31 @@ impl RetainedBytes {
         if start > end || end > self.0.len() {
             return Err(ApiError::Invalid("slice is outside retained bytes".into()));
         }
-        Ok(Self(self.0.slice(start..end)))
+        Ok(Self(
+            self.0.slice(start..end),
+            if start == end { 0 } else { self.1 },
+            if start == end { None } else { self.2.clone() },
+        ))
     }
     /// Transfers the buffer to a byte-oriented transport without losing its owner.
     pub fn into_bytes(self) -> Bytes {
-        self.0
+        struct Owner {
+            data: Bytes,
+            _retention: Retentions,
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+        if let Some(retention) = self.2 {
+            Bytes::from_owner(Owner {
+                data: self.0,
+                _retention: retention,
+            })
+        } else {
+            self.0
+        }
     }
     /// Borrows the exact immutable payload.
     pub fn as_bytes(&self) -> &[u8] {

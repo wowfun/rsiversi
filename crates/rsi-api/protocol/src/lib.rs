@@ -14,7 +14,8 @@ mod service;
 mod stream;
 pub use authentication::*;
 pub use budget::{
-    ByteAccumulator, ByteBudget, ByteReceiver, ByteReservation, RetainedBytes, measure_json,
+    ByteAccumulator, ByteAdmission, ByteBudget, ByteReceiver, ByteReservation, RetainedBytes,
+    measure_json,
 };
 pub use client::*;
 pub use identity::{DeviceId, EndpointId, HostEpoch, LocalCompatibilityKey};

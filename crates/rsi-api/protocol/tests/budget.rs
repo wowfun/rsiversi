@@ -326,3 +326,210 @@ fn deployment_generation_and_device_identities_reject_noncanonical_wire_values()
         assert!(serde_json::from_str::<DeviceId>(&json).is_err());
     }
 }
+
+#[test]
+fn preallocation_admission_composes_and_survives_worker_split_and_sliced_capacity() {
+    let pool = ByteBudget::new(32).unwrap();
+    let first = std::sync::Arc::new(());
+    let second = std::sync::Arc::new(());
+    let weak_first = std::sync::Arc::downgrade(&first);
+    let weak_second = std::sync::Arc::downgrade(&second);
+    let mut reservation = pool
+        .reserve(32)
+        .unwrap()
+        .with_retention(first)
+        .with_retention(second);
+    let worker = reservation.split(16).unwrap();
+    drop(reservation);
+    assert!(weak_first.upgrade().is_some());
+    assert!(weak_second.upgrade().is_some());
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(b"body");
+    let retained = worker.retain_vec(bytes).unwrap();
+    let slice = retained.slice(1..2).unwrap();
+    drop(retained);
+    assert_eq!(slice.allocation_weight(), 16);
+    assert_eq!(pool.used(), 16);
+    assert!(weak_first.upgrade().is_some());
+    drop(slice);
+    assert!(weak_first.upgrade().is_none());
+    assert!(weak_second.upgrade().is_none());
+    assert_eq!(pool.used(), 0);
+}
+
+#[test]
+fn deferred_admission_pins_its_owner_without_speculative_byte_credit() {
+    let pool = ByteBudget::new(7).unwrap();
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let reading = pool.clone();
+    let admission = rsi_api_protocol::ByteAdmission::new(move |length| {
+        Ok(reading.reserve(length)?.with_retention(guard))
+    });
+    assert_eq!(pool.used(), 0);
+    assert!(weak.upgrade().is_some());
+    let bytes = admission.reserve(3).unwrap().copy(b"abc").unwrap();
+    let slice = bytes.slice(1..2).unwrap();
+    drop(bytes);
+    assert_eq!(pool.used(), 3);
+    assert!(weak.upgrade().is_some());
+    drop(slice);
+    assert_eq!(pool.used(), 0);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn deferred_admission_rejects_over_reservation_and_releases_its_owner() {
+    let pool = ByteBudget::new(16).unwrap();
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let reading = pool.clone();
+    let admission = rsi_api_protocol::ByteAdmission::new(move |length| {
+        Ok(reading.reserve(length + 1)?.with_retention(guard))
+    });
+    assert!(matches!(admission.reserve(7), Err(ApiError::Invalid(_))));
+    assert_eq!(pool.used(), 0);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn deferred_admission_rejects_an_under_reserved_allocator_as_invalid_input() {
+    let admission = rsi_api_protocol::ByteAdmission::new(|_| ByteBudget::default().reserve(1));
+    assert!(matches!(admission.reserve(2), Err(ApiError::Invalid(_))));
+}
+
+#[test]
+fn deferred_allocator_failure_preserves_error_and_releases_only_its_owners() {
+    for expected in [ApiError::Capacity, ApiError::ShuttingDown] {
+        let pool = ByteBudget::new(8).unwrap();
+        let held = pool.copy(b"old").unwrap();
+        let guard = std::sync::Arc::new(());
+        let weak = std::sync::Arc::downgrade(&guard);
+        let reading = pool.clone();
+        let error = expected.clone();
+        let admission = rsi_api_protocol::ByteAdmission::new(move |length| {
+            let _workspace = reading.reserve(length)?.with_retention(guard);
+            Err(error)
+        });
+        assert!(weak.upgrade().is_some());
+        assert_eq!(pool.used(), 3);
+        assert_eq!(admission.reserve(4).unwrap_err(), expected);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(pool.used(), 3);
+        assert_eq!(held.as_bytes(), b"old");
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    }
+}
+
+#[test]
+fn oversized_deferred_read_releases_authority_without_invoking_allocator() {
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let admission = rsi_api_protocol::ByteAdmission::new(move |_| {
+        drop(guard);
+        panic!("oversized read reached allocation authority")
+    });
+    assert!(matches!(
+        admission.reserve(rsi_api_protocol::MAXIMUM_API_BYTES + 1),
+        Err(ApiError::Invalid(_))
+    ));
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn external_admission_is_exact_bounded_and_follows_split_transport_owners() {
+    use rsi_api_protocol::{ByteAdmission, ByteReservation, MAXIMUM_API_BYTES};
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let admission = ByteAdmission::new(move |bytes| ByteReservation::from_retention(bytes, guard));
+    let mut reservation = admission.reserve(7).unwrap();
+    assert!(reservation.shrink(8).is_err());
+    let sibling = reservation.split(3).unwrap().copy(b"abc").unwrap();
+    let buffer = reservation.copy(b"defg").unwrap();
+    assert_eq!(buffer.allocation_weight(), 4);
+    let wire = buffer.slice(1..2).unwrap().into_bytes();
+    drop(buffer);
+    drop(sibling);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(wire.as_ref(), b"e");
+    drop(wire);
+    assert!(weak.upgrade().is_none());
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    assert!(matches!(
+        ByteReservation::from_retention(MAXIMUM_API_BYTES + 1, guard),
+        Err(ApiError::Invalid(_))
+    ));
+    assert!(
+        weak.upgrade().is_none(),
+        "failed length validation releases the external owner"
+    );
+}
+
+#[test]
+fn repeated_retention_attachment_drops_without_recursive_wrappers() {
+    const CHILD: &str = "RSI_RETENTION_DROP_CASE";
+    if let Ok(case) = std::env::var(CHILD) {
+        let thread = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let budget = ByteBudget::new(1).unwrap();
+                let guard = std::sync::Arc::new(());
+                let weak = std::sync::Arc::downgrade(&guard);
+                if case == "reservation" {
+                    let mut reservation = budget.reserve(1).unwrap();
+                    for _ in 0..8192 {
+                        reservation = reservation.with_retention(guard.clone());
+                    }
+                    drop(reservation);
+                } else {
+                    let mut bytes = budget.copy(b"x").unwrap();
+                    for _ in 0..8192 {
+                        bytes = bytes.with_retention(guard.clone());
+                    }
+                    let wire = bytes.slice(..).unwrap().into_bytes();
+                    drop(bytes);
+                    assert_eq!(budget.used(), 1);
+                    drop(wire);
+                }
+                assert_eq!(budget.used(), 0);
+                drop(guard);
+                assert!(weak.upgrade().is_none());
+            })
+            .unwrap();
+        thread.join().unwrap();
+        return;
+    }
+    for case in ["reservation", "bytes"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repeated_retention_attachment_drops_without_recursive_wrappers",
+                "--nocapture",
+            ])
+            .env(CHILD, case)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn newly_attached_guards_do_not_follow_existing_siblings() {
+    let budget = ByteBudget::new(1).unwrap();
+    let original = budget.copy(b"x").unwrap();
+    let sibling = original.clone();
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let attached = original.with_retention(guard);
+    drop(attached);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(budget.used(), 1);
+    drop(sibling);
+    assert_eq!(budget.used(), 0);
+}

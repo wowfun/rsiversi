@@ -14,7 +14,10 @@ An owner may attach an already acquired resource guard to immutable bytes with
 `RetainedBytes::with_retention`. The guard follows clones, nonempty slices and
 transport transfer without copying the payload or replacing its byte reservation.
 This binds object-count admission to the same last-reader lifetime as its bytes;
-the API foundation does not interpret the attached guard.
+the API foundation does not interpret the attached guard. Repeated guard attachment
+uses flat ownership, so releasing a buffer or reservation does not recursively
+drop one wrapper per attachment. Adding a guard does not extend its lifetime through
+pre-existing sibling buffers or split reservations.
 
 The registry is an ordinary Meta plugin. An operation's unique registration owns
 admitted work. Retirement immediately fences new calls, cancels reads and streams,
@@ -70,3 +73,24 @@ family's protocol crate; semantic target narrowing stays with the supplying
 domain. Portable transport carries operation identities and bounded bytes, never
 caller-origin claims or Local trait objects, and inherits Meta's existing call
 deadline and generation fencing.
+
+Byte reservations can carry an opaque in-process retention owner before transfer
+into a blocking worker. Immutable retained buffers expose their complete backing
+allocation weight, including for a nonempty slice, and retain attached ownership
+through the final clone or byte-transport transfer. These facilities do not widen
+the API's 64 MiB byte limit.
+An exact-length reservation may instead retain admission acquired from an external
+resource owner. It validates the API length limit and transfers that owner's
+guard without creating a second pool. Such a reservation can split or shrink
+its byte ceiling but cannot grow the external credit; the guard retains its
+original resource charge until its final buffer owner drops.
+
+A deferred `ByteAdmission` transfers one-shot allocation authority into the
+actual read worker without charging bytes while it waits. The worker validates
+its durable length, then reserves that exact length before copying. An allocator
+must return exactly the requested reservation size; both under-reservation and
+over-reservation are caller-side contract errors. Allocator errors propagate
+unchanged, and failed admission releases its captured authority. Lengths above
+the API limit are rejected before invoking the allocator. The returned
+reservation and buffer retain the allocator's resource guard; cancelling the
+caller cannot release a running worker's allocation authority prematurely.
