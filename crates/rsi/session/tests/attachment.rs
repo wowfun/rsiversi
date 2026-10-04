@@ -58,10 +58,31 @@ mod commands;
 struct UnavailableTurns {
     tree: Option<Vec<SessionId>>,
     live_tree: Option<Arc<LiveTree>>,
+    workflow_gate: Option<Arc<access::WorkflowGate>>,
 }
 
 #[async_trait]
 impl TurnService for UnavailableTurns {
+    async fn cancel_session_program(
+        &self,
+        _: &SessionId,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        let gate = self
+            .workflow_gate
+            .as_ref()
+            .expect("admitted workflow cancel fixture");
+        gate.entered.add_permits(1);
+        gate.release.acquire().await.unwrap().forget();
+        assert!(
+            !gate.panic.load(Ordering::SeqCst),
+            "fixture cancel panic after admission"
+        );
+        Ok(rsi_agent_turn_protocol::ProgramCancelReceipt::Accepted {
+            run_id: run.clone(),
+            control_seq: 1,
+        })
+    }
     async fn prepare_resume(&self, _session_id: &SessionId) -> TurnResult<PreparedResumeSession> {
         panic!("durable attachment must not prepare execution")
     }

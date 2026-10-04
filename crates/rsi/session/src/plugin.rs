@@ -70,6 +70,10 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_workflow(
+            plan.context()
+                .lookup_local::<rsi_session_protocol::WorkflowReadinessContract>(),
+        )
         .with_execution(plan.local::<rsi_execution::ExecutionResolverContract>()?)
         .with_terminals(
             plan.local::<rsi_pty_protocol::PtyProviderContract>()?,

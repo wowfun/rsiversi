@@ -48,3 +48,8 @@ async fn fresh_projection_baselines_reconnect_and_fail_independently_of_core_his
 async fn exact_source_reads_cancel_and_retire_under_shared_bounded_admission() {
     support::owned_source_window_reads(execution()).await;
 }
+
+#[tokio::test]
+async fn workflow_latest_captures_seed_without_inspection_round_trip() {
+    support::latest_workflows_need_no_inspection(execution()).await;
+}

@@ -39,6 +39,7 @@ mod reads;
 mod references;
 mod resources;
 mod terminal;
+mod workflow;
 pub use plugin::SessionFactory;
 use references::map_reference_error;
 
@@ -53,6 +54,7 @@ use rsi_session_protocol::{
 #[derive(Clone)]
 pub struct LocalSessionService {
     origin: rsi_api_protocol::CallOrigin,
+    workflow: Option<Arc<dyn rsi_session_protocol::WorkflowReadinessSource>>,
     resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
     activity: Arc<activity::Managed>,
     terminals: Option<Arc<terminal::Terminals>>,
@@ -96,6 +98,15 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Supplies optional product-owned Workflow requirements; absence never blocks standard Sessions.
+    #[must_use]
+    pub fn with_workflow(
+        mut self,
+        source: Option<Arc<dyn rsi_session_protocol::WorkflowReadinessSource>>,
+    ) -> Self {
+        self.workflow = source;
+        self
+    }
     /// Supplies target selection and revocable caller admission for this service generation.
     #[must_use]
     pub fn with_execution(mut self, resolver: Arc<dyn rsi_execution::ExecutionResolver>) -> Self {
@@ -146,6 +157,7 @@ impl LocalSessionService {
     ) -> Self {
         Self {
             origin: rsi_api_protocol::CallOrigin::Local,
+            workflow: None,
             resolver: None,
             activity: Arc::new(activity::Managed::default()),
             terminals: None,
@@ -223,6 +235,7 @@ impl LocalSessionService {
         );
         Arc::new(LocalSessionHandle {
             origin: self.origin.clone(),
+            workflow: self.workflow.clone(),
             resolver: self.resolver.clone(),
             coordinates: state
                 .header()
@@ -300,8 +313,8 @@ impl LocalSessionService {
         } else {
             Ok(())
         };
-        tokio::join!(self.draft_commands.stop(), self.drafts.stop());
-        terminals
+        let (commands, ()) = tokio::join!(self.draft_commands.stop(), self.drafts.stop());
+        terminals.and(commands)
     }
 
     async fn prepare_draft(
@@ -323,6 +336,7 @@ impl LocalSessionService {
                 .await
                 .map_err(|error| SessionError::Backend(error.to_string()))?,
         };
+        workflow::require_preset(self.workflow.as_deref(), &agent_preset_id)?;
         let settings = self.settings.current()?;
         settings
             .validate()
@@ -446,6 +460,7 @@ impl HandleState {
 #[derive(Clone)]
 struct LocalSessionHandle {
     origin: rsi_api_protocol::CallOrigin,
+    workflow: Option<Arc<dyn rsi_session_protocol::WorkflowReadinessSource>>,
     resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
     coordinates: rsi_workspace_protocol::ExecutionCoordinates,
     terminals: Option<Arc<terminal::Terminals>>,
@@ -954,7 +969,8 @@ impl SessionHandle for LocalSessionHandle {
         };
         self.validate_model_selection(&selected)?;
         let mut state = self.state.lock().await;
-        if matches!(*state, HandleState::Attached(_)) {
+        if let HandleState::Attached(attached_header) = &*state {
+            workflow::require_preset(self.workflow.as_deref(), attached_header.agent_preset_id())?;
             drop(state);
             let session = self
                 .turns
@@ -1068,7 +1084,8 @@ impl SessionHandle for LocalSessionHandle {
             .describe(&request.model)
             .map_err(|error| map_ai_error(&error))?;
         let mut state = self.state.lock().await;
-        if matches!(*state, HandleState::Attached(_)) {
+        if let HandleState::Attached(attached_header) = &*state {
+            workflow::require_preset(self.workflow.as_deref(), attached_header.agent_preset_id())?;
             drop(state);
             let session = self
                 .turns
@@ -1253,6 +1270,27 @@ impl SessionHandle for LocalSessionHandle {
         }
     }
 
+    async fn workflow_readiness(&self) -> Result<rsi_session_protocol::WorkflowReadiness> {
+        self.read_workflow_readiness().await
+    }
+    async fn list_workflows(
+        &self,
+        request: rsi_session_protocol::WorkflowList,
+    ) -> Result<rsi_session_protocol::WorkflowPage> {
+        self.workflow_list(request).await
+    }
+    async fn read_workflow(
+        &self,
+        request: rsi_session_protocol::WorkflowRead,
+    ) -> Result<rsi_session_protocol::WorkflowDetail> {
+        self.workflow_detail(request).await
+    }
+    async fn cancel_workflow(
+        &self,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        self.workflow_cancel(run).await
+    }
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
         let _admission = self.admit()?;
         let _activity = self.begin_activity()?;

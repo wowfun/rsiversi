@@ -83,6 +83,9 @@ All DTOs are closed; receipts, history, recent pages, inspections, observation
 cursors and live interactions are validated against their request before exposure.
 Message reads also echo the exact acceptance cursor. Invalid-input diagnostics
 retain at most 4 KiB of UTF-8 text; clients reject an oversized diagnostic.
+Workflow unavailability is valid only for creation, preset selection, submission
+and direct image submission. Workflow outcome uncertainty belongs only to
+cancellation; clients reject these failures on unrelated operations.
 
 Command discovery, execution and receipt lookup use authenticated Data operations.
 The adapter validates the request identity, command identity and complete invocation
@@ -194,3 +197,16 @@ attaching, creating a handle, touching activity or loading transcript. Unpublish
 drafts are absent. The authenticated `session/read-header` v1 operation exposes
 the same read and validates the echoed identity; narrowed Session contribution
 clients do not gain this deployment-wide operation.
+
+Workflow-readiness, read-workflow and cancel-workflow are v1. List-workflows is v2:
+an absent cursor requests the latest history, and the response returns its exact
+server-captured seed. Older-page requests preserve that seed. No preliminary
+Session inspection is needed.
+The first three are authenticated finite Data/Read operations; cancellation is
+Control/Mutation. They use the existing exact Session/Header target. History
+responses fit 4 MiB and details 2 MiB, with shared retained client byte admission.
+Clients reject foreign runs, stale revisions, reordered acceptance positions and
+nonadvancing child or CAS pages. Every cancellation receipt echoes the requested
+run identity; clients authenticate it before accepting the acknowledgement. Lost cancellation acknowledgements preserve the
+exact Session/run as WorkflowOutcomeUnknown for rereading. Session-scoped plugins
+receive an explicit operation allowlist; these four user controls are excluded.

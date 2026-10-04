@@ -36,6 +36,7 @@ pub(super) struct State {
     pub projections: rsi_session_protocol::ProjectionRetention,
     pub jobs: rsi_session_protocol::JobsRetention,
     preview: preview::Budget,
+    workflow_bytes: rsi_api_protocol::ByteBudget,
 }
 /// Shared Session application proxy over one negotiated API generation.
 #[derive(Clone, Debug)]
@@ -71,6 +72,7 @@ impl SessionClient {
                 projections: rsi_session_protocol::ProjectionRetention::default(),
                 jobs: rsi_session_protocol::JobsRetention::default(),
                 preview: preview::Budget::default(),
+                workflow_bytes: rsi_api_protocol::ByteBudget::default(),
             }),
         }
     }
@@ -164,6 +166,11 @@ pub(super) fn failure(
                 Operation::ExecuteCommand | Operation::SelectPreset | Operation::GoalControl
             ) && expected != actual
         }
+        Failure::WorkflowUnavailable { .. } => matches!(
+            operation,
+            Operation::Create | Operation::SelectPreset | Operation::Submit | Operation::Image
+        ),
+        Failure::WorkflowOutcomeUnknown { .. } => operation == Operation::CancelWorkflow,
         _ => true,
     };
     if valid {
@@ -827,6 +834,106 @@ impl SessionHandle for Handle {
             return Err(malformed(Operation::TreeMetrics));
         }
         Ok(metrics)
+    }
+    async fn workflow_readiness(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::WorkflowReadiness> {
+        let result: rsi_session_protocol::WorkflowReadiness = self
+            .frozen()
+            .call(Operation::WorkflowReadiness, &())
+            .await?;
+        if result
+            .generation
+            .as_ref()
+            .is_some_and(|v| v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(malformed(Operation::WorkflowReadiness));
+        }
+        Ok(result)
+    }
+    async fn list_workflows(
+        &self,
+        request: rsi_session_protocol::WorkflowList,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::WorkflowPage> {
+        request.validate()?;
+        let reservation = self
+            .state
+            .workflow_bytes
+            .reserve(4 * 1024 * 1024)
+            .map_err(SessionError::Api)?;
+        let mut page: rsi_session_protocol::WorkflowPage = self
+            .frozen()
+            .call(Operation::ListWorkflows, &request)
+            .await?;
+        page.validate(&self.session_id, &request)
+            .map_err(|_| malformed(Operation::ListWorkflows))?;
+        let guard = Arc::new(reservation);
+        for run in &mut page.runs {
+            run.retention = Some(guard.clone());
+        }
+        Ok(page)
+    }
+    async fn read_workflow(
+        &self,
+        request: rsi_session_protocol::WorkflowRead,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::WorkflowDetail> {
+        request.validate()?;
+        let reservation = self
+            .state
+            .workflow_bytes
+            .reserve(2 * 1024 * 1024)
+            .map_err(SessionError::Api)?;
+        let mut detail: rsi_session_protocol::WorkflowDetail = self
+            .frozen()
+            .call(Operation::ReadWorkflow, &request)
+            .await?;
+        detail
+            .validate(&self.session_id, &request)
+            .map_err(|_| malformed(Operation::ReadWorkflow))?;
+        detail.run.retention = Some(Arc::new(reservation));
+        Ok(detail)
+    }
+    async fn cancel_workflow(
+        &self,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        let result: rsi_agent_turn_protocol::ProgramCancelReceipt = self
+            .frozen()
+            .call(Operation::CancelWorkflow, run)
+            .await
+            .map_err(|error| match error {
+                SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown) => {
+                    SessionError::WorkflowOutcomeUnknown {
+                        session: self.session_id.clone(),
+                        run: run.clone(),
+                    }
+                }
+                other => other,
+            })?;
+        if result.run_id() != run {
+            return Err(malformed(Operation::CancelWorkflow));
+        }
+        if let rsi_agent_turn_protocol::ProgramCancelReceipt::AlreadyTerminal { outcome, .. } =
+            &result
+        {
+            outcome
+                .validate()
+                .map_err(|_| malformed(Operation::CancelWorkflow))?;
+        }
+        let seq = match &result {
+            rsi_agent_turn_protocol::ProgramCancelReceipt::Accepted { control_seq, .. }
+            | rsi_agent_turn_protocol::ProgramCancelReceipt::AlreadyTerminal {
+                control_seq, ..
+            }
+            | rsi_agent_turn_protocol::ProgramCancelReceipt::OrphanedRequiresRestart {
+                control_seq,
+                ..
+            } => *control_seq,
+        };
+        if seq == 0 {
+            return Err(malformed(Operation::CancelWorkflow));
+        }
+        Ok(result)
     }
     async fn inspect(&self) -> rsi_session_protocol::Result<StoreSessionInspection> {
         let frozen = self.frozen();

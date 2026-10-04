@@ -263,6 +263,27 @@ fn handle_operations(
         };
     }
     vec![
+        add!(WorkflowReadiness, |owner, (): ()| async move {
+            owner.workflow_readiness().await
+        }),
+        add!(
+            ListWorkflows,
+            |owner, request: rsi_session_protocol::WorkflowList| async move {
+                owner.list_workflows(request).await
+            }
+        ),
+        add!(
+            ReadWorkflow,
+            |owner, request: rsi_session_protocol::WorkflowRead| async move {
+                owner.read_workflow(request).await
+            }
+        ),
+        add!(
+            CancelWorkflow,
+            |owner, run: rsi_agent_session_protocol::ProgramRunId| async move {
+                owner.cancel_workflow(&run).await
+            }
+        ),
         add!(
             CaptureReference,
             |owner, request: wire::Attach| async move {

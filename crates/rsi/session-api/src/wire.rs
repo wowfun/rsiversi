@@ -17,6 +17,10 @@ pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_R
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Operation {
+    WorkflowReadiness,
+    ListWorkflows,
+    ReadWorkflow,
+    CancelWorkflow,
     Export,
     Terminal,
     TerminalOutput,
@@ -60,7 +64,11 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 45] = [
+        Self::WorkflowReadiness,
+        Self::ListWorkflows,
+        Self::ReadWorkflow,
+        Self::CancelWorkflow,
         Self::Export,
         Self::Terminal,
         Self::TerminalOutput,
@@ -107,6 +115,10 @@ impl Operation {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};
         let (name, class, effect, input, output) = match self {
+            Self::WorkflowReadiness => ("workflow-readiness", Data, Read, 8192, 8192),
+            Self::ListWorkflows => ("list-workflows", Data, Read, 8192, 4 * 1024 * 1024),
+            Self::ReadWorkflow => ("read-workflow", Data, Read, 8192, 2 * 1024 * 1024),
+            Self::CancelWorkflow => ("cancel-workflow", Control, Mutation, 8192, 32768),
             Self::Export => ("export", Subscription, Read, 8192, 512 * 1024),
             Self::Terminal => ("terminal", Control, Mutation, 8192, 128 * 1024),
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
@@ -169,7 +181,8 @@ impl Operation {
                     Self::Create | Self::Inspect => 7,
                     Self::Submit => 4,
                     Self::MessageStatus => 3,
-                    Self::Jobs
+                    Self::ListWorkflows
+                    | Self::Jobs
                     | Self::TerminalOutput
                     | Self::Interactions
                     | Self::Questions
@@ -282,6 +295,13 @@ pub(crate) enum Observation<C, F> {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    WorkflowUnavailable {
+        reason: rsi_session_protocol::WorkflowRuntimeKind,
+    },
+    WorkflowOutcomeUnknown {
+        session: SessionId,
+        run: rsi_agent_session_protocol::ProgramRunId,
+    },
     Terminal {
         error: rsi_session_protocol::terminal::PtyError,
     },
@@ -328,6 +348,10 @@ pub(crate) fn domain<T>(
     result.map(Ok).or_else(|error| {
         let invalid = |_| ApiError::Backend("invalid Session error identity".into());
         Ok(Err(match error {
+            SessionError::WorkflowUnavailable(reason) => Failure::WorkflowUnavailable { reason },
+            SessionError::WorkflowOutcomeUnknown { session, run } => {
+                Failure::WorkflowOutcomeUnknown { session, run }
+            }
             SessionError::Terminal(error) => Failure::Terminal { error },
             SessionError::SetupRequired => Failure::SetupRequired {},
             SessionError::Api(error) => return Err(error),
@@ -379,6 +403,10 @@ pub(crate) fn domain<T>(
 impl Failure {
     pub fn into_error(self) -> SessionError {
         match self {
+            Self::WorkflowUnavailable { reason } => SessionError::WorkflowUnavailable(reason),
+            Self::WorkflowOutcomeUnknown { session, run } => {
+                SessionError::WorkflowOutcomeUnknown { session, run }
+            }
             Self::Terminal { error } => SessionError::Terminal(error),
             Self::SetupRequired {} => SessionError::SetupRequired,
             Self::Invalid { message } => SessionError::Invalid(message),
@@ -423,6 +451,7 @@ mod setup_tests {
     #[test]
     fn closed_review_operations_advertise_the_new_wire_version() {
         for operation in [
+            Operation::ListWorkflows,
             Operation::Interactions,
             Operation::Questions,
             Operation::AnswerQuestion,

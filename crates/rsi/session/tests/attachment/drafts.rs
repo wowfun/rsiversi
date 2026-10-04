@@ -736,3 +736,80 @@ async fn shared_draft_state_does_not_share_the_first_callers_authority() {
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
     service.stop().await.unwrap();
 }
+
+#[derive(Debug)]
+struct WorkflowDefault(Arc<Preparation>);
+#[async_trait]
+impl AgentComposition for WorkflowDefault {
+    async fn default_preset_id(&self) -> Result<AgentPresetId, AgentCompositionError> {
+        Ok(AgentPresetId::new("workflow").unwrap())
+    }
+    async fn pin(
+        &self,
+        preset: &AgentPresetId,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> Result<AgentCompositionPin, AgentCompositionError> {
+        self.0.pin(preset, seed).await
+    }
+}
+#[tokio::test]
+async fn absent_workflow_runtime_gates_default_and_switch_before_generation_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(false);
+    let service = service(dir.path(), Arc::new(WorkflowDefault(preparation.clone())));
+    assert!(matches!(
+        service
+            .create(request(dir.path(), "workflow-default"))
+            .await,
+        Err(SessionError::WorkflowUnavailable(
+            rsi_session_protocol::WorkflowRuntimeKind::Absent
+        ))
+    ));
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 0);
+    let mut input = request(dir.path(), "explicit-standard");
+    input.agent_preset_id = Some(AgentPresetId::new("standard").unwrap());
+    let handle = service.create(input).await.unwrap();
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 1);
+    let previous = handle.header().await.unwrap();
+    assert!(matches!(
+        handle
+            .select_preset(rsi_session_protocol::SelectDraftPreset {
+                preset_id: AgentPresetId::new("workflow").unwrap(),
+                expected_revision: 0,
+            })
+            .await,
+        Err(SessionError::WorkflowUnavailable(
+            rsi_session_protocol::WorkflowRuntimeKind::Absent
+        ))
+    ));
+    assert_eq!(handle.header().await.unwrap(), previous);
+    assert_eq!(preparation.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        handle.inspect().await,
+        Err(SessionError::NotFound(_))
+    ));
+    let ready = handle.workflow_readiness().await.unwrap();
+    assert!(!ready.runtime.available);
+    let page = handle
+        .list_workflows(rsi_session_protocol::WorkflowList {
+            cursor: None,
+            limit: 8,
+        })
+        .await
+        .unwrap();
+    assert!(page.runs.is_empty());
+    assert_eq!(page.seed_control_seq, 0);
+    assert!(matches!(
+        handle
+            .list_workflows(rsi_session_protocol::WorkflowList {
+                cursor: Some(rsi_session_protocol::WorkflowCursor {
+                    seed_control_seq: 1,
+                    before_accepted_control_seq: None
+                }),
+                limit: 8,
+            })
+            .await,
+        Err(SessionError::Invalid(_))
+    ));
+    service.stop().await.unwrap();
+}

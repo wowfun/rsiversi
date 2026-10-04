@@ -307,3 +307,23 @@ finite read lifetime and exact live execution lease. It checks the Header locati
 against the lease and cannot be reconstructed from browser coordinates. Source
 workers retain the acquired lifetime through actual completion; retirement cancels
 subsequent work. Ordinary wire Session clients do not implement this capability.
+
+Workflow readiness, acceptance-ordered history, revision-bound detail and user
+cancellation are finite Session operations. [Session](../session/README.md) owns
+admission and execution behavior; the wire types validate correlation, ordering,
+child receipts and forward byte offsets at the API client boundary. A new draft
+has no durable inspection and returns NotFound for that read. Its Workflow history
+is empty. A history request without a cursor captures the server's durable control
+watermark; the page returns that seed, and every continuation preserves it. This
+avoids reading a full inspection before the first page. History seed/position and
+detail revision cursors encode u64 values as
+canonical decimal strings, preserving exact action payloads through JavaScript.
+Script and result fragments contain at most a 16 KiB JSON envelope;
+CAS authentication belongs to the trusted Session service, without range proofs.
+
+Workflow CAS-page sizing and transmission use the same `WorkflowResultFragment`
+DTO, borrowing the fragment during measurement and owning it only after admission.
+
+Workflow Runtime sources provide a cheap applied-supply check for preset admission.
+Only readiness queries and refused admission collect the complete desired/applied
+Profile observations; admission does not cache readiness across Profile changes.

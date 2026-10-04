@@ -217,6 +217,27 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         scoped.list_recent(None, 1).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
+    assert!(matches!(
+        handle.workflow_readiness().await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
+        handle
+            .list_workflows(rsi_session_protocol::WorkflowList {
+                cursor: None,
+                limit: 8,
+            })
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
+        handle
+            .cancel_workflow(
+                &rsi_agent_session_protocol::ProgramRunId::new("program-revoked").unwrap()
+            )
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
     service.stop().await.unwrap();
 }
 
@@ -444,4 +465,162 @@ async fn ssh_draft_requires_current_use_without_resolving_connection_or_local_pa
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     service.stop().await.unwrap();
+}
+
+#[derive(Debug)]
+pub(super) struct WorkflowGate {
+    pub entered: Semaphore,
+    pub release: Semaphore,
+    pub panic: std::sync::atomic::AtomicBool,
+}
+async fn workflow_cancel_fixture() -> (
+    tempfile::TempDir,
+    LocalSessionService,
+    Arc<WorkflowGate>,
+    Arc<Semaphore>,
+    Arc<dyn SessionHandle>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().canonicalize().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let header = SessionHeader::new(
+        SessionId::new("admitted-workflow").unwrap(),
+        1,
+        rsi_execution::ExecutionCoordinates::new(ExecutionLocation::Local, path.to_str().unwrap())
+            .unwrap(),
+        AgentPresetId::new("standard").unwrap(),
+        test_settings(),
+    )
+    .unwrap();
+    store
+        .append(AppendBatch {
+            session_id: header.session_id().clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![
+                SessionFact::new(
+                    1,
+                    1,
+                    SessionFactBody::TurnAccepted {
+                        turn_id: TurnId::new("accepted").unwrap(),
+                        text: "history".into(),
+                        model: None,
+                        reasoning_effort: None,
+                        sandbox: SandboxMode::WorkspaceWrite,
+                        require_approval: false,
+                    },
+                )
+                .unwrap()
+                .into(),
+            ],
+        })
+        .await
+        .unwrap();
+    let gate = Arc::new(WorkflowGate {
+        panic: std::sync::atomic::AtomicBool::new(false),
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let slots = Arc::new(Semaphore::new(1));
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
+        Arc::new(UnavailableTurns {
+            workflow_gate: Some(gate.clone()),
+            ..Default::default()
+        }),
+        store,
+        rsi_agent_context::ContextBudget::default(),
+        Arc::new(UnavailableComposition),
+        Arc::new(UnavailableWorkspace),
+        Arc::new(UnavailableSettings),
+        Arc::new(UnavailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(NoApprovalControl),
+    )
+    .with_execution(Arc::new(Access {
+        slots: Some(slots.clone()),
+        ..Default::default()
+    }));
+    let handle = service.attach(header.session_id()).await.unwrap();
+    (dir, service, gate, slots, handle)
+}
+#[tokio::test]
+async fn dropped_workflow_cancel_waiter_keeps_execution_admission_until_owned_completion() {
+    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    let waiter = tokio::spawn(async move {
+        handle
+            .cancel_workflow(
+                &rsi_agent_session_protocol::ProgramRunId::new("program-admitted").unwrap(),
+            )
+            .await
+    });
+    gate.entered.acquire().await.unwrap().forget();
+    assert_eq!(slots.available_permits(), 0);
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "dropping a waiter cannot release owned mutation admission"
+    );
+    gate.release.add_permits(1);
+    service.stop().await.unwrap();
+    assert_eq!(
+        slots.available_permits(),
+        1,
+        "actual completion releases its permit"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_reports_incomplete_cancel_without_abandoning_its_admission() {
+    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    let waiter = tokio::spawn(async move {
+        handle
+            .cancel_workflow(
+                &rsi_agent_session_protocol::ProgramRunId::new("program-stalled").unwrap(),
+            )
+            .await
+    });
+    gate.entered.acquire().await.unwrap().forget();
+    let failure = service.stop().await.unwrap_err();
+    assert!(
+        matches!(failure, SessionError::Backend(message) if message.contains("cleanup exceeded"))
+    );
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "deadline cannot release the running mutation"
+    );
+    assert!(!waiter.is_finished());
+    gate.release.add_permits(1);
+    assert!(matches!(
+        waiter.await.unwrap().unwrap(),
+        rsi_agent_turn_protocol::ProgramCancelReceipt::Accepted { .. }
+    ));
+    service.stop().await.unwrap();
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn workflow_cancel_panic_preserves_unknown_identity_and_releases_settled_admission() {
+    let (_temp, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    gate.panic.store(true, Ordering::SeqCst);
+    let run = rsi_agent_session_protocol::ProgramRunId::new("program-panic").unwrap();
+    let requested = run.clone();
+    let waiter = tokio::spawn(async move { handle.cancel_workflow(&requested).await });
+    gate.entered.acquire().await.unwrap().forget();
+    assert_eq!(slots.available_permits(), 0);
+    gate.release.add_permits(1);
+    match waiter.await.unwrap() {
+        Err(SessionError::WorkflowOutcomeUnknown { run: observed, .. }) => {
+            assert_eq!(observed, run);
+        }
+        other => panic!("expected exact uncertain cancellation receipt, got {other:?}"),
+    }
+    service.stop().await.unwrap();
+    assert_eq!(slots.available_permits(), 1);
 }

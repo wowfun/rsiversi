@@ -60,7 +60,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         SessionId::new("allowed").unwrap(),
     )
     .unwrap();
-    assert_eq!(local.operations().len(), Operation::ALL.len() - 3); // Creation and global discovery are excluded.
+    assert_eq!(local.operations().len(), Operation::ALL.len() - 7); // Global discovery and Workflow user controls are excluded.
     assert!(local.operations().contains(&Operation::Export.spec()));
     assert!(local.operations().contains(&Operation::Resource.spec()));
     for operation in [

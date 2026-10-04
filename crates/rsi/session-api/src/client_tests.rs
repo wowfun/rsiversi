@@ -701,3 +701,60 @@ impl rsi_session_protocol::SessionIngress for LocalIngress {
         self.scoped(origin).create(request).await
     }
 }
+
+#[tokio::test]
+async fn cancellation_receipts_reject_foreign_runs_without_replay() {
+    let (remote, _, handle) = fixture().await;
+    let run = rsi_agent_session_protocol::ProgramRunId::new("program-requested").unwrap();
+    for status in ["accepted", "already_terminal", "orphaned_requires_restart"] {
+        for foreign in [false, true] {
+            let mut receipt = json!({"status":status,"run_id":if foreign {"program-foreign"} else {run.as_str()},"control_seq":1});
+            match status {
+                "already_terminal" => receipt["outcome"] = json!({"status":"completed"}),
+                "orphaned_requires_restart" => receipt["cancellation_requested"] = json!(false),
+                _ => {}
+            }
+            remote.reply(&envelope(receipt));
+            let before = remote.calls.load(Ordering::SeqCst);
+            let reply = handle.cancel_workflow(&run).await;
+            assert_eq!(remote.calls.load(Ordering::SeqCst), before + 1);
+            if foreign {
+                assert!(reply.is_err());
+            } else {
+                assert_eq!(reply.unwrap().run_id(), &run);
+            }
+        }
+    }
+}
+
+#[test]
+fn workflow_failures_are_bound_to_their_actual_operations() {
+    for operation in Operation::ALL {
+        let unavailable = crate::client::failure(
+            operation,
+            Failure::WorkflowUnavailable {
+                reason: rsi_session_protocol::WorkflowRuntimeKind::Absent,
+            },
+        );
+        assert_eq!(
+            unavailable.is_ok(),
+            matches!(
+                operation,
+                Operation::Create | Operation::SelectPreset | Operation::Submit | Operation::Image
+            ),
+            "{operation:?}"
+        );
+        let unknown = crate::client::failure(
+            operation,
+            Failure::WorkflowOutcomeUnknown {
+                session: rsi_agent_session_protocol::SessionId::new("workflow-session").unwrap(),
+                run: rsi_agent_session_protocol::ProgramRunId::new("workflow-run").unwrap(),
+            },
+        );
+        assert_eq!(
+            unknown.is_ok(),
+            operation == Operation::CancelWorkflow,
+            "{operation:?}"
+        );
+    }
+}

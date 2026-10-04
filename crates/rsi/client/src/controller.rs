@@ -44,8 +44,10 @@ pub struct SessionController {
     projections: tokio::sync::watch::Sender<Option<rsi_session_protocol::ProjectionSnapshot>>,
     goal: tokio::sync::watch::Sender<Option<rsi_session_protocol::Result<rsi_goal::GoalLiveState>>>,
     goal_control: tokio::sync::watch::Sender<GoalControlState>,
+    pub(super) workflow_selection: Mutex<super::workflow::WorkflowSelection>,
+    pub(super) workflow_changed: tokio::sync::watch::Sender<u64>,
     session_id: SessionId,
-    handle: Arc<dyn SessionHandle>,
+    pub(super) handle: Arc<dyn SessionHandle>,
     sink: Arc<dyn ObservationSink>,
     execution: Execution,
     stop: CancellationToken,
@@ -160,7 +162,7 @@ impl SessionController {
                         observe_session(
                             controller.handle.as_ref(),
                             cursor,
-                            controller.sink.as_ref(),
+                            &super::workflow::Sink { inner: controller.sink.clone(), changed: controller.workflow_changed.clone() },
                             &controller.execution,
                         )
                         .await
@@ -263,6 +265,8 @@ impl PluginFactory for SessionControllerFactory {
             projections: tokio::sync::watch::channel(None).0,
             goal: tokio::sync::watch::channel(None).0,
             goal_control: tokio::sync::watch::channel(GoalControlState::Idle).0,
+            workflow_selection: Mutex::new(super::workflow::WorkflowSelection::Latest),
+            workflow_changed: tokio::sync::watch::channel(0).0,
             session_id: config.session_id,
             handle,
             sink: plan.local::<ObservationSinkContract>()?,

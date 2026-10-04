@@ -51,6 +51,14 @@ Meta, including the shared `ContextBudgetContract`. All clients of that generati
 Host's approval broker is also an ordinary plugin; the launcher neither
 constructs Session adapters nor registers a second broker per client.
 
+Workflow cancellation owns its execution admission until the Kernel call settles;
+dropping the caller does not abandon it. Shutdown refuses new mutations and waits
+at most 30 seconds for command cleanup. A deadline reports incomplete cleanup,
+while the outstanding task keeps its ownership through actual completion. It does
+not produce a successful cancellation receipt or authorize replay. A queued cancel
+that observes shutdown before calling the Kernel returns ShuttingDown; a panic
+after entering that call has an unknown outcome.
+
 Trusted ingress binds a service view to the actual authenticated caller for all
 operations, including streams and Header reads. Returned handles retain that
 caller and consult Execution admission for every new operation. Reconciliation
@@ -201,3 +209,23 @@ Other bounded terminal operations use the Session's metadata admission and remai
 available without reconnecting; private output pumping never publishes to a caller
 without a separately admitted request. Creator revocation does not lend that
 creator's authority to another authorized attachment.
+
+## Workflow workbench
+
+Session-scoped Workflow history, details, readiness and cancellation retain caller
+origin, activity and execution-location admission across I/O. Only authenticated,
+unrevoked devices with that admission, or Local callers, may operate. This authority
+does not distinguish human users from programs using their device credentials.
+Session-scoped plugin bridges use an explicit existing-operation allowlist and do
+not receive new Workflow operations. Readiness exposes closed facts without raw
+errors, configuration values, paths or dependency identities.
+Cancellation authorizes once when the command enters its bounded queue. Later
+device revocation prevents new requests and read delivery, but does not revoke an
+admitted mutation or its receipt. Losing that receipt cannot establish rejection.
+
+The built-in workflow preset is opt-in; creation, switching and cold execution
+reject an unavailable runtime before composition. Durable history remains readable.
+
+Workflow detail pages children, frozen script and result from one Kernel snapshot
+of the requested run revision. CAS buffers retain their actual input admission
+under the shared Program byte budget. Neither read executes code.

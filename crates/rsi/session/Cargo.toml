@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-agent-context = { path = "../../rsi-agent/context" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-session-export = { path = "../session-export" }
@@ -47,7 +49,6 @@ rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
-rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 tokio-util.workspace = true
 
 [lints]

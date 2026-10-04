@@ -21,6 +21,8 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod workflow;
+pub use workflow::*;
 mod activity;
 mod evidence;
 /// Read-only conversation artifacts and stream verification.
@@ -505,6 +507,28 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Explicit bounded tree usage cycle; refresh only replaces a completed cycle.
     async fn tree_metrics(&self, refresh: bool) -> Result<TreeMetricsRead>;
 
+    /// Reads closed Workflow requirements without configuration authority or execution.
+    async fn workflow_readiness(&self) -> Result<WorkflowReadiness> {
+        Err(SessionError::NotFound("workflow readiness".into()))
+    }
+    /// Discovers accepted runs through one fixed-watermark descending page.
+    async fn list_workflows(&self, request: WorkflowList) -> Result<WorkflowPage> {
+        let _ = request;
+        Err(SessionError::NotFound("workflow history".into()))
+    }
+    /// Reads validated canonical state, a child page and optional result fragment.
+    async fn read_workflow(&self, request: WorkflowRead) -> Result<WorkflowDetail> {
+        let _ = request;
+        Err(SessionError::NotFound("workflow details".into()))
+    }
+    /// Requests durable cancellation, independent of model Tool authority.
+    async fn cancel_workflow(
+        &self,
+        run: &rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        let _ = run;
+        Err(SessionError::NotFound("workflow cancellation".into()))
+    }
     /// Captures one atomic durable inspection of this Session and subtree.
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection>;
     /// Lists this root Session's live pending human questions.
@@ -603,6 +627,21 @@ impl rsi_meta_contract::LocalContract for SessionContract {
 /// Closed Session application failure taxonomy shared by all adapters.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    /// Runtime is unavailable before building the opt-in Workflow generation.
+    #[error(
+        "Workflow runtime is {0:?}; configure and restart its Host, or explicitly create a standard Session"
+    )]
+    WorkflowUnavailable(WorkflowRuntimeKind),
+    /// Cancellation may have taken effect; read this exact run before retrying.
+    #[error(
+        "Workflow {run} in Session {session} has an unknown cancellation outcome; read its state"
+    )]
+    WorkflowOutcomeUnknown {
+        /// Exact Session.
+        session: rsi_agent_session_protocol::SessionId,
+        /// Exact run.
+        run: rsi_agent_session_protocol::ProgramRunId,
+    },
     /// Bounded live terminal failure, including explicit unsupported platform/policy.
     #[error(transparent)]
     Terminal(#[from] terminal::PtyError),

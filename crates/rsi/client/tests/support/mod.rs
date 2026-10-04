@@ -58,6 +58,8 @@ pub struct Handle {
     pub source_reads: source_reads::Scenario,
     pub projections: projections::Scenario,
     pub id: SessionId,
+    pub inspections: AtomicUsize,
+    pub workflow_requests: Mutex<Vec<rsi_session_protocol::WorkflowList>>,
     pub submissions: Mutex<Vec<SubmitInput>>,
     pub release: Semaphore,
     pub active_mutations: Arc<AtomicUsize>,
@@ -73,6 +75,8 @@ impl Handle {
             source_reads: source_reads::Scenario::default(),
             projections: projections::Scenario::default(),
             id: SessionId::new(id).unwrap(),
+            inspections: AtomicUsize::new(0),
+            workflow_requests: Mutex::new(Vec::new()),
             submissions: Mutex::new(Vec::new()),
             release: Semaphore::new(0),
             active_mutations: Arc::default(),
@@ -221,9 +225,25 @@ impl SessionHandle for Handle {
             "fixture metrics".into(),
         ))
     }
+    async fn list_workflows(
+        &self,
+        request: rsi_session_protocol::WorkflowList,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::WorkflowPage> {
+        let seed_control_seq = request
+            .cursor
+            .as_ref()
+            .map_or(42, |cursor| cursor.seed_control_seq);
+        self.workflow_requests.lock().unwrap().push(request);
+        Ok(rsi_session_protocol::WorkflowPage {
+            seed_control_seq,
+            runs: vec![],
+            next: None,
+        })
+    }
     async fn inspect(
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        self.inspections.fetch_add(1, Ordering::SeqCst);
         missing()
     }
     async fn pending_questions(
@@ -703,4 +723,41 @@ pub async fn acknowledged_cursor(execution: Execution) {
     );
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(handle.active_streams.load(Ordering::SeqCst), 0);
+}
+
+pub async fn latest_workflows_need_no_inspection(execution: Execution) {
+    let runtime = Runtime::with_execution(rsi_meta::RuntimeLimits::default(), execution).unwrap();
+    let handle = Handle::new("workflow-history", false);
+    install_service(&runtime, vec![handle.clone()]).await;
+    let context = runtime.root();
+    let controller_fiber = controller(&context, &handle, Sink::new(false), None).await;
+    let controller = context.lookup_local::<SessionControllerContract>().unwrap();
+    let page = controller.list_workflows(None).await.unwrap();
+    assert!(page.runs.is_empty());
+    assert_eq!(page.seed_control_seq, 42);
+    assert_eq!(handle.workflow_requests.lock().unwrap().len(), 1);
+    assert!(handle.workflow_requests.lock().unwrap()[0].cursor.is_none());
+    controller
+        .list_workflows(Some(rsi_session_protocol::WorkflowCursor {
+            seed_control_seq: 42,
+            before_accepted_control_seq: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.workflow_requests.lock().unwrap()[1]
+            .cursor
+            .as_ref()
+            .unwrap()
+            .seed_control_seq,
+        42
+    );
+    assert_eq!(
+        handle.inspections.load(Ordering::SeqCst),
+        0,
+        "latest history must use its own server seed instead of a full tree inspection"
+    );
+    drop(controller);
+    assert!(controller_fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }

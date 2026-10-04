@@ -10,11 +10,52 @@ use std::sync::Arc;
 pub(crate) fn operations(available: &[OperationSpec]) -> Result<Vec<OperationSpec>> {
     Operation::ALL
         .into_iter()
-        .filter(|operation| {
-            !matches!(
-                operation,
-                Operation::Create | Operation::Recent | Operation::ReadHeader
-            )
+        .filter(|operation| match operation {
+            Operation::Create
+            | Operation::Recent
+            | Operation::ReadHeader
+            | Operation::WorkflowReadiness
+            | Operation::ListWorkflows
+            | Operation::ReadWorkflow
+            | Operation::CancelWorkflow => false,
+            Operation::Export
+            | Operation::Terminal
+            | Operation::TerminalOutput
+            | Operation::TerminalInput
+            | Operation::Attach
+            | Operation::Submit
+            | Operation::Commands
+            | Operation::ExecuteCommand
+            | Operation::CommandStatus
+            | Operation::DraftSnapshot
+            | Operation::SelectPreset
+            | Operation::Image
+            | Operation::MutateQueue
+            | Operation::QueueMutationStatus
+            | Operation::MessageStatus
+            | Operation::ReadMessage
+            | Operation::Cancel
+            | Operation::History
+            | Operation::Observe
+            | Operation::Interactions
+            | Operation::Projections
+            | Operation::Resource
+            | Operation::CaptureReference
+            | Operation::PreviewReference
+            | Operation::ReadReference
+            | Operation::GoalControl
+            | Operation::GoalStatus
+            | Operation::GoalObserve
+            | Operation::Jobs
+            | Operation::PeekJob
+            | Operation::Inspect
+            | Operation::Metrics
+            | Operation::TreeMetrics
+            | Operation::Evidence
+            | Operation::Questions
+            | Operation::AnswerQuestion
+            | Operation::Approvals
+            | Operation::AnswerApproval => true,
         })
         .map(Operation::spec)
         .map(|operation| {
@@ -160,3 +201,25 @@ fn invalid() -> ApiError {
 #[cfg(test)]
 #[path = "target_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    #[test]
+    fn scoped_plugins_do_not_implicitly_receive_workflow_operations() {
+        let available = Operation::ALL
+            .into_iter()
+            .map(Operation::spec)
+            .collect::<Vec<_>>();
+        let narrowed = operations(&available).unwrap();
+        for op in [
+            Operation::WorkflowReadiness,
+            Operation::ListWorkflows,
+            Operation::ReadWorkflow,
+            Operation::CancelWorkflow,
+        ] {
+            assert!(!narrowed.contains(&op.spec()));
+        }
+        assert!(narrowed.contains(&Operation::Submit.spec()));
+    }
+}

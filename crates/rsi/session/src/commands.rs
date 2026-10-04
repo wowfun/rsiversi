@@ -30,6 +30,60 @@ struct Pending {
 }
 
 impl DraftCommands {
+    pub(super) async fn cancel_workflow(
+        self: &Arc<Self>,
+        handle: &LocalSessionHandle,
+        run: rsi_agent_session_protocol::ProgramRunId,
+    ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
+        let activity = handle.begin_activity()?;
+        let admission = handle.admit()?;
+        let session_id = handle.session_id().clone();
+        let run_id = run.clone();
+        let turns = handle.turns.clone();
+        let session = session_id.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let _lock = self
+                .pending
+                .lock()
+                .expect("Session mutation admission poisoned");
+            if self.stopped.is_cancelled() {
+                return Err(SessionError::ShuttingDown);
+            }
+            if self.tasks.len() >= 64 {
+                return Err(SessionError::Capacity);
+            }
+            let stopping = self.stopped.child_token();
+            self.tasks.spawn(async move {
+                let _activity = activity;
+                let _admission = admission;
+                if stopping.is_cancelled() {
+                    let _ = sender.send(Err(SessionError::ShuttingDown));
+                    return;
+                }
+                let call =
+                    std::panic::AssertUnwindSafe(turns.cancel_session_program(&session, &run))
+                        .catch_unwind();
+                let result = call
+                    .await
+                    .unwrap_or(Err(TurnError::ExecutionOutcomeUnknown))
+                    .map_err(|error| match error {
+                        TurnError::Capacity => SessionError::Capacity,
+                        TurnError::ExecutionOutcomeUnknown => {
+                            SessionError::WorkflowOutcomeUnknown { session, run }
+                        }
+                        other => map_turn_error(other),
+                    });
+                let _ = sender.send(result);
+            });
+        }
+        receiver
+            .await
+            .map_err(|_| SessionError::WorkflowOutcomeUnknown {
+                session: session_id,
+                run: run_id,
+            })?
+    }
     pub(super) async fn select_preset(
         self: &Arc<Self>,
         handle: LocalSessionHandle,
@@ -75,7 +129,7 @@ impl DraftCommands {
             tasks: TaskTracker::new(),
         })
     }
-    pub(super) async fn stop(&self) {
+    pub(super) async fn stop(&self) -> Result<()> {
         {
             let _admission = self
                 .pending
@@ -84,7 +138,13 @@ impl DraftCommands {
             self.stopped.cancel();
             self.tasks.close();
         }
-        self.tasks.wait().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.tasks.wait())
+            .await
+            .map_err(|_| {
+                SessionError::Backend(
+                    "Session mutation cleanup exceeded 30 seconds; work remains owned".into(),
+                )
+            })
     }
     async fn execute(
         self: &Arc<Self>,
@@ -182,6 +242,7 @@ impl LocalSessionHandle {
     }
 
     async fn run_preset_selection(&self, request: SelectDraftPreset) -> Result<SessionDraftView> {
+        super::workflow::require_preset(self.workflow.as_deref(), &request.preset_id)?;
         self.reconcile_fresh_read().await?;
         let preparation = {
             let state = self.state.lock().await;

@@ -79,6 +79,15 @@ precommit transition. Cancellation reuses tree snapshots but rechecks membership
 after source mutation drain; a one-time membership snapshot could miss a child
 admitted concurrently with cancellation.
 
+The product exposes a separate trusted Session workbench seam. Local callers and
+unrevoked authenticated Devices with location access can read and cancel a run
+bound to their exact Session/Header. This is deployment-wide Session authority;
+there is no reliable human-versus-plugin identity inside a Device credential.
+Session-scoped plugins receive an explicit operation allowlist and do not
+implicitly acquire the new Workflow controls. Retaining a mutation's execution
+admission in a tracked Session task prevents a dropped presentation waiter from
+releasing authority while its durable commit remains owned by Kernel.
+
 Kernel remains the sole lifecycle fold. Clients consume bounded snapshots and
 coalesced invalidations from the existing control observer, avoiding a second
 reducer and cold-reopen gaps. Acceptance ordering requires an indexed Store column
