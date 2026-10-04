@@ -29,6 +29,19 @@ failure affects notes only; product lint does not suppress unrelated tests.
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, lockfile consistency, and Windows `rsi-meta`.
+SSH native lifecycle, cache/execution, watchdog, source-reader and actual-SSH
+checks have independent steps after their shared toolchain, helper and native
+prerequisites. The native manager/namespace preflight does not require the helper
+artifact; helper failure cannot suppress that independent evidence.
+A failed check remains required but does not suppress unrelated
+checks. Guarded prerequisites have unique step identities checked alongside their
+references, so a renamed ID cannot silently suppress dependent verification.
+The native cache target includes its internal publication-race tests, explicitly
+opts into native filesystem requirements, and removes the job's enlarged stack
+setting. Checkout, toolchain and cache actions have their own SSH deadlines;
+the job budget covers these along with the verification steps.
+Base independently compiles and exercises UDS test-support contracts on Linux;
+its ignored timing report remains opt-in.
 Conformance remains the only command that enumerates the foundation test
 surface and runs on Linux, macOS, and Windows. Product lint and tests run in
 their product jobs; the Base job owns `rsi-host` and every Base service family,
@@ -138,7 +151,11 @@ weakening the scenarios or adding another packaging mechanism.
 
 Verification prerequisites are the actual toolchain and build steps. A failed
 cache action remains a job failure but does not suppress otherwise runnable
-checks. Workspace lock discovery includes nonignored new files before staging,
+checks. SSH lint, package tests and native consumers remain independent once
+their prerequisites succeed. Setup, compilation and native commands each have
+explicit deadlines; the default-stack cache check precedes slower native probes
+so those probes do not delay its first failure evidence.
+Workspace lock discovery includes nonignored new files before staging,
 so staging alone does not change the set of checked workspaces.
 
 ## Consequences
@@ -178,3 +195,12 @@ completed its npm setup.
 The Web terminal fixture has its own step deadline, outcome and evidence archive.
 It reuses the main product build when present, and can still run after later main
 fixture failures. Its own namespace-policy preflight is restored at step exit.
+
+Workflow browser acceptance has its own prerequisite-conditioned outcome and
+retains an explicit Dock scope. The full fixture keeps its inline navigation
+assertions available separately: a passing Dock run cannot stand in for that
+boundary. This gives canonical history, Node execution and cleanup an automated
+gate while the inline retirement race remains unresolved, without weakening
+snapshot authority or converting a failing assertion to an expected failure.
+Fixture unit discovery includes the Workflow configuration helpers. Desktop
+acceptance supplies Node explicitly and preserves its separate Workflow report.

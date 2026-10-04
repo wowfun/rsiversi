@@ -136,7 +136,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 191
+    timeout-minutes: 201
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -296,6 +296,29 @@ jobs:
           git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness "$RUNNER_TEMP/rsi-workbench-reference"
           git -C "$RUNNER_TEMP/rsi-workbench-reference" checkout --detach 4878cdabd87d4041bdaff61d04c966883b9fd07a
           RSI_DSH_REFERENCE="$RUNNER_TEMP/rsi-workbench-reference" node fixtures/rsi/workbench-reference/verify.mjs --report "$RUNNER_TEMP/rsi-web-evidence/workbench-reference"
+
+      - name: Exercise canonical Workflow Dock and Node cleanup
+        id: web_workflow
+        if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
+        timeout-minutes: 10
+        working-directory: fixtures/rsi/web-product
+        run: |
+          declare -A previous_policy
+          restore_policy() {
+            for key in "${!previous_policy[@]}"; do
+              sudo sysctl -w "$key=${previous_policy[$key]}"
+            done
+          }
+          trap restore_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
+          export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
+          RSI_TEST_NODE="$(command -v node)" RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workflow-dock" node workflow-verify.mjs --dock-only
 
       - name: Preserve failed Web product log before integration probes
         if: ${{ !cancelled() && steps.web_product.outcome == 'failure' }}
@@ -463,7 +486,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 85
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -517,6 +540,13 @@ jobs:
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: cargo test --locked -p rsi-tools-protocol --all-targets --no-fail-fast --features serde_json/arbitrary_precision
         timeout-minutes: 10
+
+      - name: Check UDS test-support contracts
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
+        run: |
+          cargo clippy --locked -p rsi-api-uds-client --features test-support --all-targets -- -D warnings
+          cargo test --locked -p rsi-api-uds-client --features test-support --test client
+        timeout-minutes: 5
 
   rsi-ai:
     strategy:
@@ -876,13 +906,16 @@ jobs:
 
   rsi-ssh-linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 170
     env:
       CARGO_BUILD_JOBS: 2
       RUST_MIN_STACK: 268435456
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 5
       - name: Install isolated Linux SSH prerequisites
+        timeout-minutes: 10
+        id: ssh_prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes openssh-server bubblewrap musl-tools libdbus-1-dev pkg-config
@@ -896,22 +929,36 @@ jobs:
           echo "RSI_TEST_SSH_FIXTURES=$HOME/rsi-ssh-ci" >> "$GITHUB_ENV"
           echo "RSI_TEST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
           echo "RSI_TEST_HELPER_BIN=$GITHUB_WORKSPACE/target/x86_64-unknown-linux-musl/release/rsi-ssh-helper" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+      - id: ssh_setup
+        timeout-minutes: 10
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.97.0
           targets: x86_64-unknown-linux-musl
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' }}
         with:
           workspaces: . -> target
           key: ssh-linux
       - name: Lint Execution and SSH packages
+        timeout-minutes: 20
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' }}
         run: cargo clippy --locked -p 'rsi-execution*' -p 'rsi-ssh*' --all-targets -- -D warnings
       - name: Test Execution and SSH packages
+        timeout-minutes: 20
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' }}
         run: cargo test --locked -p 'rsi-execution*' -p 'rsi-ssh*' --all-targets
       - name: Build receipt-compatible static helper
+        timeout-minutes: 20
+        id: ssh_helper_build
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' }}
         run: cargo build --locked -p rsi-ssh-helper-app --release --target x86_64-unknown-linux-musl
       - name: Verify native manager and namespace support
+        id: ssh_native
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_prerequisites.outcome == 'success' }}
         run: |
           setting=kernel.apparmor_restrict_unprivileged_userns
           previous=$(sysctl -n "$setting")
@@ -922,23 +969,62 @@ jobs:
           systemd-run --user --pipe --wait --collect --expand-environment=no /usr/bin/true
           bwrap --unshare-user --unshare-pid --ro-bind / / /usr/bin/true
       - name: Verify generated OpenSSH policy and trust
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
           setting=kernel.apparmor_restrict_unprivileged_userns
           previous=$(sysctl -n "$setting")
           trap 'sudo sysctl -w "$setting=$previous"' EXIT
           sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --nocapture
-      - name: Verify target lifecycle and cgroup cleanup
+      - name: Verify SSH cache on the default stack
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --nocapture
+      - name: Verify target native lifecycle
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
           setting=kernel.apparmor_restrict_unprivileged_userns
           previous=$(sysctl -n "$setting")
           trap 'sudo sysctl -w "$setting=$previous"' EXIT
           sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-ssh-helper-app --test native -- --ignored --nocapture
-          cargo test --locked -p rsi-ssh-helper --test cache --test execution -- --ignored --nocapture
+      - name: Verify cache and execution
+        timeout-minutes: 10
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          cargo test --locked -p rsi-ssh-helper --test execution -- --ignored --nocapture
+      - name: Verify watchdog and cgroup cleanup
+        timeout-minutes: 3
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-ssh-helper --test lifecycle native_watchdog_and_cgroup_cleanup -- --ignored --exact --nocapture
+      - name: Verify source-reader sandbox
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-sandbox-local --test local native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access -- --ignored --exact
       - name: Verify actual SSH execution, context, LSP, MCP and saturated control ACKs
+        timeout-minutes: 30
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
           setting=kernel.apparmor_restrict_unprivileged_userns
           previous=$(sysctl -n "$setting")
@@ -1042,6 +1128,7 @@ jobs:
         timeout-minutes: 5
         run: |
           dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-evidence" --daemon --window-close --restart --save-failure --refresh-during-click --tasks --foreign-bundle "$RUNNER_TEMP/rsi-desktop-foreign/bundle" --file-previews --export
+          RSI_TEST_NODE="$(command -v node)" dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-workflow-evidence" --workflows
           dbus-run-session -- xvfb-run -a /usr/bin/python3 fixtures/rsi/desktop-product/csp_engine.py --responses "$RUNNER_TEMP/rsi-desktop-evidence/preview-responses.json" --report "$RUNNER_TEMP/rsi-desktop-evidence/csp-engine.json"
       - name: Exercise WebKitGTK external, Profile, history and language surfaces
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}

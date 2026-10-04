@@ -1144,6 +1144,61 @@ fn ci_baseline_script_fetches_exact_nonancestor_commits_and_rejects_missing_inpu
 }
 
 #[test]
+fn ci_guard_step_references_resolve_to_unique_steps() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    assert!(ci_guard_step_errors(&workflow).is_empty());
+    for (job, id) in [
+        ("rsi-ssh-linux", "ssh_setup"),
+        ("rsi-ssh-linux", "ssh_prerequisites"),
+        ("rsi-ssh-linux", "ssh_helper_build"),
+        ("rsi-ssh-linux", "ssh_native"),
+        ("rsi-base", "base_setup"),
+    ] {
+        for replacement in [None, Some("renamed")] {
+            let mut broken = workflow.clone();
+            let steps = broken["jobs"][job]["steps"].as_sequence_mut().unwrap();
+            let step = steps
+                .iter_mut()
+                .find(|step| step["id"].as_str() == Some(id))
+                .unwrap();
+            step["id"] = replacement.map_or(yaml_serde::Value::Null, Into::into);
+            assert!(!ci_guard_step_errors(&broken).is_empty(), "{job}: {id}");
+        }
+    }
+    let mut duplicate = workflow.clone();
+    let steps = duplicate["jobs"]["rsi-base"]["steps"]
+        .as_sequence_mut()
+        .unwrap();
+    steps[0]["id"] = "base_setup".into();
+    assert!(!ci_guard_step_errors(&duplicate).is_empty());
+}
+
+fn ci_guard_step_errors(workflow: &yaml_serde::Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (job, value) in workflow["jobs"].as_mapping().unwrap() {
+        let Some(steps) = value["steps"].as_sequence() else {
+            continue;
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        for id in steps.iter().filter_map(|step| step["id"].as_str()) {
+            if !ids.insert(id) {
+                errors.push(format!("{job:?}: duplicate step {id}"));
+            }
+        }
+        for condition in steps.iter().filter_map(|step| step["if"].as_str()) {
+            for reference in condition.split("steps.").skip(1) {
+                let id = reference.split('.').next().unwrap();
+                if !ids.contains(id) {
+                    errors.push(format!("{job:?}: unresolved guard step {id}"));
+                }
+            }
+        }
+    }
+    errors
+}
+
+#[test]
 fn native_verification_depends_on_toolchain_not_cache_success() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
@@ -1186,4 +1241,161 @@ fn native_verification_depends_on_toolchain_not_cache_success() {
             }
         }
     }
+}
+
+#[test]
+fn ssh_native_prerequisites_have_owned_ids_guards_and_timeouts() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-ssh-linux"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for (name, id) in [
+        (
+            "Install isolated Linux SSH prerequisites",
+            "ssh_prerequisites",
+        ),
+        ("Build receipt-compatible static helper", "ssh_helper_build"),
+        ("Verify native manager and namespace support", "ssh_native"),
+    ] {
+        let step = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap();
+        assert_eq!(step["id"].as_str(), Some(id));
+    }
+    let setup = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("ssh_setup"))
+        .unwrap();
+    assert!(
+        setup["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("dtolnay/rust-toolchain@")
+    );
+    assert_eq!(setup["with"]["toolchain"].as_str(), Some("1.97.0"));
+    for step in steps.iter().take(4) {
+        assert!(step["timeout-minutes"].as_u64().is_some());
+    }
+    let native = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("ssh_native"))
+        .unwrap();
+    assert!(native["timeout-minutes"].as_u64().is_some());
+    assert!(native["continue-on-error"].is_null());
+    let condition = native["if"].as_str().unwrap();
+    assert!(condition.contains("!cancelled()"));
+    assert!(!condition.contains("ssh_helper_build"));
+    for prerequisite in ["ssh_setup", "ssh_prerequisites"] {
+        assert!(condition.contains(&format!("steps.{prerequisite}.outcome == 'success'")));
+    }
+}
+
+#[test]
+fn ssh_native_checks_report_independent_failures_after_required_setup() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let job = &workflow["jobs"]["rsi-ssh-linux"];
+    let steps = job["steps"].as_sequence().unwrap();
+    for name in [
+        "Install isolated Linux SSH prerequisites",
+        "Lint Execution and SSH packages",
+        "Test Execution and SSH packages",
+        "Build receipt-compatible static helper",
+    ] {
+        let step = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap();
+        assert!(
+            step["timeout-minutes"].as_u64().is_some(),
+            "unbounded SSH prerequisite: {name}"
+        );
+    }
+    let position = |name| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(
+        position("Verify SSH cache on the default stack")
+            < position("Verify target native lifecycle")
+    );
+    let cache = steps[position("Verify SSH cache on the default stack")]["run"]
+        .as_str()
+        .unwrap();
+    assert!(cache.contains("env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored"));
+    assert!(
+        !steps[position("Verify cache and execution")]["run"]
+            .as_str()
+            .unwrap()
+            .contains("--test cache")
+    );
+    for name in [
+        "Verify generated OpenSSH policy and trust",
+        "Verify target native lifecycle",
+        "Verify cache and execution",
+        "Verify watchdog and cgroup cleanup",
+        "Verify source-reader sandbox",
+        "Verify actual SSH execution, context, LSP, MCP and saturated control ACKs",
+        "Verify SSH cache on the default stack",
+    ] {
+        let step = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap();
+        let condition = step["if"].as_str().unwrap();
+        assert!(condition.contains("!cancelled()"));
+        for prerequisite in ["ssh_setup", "ssh_helper_build", "ssh_native"] {
+            assert!(condition.contains(&format!("steps.{prerequisite}.outcome == 'success'")));
+        }
+        assert!(step["continue-on-error"].is_null());
+        assert!(step["timeout-minutes"].as_u64().is_some());
+        assert_eq!(
+            step["run"].as_str().unwrap().matches("cargo test").count(),
+            1
+        );
+    }
+    assert!(job["continue-on-error"].is_null());
+}
+
+#[test]
+fn uds_test_support_is_checked_independently_of_base_test_outcomes() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let setup = workflow["jobs"]["rsi-base"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("base_setup"))
+        .unwrap();
+    assert!(
+        setup["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("dtolnay/rust-toolchain@")
+    );
+    assert_eq!(setup["with"]["toolchain"].as_str(), Some("1.97.0"));
+    let step = workflow["jobs"]["rsi-base"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Check UDS test-support contracts"))
+        .unwrap();
+    let condition = step["if"].as_str().unwrap();
+    assert!(condition.contains("!cancelled()"));
+    assert!(condition.contains("steps.base_setup.outcome == 'success'"));
+    assert!(condition.contains("runner.os == 'Linux'"));
+    let run = step["run"].as_str().unwrap();
+    assert!(run.contains(
+        "cargo clippy --locked -p rsi-api-uds-client --features test-support --all-targets"
+    ));
+    assert!(run.contains(
+        "cargo test --locked -p rsi-api-uds-client --features test-support --test client"
+    ));
+    assert!(!run.contains("--ignored"));
 }
