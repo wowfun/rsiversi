@@ -40,6 +40,7 @@ impl PluginFactory for SessionFactory {
             .requiring_local::<SessionProjectionsContract>()
             .requiring_local::<rsi_agent_turn_protocol::SessionResourcesContract>()
             .requiring_local::<SessionStoreContract>()
+            .requiring_local::<rsi_agent_context::ContextBudgetContract>()
             .requiring_local::<rsi_agent_references::ReferencesContract>()
             .requiring_local::<AgentCompositionContract>()
             .requiring_local::<WorkspaceRegistryContract>()
@@ -58,6 +59,9 @@ impl PluginFactory for SessionFactory {
             plan.local::<SessionProjectionsContract>()?,
             plan.local::<TurnServiceContract>()?,
             plan.local::<SessionStoreContract>()?,
+            plan.local::<rsi_agent_context::ContextBudgetContract>()?
+                .as_ref()
+                .clone(),
             plan.local::<AgentCompositionContract>()?,
             plan.local::<WorkspaceRegistryContract>()?,
             plan.local::<AgentSettingsContract>()?,

@@ -12,15 +12,7 @@ impl AgentKernel {
         let progress = state.progress.clone();
         let result_ref = state.result.clone();
         let result = if let Some(binding) = &result_ref {
-            let bytes = self
-                .inner
-                .store
-                .read_cas(&rsi_agent_store_protocol::CasObjectRef {
-                    sha256: binding.sha256.clone(),
-                    byte_len: binding.bytes,
-                })
-                .await
-                .map_err(turn_store_error)?;
+            let bytes = self.read_program_blob(binding).await?;
             if bytes.len() as u64 != binding.bytes
                 || format!("{:x}", Sha256::digest(&bytes)) != binding.sha256
             {

@@ -117,6 +117,9 @@ fn language_stream_assembles_interleaved_reasoning_text_and_tool_arguments() {
 
     for event in events {
         assembler.push(&event).expect("valid event");
+        assert!(
+            assembler.retained_encoded_weight() >= serde_json::to_vec(&assembler).unwrap().len()
+        );
     }
 
     assert_eq!(
@@ -274,6 +277,9 @@ fn provider_failure_is_terminal_and_exposes_validated_partial_output() {
         },
     ] {
         assembler.push(&event).expect("valid event");
+        assert!(
+            assembler.retained_encoded_weight() >= serde_json::to_vec(&assembler).unwrap().len()
+        );
     }
 
     let LanguageAssemblyError::Provider { error, partial } =
@@ -316,4 +322,134 @@ fn assembler_after_failure_error() -> rsi_ai_protocol::StreamError {
             replay: None,
         })
         .expect_err("second terminal")
+}
+
+#[test]
+#[ignore = "report-only streamed assembler accounting cost; no timing threshold"]
+fn report_streamed_assembler_accounting() {
+    for count in [512, 2048, 8192] {
+        let mut assembler = LanguageAssembler::new();
+        assembler
+            .push(&LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            })
+            .unwrap();
+        let event = LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("x".repeat(128)),
+        };
+        let started = std::time::Instant::now();
+        for _ in 0..count {
+            assembler.push(&event).unwrap();
+            std::hint::black_box(assembler.retained_encoded_weight());
+        }
+        eprintln!(
+            "assembler events={count} retained_bytes={} elapsed_us={}",
+            count * 128,
+            started.elapsed().as_micros()
+        );
+    }
+}
+
+#[test]
+fn assembler_weight_covers_escaped_strings_metadata_and_replay() {
+    let mut assembler = LanguageAssembler::new();
+    for event in [
+        LanguageEvent::ContentStarted {
+            index: 0,
+            content: ContentStart::Text,
+        },
+        LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("\u{0000}\n\"\\中文".repeat(1024)),
+        },
+        LanguageEvent::Warning {
+            warning: Warning {
+                code: "warning".into(),
+                message: "\n\"\\".repeat(256),
+            },
+        },
+        LanguageEvent::Source {
+            source: Source {
+                id: "source".into(),
+                title: Some("中文".repeat(256)),
+                url: None,
+            },
+        },
+        LanguageEvent::Usage { usage: usage() },
+        LanguageEvent::ContentFinished { index: 0 },
+        LanguageEvent::Finished {
+            reason: FinishReason::Stop,
+            replay: Some(
+                ProviderExtension::new(
+                    "fixture.replay",
+                    0,
+                    serde_json::json!({"data": "\"\\".repeat(1024)}),
+                )
+                .unwrap(),
+            ),
+        },
+    ] {
+        assembler.push(&event).unwrap();
+        assert!(
+            assembler.retained_encoded_weight() >= serde_json::to_vec(&assembler).unwrap().len()
+        );
+    }
+    assert!(assembler.finish().is_ok());
+}
+
+#[test]
+fn assembler_weight_covers_maximum_metadata_arrays_and_counter_widths() {
+    let mut assembler = LanguageAssembler::new();
+    for index in 0..rsi_ai_protocol::MAX_SOURCES {
+        assembler
+            .push(&LanguageEvent::Source {
+                source: Source {
+                    id: format!("source-{index}"),
+                    title: None,
+                    url: None,
+                },
+            })
+            .unwrap();
+    }
+    for _ in 0..rsi_ai_protocol::MAX_WARNINGS {
+        assembler
+            .push(&LanguageEvent::Warning {
+                warning: Warning {
+                    code: "warning".into(),
+                    message: "warning".into(),
+                },
+            })
+            .unwrap();
+    }
+    assembler
+        .push(&LanguageEvent::Usage {
+            usage: TokenUsage::new(u64::MAX, 0, Some(u64::MAX), None, Some(0)).unwrap(),
+        })
+        .unwrap();
+    assert!(assembler.retained_encoded_weight() >= serde_json::to_vec(&assembler).unwrap().len());
+}
+
+#[test]
+fn maximum_escaped_provider_failure_is_included_in_retained_weight() {
+    let mut assembler = LanguageAssembler::new();
+    let summary = "\"".repeat(rsi_ai_protocol::MAX_ERROR_SUMMARY_BYTES);
+    assembler
+        .push(&LanguageEvent::Failed {
+            error: AiError::new(
+                ErrorKind::Server,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                &summary,
+            )
+            .unwrap(),
+            replay: None,
+        })
+        .unwrap();
+    assert!(assembler.retained_encoded_weight() >= serde_json::to_vec(&assembler).unwrap().len());
+    let LanguageAssemblyError::Provider { error, .. } = assembler.finish().unwrap_err() else {
+        panic!("provider failure expected")
+    };
+    assert_eq!(error.safe_summary(), summary);
 }

@@ -139,3 +139,17 @@ that allowance without revalidating the frozen controls. Complete requests remai
 Consuming a request can transfer its validated messages without cloning them.
 Reassembling changed messages still crosses the complete-request constructor and
 its aggregate relationship and byte checks.
+
+A Language request may carry an opaque in-process retention owner. This owner is
+excluded from serialization and semantic equality and survives provider prepare
+until the prepared request is dropped. Retained requests cannot use unchecked
+mutating builders or consuming message extraction; callers construct a separately
+admitted request when copying or extending it.
+Retentions accumulate in a flat shared collection. Clones retain their captured
+owners; attaching another owner preserves existing owners without building a
+recursive destruction chain.
+
+Validated request options and requests share immutable Tool definitions across
+clones and context planning. Constructor and wire decoding still establish their
+own request aggregate limits; composition catalog measurements admit allocation
+and do not replace Language request validation.

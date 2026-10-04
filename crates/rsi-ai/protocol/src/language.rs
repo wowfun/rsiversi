@@ -609,7 +609,7 @@ impl LanguageAssemblyError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 enum OpenContent {
     Text(String),
     Reasoning(String),
@@ -665,12 +665,18 @@ impl OpenContent {
 }
 
 /// Strict incremental assembler shared by direct SDK and durable consumers.
-#[derive(Debug, Default)]
+/// Serialization exposes diagnostic state, not a resumable checkpoint. Restore
+/// reconstructs an assembler only by applying validated events; it has no
+/// deserialization contract. Source/warning payloads include their full encoded
+/// objects in the incremental weight; their entry counts add array separators.
+#[derive(Debug, Default, Serialize)]
 pub struct LanguageAssembler {
     next_index: u32,
     open: BTreeMap<u32, OpenContent>,
     content: BTreeMap<u32, ContentBlock>,
     assembled_bytes: usize,
+    #[serde(skip)]
+    encoded_payload_bytes: usize,
     event_count: usize,
     usage: Option<TokenUsage>,
     replay: Option<ProviderExtension>,
@@ -681,6 +687,14 @@ pub struct LanguageAssembler {
 }
 
 impl LanguageAssembler {
+    /// Conservative encoded weight maintained at ingestion; accumulated strings
+    /// are never rescanned. Fixed overhead bounds field names, map keys and counters.
+    pub fn retained_encoded_weight(&self) -> usize {
+        1024 + self.encoded_payload_bytes
+            + (self.open.len() + self.content.len()) * 256
+            + self.sources.len()
+            + self.warnings.len()
+    }
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -688,6 +702,7 @@ impl LanguageAssembler {
             open: BTreeMap::new(),
             content: BTreeMap::new(),
             assembled_bytes: 0,
+            encoded_payload_bytes: 0,
             event_count: 0,
             usage: None,
             replay: None,
@@ -734,6 +749,7 @@ impl LanguageAssembler {
                     ContentStart::Reasoning => OpenContent::Reasoning(String::new()),
                     ContentStart::ToolCall { id, name, kind } => {
                         self.add_bytes(id.len().saturating_add(name.len()))?;
+                        self.count_encoded(&(id, name))?;
                         OpenContent::ToolCall {
                             id: id.clone(),
                             name: name.clone(),
@@ -754,6 +770,11 @@ impl LanguageAssembler {
                 })?;
                 let added = open.push(delta)?;
                 self.add_bytes(added)?;
+                match delta {
+                    ContentDelta::Text(value)
+                    | ContentDelta::Reasoning(value)
+                    | ContentDelta::ToolArguments(value) => self.count_encoded(value)?,
+                }
             }
             LanguageEvent::ContentFinished { index } => {
                 let open = self.open.remove(index).ok_or_else(|| {
@@ -778,6 +799,7 @@ impl LanguageAssembler {
                         .saturating_add(source.title.as_ref().map_or(0, String::len))
                         .saturating_add(source.url.as_ref().map_or(0, String::len)),
                 )?;
+                self.count_encoded(source)?;
                 self.sources.push(source.clone());
             }
             LanguageEvent::Warning { warning } => {
@@ -788,6 +810,7 @@ impl LanguageAssembler {
                     ));
                 }
                 self.add_bytes(warning.code.len().saturating_add(warning.message.len()))?;
+                self.count_encoded(warning)?;
                 self.warnings.push(warning.clone());
             }
             LanguageEvent::Usage { usage } => {
@@ -806,6 +829,7 @@ impl LanguageAssembler {
                     ));
                 }
                 self.finish_reason = Some(reason.clone());
+                self.count_encoded(replay)?;
                 self.replay.clone_from(replay);
             }
             LanguageEvent::Failed { error, replay } => {
@@ -813,6 +837,7 @@ impl LanguageAssembler {
                     self.content.insert(index, open.close());
                 }
                 self.failure = Some(error.clone());
+                self.count_encoded(&(replay, error))?;
                 self.replay.clone_from(replay);
             }
         }
@@ -863,6 +888,16 @@ impl LanguageAssembler {
             warnings: self.warnings,
             sources: self.sources,
         })
+    }
+
+    fn count_encoded<T: Serialize>(&mut self, value: &T) -> Result<(), StreamError> {
+        let bytes = validation::encoded_len(value)
+            .map_err(|error| StreamError::invalid("stream.encoding", error))?;
+        self.encoded_payload_bytes = self
+            .encoded_payload_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| StreamError::invalid("stream.encoding", "encoded weight overflow"))?;
+        Ok(())
     }
 
     fn add_bytes(&mut self, added: usize) -> Result<(), StreamError> {

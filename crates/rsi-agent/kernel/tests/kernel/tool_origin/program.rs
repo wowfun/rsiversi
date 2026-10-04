@@ -6,6 +6,32 @@ use rsi_tools_protocol::ToolProgramRole;
 struct ProgramTools;
 #[async_trait]
 impl ToolRuntime for ProgramTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        let definitions: Vec<ToolDefinition> = {
+            [
+                ("run_code", ToolProgramRole::Coordinator),
+                ("fixture_workflow", ToolProgramRole::Workflow),
+                ("run_workflow", ToolProgramRole::Unavailable),
+                ("fixture_control", ToolProgramRole::Unavailable),
+                ("file_read", ToolProgramRole::Callable),
+            ]
+            .into_iter()
+            .map(|(name, role)| {
+                ToolDefinition::new(name, "fixture", serde_json::json!({"type":"object"}))
+                    .unwrap()
+                    .with_program_role(role)
+            })
+            .collect()
+        };
+        for definition in definitions {
+            visitor(&definition);
+        }
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -25,22 +51,6 @@ impl ToolRuntime for ProgramTools {
         self.definitions()
             .into_iter()
             .find(|definition| definition.name() == name)
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        [
-            ("run_code", ToolProgramRole::Coordinator),
-            ("fixture_workflow", ToolProgramRole::Workflow),
-            ("run_workflow", ToolProgramRole::Unavailable),
-            ("fixture_control", ToolProgramRole::Unavailable),
-            ("file_read", ToolProgramRole::Callable),
-        ]
-        .into_iter()
-        .map(|(name, role)| {
-            ToolDefinition::new(name, "fixture", serde_json::json!({"type":"object"}))
-                .unwrap()
-                .with_program_role(role)
-        })
-        .collect()
     }
     fn prepare(
         &self,
@@ -315,14 +325,19 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
         .unwrap()
         .facts;
     let limits = rsi_agent_context::ContextLimits::default();
-    let mut fold =
-        rsi_agent_context::ContextFold::with_limits(claim.header().clone(), limits).unwrap();
+    let mut fold = rsi_agent_context::ContextFold::with_limits(
+        claim.header().clone(),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&prefix).unwrap();
     let checkpoint = fold.checkpoint_bytes().unwrap();
     let mut restored = rsi_agent_context::ContextFold::from_checkpoint(
         claim.header().clone(),
         limits,
         &checkpoint,
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     flush_bodies(
@@ -378,7 +393,7 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
         .facts;
     fold.apply(&suffix).unwrap();
     restored.apply(&suffix).unwrap();
-    let visible = serde_json::to_string(&fold.project(limits).unwrap().messages).unwrap();
+    let visible = serde_json::to_string(fold.project(limits).unwrap().messages()).unwrap();
     assert!(visible.contains("CURATED_FINAL"));
     assert!(!visible.contains("INTERNAL_RESULT"));
     assert!(!visible.contains("file_read"));

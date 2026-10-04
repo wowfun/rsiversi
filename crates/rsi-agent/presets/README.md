@@ -91,8 +91,8 @@ transport, and cross-process authorization belong to their owning modules.
 Generation compilation and resolution remain authoritative because roster
 health is only a point-in-time discovery result.
 
-The Session Profile fragment binds one absolute Store root, then starts Kernel
-and one executor generation. The fragment serializes `maximum_active_turns` and
+The Session Profile fragment starts the shared Context budget, binds one absolute
+Store root, then starts references, Kernel and one executor generation. The fragment serializes `maximum_active_turns` and
 defaults it to one for deterministic embedding; the executor factory is the
 sole owner of its accepted bound. The standard product explicitly composes
 four.

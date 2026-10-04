@@ -190,6 +190,7 @@ impl Fixture {
             Arc::new(kernel.clone()),
             Arc::new(kernel.clone()),
             store.clone(),
+            rsi_agent_context::ContextBudget::default(),
             composition.clone(),
             Arc::new(AvailableWorkspace::at(directory.path())),
             Arc::new(TextSettings),

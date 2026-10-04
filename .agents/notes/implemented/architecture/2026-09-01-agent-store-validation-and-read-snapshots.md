@@ -29,7 +29,10 @@ Store remains recoverable without mutating a rejected old main database or WAL.
 First access to an existing
 session validates its bounded Header, watermark, digest shape, Fact/turn
 relationships, and canonical Agent-control projections in one deferred read
-transaction. One async single-flight gate
+transaction. Shared control replay compares its final digest with the stored
+append-chain seed. Checking that value only during offline audit would let cold
+online access authorize a damaged seed despite correctly replaying the controls.
+One async single-flight gate
 and a 256-entry recency cache reuse that proof; new sessions enter the cache
 only after their creation transaction commits.
 
@@ -72,7 +75,7 @@ at open was rejected because dormant history would remain an availability gate.
 Activation lineage is derived from immutable Headers at control admission and
 offline audit. A matching control digest and activation index cannot substitute
 for that independent relationship check. First access also checks the shape of
-the control-prefix digest and the active index's parent against the Header.
+the control-prefix digest, its canonical value, and the active index's parent against the Header.
 
 ## Consequences
 

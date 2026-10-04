@@ -91,23 +91,11 @@ pub(super) fn read_cas_file_bounded(
 ) -> Result<Vec<u8>> {
     validate_sha256("CAS identity", sha256)?;
     let path = cas_dir.join(sha256);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            StoreError::NotFound(sha256.into())
-        } else {
-            io_error(error)
-        }
-    })?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(StoreError::Corrupt(
-            "CAS entry is not a regular file".into(),
-        ));
-    }
     let bytes = read_regular_file_bounded(&path, maximum_bytes).map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidData {
             StoreError::Corrupt(error.to_string())
         } else {
-            io_error(error)
+            cas_read_error(sha256, error)
         }
     })?;
     validate_digest(sha256, &bytes)?;
@@ -118,15 +106,8 @@ pub(super) fn read_regular_file_bounded(
     path: &Path,
     maximum_bytes: usize,
 ) -> std::io::Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "CAS entry is not a regular file",
-        ));
-    }
-    let file = File::open(path)?;
-    if file.metadata()?.len() > maximum_bytes as u64 {
+    let (file, metadata) = open_cas_file(path)?;
+    if metadata.len() > maximum_bytes as u64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("CAS entry exceeds {maximum_bytes} bytes"),
@@ -144,40 +125,29 @@ pub(super) fn read_regular_file_bounded(
     Ok(bytes)
 }
 
-pub(super) type ContextCheckpointProjection = (
-    String,
-    i64,
-    String,
-    i64,
-    Option<Vec<u8>>,
-    i64,
-    Option<String>,
-    i64,
-);
+pub(super) struct ContextCheckpointProjection {
+    pub(super) header_fingerprint: String,
+    pub(super) through_seq: i64,
+    pub(super) fact_prefix_sha256: String,
+    pub(super) encoded_len: usize,
+    pub(super) header_encoded_len: i64,
+    pub(super) header_json: Option<String>,
+    pub(super) durable_seq: i64,
+}
 
 pub(super) fn decode_context_checkpoint(
     projection: ContextCheckpointProjection,
+    bytes: rsi_api_protocol::RetainedBytes,
 ) -> Result<StoredContextCheckpoint> {
-    let (
+    let ContextCheckpointProjection {
         header_fingerprint,
         through_seq,
         fact_prefix_sha256,
         encoded_len,
-        bytes,
         header_encoded_len,
         header_json,
         durable_seq,
-    ) = projection;
-    let encoded_len = usize::try_from(encoded_len)
-        .map_err(|_| StoreError::Corrupt("checkpoint length is invalid".into()))?;
-    if encoded_len == 0 || encoded_len > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
-        return Err(StoreError::Corrupt(
-            "checkpoint bytes exceed their durable bound".into(),
-        ));
-    }
-    let bytes = bytes.ok_or_else(|| {
-        StoreError::Corrupt("bounded checkpoint projection returned no bytes".into())
-    })?;
+    } = projection;
     if bytes.len() != encoded_len {
         return Err(StoreError::Corrupt(
             "checkpoint byte length changed during read".into(),
@@ -187,7 +157,7 @@ pub(super) fn decode_context_checkpoint(
         header_fingerprint,
         through_seq: decode_u64("checkpoint sequence", through_seq)?,
         fact_prefix_sha256,
-        bytes: Arc::from(bytes),
+        bytes,
     };
     checkpoint
         .validate()
@@ -259,6 +229,7 @@ pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
     (encoded_len, json): (i64, Option<String>),
     maximum_bytes: usize,
 ) -> Result<T> {
+    super::cold_validation::check()?;
     #[cfg(feature = "test-support")]
     let _decode = super::test_support::DecodeProbe::start();
     let encoded_len = usize::try_from(encoded_len)
@@ -348,6 +319,11 @@ pub(super) const fn fact_index_kind(body: &SessionFactBody) -> &'static str {
 }
 
 pub(super) fn sql_error(error: rusqlite::Error) -> StoreError {
+    if super::cold_validation::in_read_scope()
+        && matches!(&error, rusqlite::Error::SqliteFailure(code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::OperationInterrupted))
+    {
+        return StoreError::ValidationBusy;
+    }
     let message = error.to_string();
     let mapped = match &error {
         rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
@@ -371,4 +347,157 @@ pub(super) fn io_error(error: std::io::Error) -> StoreError {
     let message = error.to_string();
     drop(error);
     StoreError::Io(format!("filesystem: {message}"))
+}
+
+/// The caller reserved the exact validated object length before this allocation.
+pub(super) fn read_cas_file_admitted(
+    cas_dir: &Path,
+    digest: &str,
+    length: usize,
+) -> Result<Vec<u8>> {
+    validate_sha256("CAS identity", digest)?;
+    let path = cas_dir.join(digest);
+    let (mut file, actual) = open_cas_file(&path).map_err(|error| cas_read_error(digest, error))?;
+    if actual.len() != length as u64 {
+        return Err(StoreError::Corrupt(format!(
+            "CAS entry exceeds {length} bytes, is not regular, or has changed length"
+        )));
+    }
+    let bytes = read_admitted_cas_body(&mut file, length)?;
+    validate_digest(digest, &bytes)?;
+    Ok(bytes)
+}
+
+fn read_admitted_cas_body(file: &mut impl std::io::Read, length: usize) -> Result<Vec<u8>> {
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            StoreError::Corrupt("CAS entry shrank below admitted length".into())
+        } else {
+            io_error(error)
+        }
+    })?;
+    let mut extra = [0];
+    if file.read(&mut extra).map_err(io_error)? != 0 {
+        return Err(StoreError::Corrupt(
+            "CAS entry grew beyond admitted length".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+// Both bounded verification and admitted payload reads open the same regular-file boundary.
+fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "CAS entry is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    let file = {
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("CAS path has no file name"))?;
+        let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)?;
+        rsi_files_native_fs::open_relative_file_no_follow(&directory, Path::new(name))?
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+        // BACKUP_SEMANTICS permits directory handles; OPEN_REPARSE_POINT opens
+        // each component itself. Excluding FILE_SHARE_DELETE pins every acquired
+        // parent against rename/replacement until the leaf handle is acquired.
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
+        let mut prefix = PathBuf::new();
+        let mut parents = Vec::new();
+        for component in parent.components() {
+            prefix.push(component);
+            if matches!(component, std::path::Component::Prefix(_)) {
+                continue;
+            }
+            if !matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            ) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "CAS parent is not normalized",
+                ));
+            }
+            let directory = OpenOptions::new()
+                .read(true)
+                .share_mode(0x0000_0003)
+                .custom_flags(0x0220_0000)
+                .open(&prefix)?;
+            let metadata = directory.metadata()?;
+            if !metadata.is_dir() || metadata.file_attributes() & 0x0000_0400 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "CAS parent is a reparse point or not a directory",
+                ));
+            }
+            parents.push(directory);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0020_0000)
+            .open(path)?;
+        if file.metadata()?.file_attributes() & 0x0000_0400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CAS leaf is a reparse point",
+            ));
+        }
+        drop(parents);
+        file
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = File::open(path)?;
+    let actual = file.metadata()?;
+    if !actual.file_type().is_file() || actual.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "CAS entry is not a regular file",
+        ));
+    }
+    Ok((file, actual))
+}
+
+fn cas_read_error(digest: &str, error: std::io::Error) -> StoreError {
+    #[cfg(unix)]
+    if rsi_files_native_fs::is_link_rejection(&error) {
+        return StoreError::Corrupt("CAS path contains a symlink or non-directory parent".into());
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        StoreError::NotFound(digest.into())
+    } else if error.kind() == std::io::ErrorKind::InvalidData {
+        StoreError::Corrupt(error.to_string())
+    } else {
+        io_error(error)
+    }
+}
+
+#[cfg(test)]
+mod admitted_tests {
+    use super::*;
+    #[test]
+    fn admitted_cas_body_rejects_truncation_and_growth_as_corruption() {
+        for body in [b"short".as_slice(), b"too long".as_slice()] {
+            assert!(matches!(
+                read_admitted_cas_body(&mut std::io::Cursor::new(body), 6),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+        assert_eq!(
+            read_admitted_cas_body(&mut std::io::Cursor::new(b"exact!"), 6).unwrap(),
+            b"exact!"
+        );
+    }
 }

@@ -5,6 +5,14 @@ use super::*;
 struct ClaimFixture;
 #[async_trait]
 impl rsi_tools_protocol::ToolRuntime for ClaimFixture {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        let _ = visitor;
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, _: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         None
     }
@@ -13,9 +21,6 @@ impl rsi_tools_protocol::ToolRuntime for ClaimFixture {
     }
     fn definition(&self, _: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
         None
-    }
-    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
-        vec![]
     }
     fn prepare(
         &self,
@@ -597,4 +602,162 @@ fn retired_submission_key_cannot_remove_its_replacement() {
     );
     drop(replacement);
     assert!(admission.sessions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn store_admission_refusals_are_capacity_and_retryable_human_waits() {
+    assert_eq!(
+        turn_store_error(StoreError::ReadCapacity),
+        TurnError::Capacity
+    );
+    assert_eq!(
+        turn_store_error(StoreError::ValidationBusy),
+        TurnError::Capacity
+    );
+    assert!(matches!(
+        human_wait::WaitControlError::from(StoreError::ValidationBusy),
+        human_wait::WaitControlError::StoreBusy
+    ));
+    assert!(matches!(
+        human_wait::WaitControlError::from(StoreError::ReadCapacity),
+        human_wait::WaitControlError::StoreBusy
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one paused-time refusal history verifies pending ownership, successful reset and independent escalation"
+)]
+async fn store_capacity_flush_preserves_pending_bytes_and_io_failure_count() {
+    use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
+    let kernel = AgentKernel::recover(
+        Arc::new(rsi_agent_testkit::MemoryStore::new()),
+        Arc::new(ClaimFixture),
+    )
+    .await
+    .unwrap();
+    let header = SessionHeader::new_local(
+        SessionId::new("busy-flush").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "test",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let id = header.session_id().clone();
+    let pin = ClaimFixture
+        .pin(header.agent_preset_id(), None)
+        .await
+        .unwrap();
+    let mut session = SessionRuntime::new(header, pin, 0, true);
+    let mut fact = Arc::new(
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
+                turn_id: TurnId::new("busy-turn").unwrap(),
+                text: "retained input".into(),
+                model: None,
+                sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    );
+    push_pending(&kernel.inner, &mut session, fact.clone()).unwrap();
+    session.retry_failures = MAXIMUM_CONSECUTIVE_FLUSH_FAILURES - 1;
+    session.flush_inflight = true;
+    let mut bytes = session.pending_bytes;
+    lock_state(&kernel.inner)
+        .sessions
+        .insert(id.clone(), session);
+    for _ in 0..=MAXIMUM_CONSECUTIVE_FLUSH_FAILURES {
+        kernel.complete_flush(&id, Err(StoreError::ReadCapacity));
+    }
+    assert!(
+        lock_state(&kernel.inner).sessions[&id]
+            .permanent_flush_error
+            .is_none()
+    );
+    assert_eq!(lock_state(&kernel.inner).sessions[&id].pending_bytes, bytes);
+    tokio::time::advance(
+        DURABILITY_WAIT_TIMEOUT
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .await;
+    {
+        let mut state = lock_state(&kernel.inner);
+        let session = state.sessions.get_mut(&id).unwrap();
+        apply_committed_flush(
+            session,
+            AppendCommit { durable_seq: 1 },
+            &kernel.inner.process_pending_bytes,
+        );
+
+        assert_eq!(session.retry_failures, 0);
+        assert_eq!(
+            kernel.inner.process_pending_bytes.load(Ordering::Acquire),
+            0
+        );
+        let mut body = fact.body().clone();
+        let SessionFactBody::TurnAccepted { turn_id, .. } = &mut body else {
+            unreachable!()
+        };
+        *turn_id = TurnId::new("busy-turn-2").unwrap();
+        fact = Arc::new(SessionFact::new(2, 2, body).unwrap());
+        push_pending(&kernel.inner, session, fact.clone()).unwrap();
+        bytes = session.pending_bytes;
+        session.retry_failures = MAXIMUM_CONSECUTIVE_FLUSH_FAILURES - 1;
+    }
+    kernel.complete_flush(&id, Err(StoreError::ValidationBusy));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    kernel.complete_flush(&id, Err(StoreError::ReadCapacity));
+    assert!(
+        lock_state(&kernel.inner).sessions[&id]
+            .permanent_flush_error
+            .is_none()
+    );
+    tokio::time::advance(
+        DURABILITY_WAIT_TIMEOUT
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .await;
+    kernel.complete_flush(&id, Err(StoreError::ReadCapacity));
+    {
+        let mut state = lock_state(&kernel.inner);
+        let session = state.sessions.remove(&id).unwrap();
+        assert_eq!(session.pending.len(), 1);
+        assert!(Arc::ptr_eq(&session.pending[0], &fact));
+        assert_eq!(session.pending_bytes, bytes);
+        assert_eq!(
+            session.retry_failures,
+            MAXIMUM_CONSECUTIVE_FLUSH_FAILURES - 1
+        );
+        assert!(
+            session.permanent_flush_error.is_none(),
+            "shared validation pressure must remain retryable after a minute"
+        );
+        assert_eq!(
+            session.flush_status.borrow().permanent_error,
+            session.permanent_flush_error
+        );
+        assert!(!session.flush_inflight);
+        assert!(session.retry_not_before.is_some());
+        kernel
+            .inner
+            .process_pending_bytes
+            .fetch_sub(bytes, Ordering::AcqRel);
+    }
+    assert!(kernel.shutdown(kernel.start_workers()).await.is_ok());
 }

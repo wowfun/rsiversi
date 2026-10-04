@@ -11,6 +11,67 @@ use rsi_agent_session_protocol::{
 use rsi_agent_turn_protocol::SessionCommands;
 
 #[tokio::test]
+async fn store_admission_command_refusal_preserves_known_prewrite_capacity() {
+    for refusal in [StoreError::ValidationBusy, StoreError::ReadCapacity] {
+        let memory = Arc::new(MemoryStore::new());
+        let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+        let fixture = Fixture::start(store.clone(), false).await;
+        let invocation = fixture.invocation("busy-command", true).await;
+        let before = memory.read_watermarks(&fixture.session_id).await.unwrap();
+        *store.commit_admission_refusal.lock().unwrap() = Some(refusal);
+        assert!(matches!(
+            fixture
+                .kernel
+                .execute(
+                    fixture
+                        .kernel
+                        .prepare_resume(&fixture.session_id)
+                        .await
+                        .unwrap(),
+                    invocation.clone(),
+                )
+                .await,
+            Err(TurnError::Capacity)
+        ));
+        assert_eq!(
+            memory.read_watermarks(&fixture.session_id).await.unwrap(),
+            before
+        );
+        assert!(
+            memory
+                .read_domain_request(&fixture.session_id, &invocation.request_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 1);
+        // Receipt lookup is deliberately unavailable: a known refusal must not become OutcomeUnknown.
+        *store.commit_admission_refusal.lock().unwrap() = None;
+        store.domain_lookup_fails.store(false, Ordering::Release);
+        fixture
+            .kernel
+            .execute(
+                fixture
+                    .kernel
+                    .prepare_resume(&fixture.session_id)
+                    .await
+                    .unwrap(),
+                invocation.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            memory
+                .read_domain_request(&fixture.session_id, &invocation.request_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn current_domain_reads_reject_a_structurally_valid_historical_page() {
     let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     let fixture = Fixture::start(store.clone(), false).await;

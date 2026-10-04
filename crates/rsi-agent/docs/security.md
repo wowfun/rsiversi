@@ -120,3 +120,17 @@ Local contracts are safe-Rust, process-local authority. Session identities are
 correlation values, not authorization tokens. Cross-process API, auth, RPC, and
 browser control are outside this contract and must add their own trust boundary
 instead of exposing these Local services directly.
+
+`StoreError::ValidationBusy` and `StoreError::ReadCapacity` are transient validation
+or read-byte admission refusals. A mutation returning either error has refused
+the write before admission. They can describe shared validation or byte admission, abandoned read work or
+SQLite read-lock contention. Kernel maps them to capacity without uncertain-outcome
+reconciliation, including Turn ending and activation settlement. It preserves pending flush Facts and retries without consuming the
+I/O-failure counter or permanently fencing a Session for shared Store pressure.
+A human wait
+fences only after a minute of elapsed wall time between consecutive local Kernel
+capacity refusals, including bounded time spent waiting inside those attempts;
+any other retry cause resets that interval. These checks occur between completed attempts
+and never abandon an admitted native operation. Durable parked state remains for
+authoritative restart recovery; a refusal never permits replaying an admitted
+mutation.

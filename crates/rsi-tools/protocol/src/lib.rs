@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 pub mod portable;
 
 mod fragment;
-pub use fragment::bounded_json_fragment_page;
+pub use fragment::{bounded_json_fragment_end, bounded_json_fragment_page};
 
 mod output;
 pub use output::{
@@ -1070,10 +1070,18 @@ pub trait ToolCatalogProvider: fmt::Debug + Send + Sync + 'static {
 #[async_trait]
 pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
     /// Returns ordered model-visible definitions of the active tools.
-    fn definitions(&self) -> Vec<ToolDefinition>;
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = Vec::new();
+        self.visit_definitions(&mut |definition| definitions.push(definition.clone()));
+        definitions
+    }
+    /// Visits immutable definitions without cloning schema payloads, for pre-copy admission.
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&ToolDefinition));
     /// Looks up one definition in the same immutable exact-name authority as preparation.
     /// Implementations clone only the selected definition, never the complete catalog.
     fn definition(&self, name: &str) -> Option<ToolDefinition>;
+    /// Exact-name scheduling from the sealed authority without enumerating or cloning schemas.
+    fn scheduling(&self, name: &str) -> Option<ToolScheduling>;
     /// Exact role from the same immutable authority, without cloning schema payloads.
     fn program_role(&self, name: &str) -> Option<ToolProgramRole>;
     /// Names and roles from the same authority, excluding unavailable roles.

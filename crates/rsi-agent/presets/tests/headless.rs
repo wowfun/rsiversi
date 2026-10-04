@@ -1,7 +1,7 @@
 use rsi_agent_presets::{
-    EXECUTOR_FACTORY, KERNEL_FACTORY, SESSION_EXECUTOR_INSTANCE, SESSION_FRAGMENT_ID,
-    SESSION_KERNEL_INSTANCE, SESSION_STORE_INSTANCE, SQLITE_STORE_FACTORY, SessionAgentConfig,
-    session_fragment,
+    CONTEXT_BUDGET_FACTORY, EXECUTOR_FACTORY, KERNEL_FACTORY, SESSION_EXECUTOR_INSTANCE,
+    SESSION_FRAGMENT_ID, SESSION_KERNEL_INSTANCE, SESSION_STORE_INSTANCE, SQLITE_STORE_FACTORY,
+    SessionAgentConfig, session_fragment,
 };
 
 #[test]
@@ -17,7 +17,11 @@ fn session_fragment_has_fixed_order_and_explicit_authority() {
 
     assert_eq!(fragment.id(), SESSION_FRAGMENT_ID);
     let entries = fragment.entries();
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
+    assert_eq!(entries[0].id().as_str(), "rsi-context-budget");
+    assert_eq!(entries[0].plugin().as_str(), CONTEXT_BUDGET_FACTORY);
+    assert_eq!(entries[0].config(), &serde_json::json!({}));
+    let entries = &entries[1..];
     assert_eq!(entries[0].id().as_str(), SESSION_STORE_INSTANCE);
     assert_eq!(entries[0].plugin().as_str(), SQLITE_STORE_FACTORY);
     assert_eq!(entries[0].config()["root"], root.to_string_lossy().as_ref());

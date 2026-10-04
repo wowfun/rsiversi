@@ -938,6 +938,76 @@ async fn failed_direct_ending_keeps_business_closed_and_allows_retry_without_par
 }
 
 #[tokio::test]
+async fn ending_store_refusals_skip_reconciliation_and_preserve_retry() {
+    for mailbox in [false, true] {
+        for refusal in [StoreError::ValidationBusy, StoreError::ReadCapacity] {
+            let memory = Arc::new(MemoryStore::new());
+            let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+            let mut run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+            if mailbox {
+                run.kernel
+                    .finish_turn(&run.claim, &TurnOutcome::Completed)
+                    .await
+                    .unwrap();
+                run.kernel
+                    .submit_message(SubmitMessage {
+                        session: resume(&run.kernel, run.claim.session_id().clone()).await,
+                        message: mailbox_message("refused-ending"),
+                        delivery: MessageDelivery::NextTurn,
+                    })
+                    .await
+                    .unwrap();
+                run.claim = run
+                    .kernel
+                    .claim("domain-worker", CancellationToken::new())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let before = memory
+                .read_watermarks(run.claim.session_id())
+                .await
+                .unwrap();
+            let reads = store.turn_boundary_read_attempts.load(Ordering::Acquire);
+            *store.commit_admission_refusal.lock().unwrap() = Some(refusal.clone());
+            *store.boundary_read_refusal.lock().unwrap() =
+                Some((run.claim.session_id().clone(), refusal));
+            let result = run
+                .kernel
+                .finish_turn(&run.claim, &TurnOutcome::Completed)
+                .await;
+            assert!(matches!(result, Err(TurnError::Capacity)), "{result:?}");
+            assert_eq!(
+                store.turn_boundary_read_attempts.load(Ordering::Acquire),
+                reads,
+                "known pre-write refusal must not reconcile an uncertain outcome"
+            );
+            assert_eq!(
+                memory
+                    .read_watermarks(run.claim.session_id())
+                    .await
+                    .unwrap(),
+                before
+            );
+            *store.commit_admission_refusal.lock().unwrap() = None;
+            *store.boundary_read_refusal.lock().unwrap() = None;
+            store.domain_lookup_fails.store(false, Ordering::Release);
+            assert!(matches!(
+                run.kernel
+                    .commit_domains(&run.claim, run.mutation("after-ending", 1, true, vec![]))
+                    .await,
+                Err(TurnError::StaleClaim)
+            ));
+            run.kernel
+                .finish_turn(&run.claim, &TurnOutcome::Completed)
+                .await
+                .unwrap();
+            run.stop().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn lost_terminal_acknowledgements_resolve_direct_and_mailbox_endings() {
     for mailbox in [false, true] {
         let memory = Arc::new(MemoryStore::new());
@@ -1970,4 +2040,38 @@ async fn domain_read_guards_reject_stale_authority_but_preserve_committed_receip
         receipt
     );
     run.stop().await;
+}
+
+#[tokio::test]
+async fn store_admission_domain_refusal_preserves_known_prewrite_capacity() {
+    for refusal in [StoreError::ValidationBusy, StoreError::ReadCapacity] {
+        let memory = Arc::new(MemoryStore::new());
+        let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let before = memory
+            .read_watermarks(run.claim.session_id())
+            .await
+            .unwrap();
+        *store.commit_admission_refusal.lock().unwrap() = Some(refusal);
+        assert!(matches!(
+            run.kernel
+                .commit_domains(&run.claim, run.mutation("busy", 1, true, vec![]))
+                .await,
+            Err(TurnError::Capacity)
+        ));
+        assert_eq!(
+            memory
+                .read_watermarks(run.claim.session_id())
+                .await
+                .unwrap(),
+            before
+        );
+        *store.commit_admission_refusal.lock().unwrap() = None;
+        store.domain_lookup_fails.store(false, Ordering::Release);
+        run.kernel
+            .commit_domains(&run.claim, run.mutation("busy", 1, true, vec![]))
+            .await
+            .unwrap();
+        run.kernel.shutdown(run.workers).await.unwrap();
+    }
 }

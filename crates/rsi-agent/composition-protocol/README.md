@@ -232,3 +232,10 @@ holders. Models cannot call those operations or supply retained-result identitie
 
 The process-free reporting Tool requires explicit execution preparation before
 start, so its review participates in the same approval binding as other Tools.
+
+A pin caches the exact encoded weight of its immutable, selected Tool catalog
+without cloning definitions. Before a deep copy, measurement enforces the AI
+request Tool count, aggregate schema/grammar bound and total request encoding
+bound. Clones share that measurement. Delegation and private
+reporting views create a fresh cache because they change catalog membership;
+Executor reserves options credit from this weight before copying definitions.

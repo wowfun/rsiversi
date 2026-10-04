@@ -305,6 +305,20 @@ pub(super) fn combine_cancellation(
     }
 }
 
+pub(super) fn context_failure(
+    fallback: &'static str,
+    error: &rsi_agent_context::ContextError,
+) -> DriveFailure {
+    failed(
+        if matches!(error, rsi_agent_context::ContextError::Capacity) {
+            "context.capacity"
+        } else {
+            fallback
+        },
+        error.to_string(),
+    )
+}
+
 pub(super) fn ai_failure(error: &rsi_ai_protocol::AiError) -> DriveFailure {
     if error.kind() == ErrorKind::Cancelled {
         return DriveFailure::Turn(TurnOutcome::Cancelled);

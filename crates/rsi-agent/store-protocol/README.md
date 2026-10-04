@@ -323,3 +323,9 @@ index and indexed last-activity key beside every SessionId. Both derive from the
 flat view can reject cross-machine/workspace moves without reading all summaries.
 Groups are unique, referenced, in first-member order, and share the seed's 128 KiB
 bound. Summary pages are independent later read snapshots.
+
+CAS
+reads accept ByteAdmission, reserve in the actual owning worker before payload
+allocation, and return RetainedBytes whose shared lease survives the last clone. Missing metadata or a missing
+CAS file returns `NotFound`; malformed files and inconsistent metadata remain
+`Corrupt`, and other filesystem faults remain `Io`.

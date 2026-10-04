@@ -9,6 +9,24 @@ use rsi_session_protocol::Result;
 #[path = "tests/seams.rs"]
 mod seams;
 
+#[test]
+fn diagnostic_render_credit_covers_backtick_fences_and_selected_format() {
+    let value = json!({"text":"`".repeat(64 * 1024)});
+    let pretty = serde_json::to_string_pretty(&value).unwrap();
+    let markdown = render_value(&value, false).unwrap();
+    let fence = 64 * 1024 + 1;
+    assert_eq!(
+        rendered_workspace_weight(&value, false).unwrap(),
+        pretty.len() + fence + markdown.len(),
+        "pretty text, fence and final Markdown coexist"
+    );
+    assert_eq!(
+        rendered_workspace_weight(&value, true).unwrap(),
+        pretty.len(),
+        "JSON uses one pretty string without a fence"
+    );
+}
+
 pub(super) fn header() -> SessionHeader {
     SessionHeader::new_local(
         SessionId::new("export-test").unwrap(),
@@ -140,9 +158,15 @@ fn options(include: &str, format: ExportFormat) -> ExportOptions {
     options
 }
 async fn collect(store: Arc<MemoryStore>, header: SessionHeader, options: ExportOptions) -> String {
-    let source = export(store, header, options, CancellationToken::new())
-        .await
-        .unwrap();
+    let source = export(
+        store,
+        header,
+        options,
+        CancellationToken::new(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .await
+    .unwrap();
     let mut bytes = Vec::new();
     write_stream(source, &mut bytes).await.unwrap();
     String::from_utf8(bytes).unwrap()
@@ -287,6 +311,7 @@ async fn cut_is_fixed_before_lazy_consumption_and_partial_generation_does_not_re
         header.clone(),
         options("m,lpr,last-provider-response", ExportFormat::Json),
         CancellationToken::new(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .await
     .unwrap();
@@ -409,6 +434,7 @@ async fn complete_history_over_32_mib_is_read_lazily_in_bounded_pages() {
         header.clone(),
         options("m", ExportFormat::Json),
         CancellationToken::new(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .await
     .unwrap();
@@ -792,6 +818,7 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
         Arc::new(DefaultContextBuilder::default()),
         header.clone(),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     state.ingest(ContextPage::Canonical(&facts)).unwrap();
@@ -1085,4 +1112,115 @@ fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
     assert_eq!(record["source"], serde_json::to_value(source).unwrap());
     let markdown = projection::Markdown::default().record(&record).unwrap();
     assert!(markdown.contains("Workflow completed") && markdown.contains("workflow"));
+}
+
+#[tokio::test]
+async fn diagnostic_export_uses_shared_admission_and_releases_on_stream_drop() {
+    let store = Arc::new(MemoryStore::new());
+    let header = header();
+    append(
+        &store,
+        &header,
+        0,
+        vec![
+            accepted("bounded diagnostic"),
+            intent("completed", evidence()),
+            finished("completed"),
+        ],
+    )
+    .await;
+    let budget = rsi_agent_context::ContextBudget::new(1024 * 1024).unwrap();
+    let held = budget.reserve(budget.maximum()).unwrap();
+    let mut stream = export(
+        store.clone(),
+        header.clone(),
+        options("lpr", ExportFormat::Json),
+        CancellationToken::new(),
+        budget.clone(),
+    )
+    .await
+    .unwrap();
+    let mut verifier = ExportVerifier::default();
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        let event = event.unwrap();
+        verifier.accept(&event, None).unwrap();
+        if let ExportEvent::Chunk { text: chunk, .. } = event {
+            text.push_str(&chunk);
+        }
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["last_provider_request"]["reason"],
+        "context_capacity"
+    );
+    assert_eq!(budget.used(), budget.maximum());
+    drop(stream);
+    drop(held);
+    let mut stream = export(
+        store,
+        header,
+        options("lpr", ExportFormat::Json),
+        CancellationToken::new(),
+        budget.clone(),
+    )
+    .await
+    .unwrap();
+    while let Some(event) = stream.next().await {
+        if let ExportEvent::Chunk { text, .. } = event.unwrap()
+            && text.contains("recorded instructions")
+        {
+            break;
+        }
+    }
+    assert!(
+        budget.used() > 0,
+        "serialized diagnostic lost its producer admission"
+    );
+    drop(stream);
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+async fn reconstruction_capacity_is_reported_after_initial_diagnostic_admission() {
+    let store = Arc::new(MemoryStore::new());
+    let header = header();
+    append(
+        &store,
+        &header,
+        0,
+        vec![
+            accepted(&"x".repeat(64 * 1024)),
+            intent("completed", evidence()),
+            finished("completed"),
+        ],
+    )
+    .await;
+    let budget = rsi_agent_context::ContextBudget::new(64 * 1024).unwrap();
+    let cut = Cut {
+        context_budget: budget.clone(),
+        store: Some(store),
+        header: header.clone(),
+        through: 3,
+        intervals: vec![Interval {
+            id: header.session_id().clone(),
+            after: 0,
+            through: 3,
+        }],
+        _leases: vec![],
+    };
+    let latest = diagnostic::Latest {
+        id: header.session_id().clone(),
+        effect: EffectId::new("completed").unwrap(),
+        intent: 2,
+        end: 3,
+    };
+    let result = diagnostic::request(&cut, &latest).await.unwrap();
+    assert!(
+        result.credit.is_some(),
+        "initial diagnostic admission must have succeeded"
+    );
+    assert_eq!(result.value["availability"], "unavailable");
+    assert_eq!(result.value["reason"], "context_capacity");
+    drop(result);
+    assert_eq!(budget.used(), 0);
 }

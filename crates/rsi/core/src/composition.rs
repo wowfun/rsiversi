@@ -1879,6 +1879,12 @@ fn register_runtime_factories(
     }
     register(
         builder,
+        rsi_agent_presets::CONTEXT_BUDGET_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_agent_context::ContextBudgetFactory,
+    )?;
+    register(
+        builder,
         AGENT_COMPOSITION_FACTORY,
         UpdateMode::RestartRequired,
         agent_composition,
@@ -2036,6 +2042,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<LanguageRegistrarContract>()?;
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
+    builder.register_local_contract::<rsi_agent_context::ContextBudgetContract>()?;
     builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
     builder.register_local_contract::<rsi_history::HistoryContract>()?;
     builder.register_local_contract::<rsi_lsp::LanguageContract>()?;

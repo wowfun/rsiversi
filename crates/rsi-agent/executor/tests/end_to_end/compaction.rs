@@ -248,6 +248,7 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         stack.store.header(&first.session_id).await.unwrap(),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     let facts: Vec<_> = facts.into_iter().map(Arc::new).collect();

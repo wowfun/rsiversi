@@ -211,7 +211,8 @@ fn tool_result_facts(result: ToolResult) -> Vec<SessionFact> {
 
 #[test]
 fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
-    let mut fold = ContextFold::new(header("")).unwrap();
+    let mut fold =
+        ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
     fold.apply(&tool_result_facts(
         ToolResult::new(json!({"answer":42}), vec![], false).unwrap(),
     ))
@@ -219,21 +220,21 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
     let projected = fold.project(ContextLimits::default()).unwrap();
     assert_eq!(
         projected
-            .messages
+            .messages()
             .iter()
             .map(rsi_ai_protocol::Message::role)
             .collect::<Vec<_>>(),
         vec![MessageRole::User, MessageRole::Assistant, MessageRole::Tool]
     );
     assert!(matches!(
-        projected.messages[1].content(),
+        projected.messages()[1].content(),
         [MessageContent::ToolCall(_)]
     ));
     assert!(matches!(
-        projected.messages[2].content(),
+        projected.messages()[2].content(),
         [MessageContent::ToolResult { call_id, .. }] if call_id == "tool-call"
     ));
-    let encoded = serde_json::to_string(&projected.messages).unwrap();
+    let encoded = serde_json::to_string(projected.messages()).unwrap();
     assert!(!encoded.contains("secret/workspace-name"));
 }
 
@@ -248,7 +249,11 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
         json!({"response_id": "resp-1"}),
     )
     .unwrap();
-    let mut fold = ContextFold::new(header("system")).unwrap();
+    let mut fold = ContextFold::new(
+        header("system"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -439,8 +444,11 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
         },
     ]);
 
-    let mut fold =
-        ContextFold::new(fork_header("system", u64::try_from(seed.len()).unwrap(), 1)).unwrap();
+    let mut fold = ContextFold::new(
+        fork_header("system", u64::try_from(seed.len()).unwrap(), 1),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply_seed_page(&seed).unwrap();
     fold.finish_seed().unwrap();
     fold.apply(&child).unwrap();
@@ -477,14 +485,22 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         },
     ]);
 
-    let mut overlap = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    let mut overlap = ContextFold::new(
+        fork_header("", 2, 1),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     overlap.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         overlap.apply_seed_page(&seed),
         Err(ContextError::Invalid(message)) if message.contains("expected parent Fact 2, got 1")
     ));
 
-    let mut incomplete = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    let mut incomplete = ContextFold::new(
+        fork_header("", 2, 1),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     incomplete.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         incomplete.finish_seed(),
@@ -503,7 +519,11 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         incomplete.apply(&child),
         Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
     ));
-    let mut incomplete_page = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    let mut incomplete_page = ContextFold::new(
+        fork_header("", 2, 1),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     incomplete_page.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         incomplete_page.apply_page(&child, 1),
@@ -515,7 +535,11 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
 fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
     let old = TurnId::new("turn-old").unwrap();
     let current = TurnId::new("turn-current").unwrap();
-    let mut fold = ContextFold::new(header("system")).unwrap();
+    let mut fold = ContextFold::new(
+        header("system"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -542,8 +566,8 @@ fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
     .unwrap();
     let projected = fold.project(ContextLimits::new(3, 500).unwrap()).unwrap();
     assert_eq!(projected.omitted_turns, 1);
-    assert_eq!(projected.messages.len(), 3);
-    let encoded = serde_json::to_string(&projected.messages).unwrap();
+    assert_eq!(projected.messages().len(), 3);
+    let encoded = serde_json::to_string(projected.messages()).unwrap();
     assert!(encoded.contains("omitted 1 complete earlier turn"));
     assert!(encoded.contains("current"));
     assert!(!encoded.contains(&"old".repeat(50)));
@@ -553,7 +577,11 @@ fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
 fn projection_uses_the_exact_canonical_json_byte_boundary() {
     let old = TurnId::new("turn-old").unwrap();
     let current = TurnId::new("turn-current").unwrap();
-    let mut fold = ContextFold::new(header("system")).unwrap();
+    let mut fold = ContextFold::new(
+        header("system"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -579,7 +607,7 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
     ]))
     .unwrap();
     let complete = fold.project(ContextLimits::default()).unwrap();
-    let exact = serde_json::to_vec(&complete.messages).unwrap().len();
+    let exact = serde_json::to_vec(complete.messages()).unwrap().len();
 
     assert_eq!(
         fold.project(ContextLimits::new(8, exact).unwrap())
@@ -597,7 +625,8 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
 
 #[test]
 fn active_turn_is_never_split_to_force_a_fit() {
-    let mut fold = ContextFold::new(header("")).unwrap();
+    let mut fold =
+        ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
     fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("turn-current").unwrap(),
@@ -615,7 +644,8 @@ fn active_turn_is_never_split_to_force_a_fit() {
 
 #[test]
 fn incremental_fold_rejects_gaps_and_replays() {
-    let mut fold = ContextFold::new(header("")).unwrap();
+    let mut fold =
+        ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
     let first = facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("turn-1").unwrap(),
@@ -632,7 +662,12 @@ fn incremental_fold_rejects_gaps_and_replays() {
 fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
     let limits = ContextLimits::default();
     let old = TurnId::new("turn-old").unwrap();
-    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -651,7 +686,13 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
     .unwrap();
     let expected = fold.project(limits).unwrap();
     let bytes = fold.checkpoint_bytes().unwrap();
-    let mut restored = ContextFold::from_checkpoint(header("system"), limits, &bytes).unwrap();
+    let mut restored = ContextFold::from_checkpoint(
+        header("system"),
+        limits,
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     assert_eq!(restored.project(limits).unwrap(), expected);
 
     restored
@@ -670,16 +711,78 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
     let projected = restored.project(limits).unwrap();
     assert_eq!(projected.through_seq, 3);
     assert!(
-        serde_json::to_string(&projected.messages)
+        serde_json::to_string(projected.messages())
             .unwrap()
             .contains("suffix only")
     );
 }
 
 #[test]
+fn checkpoint_capacity_refusal_preserves_prefix_and_exact_credit_follows_last_slice() {
+    let budget = rsi_agent_context::ContextBudget::new(256 * 1024).unwrap();
+    let mut fold =
+        ContextFold::with_limits(header("system"), ContextLimits::default(), budget.clone())
+            .unwrap();
+    let turn = TurnId::new("checkpoint-capacity").unwrap();
+    fold.apply(&facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "quote\" slash\\ line\n中文".repeat(32),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+            result: None,
+        },
+    ]))
+    .unwrap();
+    let expected = fold.checkpoint_bytes().unwrap().as_bytes().to_vec();
+    let retained = budget.used();
+    let through_seq = fold.through_seq();
+    let digest = fold.fact_prefix_sha256();
+    let mut pressure = budget
+        .reserve(budget.maximum() - retained - expected.len() + 1)
+        .unwrap();
+    assert!(matches!(
+        fold.checkpoint_bytes(),
+        Err(ContextError::Capacity)
+    ));
+    assert_eq!(budget.used(), retained + pressure.bytes());
+    assert_eq!(fold.through_seq(), through_seq);
+    assert_eq!(fold.fact_prefix_sha256(), digest);
+    pressure.resize(pressure.bytes() - 1).unwrap();
+    let bytes = fold.checkpoint_bytes().unwrap();
+    assert_eq!(bytes.as_bytes(), expected);
+    assert_eq!(budget.used(), budget.maximum());
+    let slice = bytes.slice(0..1).unwrap();
+    let sibling = slice.clone();
+    drop(bytes);
+    drop(fold);
+    drop(pressure);
+    assert_eq!(budget.used(), expected.len());
+    drop(slice);
+    assert_eq!(budget.used(), expected.len());
+    drop(sibling);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one complete checkpoint corruption matrix preserves the prior cursor"
+)]
 fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     let limits = ContextLimits::default();
-    let mut empty_turn = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut empty_turn = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     empty_turn
         .apply(&facts(vec![SessionFactBody::MessageTurnAccepted {
             reasoning_effort: None,
@@ -696,7 +799,12 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
         Err(ContextError::Invalid(message)) if message.contains("empty turn")
     ));
 
-    let mut active = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut active = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     let active_turn = TurnId::new("turn-active").unwrap();
     active
         .apply(&facts(vec![
@@ -723,7 +831,12 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     assert!(active.checkpoint_bytes().is_err());
 
     let turn = TurnId::new("turn-complete").unwrap();
-    let mut complete = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut complete = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     complete
         .apply(&facts(vec![
             SessionFactBody::TurnAccepted {
@@ -742,18 +855,35 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
         ]))
         .unwrap();
     let bytes = complete.checkpoint_bytes().unwrap();
-    assert!(ContextFold::from_checkpoint(header("different"), limits, &bytes).is_err());
+    assert!(
+        ContextFold::from_checkpoint(
+            header("different"),
+            limits,
+            &bytes,
+            rsi_agent_context::ContextBudget::default()
+        )
+        .is_err()
+    );
     assert!(
         ContextFold::from_checkpoint(
             header("system"),
             ContextLimits::new(limits.max_messages - 1, limits.max_bytes).unwrap(),
             &bytes,
+            rsi_agent_context::ContextBudget::default()
         )
         .is_err()
     );
     let mut corrupt = bytes.to_vec();
     corrupt.truncate(corrupt.len() - 1);
-    assert!(ContextFold::from_checkpoint(header("system"), limits, &corrupt).is_err());
+    assert!(
+        ContextFold::from_checkpoint(
+            header("system"),
+            limits,
+            &corrupt,
+            rsi_agent_context::ContextBudget::default()
+        )
+        .is_err()
+    );
 
     let mut injected = bytes.to_vec();
     let original = b"complete";
@@ -764,7 +894,13 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
         .expect("checkpoint contains the projected user message");
     injected[offset..offset + replacement.len()].copy_from_slice(replacement);
     assert!(
-        ContextFold::from_checkpoint(header("system"), limits, &injected).is_err(),
+        ContextFold::from_checkpoint(
+            header("system"),
+            limits,
+            &injected,
+            rsi_agent_context::ContextBudget::default()
+        )
+        .is_err(),
         "a structurally valid same-length checkpoint mutation must be rejected"
     );
 }
@@ -798,7 +934,12 @@ fn checkpoint_rejects_a_claim_filtered_sequence_hole() {
         )
         .unwrap(),
     ];
-    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply_page(&visible, 3).unwrap();
     assert!(fold.checkpoint_bytes().is_err());
 }
@@ -808,7 +949,12 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
     let first = TurnId::new("turn-first").unwrap();
     let queued = TurnId::new("turn-queued").unwrap();
     let limits = ContextLimits::default();
-    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
@@ -835,7 +981,13 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
     .unwrap();
 
     let bytes = fold.checkpoint_bytes().unwrap();
-    let mut restored = ContextFold::from_checkpoint(header("system"), limits, &bytes).unwrap();
+    let mut restored = ContextFold::from_checkpoint(
+        header("system"),
+        limits,
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     assert_eq!(
         restored.project(limits).unwrap(),
         fold.project(limits).unwrap()
@@ -856,9 +1008,13 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
 fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
     for limited in [false, true] {
         let mut fold = if limited {
-            ContextFold::with_limits(header(""), ContextLimits::new(8, 1024).unwrap())
+            ContextFold::with_limits(
+                header(""),
+                ContextLimits::new(8, 1024).unwrap(),
+                rsi_agent_context::ContextBudget::default(),
+            )
         } else {
-            ContextFold::new(header(""))
+            ContextFold::new(header(""), rsi_agent_context::ContextBudget::default())
         }
         .unwrap();
         for seq in 1..=rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES as u64 {
@@ -891,13 +1047,6 @@ fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
             },
         )
         .unwrap();
-        for _ in 0..2 {
-            assert!(matches!(
-                fold.apply(std::slice::from_ref(&fact)),
-                Err(ContextError::TooLarge)
-            ));
-        }
-        assert_eq!(fold.through_seq(), seq - 1);
         assert_eq!(
             fold.project(
                 ContextLimits::new(
@@ -907,17 +1056,31 @@ fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
                 .unwrap()
             )
             .unwrap()
-            .messages
+            .messages()
             .len(),
             rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES
         );
+        assert!(matches!(
+            fold.apply(std::slice::from_ref(&fact)),
+            Err(ContextError::TooLarge)
+        ));
+        assert_eq!(fold.through_seq(), seq - 1);
+        assert!(matches!(fold.apply(&[fact]), Err(ContextError::Invalid(_))));
+        assert!(matches!(
+            fold.project(ContextLimits::default()),
+            Err(ContextError::Invalid(_))
+        ));
     }
 }
 
 #[test]
 fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
-    let mut fold =
-        ContextFold::with_limits(header(""), ContextLimits::new(8, 1024).unwrap()).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header(""),
+        ContextLimits::new(8, 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     let mut rejected = false;
     for seq in 1..=128 {
         let fact = SessionFact::new(
@@ -937,7 +1100,7 @@ fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
             Ok(()) => {}
             Err(ContextError::TooLarge) => {
                 assert_eq!(fold.through_seq(), seq - 1);
-                assert!(matches!(fold.apply(&[fact]), Err(ContextError::TooLarge)));
+                assert!(matches!(fold.apply(&[fact]), Err(ContextError::Invalid(_))));
                 rejected = true;
                 break;
             }
@@ -945,4 +1108,275 @@ fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
         }
     }
     assert!(rejected);
+}
+
+#[test]
+fn request_materialization_uses_one_projection_admission() {
+    let budget = rsi_agent_context::ContextBudget::default();
+    let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
+    fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+        reasoning_effort: None,
+        turn_id: TurnId::new("projection-credit").unwrap(),
+        text: "large input ".repeat(1024),
+        model: None,
+        sandbox: SandboxMode::WorkspaceWrite,
+        require_approval: false,
+    }]))
+    .unwrap();
+    let state_bytes = budget.used();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let spare = 4 * state_bytes + options.encoded_weight();
+    let pressure = budget
+        .reserve(budget.maximum() - state_bytes - spare)
+        .unwrap();
+    let request = fold.request(ContextLimits::default(), options).unwrap();
+    assert!(
+        request
+            .messages()
+            .iter()
+            .any(|message| message.role() == MessageRole::User)
+    );
+    drop(request);
+    drop(pressure);
+    drop(fold);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn failed_fact_releases_workspace_and_fences_all_projection_entry_points() {
+    for path in 0..3 {
+        let budget = rsi_agent_context::ContextBudget::new(1024 * 1024).unwrap();
+        let mut fold = ContextFold::with_limits(
+            if path == 2 {
+                fork_header("system", 2, 1)
+            } else {
+                header("system")
+            },
+            ContextLimits::default(),
+            budget.clone(),
+        )
+        .unwrap();
+        let page = facts(vec![
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new("bad-fact").unwrap(),
+                text: "x".repeat(4096),
+                model: None,
+                reasoning_effort: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+            SessionFactBody::ModelEvent {
+                turn_id: TurnId::new("bad-fact").unwrap(),
+                effect_id: EffectId::new("missing-intent").unwrap(),
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                event: LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            },
+        ]);
+        let apply = |fold: &mut ContextFold, input: &[SessionFact]| match path {
+            0 => fold.apply(input),
+            1 => fold.apply_page(input, input.last().unwrap().seq()),
+            _ => fold.apply_seed_page(input),
+        };
+        apply(&mut fold, &page[..1]).unwrap();
+        let prefix_seq = fold.through_seq();
+        let prefix_digest = fold.fact_prefix_sha256();
+        assert!(matches!(
+            apply(&mut fold, &page[1..]),
+            Err(ContextError::Invalid(_))
+        ));
+        assert_eq!(fold.through_seq(), prefix_seq);
+        assert_eq!(fold.fact_prefix_sha256(), prefix_digest);
+        let after_failure = budget.used();
+        assert_eq!(
+            after_failure,
+            serde_json::to_vec(fold.header()).unwrap().len()
+        );
+        for _ in 0..8 {
+            assert!(matches!(
+                apply(&mut fold, &page[1..]),
+                Err(ContextError::Invalid(_))
+            ));
+            assert_eq!(budget.used(), after_failure);
+        }
+        assert!(matches!(
+            fold.project(ContextLimits::default()),
+            Err(ContextError::Invalid(_))
+        ));
+        assert!(matches!(
+            fold.request(
+                ContextLimits::default(),
+                rsi_ai_protocol::LanguageRequestOptions::default()
+            ),
+            Err(ContextError::Invalid(_))
+        ));
+        assert!(matches!(
+            fold.checkpoint_bytes(),
+            Err(ContextError::Invalid(_))
+        ));
+        drop(fold);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[test]
+fn immutable_fact_weight_preserves_the_exact_ingestion_admission_boundary() {
+    let budget = rsi_agent_context::ContextBudget::new(64 * 1024).unwrap();
+    let mut fold = ContextFold::new(header(""), budget.clone()).unwrap();
+    let input = facts(vec![SessionFactBody::TurnAccepted {
+        turn_id: TurnId::new("cached-fact-weight").unwrap(),
+        text: "quote\" slash\\ line\n中文".repeat(32),
+        model: None,
+        reasoning_effort: None,
+        sandbox: SandboxMode::WorkspaceWrite,
+        require_approval: false,
+    }]);
+    let state = budget.used();
+    let encoded = serde_json::to_vec(&input[0]).unwrap().len();
+    assert_eq!(input[0].encoded_len(), encoded);
+    let required = 3 * state + 8 * encoded;
+    let mut pressure = budget.reserve(budget.maximum() - required + 1).unwrap();
+    assert!(matches!(fold.apply(&input), Err(ContextError::Capacity)));
+    assert_eq!(fold.through_seq(), 0);
+    assert_eq!(budget.used(), state + pressure.bytes());
+    pressure.resize(pressure.bytes() - 1).unwrap();
+    fold.apply(&input).unwrap();
+    assert_eq!(fold.through_seq(), 1);
+    drop(fold);
+    drop(pressure);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn small_shared_pool_requires_projection_headroom_above_retained_state() {
+    let budget = rsi_agent_context::ContextBudget::new(512 * 1024).unwrap();
+    let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
+    fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+        turn_id: TurnId::new("small-pool").unwrap(),
+        text: "x".repeat(32 * 1024),
+        model: None,
+        reasoning_effort: None,
+        sandbox: SandboxMode::WorkspaceWrite,
+        require_approval: false,
+    }]))
+    .unwrap();
+    let state = budget.used();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let required = 4 * state + options.encoded_weight();
+    println!(
+        "shared pool: capacity={} retained={state} projection_admission={required} isolated_peak={}",
+        budget.maximum(),
+        state + required
+    );
+    let mut pressure = budget
+        .reserve(budget.maximum() - state - required + 1)
+        .unwrap();
+    assert!(matches!(
+        fold.request(ContextLimits::default(), options.clone()),
+        Err(ContextError::Capacity)
+    ));
+    assert_eq!(budget.used(), state + pressure.bytes());
+    pressure.resize(pressure.bytes() - 1).unwrap();
+    let request = fold.request(ContextLimits::default(), options).unwrap();
+    drop(request);
+    drop(pressure);
+    assert_eq!(budget.used(), state);
+    drop(fold);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn workspace_refusal_preserves_exact_prefix_before_a_hidden_page_hole() {
+    let budget = rsi_agent_context::ContextBudget::new(64 * 1024).unwrap();
+    let mut fold =
+        ContextFold::with_limits(header(""), ContextLimits::default(), budget.clone()).unwrap();
+    fold.apply(&facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: TurnId::new("completed").unwrap(),
+            text: "input".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new("completed").unwrap(),
+            outcome: TurnOutcome::Completed,
+            result: None,
+        },
+    ]))
+    .unwrap();
+    let before = fold.checkpoint_bytes().unwrap();
+    let bytes = before.as_bytes().to_vec();
+    drop(before);
+    let used = budget.used();
+    let next = SessionFact::new(
+        4,
+        4,
+        SessionFactBody::TurnAccepted {
+            turn_id: TurnId::new("not-admitted").unwrap(),
+            text: "x".repeat(32 * 1024),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        fold.apply_page(&[next], 4),
+        Err(ContextError::Capacity)
+    ));
+    assert_eq!(fold.through_seq(), 2);
+    assert_eq!(budget.used(), used);
+    let after = fold.checkpoint_bytes().unwrap();
+    assert_eq!(after.as_bytes(), bytes);
+}
+
+#[test]
+fn shared_parked_folds_release_pressure_without_process_restart_or_cursor_rebuild() {
+    let budget = rsi_agent_context::ContextBudget::new(512 * 1024).unwrap();
+    let mut folds = Vec::new();
+    for _ in 0..6 {
+        let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
+        fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+            turn_id: TurnId::new("parked").unwrap(),
+            text: "x".repeat(32 * 1024),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        }]))
+        .unwrap();
+        folds.push(fold);
+    }
+    let before = budget.used();
+    let next = SessionFact::new(
+        2,
+        2,
+        SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new("parked").unwrap(),
+            outcome: TurnOutcome::Completed,
+            result: None,
+        },
+    )
+    .unwrap();
+    let headroom = 2 * (before / folds.len()) + 8 * next.encoded_len();
+    let pressure = budget
+        .reserve(budget.maximum() - before - headroom + 1)
+        .unwrap();
+    assert!(matches!(
+        folds[0].apply(std::slice::from_ref(&next)),
+        Err(ContextError::Capacity)
+    ));
+    assert_eq!(folds[0].through_seq(), 1);
+    assert_eq!(budget.used(), before + pressure.bytes());
+    drop(folds.pop().unwrap());
+    folds[0].apply(&[next]).unwrap();
+    assert_eq!(folds[0].through_seq(), 2);
+    drop(folds);
+    drop(pressure);
+    assert_eq!(budget.used(), 0);
 }

@@ -110,6 +110,8 @@ clients. Only the credential owner reads or writes that file; Settings retain
 references. Old keyring entries require login again and are never imported or
 deleted. No current backend depends on a desktop credential service.
 
+The standard Host registers the Context budget Local contract so each Service
+Profile isolates its shared pool from the enclosing application and other Services.
 The standard service Profile installs an API registry, persistent service identity,
 connection negotiation and the domain endpoint plugins. Identity uses the same
 exclusive native owner lease as process startup. Direct library startup acquires

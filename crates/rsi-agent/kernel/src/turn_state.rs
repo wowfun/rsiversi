@@ -965,6 +965,7 @@ pub(super) fn lock_state(inner: &KernelInner) -> std::sync::MutexGuard<'_, Kerne
 
 pub(super) fn turn_store_error(error: StoreError) -> TurnError {
     match error {
+        StoreError::ValidationBusy | StoreError::ReadCapacity => TurnError::Capacity,
         StoreError::Invalid(message) => TurnError::Invalid(bounded_diagnostic(&message)),
         error @ StoreError::SchemaMismatch { .. } => {
             TurnError::Invariant(bounded_diagnostic(&error.to_string()))

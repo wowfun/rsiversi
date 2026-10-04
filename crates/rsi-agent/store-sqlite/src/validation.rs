@@ -133,7 +133,10 @@ pub(super) fn user_indexes(connection: &Connection) -> Result<BTreeSet<String>> 
         .map_err(sql_error)
 }
 
-pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) -> Result<u64> {
+pub(super) fn validate_session(
+    connection: &Connection,
+    session_id: &SessionId,
+) -> Result<ControlReplaySummary> {
     let (header, durable_seq) = read_session_header_row(connection, session_id)?;
     rsi_agent_store_protocol::validate_program_header(
         &super::program_graph::Graph(connection),
@@ -255,8 +258,28 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CONTROL_OBSERVER: std::cell::RefCell<Option<Arc<AtomicU64>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(any(test, feature = "test-support"))]
+pub(super) struct ControlObserver(Option<Arc<AtomicU64>>);
+#[cfg(any(test, feature = "test-support"))]
+impl ControlObserver {
+    pub(super) fn enter(counter: Arc<AtomicU64>) -> Self {
+        Self(CONTROL_OBSERVER.with(|scope| scope.replace(Some(counter))))
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ControlObserver {
+    fn drop(&mut self) {
+        CONTROL_OBSERVER.with(|scope| scope.replace(self.0.take()));
+    }
+}
 #[cfg(test)]
 thread_local! {
+    pub(super) static READY_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CONTROL_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static HEADER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -452,9 +475,8 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
             break;
         }
         for session_id in &page {
-            validate_session(connection, session_id)?;
+            let controls = validate_session(connection, session_id)?;
             let facts = validate_canonical_fact_prefix(connection, session_id)?;
-            let controls = validate_canonical_control_prefix(connection, session_id)?;
             let (created, activity) = connection
                 .query_row(
                     "SELECT created_at_ms, last_activity_ms FROM sessions WHERE session_id = ?1",
@@ -465,7 +487,7 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
             if decode_u64("activity timestamp", activity)?
                 != decode_u64("creation timestamp", created)?
                     .max(facts)
-                    .max(controls)
+                    .max(controls.activity_ms)
             {
                 return Err(StoreError::Corrupt(
                     "activity index differs from canonical records".into(),
@@ -1117,66 +1139,6 @@ pub(super) fn validate_canonical_fact_prefix(
     Ok(activity.latest())
 }
 
-pub(super) fn validate_canonical_control_prefix(
-    connection: &Connection,
-    session_id: &SessionId,
-) -> Result<u64> {
-    let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
-    let expected_digest = connection
-        .query_row(
-            "SELECT control_prefix_sha256 FROM sessions WHERE session_id = ?1",
-            [session_id.as_str()],
-            |row| bounded_text(row, 0, 64),
-        )
-        .map_err(sql_error)?;
-    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
-    let mut next_sequence = 1_u64;
-    let mut statement = connection
-        .prepare(
-            "SELECT seq, length(CAST(control_json AS BLOB)),
-                    CASE WHEN length(CAST(control_json AS BLOB)) <= ?2
-                         THEN control_json END
-             FROM agent_controls WHERE session_id = ?1 ORDER BY seq",
-        )
-        .map_err(sql_error)?;
-    let mut rows = statement
-        .query(params![
-            session_id.as_str(),
-            i64::try_from(MAXIMUM_SESSION_FACT_BYTES).expect("control bound fits SQLite INTEGER"),
-        ])
-        .map_err(sql_error)?;
-    while let Some(row) = rows.next().map_err(sql_error)? {
-        let sequence = decode_u64("control sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
-        let record: AgentControlRecord = decode_projected_json(
-            "Agent control record",
-            (
-                row.get::<_, i64>(1).map_err(sql_error)?,
-                row.get::<_, Option<String>>(2).map_err(sql_error)?,
-            ),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
-        if sequence != next_sequence || record.seq() != sequence {
-            return Err(StoreError::Corrupt(
-                "Agent control JSON sequence differs from its contiguous durable row".into(),
-            ));
-        }
-        activity.observe_control(&record);
-        digest = advance_control_prefix_digest(digest, &record).map_err(|error| {
-            StoreError::Corrupt(format!("stored Agent control record is invalid: {error}"))
-        })?;
-        validate_terminal_control(connection, session_id, &record, digest)?;
-        next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
-            StoreError::Corrupt("Agent control sequence overflowed during audit".into())
-        })?;
-    }
-    if hex::encode(digest) != expected_digest {
-        return Err(StoreError::Corrupt(
-            "control-prefix digest differs from the canonical control stream".into(),
-        ));
-    }
-    Ok(activity.latest())
-}
-
 #[derive(Default)]
 struct ReadyProjection {
     expected: BTreeMap<(String, String), (String, u64, u64, String)>,
@@ -1306,42 +1268,35 @@ impl ReadyProjection {
     fn finish(self, connection: &Connection, selected: &SessionId) -> Result<()> {
         let Self { expected, .. } = self;
 
-        let actual = {
-            let mut statement = connection
-                .prepare(
-                    "SELECT session_id, message_id, root_session_id, ready_control_seq,
-                        timestamp_ms, target
-                 FROM ready_messages WHERE session_id = ?1 ORDER BY message_id",
-                )
-                .map_err(sql_error)?;
-            statement
-                .query_map([selected.as_str()], |row| {
-                    Ok((
-                        (bounded_text(row, 0, 256)?, bounded_text(row, 1, 256)?),
-                        (
-                            bounded_text(row, 2, 256)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
-                            bounded_text(row, 5, 16)?,
-                        ),
-                    ))
-                })
-                .map_err(sql_error)?
-                .map(|row| {
-                    let (key, (root, sequence, timestamp, target)) = row.map_err(sql_error)?;
-                    Ok((
-                        key,
-                        (
-                            root,
-                            decode_u64("ready control sequence", sequence)?,
-                            decode_u64("ready timestamp", timestamp)?,
-                            target,
-                        ),
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>>>()?
-        };
-        if actual != expected {
+        let mut statement = connection.prepare(
+            "SELECT session_id, message_id, root_session_id, ready_control_seq, timestamp_ms, target
+             FROM ready_messages WHERE session_id = ?1 ORDER BY message_id COLLATE BINARY LIMIT ?2"
+        ).map_err(sql_error)?;
+        let lookahead = i64::try_from(expected.len() + 1).expect("ready projection is bounded");
+        let mut rows = statement
+            .query(params![selected.as_str(), lookahead])
+            .map_err(sql_error)?;
+        let mut expected = expected.into_iter();
+        while let Some(row) = rows.next().map_err(sql_error)? {
+            #[cfg(test)]
+            READY_ROWS.set(READY_ROWS.get() + 1);
+            let key = (
+                bounded_text(row, 0, 256).map_err(sql_error)?,
+                bounded_text(row, 1, 256).map_err(sql_error)?,
+            );
+            let value = (
+                bounded_text(row, 2, 256).map_err(sql_error)?,
+                decode_u64("ready control sequence", row.get(3).map_err(sql_error)?)?,
+                decode_u64("ready timestamp", row.get(4).map_err(sql_error)?)?,
+                bounded_text(row, 5, 16).map_err(sql_error)?,
+            );
+            if expected.next() != Some((key, value)) {
+                return Err(StoreError::Corrupt(
+                    "ready-message index differs from the canonical control streams".into(),
+                ));
+            }
+        }
+        if expected.next().is_some() {
             return Err(StoreError::Corrupt(
                 "ready-message index differs from the canonical control streams".into(),
             ));
@@ -1350,12 +1305,18 @@ impl ReadyProjection {
     }
 }
 
+/// Canonical replay results consumed by online projection and offline audit.
+#[derive(Debug)]
+pub(super) struct ControlReplaySummary {
+    pub(super) activity_ms: u64,
+}
+
 /// Decode each bounded canonical control once and feed all index projections.
 #[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
 pub(super) fn validate_agent_indexes(
     connection: &Connection,
     header: &SessionHeader,
-) -> Result<u64> {
+) -> Result<ControlReplaySummary> {
     let selected = header.session_id();
     let mut mailbox = MailboxProjection::default();
     let mut ready = ReadyProjection::default();
@@ -1363,6 +1324,7 @@ pub(super) fn validate_agent_indexes(
     let mut domains = super::domain::Projection::default();
     let mut programs = super::program::Projection::default();
     let mut decoded = 0_u64;
+    let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
     let mut queue_receipts = 0_usize;
@@ -1391,6 +1353,15 @@ pub(super) fn validate_agent_indexes(
             MAXIMUM_SESSION_FACT_BYTES,
         )?;
         decoded += 1;
+        activity.observe_control(&record);
+        #[cfg(test)]
+        CONTROL_DECODES.set(CONTROL_DECODES.get() + 1);
+        #[cfg(any(test, feature = "test-support"))]
+        CONTROL_OBSERVER.with(|scope| {
+            if let Some(counter) = &*scope.borrow() {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
         if record.seq() != decoded
             || decode_u64("control row sequence", row.get(2).map_err(sql_error)?)? != decoded
         {
@@ -1450,14 +1421,19 @@ pub(super) fn validate_agent_indexes(
         )
         .then_some(record);
     }
-    let (indexed_terminals, indexed_settlement) = connection
+    let (indexed_terminals, indexed_settlement, indexed_digest) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL),
-                last_settled_control_seq FROM sessions WHERE session_id = ?1",
+                last_settled_control_seq, control_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [selected.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, bounded_text(row, 2, 64)?)),
         )
         .map_err(sql_error)?;
+    if digest != decode_sha256("control-prefix digest", &indexed_digest)? {
+        return Err(StoreError::Corrupt(
+            "control-prefix digest differs from the canonical control stream".into(),
+        ));
+    }
     if last_settled_control_seq != decode_u64("last settlement sequence", indexed_settlement)? {
         return Err(StoreError::Corrupt(
             "last settlement sequence differs from canonical controls".into(),
@@ -1478,7 +1454,9 @@ pub(super) fn validate_agent_indexes(
     activation.finish(connection, selected)?;
     domains.finish(connection, selected)?;
     programs.finish(connection, selected)?;
-    Ok(decoded)
+    Ok(ControlReplaySummary {
+        activity_ms: activity.latest(),
+    })
 }
 
 /// Checks each marker against the sole derived index; counts detect indexed terminals without a marker.

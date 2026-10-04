@@ -97,6 +97,7 @@ struct FactReadRaceStore {
     pause_read: AtomicBool,
     read_attempts: AtomicUsize,
     control_read_attempts: AtomicUsize,
+    control_read_error: Mutex<Option<StoreError>>,
     count_control_reads_for: Mutex<Option<SessionId>>,
     mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     read_captured: Notify,
@@ -108,11 +109,14 @@ struct FactReadRaceStore {
     fail_program_after_apply: AtomicBool,
     program_records_materialized: AtomicUsize,
     cas_writes: AtomicUsize,
+    missing_cas: Mutex<Option<String>>,
     fail_domain_after_apply: AtomicBool,
+    commit_admission_refusal: Mutex<Option<StoreError>>,
     reject_quiescent_commit: AtomicBool,
     fail_terminal_after_apply: AtomicBool,
     fail_terminal_lookup_after_apply: AtomicBool,
     terminal_lookup_fails: AtomicBool,
+    boundary_read_refusal: Mutex<Option<(SessionId, StoreError)>>,
     fail_domain_lookup_after_apply: AtomicBool,
     domain_lookup_fails: AtomicBool,
     fail_append_creation_after_apply: AtomicBool,
@@ -178,6 +182,7 @@ impl FactReadRaceStore {
             pause_read: AtomicBool::new(false),
             read_attempts: AtomicUsize::new(0),
             control_read_attempts: AtomicUsize::new(0),
+            control_read_error: Mutex::new(None),
             count_control_reads_for: Mutex::new(None),
             mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
             read_captured: Notify::new(),
@@ -189,11 +194,14 @@ impl FactReadRaceStore {
             fail_program_after_apply: AtomicBool::new(false),
             program_records_materialized: AtomicUsize::new(0),
             cas_writes: AtomicUsize::new(0),
+            missing_cas: Mutex::new(None),
             fail_domain_after_apply: AtomicBool::new(false),
+            commit_admission_refusal: Mutex::new(None),
             reject_quiescent_commit: AtomicBool::new(false),
             fail_terminal_after_apply: AtomicBool::new(false),
             fail_terminal_lookup_after_apply: AtomicBool::new(false),
             terminal_lookup_fails: AtomicBool::new(false),
+            boundary_read_refusal: Mutex::new(None),
             fail_domain_lookup_after_apply: AtomicBool::new(false),
             domain_lookup_fails: AtomicBool::new(false),
             fail_append_creation_after_apply: AtomicBool::new(false),
@@ -609,6 +617,10 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        if let Some(error) = self.commit_admission_refusal.lock().unwrap().clone() {
+            self.domain_lookup_fails.store(true, Ordering::Release);
+            return Err(error);
+        }
         let creates_session = commit.sessions.iter().any(|append| append.header.is_some());
         let program = commit
             .sessions
@@ -802,6 +814,9 @@ impl SessionStore for FactReadRaceStore {
         after_seq: u64,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreControlPage> {
+        if let Some(error) = self.control_read_error.lock().unwrap().take() {
+            return Err(error);
+        }
         if self.count_control_reads_for.lock().unwrap().as_ref() == Some(session_id) {
             self.control_read_attempts.fetch_add(1, Ordering::AcqRel);
         }
@@ -856,6 +871,13 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         turn_id: &TurnId,
     ) -> rsi_agent_store_protocol::Result<StoreTurnBoundary> {
+        if let Some((session, error)) = self.boundary_read_refusal.lock().unwrap().as_ref()
+            && session == session_id
+        {
+            self.turn_boundary_read_attempts
+                .fetch_add(1, Ordering::AcqRel);
+            return Err(error.clone());
+        }
         if self.terminal_lookup_fails.load(Ordering::Acquire) {
             return Err(StoreError::Io("injected terminal lookup failure".into()));
         }
@@ -1125,8 +1147,11 @@ impl SessionStore for FactReadRaceStore {
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> rsi_agent_store_protocol::Result<Option<StoredContextCheckpoint>> {
-        self.inner.read_context_checkpoint(session_id).await
+        self.inner
+            .read_context_checkpoint(session_id, reservation)
+            .await
     }
 
     async fn write_context_checkpoint(
@@ -1144,8 +1169,15 @@ impl SessionStore for FactReadRaceStore {
         self.inner.put_cas(bytes).await
     }
 
-    async fn read_cas(&self, object: &CasObjectRef) -> rsi_agent_store_protocol::Result<Arc<[u8]>> {
-        self.inner.read_cas(object).await
+    async fn read_cas(
+        &self,
+        object: &CasObjectRef,
+        admission: rsi_api_protocol::ByteAdmission,
+    ) -> rsi_agent_store_protocol::Result<rsi_api_protocol::RetainedBytes> {
+        if self.missing_cas.lock().unwrap().as_ref() == Some(&object.sha256) {
+            return Err(StoreError::NotFound(object.sha256.clone()));
+        }
+        self.inner.read_cas(object, admission).await
     }
 }
 
@@ -1237,6 +1269,27 @@ impl Drop for DropOwner {
 
 #[async_trait]
 impl ToolRuntime for SourceOnlyTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        let definitions: Vec<ToolDefinition> = {
+            // These fixtures publish source-bound effects directly; keep the frozen
+            // child policy honest even though they never invoke a Tool executor.
+            ["fixture_control", "echo"]
+                .into_iter()
+                .map(|name| {
+                    ToolDefinition::new(name, "Test source", serde_json::json!({"type":"object"}))
+                        .unwrap()
+                })
+                .collect()
+        };
+        for definition in definitions {
+            visitor(&definition);
+        }
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -1256,17 +1309,6 @@ impl ToolRuntime for SourceOnlyTools {
         self.definitions()
             .into_iter()
             .find(|definition| definition.name() == name)
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        // These fixtures publish source-bound effects directly; keep the frozen
-        // child policy honest even though they never invoke a Tool executor.
-        ["fixture_control", "echo"]
-            .into_iter()
-            .map(|name| {
-                ToolDefinition::new(name, "Test source", serde_json::json!({"type":"object"}))
-                    .unwrap()
-            })
-            .collect()
     }
 
     fn prepare(

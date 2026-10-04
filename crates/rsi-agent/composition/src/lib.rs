@@ -35,7 +35,7 @@ use rsi_tools_protocol::{
 };
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -252,6 +252,7 @@ impl PresetRow {
 }
 
 struct Generation {
+    pin: OnceLock<rsi_agent_composition_protocol::Result<AgentCompositionPin>>,
     preset_id: AgentPresetId,
     identity: snapshot::GenerationIdentity,
     tools: Arc<dyn ToolRuntime>,
@@ -273,16 +274,20 @@ impl fmt::Debug for Generation {
 
 impl Generation {
     fn pin(&self) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        AgentCompositionPin::new(
-            self.preset_id.clone(),
-            self.identity.effective_digest.clone(),
-            Arc::clone(&self.tools),
-            Arc::clone(&self.context_builder),
-            self.domains.clone(),
-            self.contributions.clone(),
-            self.owner.clone(),
-        )
-        .map(|pin| pin.with_manifest(self.identity.manifest.clone()))
+        self.pin
+            .get_or_init(|| {
+                AgentCompositionPin::new(
+                    self.preset_id.clone(),
+                    self.identity.effective_digest.clone(),
+                    Arc::clone(&self.tools),
+                    Arc::clone(&self.context_builder),
+                    self.domains.clone(),
+                    self.contributions.clone(),
+                    self.owner.clone(),
+                )
+                .map(|pin| pin.with_manifest(self.identity.manifest.clone()))
+            })
+            .clone()
     }
 }
 
@@ -911,6 +916,7 @@ impl CompositionState {
                     executor: self.executor.clone(),
                 });
                 let generation = Arc::new(Generation {
+                    pin: OnceLock::new(),
                     preset_id,
                     identity,
                     tools,

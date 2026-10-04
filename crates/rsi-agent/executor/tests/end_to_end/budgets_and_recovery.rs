@@ -650,6 +650,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         context_builder,
         first_claim.header().clone(),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     loop {
@@ -731,6 +732,10 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one complete concurrency or recovery scenario checks durable request boundaries"
+)]
 async fn context_checkpoint_reads_only_suffix_and_corruption_falls_back_equivalently() {
     let stack = BaseStack::activate().await;
     let fixture = Arc::new(LanguageFixture {
@@ -755,7 +760,10 @@ async fn context_checkpoint_reads_only_suffix_and_corruption_falls_back_equivale
         loop {
             if let Some(checkpoint) = stack
                 .store
-                .read_context_checkpoint(&first.session_id)
+                .read_context_checkpoint(
+                    &first.session_id,
+                    rsi_api_protocol::ByteBudget::default().into(),
+                )
                 .await
                 .unwrap()
             {
@@ -783,7 +791,10 @@ async fn context_checkpoint_reads_only_suffix_and_corruption_falls_back_equivale
         loop {
             let checkpoint = stack
                 .store
-                .read_context_checkpoint(&first.session_id)
+                .read_context_checkpoint(
+                    &first.session_id,
+                    rsi_api_protocol::ByteBudget::default().into(),
+                )
                 .await
                 .unwrap()
                 .unwrap();
@@ -804,7 +815,9 @@ async fn context_checkpoint_reads_only_suffix_and_corruption_falls_back_equivale
                 header_fingerprint: second_checkpoint.header_fingerprint,
                 through_seq: second_checkpoint.through_seq,
                 fact_prefix_sha256: second_checkpoint.fact_prefix_sha256,
-                bytes: Arc::from(b"corrupt-context-checkpoint".as_slice()),
+                bytes: rsi_api_protocol::ByteBudget::default()
+                    .copy(b"corrupt-context-checkpoint".as_slice())
+                    .unwrap(),
             },
         })
         .await
@@ -832,4 +845,99 @@ async fn context_checkpoint_reads_only_suffix_and_corruption_falls_back_equivale
         assert!(third_request.contains("third"));
     }
     stack.dispose(language_fiber, executor_fiber).await;
+}
+
+#[tokio::test]
+async fn checkpoint_read_capacity_is_explicit_and_does_not_dispatch_after_history_fallback() {
+    for read_pressure in [true, false] {
+        let stack = BaseStack::activate().await;
+        let fixture = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([
+                StartOutcome::Stream(answer_script()),
+                StartOutcome::Stream(answer_script()),
+            ])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let language = stack
+            .activate_language("test.language.restore-pressure", fixture.clone())
+            .await;
+        let executor = stack
+            .activate_executor("executor-restore-pressure-first")
+            .await;
+        let input = if read_pressure {
+            "first".to_owned()
+        } else {
+            "large input ".repeat(8192)
+        };
+        let (first, outcome) = stack.submit_and_wait(&input).await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let checkpoint = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(checkpoint) = stack
+                    .store
+                    .read_context_checkpoint(
+                        &first.session_id,
+                        rsi_api_protocol::ByteBudget::default().into(),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    break checkpoint;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let spare = if read_pressure {
+            32768
+        } else {
+            checkpoint.bytes.len() * 2
+        };
+        let bytes = if read_pressure {
+            rsi_api_protocol::ByteBudget::default()
+                .copy(&vec![b'x'; 65536])
+                .unwrap()
+        } else {
+            checkpoint.bytes.clone()
+        };
+        stack
+            .store
+            .write_context_checkpoint(WriteContextCheckpoint {
+                session_id: first.session_id.clone(),
+                expected_durable_seq: checkpoint.through_seq,
+                checkpoint: StoredContextCheckpoint {
+                    bytes,
+                    ..checkpoint
+                },
+            })
+            .await
+            .unwrap();
+        fixture.requests.lock().unwrap().clear();
+        assert!(executor.dispose().await.is_clean());
+        let budget = stack
+            .runtime
+            .root()
+            .lookup_local::<rsi_agent_context::ContextBudgetContract>()
+            .unwrap();
+        let pressure = budget
+            .reserve(budget.maximum() - budget.used() - spare)
+            .unwrap();
+        let executor = stack
+            .activate_executor("executor-restore-pressure-second")
+            .await;
+        stack.store.take_fact_read_cursors();
+        let (_, outcome) = stack.resume_and_wait("second", first.session_id).await;
+        assert!(matches!(outcome, TurnOutcome::Failed {code, ..} if code == "context.capacity"));
+        assert_eq!(fixture.starts.load(Ordering::Relaxed), 1);
+        assert!(
+            !stack.store.take_fact_read_cursors().contains(&0),
+            "capacity triggered full-history fallback"
+        );
+        drop(pressure);
+        stack.dispose(language, executor).await;
+    }
 }

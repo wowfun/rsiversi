@@ -74,6 +74,7 @@ pub struct LocalSessionService {
     commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
     draft_commands: Arc<commands::DraftCommands>,
     store: Arc<dyn SessionStore>,
+    context_budget: rsi_agent_context::ContextBudget,
     composition: Arc<dyn AgentComposition>,
     workspace: Arc<dyn WorkspaceRegistry>,
     settings: Arc<dyn AgentSettingsSource>,
@@ -134,6 +135,7 @@ impl LocalSessionService {
         projections: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
         turns: Arc<dyn TurnService>,
         store: Arc<dyn SessionStore>,
+        context_budget: rsi_agent_context::ContextBudget,
         composition: Arc<dyn AgentComposition>,
         workspace: Arc<dyn WorkspaceRegistry>,
         settings: Arc<dyn AgentSettingsSource>,
@@ -165,6 +167,7 @@ impl LocalSessionService {
             commands,
             draft_commands: commands::DraftCommands::new(),
             store,
+            context_budget,
             composition,
             workspace,
             settings,
@@ -257,6 +260,7 @@ impl LocalSessionService {
             commands: self.commands.clone(),
             draft_commands: self.draft_commands.clone(),
             store: Arc::clone(&self.store),
+            context_budget: self.context_budget.clone(),
             workspace: Arc::clone(&self.workspace),
             language: Arc::clone(&self.language),
             image: Arc::clone(&self.image),
@@ -468,6 +472,7 @@ struct LocalSessionHandle {
     commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
     draft_commands: Arc<commands::DraftCommands>,
     store: Arc<dyn SessionStore>,
+    context_budget: rsi_agent_context::ContextBudget,
     workspace: Arc<dyn WorkspaceRegistry>,
     language: Arc<dyn LanguageCall>,
     image: Arc<dyn ImageCall>,
@@ -1130,10 +1135,16 @@ impl SessionHandle for LocalSessionHandle {
                 (*header).clone(),
                 options,
                 self.projection_stopped.clone(),
+                self.context_budget.clone(),
             )
             .await?
         } else {
-            rsi_session_export::empty((*header).clone(), options, self.projection_stopped.clone())?
+            rsi_session_export::empty(
+                (*header).clone(),
+                options,
+                self.projection_stopped.clone(),
+                self.context_budget.clone(),
+            )?
         };
         Ok(self.guard_stream(async_stream::try_stream! {
             let _permit = permit;
@@ -1248,7 +1259,7 @@ impl SessionHandle for LocalSessionHandle {
         self.store
             .inspect_session(self.session_id())
             .await
-            .map_err(|error| SessionError::Backend(error.to_string()))
+            .map_err(map_store_error)
     }
 
     async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {

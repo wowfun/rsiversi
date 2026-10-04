@@ -13,6 +13,13 @@ use rsi_ai_protocol::{
     LanguageEvent, LanguageRequestOptions, Message, MessageContent, MessageRole,
 };
 
+// Policy headroom for resolved section text, decoded JSON and metadata copies;
+// these factors account workspace, not Rust allocator overhead or an RSS bound.
+const EVIDENCE_WORKSPACE_FACTOR: usize = 8;
+const DIAGNOSTIC_METADATA_HEADROOM: usize = 16 * 1024;
+// Normalized messages and overlapping original/replacement/final request JSON.
+const REQUEST_WORKSPACE_FACTOR: usize = 4;
+
 pub(super) struct Latest {
     pub id: SessionId,
     pub effect: EffectId,
@@ -141,7 +148,17 @@ async fn resolve(
     Ok(value)
 }
 
-pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Value> {
+pub(super) struct Diagnostic {
+    pub value: Value,
+    pub credit: Option<rsi_agent_context::ContextCredit>,
+}
+fn capacity_unavailable() -> Diagnostic {
+    Diagnostic {
+        value: json!({"availability":"unavailable","reason":"context_capacity"}),
+        credit: None,
+    }
+}
+pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Diagnostic> {
     let mut page = cut
         .store()
         .read_facts(&latest.id, latest.intent - 1, 1)
@@ -158,6 +175,18 @@ pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Value> {
     else {
         return Err(invalid("export request source changed"));
     };
+    let evidence_bytes = evidence
+        .parts()
+        .iter()
+        .try_fold(0usize, |sum, (_, part)| sum.checked_add(part.bytes()))
+        .ok_or_else(|| invalid("evidence weight overflow"))?;
+    let initial = evidence_bytes
+        .checked_mul(EVIDENCE_WORKSPACE_FACTOR)
+        .and_then(|weight| weight.checked_add(DIAGNOSTIC_METADATA_HEADROOM))
+        .ok_or_else(|| invalid("diagnostic weight overflow"))?;
+    let Ok(mut credit) = cut.context_budget.reserve(initial) else {
+        return Ok(capacity_unavailable());
+    };
     let evidence = resolve(&*cut.store(), &latest.id, evidence).await?;
     let mut result = json!({"raw":false,"reconstructed":true,"approximate":true,"session_id":latest.id,"intent_seq":latest.intent.to_string(),"effect_id":latest.effect,"snapshot":snapshot,
         "reconstructor":DefaultContextBuilder::default().identity(),"projection_limits":ContextLimits::default(),
@@ -165,12 +194,19 @@ pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Value> {
     if result["evidence"]["availability"] != "available" {
         result["availability"] = json!("unavailable");
         result["reason"] = json!("request_evidence_unavailable");
-        return Ok(result);
+        return Ok(Diagnostic {
+            value: result,
+            credit: Some(credit),
+        });
     }
-    match reconstruct(cut, latest, &result["evidence"]).await {
+    match reconstruct(cut, latest, &result["evidence"], &mut credit).await {
         Ok(request) => {
             result["availability"] = json!("available");
             result["request"] = request;
+        }
+        Err(super::SessionError::Capacity) => {
+            result["availability"] = json!("unavailable");
+            result["reason"] = json!("context_capacity");
         }
         Err(error) => {
             result["availability"] = json!("unavailable");
@@ -179,10 +215,29 @@ pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Value> {
             result["detail"] = json!(detail);
         }
     }
-    Ok(result)
+    Ok(Diagnostic {
+        value: result,
+        credit: Some(credit),
+    })
 }
 
-async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Value> {
+fn context_error(error: rsi_agent_context::ContextError) -> super::SessionError {
+    match error {
+        rsi_agent_context::ContextError::Capacity => super::SessionError::Capacity,
+        error => encoding(error),
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one admitted reconstruction binds the exact export interval and recorded options"
+)]
+async fn reconstruct(
+    cut: &Cut,
+    latest: &Latest,
+    evidence: &Value,
+    credit: &mut rsi_agent_context::ContextCredit,
+) -> Result<Value> {
     if latest.id != *cut.header.session_id()
         && cut
             .intervals
@@ -205,9 +260,10 @@ async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Val
             identity: builder.identity(),
             header: header.clone(),
             limits: ContextLimits::default(),
+            budget: cut.context_budget.clone(),
             checkpoint: None,
         })
-        .map_err(encoding)?;
+        .map_err(context_error)?;
     // Only the exported Session's proven direct-parent interval may be consulted.
     if let Some(origin) = header.fork_origin() {
         if latest.id != *cut.header.session_id() {
@@ -226,9 +282,11 @@ async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Val
         while let Some(fact) = source.next().await {
             cursor
                 .ingest(ContextPage::ForkSeed(&[Arc::new(fact?)]))
-                .map_err(encoding)?;
+                .map_err(context_error)?;
         }
-        cursor.ingest(ContextPage::FinishSeed).map_err(encoding)?;
+        cursor
+            .ingest(ContextPage::FinishSeed)
+            .map_err(context_error)?;
     }
     let mut source = facts(
         cut.store(),
@@ -241,10 +299,16 @@ async fn reconstruct(cut: &Cut, latest: &Latest, evidence: &Value) -> Result<Val
     while let Some(fact) = source.next().await {
         cursor
             .ingest(ContextPage::Canonical(&[Arc::new(fact?)]))
-            .map_err(encoding)?;
+            .map_err(context_error)?;
     }
     let (options, profile) = recorded_inputs(evidence)?;
-    let projected = cursor.build(options, &profile).map_err(encoding)?;
+    let projected = cursor.build(options, &profile).map_err(context_error)?;
+    let copies = projected
+        .encoded_weight()
+        .checked_mul(REQUEST_WORKSPACE_FACTOR)
+        .and_then(|weight| weight.checked_add(credit.bytes()))
+        .ok_or_else(|| invalid("diagnostic weight overflow"))?;
+    credit.resize(copies).map_err(context_error)?;
     let mut messages: Vec<Message> = serde_json::from_str(
         evidence["system"]["text"]
             .as_str()

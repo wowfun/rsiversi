@@ -433,6 +433,11 @@ struct StoreInner {
         )>,
     >,
     validation_admission: Arc<Semaphore>,
+    cold_validation: cold_validation::ColdValidation,
+    #[cfg(any(test, feature = "test-support"))]
+    validation_vm_steps: Arc<AtomicU64>,
+    #[cfg(test)]
+    ready_rows_decoded: AtomicU64,
     pins: Mutex<BTreeMap<SessionId, std::sync::Weak<preparation::PinnedProof>>>,
     pin_admission: Arc<Semaphore>,
     pin_changed: tokio::sync::Notify,
@@ -447,7 +452,7 @@ struct StoreInner {
     #[cfg(any(test, feature = "test-support"))]
     fact_materializations: Arc<AtomicU64>,
     #[cfg(any(test, feature = "test-support"))]
-    control_decodes: AtomicU64,
+    control_decodes: Arc<AtomicU64>,
     #[cfg(any(test, feature = "test-support"))]
     validation_barrier: Mutex<
         Option<(
@@ -560,6 +565,10 @@ impl SqliteStore {
     /// Agent-control index projections, then caches that proof with bounded recency. It does not decode every Fact or
     /// recompute the canonical Fact-prefix digest; use [`Self::verify`] for that
     /// explicit full audit.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Store startup validates schema before any writable preparation"
+    )]
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = acquire_writer_lock(&root)?;
@@ -614,6 +623,9 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         configure_reader(&validation_connection)?;
+        validation_connection
+            .busy_timeout(Duration::from_millis(100))
+            .map_err(sql_error)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 connections: DatabaseConnections {
@@ -630,6 +642,11 @@ impl SqliteStore {
                 #[cfg(test)]
                 fork_barrier: Mutex::new(None),
                 validation_admission: Arc::new(Semaphore::new(1)),
+                cold_validation: cold_validation::ColdValidation::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                validation_vm_steps: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                ready_rows_decoded: AtomicU64::new(0),
                 pins: Mutex::new(BTreeMap::new()),
                 pin_admission: Arc::new(Semaphore::new(VALIDATED_SESSION_CACHE_CAPACITY)),
                 pin_changed: tokio::sync::Notify::new(),
@@ -644,7 +661,7 @@ impl SqliteStore {
                 #[cfg(any(test, feature = "test-support"))]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
                 #[cfg(any(test, feature = "test-support"))]
-                control_decodes: AtomicU64::new(0),
+                control_decodes: Arc::new(AtomicU64::new(0)),
                 #[cfg(any(test, feature = "test-support"))]
                 validation_barrier: Mutex::new(None),
                 #[cfg(feature = "test-support")]
@@ -786,81 +803,8 @@ impl SqliteStore {
         self.inner.touch_validated_session(session_id)
     }
 
-    async fn with_validation<T, F>(&self, operation: F) -> Result<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
-    {
-        let owner = Arc::clone(&self.inner);
-        Self::with_database(
-            Arc::clone(&self.inner.validation_admission),
-            "SQLite validation admission closed",
-            #[cfg(feature = "test-support")]
-            None,
-            move || {
-                let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
-                    StoreError::Io("SQLite validation connection mutex was poisoned".into())
-                })?;
-                operation(&mut connection)
-            },
-        )
-        .await
-    }
-
     async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
         self.session_proof(session_id).await.map(|_| ())
-    }
-
-    async fn session_proof(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Arc<preparation::ValidatedSessionProof>> {
-        if let Some(proof) = self.inner.session_proof(session_id) {
-            return Ok(proof);
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        let queued = std::time::Instant::now();
-        let permit = Arc::clone(&self.inner.validation_admission)
-            .acquire_owned()
-            .await
-            .map_err(|_| StoreError::Io("SQLite validation admission closed".into()))?;
-        if let Some(proof) = self.inner.session_proof(session_id) {
-            return Ok(proof);
-        }
-        let candidate = session_id.clone();
-        let owner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            #[cfg(any(test, feature = "test-support"))]
-            owner.validation_queue_ns.fetch_add(
-                u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                Ordering::Relaxed,
-            );
-            let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
-                StoreError::Io("SQLite validation connection mutex was poisoned".into())
-            })?;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
-            #[cfg(any(test, feature = "test-support"))]
-            let started = std::time::Instant::now();
-            let validated = owner.validate_selected(&transaction, &candidate);
-            #[cfg(any(test, feature = "test-support"))]
-            owner.validation_work_ns.fetch_add(
-                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                Ordering::Relaxed,
-            );
-            validated?;
-            transaction.commit().map_err(sql_error)?;
-            // Keep the actual successful proof locally even if the optional cache is poisoned or evicted.
-            let proof = owner.validated_sessions.lock().map_or_else(
-                |_| Arc::new(preparation::ValidatedSessionProof),
-                |mut cache| cache.insert(candidate),
-            );
-            Ok(proof)
-        })
-        .await
-        .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
     }
 
     async fn with_subtree_reader<T, F>(&self, root: &SessionId, operation: F) -> Result<T>
@@ -892,18 +836,19 @@ impl SqliteStore {
             Err(operation) => {
                 let candidate = root.clone();
                 let owner = Arc::clone(&self.inner);
-                self.with_validation(move |connection| {
-                    let transaction = connection
-                        .transaction_with_behavior(TransactionBehavior::Deferred)
-                        .map_err(sql_error)?;
-                    let snapshot = owner.read_validated_agent_subtree(&transaction, &candidate)?;
-                    // Publish only after the complete snapshot operation succeeds.
-                    let validated = snapshot.clone();
-                    let result = operation(&transaction, snapshot)?;
-                    transaction.commit().map_err(sql_error)?;
-                    owner.mark_subtree_validated(&validated);
-                    Ok(result)
-                })
+                let publishing = owner.clone();
+                self.with_validation_publish(
+                    move |transaction| {
+                        let snapshot =
+                            owner.read_validated_agent_subtree(transaction, &candidate)?;
+                        let result = operation(transaction, snapshot.clone())?;
+                        Ok((snapshot, result))
+                    },
+                    move |(snapshot, result)| {
+                        publishing.mark_subtree_validated(&snapshot);
+                        Ok(result)
+                    },
+                )
                 .await
             }
         }
@@ -946,6 +891,7 @@ impl SqliteStore {
 mod activity;
 mod append;
 mod cas;
+mod cold_validation;
 mod domain;
 mod filesystem;
 mod program;

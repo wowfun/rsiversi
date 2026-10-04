@@ -35,8 +35,10 @@ impl ModelContextBuilder for DefaultContextBuilder {
     }
     fn open(&self, init: ContextInit<'_>) -> Result<Box<dyn ModelContextCursor>> {
         let mut fold = match init.checkpoint {
-            Some(bytes) => ContextFold::from_checkpoint(init.header, init.limits, bytes)?,
-            None => ContextFold::with_limits(init.header, init.limits)?,
+            Some(bytes) => {
+                ContextFold::from_checkpoint(init.header, init.limits, bytes, init.budget)?
+            }
+            None => ContextFold::with_limits(init.header, init.limits, init.budget)?,
         };
         fold.enable_semantic(init.identity)?;
         Ok(Box::new(DefaultCursor {
@@ -67,8 +69,11 @@ impl ModelContextCursor for DefaultCursor {
         options: LanguageRequestOptions,
         profile: &LanguageProfile,
     ) -> Result<LanguageRequest> {
+        let mut credit = self.fold.projection_credit(options.encoded_weight())?;
         let request = self.fold.request_messages(self.limits, &options)?;
-        crate::emission::project_tool_images(request, options, profile, self.limits)
+        let request = crate::emission::project_tool_images(request, options, profile, self.limits)?;
+        credit.resize(request.encoded_weight())?;
+        Ok(request.with_retention(credit))
     }
     fn plan_compaction(
         &self,
@@ -84,7 +89,7 @@ impl ModelContextCursor for DefaultCursor {
     fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         self.fold.summary_installed(effect)
     }
-    fn checkpoint(&self) -> Result<Arc<[u8]>> {
+    fn checkpoint(&self) -> Result<rsi_api_protocol::RetainedBytes> {
         self.fold.checkpoint_bytes()
     }
     fn position(&self) -> ContextPosition {

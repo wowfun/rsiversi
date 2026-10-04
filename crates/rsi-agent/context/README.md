@@ -52,9 +52,14 @@ would follow a later call's result or leave its batch nonadjacent. A successful
 parallel sibling may still settle when an earlier sibling has no outcome; after
 termination its missing predecessor receives the ordinary unknown-outcome view.
 Message capacity rejection cannot register a batch or settle a call without its
-message. An ingestion error invalidates the cursor for further use; discard it
-and rebuild from authoritative Facts. A failed Fact body cannot yield a cache
-claiming to represent the preceding prefix.
+message. An error after Fact workspace admission invalidates the cursor for
+further use: mutable projection, semantic state and assemblers are dropped,
+temporary credit is released, and only the immutable Header remains charged.
+Sequence and prefix-digest metadata retain the last successful prefix for diagnostics.
+Further ingestion, projection, planning and checkpoint creation reject that
+cursor; discard it and rebuild from authoritative Facts. Sequence/Fact-validation
+rejections and workspace admission refusals do not mutate the cursor. A failed
+Fact body cannot yield a cache claiming to represent the preceding prefix.
 
 Provider requests retain actual results and add deterministic error explanations
 for missing results: superseded before execution, terminal before ToolStarted,
@@ -191,9 +196,12 @@ lifecycle state, so accepted queued turns do not prevent a checkpoint. Context
 alone owns and validates that schema, recomputes all message accounting on
 restore, and binds the retained projection to the immutable header, exact
 retention limits, cursor, and a rolling SHA-256 digest of every folded Fact.
-The envelope serializes the borrowed retained projection once, then prefixes
-its raw digest; checkpoint creation neither deep-clones the retained messages
-nor serializes the payload twice. Fact-prefix hashing streams canonical JSON
+Restore validates semantic metadata bounds and its positions against restored
+Turns before accounting or pruning; the provider separately verifies builder identity.
+The envelope first measures the borrowed retained projection to admit its exact
+encoded allocation, then serializes it into that allocation and prefixes its raw
+digest. Checkpoint creation traverses the payload twice without deep-cloning the
+retained messages. Fact-prefix hashing streams canonical JSON
 directly into SHA-256, and the immutable system message plus its canonical byte
 size are cached once per fold.
 The Store carries that prefix digest independently so the executor can reject
@@ -252,3 +260,88 @@ the enclosing model-origin coordinator result enters ordinary Context. Replays
 validate exact nesting, unique active ordinals and full Tool identity (owner,
 invocation, call and request digest) for both model and Program calls; compaction preserves that
 state while its parent call remains retained and drops it with the parent batch.
+
+The service supplies one `ContextBudgetContract`, inherited by every Agent Scope
+and retained by overlapping executor generations and checkpoint maintenance.
+Its default accounted limit is 512 MiB; pressure fails immediately with
+`ContextError::Capacity`. Parking execution releases a lane but keeps its cursor
+charged. No cursor eviction or replay policy is implied. The ordinary Host
+Profile patch can replace `rsi-context-budget` configuration with a positive
+`maximum_bytes`; replacement requires service restart so it cannot create a
+second simultaneous pool.
+
+Admission precedes retained-state growth and deep projection copies. Semantic
+state, immutable headers, schemas and request options use canonical encoded
+weight; assembler content uses an incrementally maintained conservative encoded
+weight. Buffer credit follows retained allocation capacity through clone, slice,
+prepared-call and Store worker ownership. `ModelContext` exposes its messages by
+immutable borrow: projected storage cannot be moved out separately from its
+credit. A caller making an explicit deep copy admits that copy independently.
+This accounts defined resources rather than RSS or allocator overhead; provider
+private media/wire allocations and SQLite pages have their own limits.
+
+The limit accounts retained state and temporary work together. Fact admission
+covers the old state, staged replacement and escaping overhead; projections cover
+copied messages and normalization, and restore covers encoded input plus decoded
+state. Conservative admission policy can refuse work before retained content alone reaches
+the configured limit. Each request materialization uses one caller-owned
+projection credit. Checkpoint reads reserve only the validated body length at the
+Store allocation boundary; queueing and absent checkpoints reserve no bytes.
+Restore refusal surfaces as `context.capacity` instead of triggering full-history
+replay. Required requests and forced compaction fail on pressure; optional
+maintenance and compaction decline with diagnostics. Custom builders receive the
+same mandatory budget and keep admission with their allocations.
+
+The Host-selected `maximum_bytes` is any positive host `usize`; no value disables
+checked admission. There is no additional fixed ceiling because hosts must size
+this shared pool for their chosen concurrency. API and durable-format byte limits
+remain independent. A very large configured pool weakens operational protection;
+the operator owns that choice, and this accounted-weight policy is not an RSS limit.
+
+The current peak admission formulas use accounted retained fold weight `S`,
+encoded Fact weight `F`, options weight `O`, Header weight `H`, and checkpoint
+length `C`. Opening a bare fold reserves `2H`; the standard `ModelContextState`
+also holds its own Header copy, making the opening peak `3H`. Applying a Fact
+temporarily raises the fold's credit to `3S + 8F`; a projection/request adds
+`4S + O` while retaining the fold,
+so it needs at least `5S + O` in an otherwise empty shared pool. Restore reserves
+`3C` for decoding in addition to the still-owned read buffer, existing cursor
+and newly opened fold. Replacement retains both wrapper Header copies until
+the new cursor is accepted. At the 64 MiB checkpoint bound, the read buffer and
+decode workspace alone need 256 MiB; simultaneous old/new cursor and Header
+credits reduce concurrency further. Capacity refusal leaves the prior cursor
+intact. A planned summary request holds credit for both its request and plan.
+Callers must retain the request while holding that plan, until the plan is admitted
+as a ModelIntent; moving or copying the plan alone does not carry Context credit.
+Other cursors,
+requests and diagnostics consume their own simultaneous credit. These are
+operation headroom policies, not proven allocator bounds or fixed fractions of usable model context: the
+32 MiB materialization limit and configured shared capacity are separate limits.
+Idle folds retain `S`, not `3S`; only the current operation raises its own credit.
+Pre-admission refusal leaves that fold usable, and release of another retained
+owner immediately makes its credit available for retry. Executor claim failure
+drops its local cursor rather than holding it indefinitely. The pool has no
+automatic eviction, per-Session quota or fairness guarantee. Passing an individual
+Fact/checkpoint size validator does not guarantee admission alongside other
+owners. Two maximum-sized restores alone can consume the default 512 MiB pool
+before Header/cursor credit; one maximum-sized Fact requests 288 MiB plus `3S`.
+Deployments needing that concurrency must size the shared pool for simultaneous
+operations. A smaller per-Session quota would reject additional legal workloads;
+it cannot establish an allocation bound for the current encoded-weight policy.
+
+Accounting reuses the immutable Fact's construction-proven encoded length and
+caches immutable Header, assembler bindings and per-Turn metadata.
+Restoring a semantic checkpoint validates its builder binding and recomputes all
+retained message and Turn accounting; it skips the per-Fact ingestion admissions. A newly enabled semantic state
+is accounted before the cursor is returned.
+Ordinary ingestion refreshes only the changed Turn. Batch metadata caches each
+encoded entry and remeasures only batches mutably accessed since the last charge;
+adding a batch does not rescan prior batches. Restore and compaction rebuild that
+derived cache from their complete replacement. Streaming deltas reuse unchanged
+batch/instruction weights and maximum-width source sequences.
+Instruction replacement refreshes only the current Turn and earlier Turns whose
+protected instruction coordinates changed; it does not reserialize unrelated
+Tool batches. Installed summaries rebuild bounded metadata. Six
+encoded Turn identity weights cover owned index keys, while semantic fragments
+and batches use measured canonical weights. Accumulated assembler text and
+unchanged metadata are never reserialized for each delta.

@@ -105,6 +105,14 @@ async fn bounded_pool_enforces_its_peak_and_progresses_independent_sessions() {
 #[allow(clippy::too_many_lines)] // The public seam needs its complete dependency stack visible.
 async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
     let runtime = Runtime::default();
+    activate_configured_fixture(
+        &runtime,
+        "rsi.agent.context-budget",
+        "context-budget",
+        Arc::new(rsi_agent_context::ContextBudgetFactory),
+        json!({}),
+    )
+    .await;
     let lease_dropped = Arc::new(AtomicBool::new(false));
     let claim_header = Arc::new(header_for_session(
         "session-failing-claim",
@@ -234,6 +242,10 @@ async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one single-lane scenario proves parked Context admission, independent refusal and resumed progress"
+)]
 async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning() {
     for human in [false, true] {
         let stack = BaseStack::activate().await;
@@ -276,7 +288,7 @@ async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning()
             retry_policy: RetryPolicy::default(),
         });
         let language_fiber = stack
-            .activate_language("test.language.parked-lane", fixture)
+            .activate_language("test.language.parked-lane", fixture.clone())
             .await;
         let executor_fiber = stack
             .activate_executor_with_config(json!({
@@ -295,6 +307,31 @@ async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning()
         tokio::time::timeout(std::time::Duration::from_secs(2), parked.notified())
             .await
             .expect("the first Tool did not release its executor lane");
+
+        fixture.requests.lock().unwrap().clear();
+        let budget = stack
+            .runtime
+            .root()
+            .lookup_local::<rsi_agent_context::ContextBudgetContract>()
+            .unwrap();
+        let parked_bytes = budget.used();
+        assert!(
+            parked_bytes > 0,
+            "released executor lane lost its retained Context credit"
+        );
+        let pressure = budget.reserve(budget.maximum() - parked_bytes).unwrap();
+        let refused = stack
+            .submit_fresh(
+                &turns,
+                "session-parked-pressure",
+                "fail immediately while parent is parked",
+            )
+            .await;
+        assert!(
+            matches!(wait_for_outcome(&turns, &refused).await, TurnOutcome::Failed { code, .. } if code == "context.capacity")
+        );
+        assert_eq!(fixture.starts.load(Ordering::Relaxed), 1);
+        drop(pressure);
 
         let second = stack
             .submit_fresh(&turns, "session-parked-lane-b", "run while parked")
@@ -420,6 +457,10 @@ async fn single_lane_configuration_keeps_independent_sessions_serial() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one complete concurrency or recovery scenario checks durable request boundaries"
+)]
 async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() {
     let stack = BaseStack::activate().await;
     let waiting_after_first = Arc::new(Notify::new());
@@ -491,7 +532,10 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
     .expect("executor did not start the queued second turn");
     if let Some(checkpoint) = stack
         .store
-        .read_context_checkpoint(&first.session_id)
+        .read_context_checkpoint(
+            &first.session_id,
+            rsi_api_protocol::ByteBudget::default().into(),
+        )
         .await
         .unwrap()
     {
@@ -616,6 +660,13 @@ pub(super) struct PanicCommitTools {
 
 #[async_trait]
 impl ToolRuntime for PanicCommitTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        self.inner.visit_definitions(visitor);
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.inner.scheduling(name)
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -633,9 +684,6 @@ impl ToolRuntime for PanicCommitTools {
     }
     fn definition(&self, name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
         self.inner.definition(name)
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.inner.definitions()
     }
     fn prepare(
         &self,

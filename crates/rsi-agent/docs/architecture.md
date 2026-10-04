@@ -4,6 +4,12 @@ Agent is a composition of ordinary process-local plugins. No package-wide
 adapter owns their plugin identity. The SQLite Store, Kernel, and executor each
 export their own factory; the product composition root assigns stable plugin
 and instance identities and places them in a Profile.
+Composition roots must install a service-level `ContextBudgetContract` before
+activating the executor; every Agent Scope inherits that same authority. The
+preset fragment supplies its instance entry using the factory registered by the
+product composition root, while custom roots must provide it
+explicitly or executor activation fails its required Local dependency. The
+[Context contract](../context/README.md) owns its admission and retention rules.
 
 The durable boundary is deliberately narrower than the runtime boundary.
 `rsi-agent-session-protocol` owns validated session identities, the immutable

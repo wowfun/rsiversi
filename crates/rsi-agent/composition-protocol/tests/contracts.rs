@@ -21,11 +21,26 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug)]
-struct EmptyTools;
+#[derive(Debug, Default)]
+struct EmptyTools {
+    definitions: Vec<ToolDefinition>,
+    visits: std::sync::atomic::AtomicUsize,
+}
 
 #[async_trait]
 impl ToolRuntime for EmptyTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        for definition in &self.definitions {
+            visitor(definition);
+        }
+        self.visits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -43,9 +58,6 @@ impl ToolRuntime for EmptyTools {
     }
     fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
         None
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        Vec::new()
     }
 
     fn prepare(
@@ -105,7 +117,10 @@ impl AgentComposition for FakeComposition {
         AgentCompositionPin::new(
             preset_id.clone(),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            Arc::new(EmptyTools),
+            Arc::new(EmptyTools {
+                definitions: Vec::new(),
+                visits: std::sync::atomic::AtomicUsize::new(0),
+            }),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             self.domains.clone(),
             rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -265,7 +280,10 @@ fn pin_rejects_non_sha256_source_identity() {
         AgentCompositionPin::new(
             AgentPresetId::new("alpha").unwrap(),
             "not-a-digest",
-            Arc::new(EmptyTools),
+            Arc::new(EmptyTools {
+                definitions: Vec::new(),
+                visits: std::sync::atomic::AtomicUsize::new(0)
+            }),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             rsi_agent_composition_protocol::DomainCatalog::default(),
             rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -321,13 +339,27 @@ async fn exact_name_lookup_observes_reporting_and_delegation_authority() {
         .pin(&AgentPresetId::new("alpha").unwrap(), None)
         .await
         .unwrap();
+    assert_eq!(base.tool_definition_weight().unwrap(), 2);
+    assert_eq!(base.clone().tool_definition_weight().unwrap(), 2);
     let contract = OutputContract::new(serde_json::json!({"type":"object"})).unwrap();
     let reporting = base
         .clone()
         .with_output_contract("owner", contract.clone())
         .unwrap();
+    assert_eq!(
+        reporting.tool_definition_weight().unwrap(),
+        serde_json::to_vec(&reporting.tools().definitions())
+            .unwrap()
+            .len()
+    );
+    assert!(reporting.tool_definition_weight().unwrap() > base.tool_definition_weight().unwrap());
     assert!(base.tools().definition(REPORT_RESULT_TOOL).is_none());
     assert_eq!(base.tools().program_role(REPORT_RESULT_TOOL), None);
+    assert_eq!(base.tools().scheduling(REPORT_RESULT_TOOL), None);
+    assert_eq!(
+        reporting.tools().scheduling(REPORT_RESULT_TOOL),
+        Some(rsi_tools_protocol::ToolScheduling::Exclusive)
+    );
     assert_eq!(
         reporting.tools().program_role(REPORT_RESULT_TOOL),
         Some(rsi_tools_protocol::ToolProgramRole::Unavailable)
@@ -356,8 +388,60 @@ async fn exact_name_lookup_observes_reporting_and_delegation_authority() {
     )
     .unwrap();
     let restricted = reporting.clone().for_delegation(Some(&policy));
+    assert_eq!(restricted.tool_definition_weight().unwrap(), 2);
+    assert!(reporting.tool_definition_weight().unwrap() > 2);
     assert!(restricted.tools().definition(REPORT_RESULT_TOOL).is_none());
     assert_eq!(restricted.tools().program_role(REPORT_RESULT_TOOL), None);
+    assert_eq!(restricted.tools().scheduling(REPORT_RESULT_TOOL), None);
     assert!(restricted.tools().program_roles().is_empty());
     assert!(reporting.tools().definition(REPORT_RESULT_TOOL).is_some());
+}
+
+#[test]
+fn cloned_pins_measure_the_borrowed_catalog_only_once() {
+    let tools = Arc::new(EmptyTools {
+        definitions: Vec::new(),
+        visits: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let pin = AgentCompositionPin::new(
+        AgentPresetId::new("cached-tools").unwrap(),
+        "a".repeat(64),
+        tools.clone(),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
+        Arc::new(GenerationOwner),
+    )
+    .unwrap();
+    assert_eq!(pin.tool_definition_weight().unwrap(), 2);
+    assert_eq!(pin.clone().tool_definition_weight().unwrap(), 2);
+    assert_eq!(tools.visits.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn borrowed_catalog_rejects_aggregate_ai_schema_bound_before_owned_enumeration() {
+    let schema = serde_json::json!({"type":"object", "description":"x".repeat(rsi_ai_protocol::MAX_TOOL_SCHEMA_BYTES / 2)});
+    let tools = Arc::new(EmptyTools {
+        definitions: ["first", "second"]
+            .into_iter()
+            .map(|name| ToolDefinition::new(name, "test", schema.clone()).unwrap())
+            .collect(),
+        visits: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let pin = AgentCompositionPin::new(
+        AgentPresetId::new("schema-bound").unwrap(),
+        "a".repeat(64),
+        tools.clone(),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
+        Arc::new(GenerationOwner),
+    )
+    .unwrap();
+    assert!(matches!(
+        pin.tool_definition_weight(),
+        Err(AgentCompositionError::InvalidInput(_))
+    ));
+    assert!(pin.clone().tool_definition_weight().is_err());
+    assert_eq!(tools.visits.load(std::sync::atomic::Ordering::Relaxed), 1);
 }

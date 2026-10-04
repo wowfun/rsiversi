@@ -166,6 +166,10 @@ pre-marker finalizer snapshot a second time.
 The executor delegates all prompt reconstruction and compaction to
 `rsi-agent-context`; it never reads a Workspace implicitly. Effect-owned
 pre-terminal finalizers run before the sole terminal Fact.
+Tool options reserve conservative construction workspace before copying schemas,
+then shrink to their measured canonical weight. Those options stay charged while
+available for compaction recovery; a built request independently charges its own
+copy through provider preparation and settlement.
 If an executor reclaims history containing a completed Model event but no turn
 terminal, it records interruption rather than repeating the completed external
 effect.

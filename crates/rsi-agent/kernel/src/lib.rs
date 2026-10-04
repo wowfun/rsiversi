@@ -240,6 +240,7 @@ struct KernelInner {
     continuations:
         Mutex<BTreeMap<(SessionId, String), rsi_agent_turn_protocol::WeakContinuationLease>>,
     program_generation: String,
+    program_bytes: rsi_api_protocol::ByteBudget,
     programs: Mutex<BTreeMap<SessionId, Weak<program::LiveRun>>>,
     projection_admission: Arc<Semaphore>,
     ready_activation: Mutex<ready::ReadySchedulerState>,

@@ -92,7 +92,6 @@ async fn program_notice_graph_rejects_coordinated_control_and_mailbox_corruption
             params![hex::encode(digest), id.as_str()],
         )
         .unwrap();
-    validation::validate_canonical_control_prefix(&connection, &id).unwrap();
     drop(connection);
     let error = SqliteStore::verify(root.path()).unwrap_err().to_string();
     assert!(error.contains("Program graph"), "{error}");

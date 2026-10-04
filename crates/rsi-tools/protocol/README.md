@@ -160,3 +160,15 @@ native Sandbox; body code consumes the plan once. A standalone Runtime caller
 that omits explicit preparation gets the same preparation before body execution.
 No process is spawned during preparation. Jobs may retain the move-only plan
 and consume it exactly once through its original tuple.
+
+Tool runtimes expose borrowed definition visitation as their catalog primitive;
+the default owned enumeration clones that same visitation. Pre-copy admission uses it for schema-weight measurement
+before owned copies and exact-name lookup for scheduling. Scheduling does not
+clone JSON schemas. Scoped catalogs visit and clone
+only their selected definitions; enumeration does not allocate the unselected
+catalog. Providers preserve the same immutable catalog authority for visitation,
+discovery and preparation.
+
+Fragment cursor selection measures a borrowed serializable envelope with a
+bounded counting writer. The caller can build its typed page once at the selected
+UTF-8 boundary; Tool-result callers also use this selector before final encoding.

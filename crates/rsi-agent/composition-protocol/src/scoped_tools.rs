@@ -14,6 +14,20 @@ pub(super) struct ScopedTools {
 }
 #[async_trait]
 impl ToolRuntime for ScopedTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        self.inner.visit_definitions(&mut |definition| {
+            if self.allowed.contains(definition.name()) {
+                visitor(definition);
+            }
+        });
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.allowed
+            .contains(name)
+            .then(|| self.inner.scheduling(name))
+            .flatten()
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.allowed
             .contains(name)
@@ -42,13 +56,6 @@ impl ToolRuntime for ScopedTools {
             .output_declarations()
             .into_iter()
             .filter(|(name, _)| self.allowed.contains(name))
-            .collect()
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.inner
-            .definitions()
-            .into_iter()
-            .filter(|tool| self.allowed.contains(tool.name()))
             .collect()
     }
     fn prepare(

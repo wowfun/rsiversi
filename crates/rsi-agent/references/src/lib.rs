@@ -63,7 +63,10 @@ fn check(stop: &CancellationToken) -> Result<()> {
 }
 
 #[derive(Debug, Default)]
-struct VerifiedEnvelopes(VecDeque<(ReferenceSnapshotRef, Arc<ReferenceSnapshotEnvelope>)>);
+struct VerifiedEnvelopes(
+    VecDeque<(ReferenceSnapshotRef, Arc<ReferenceSnapshotEnvelope>)>,
+    rsi_api_protocol::ByteBudget,
+);
 impl VerifiedEnvelopes {
     fn get(&mut self, snapshot: &ReferenceSnapshotRef) -> Option<Arc<ReferenceSnapshotEnvelope>> {
         let index = self.0.iter().position(|(key, _)| key == snapshot)?;
@@ -311,11 +314,21 @@ async fn load(
     let envelope = if let Some(envelope) = cached {
         envelope
     } else {
+        let admission = {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .1
+                .clone()
+        };
         let bytes = store
-            .read_cas(&CasObjectRef {
-                sha256: reference.snapshot.sha256.clone(),
-                byte_len: reference.snapshot.byte_len,
-            })
+            .read_cas(
+                &CasObjectRef {
+                    sha256: reference.snapshot.sha256.clone(),
+                    byte_len: reference.snapshot.byte_len,
+                },
+                admission.into(),
+            )
             .await?;
         check(stop)?;
         if bytes.len() as u64 != reference.snapshot.byte_len

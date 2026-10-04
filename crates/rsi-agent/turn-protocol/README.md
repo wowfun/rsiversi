@@ -35,6 +35,8 @@ revokes that same Session's live run, without reviving the creator Tool. Neither
 operation grants child or cross-Session control. Model adapters page the complete
 rendered observation within 8 KiB by default (16 KiB maximum) and bind continuation
 offsets to the returned revision; a changed run requires a fresh first page.
+Missing Program script/result objects report a Store failure with their CAS
+identity rather than a missing Session.
 
 `ExecutionObserver` is an optional, explicitly composed effect-interval observer.
 It receives the exact claim execution lease separately from durable coordinates.

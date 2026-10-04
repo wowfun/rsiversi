@@ -1048,7 +1048,7 @@ impl ResponseFormat {
 /// Validated non-message controls frozen before context planning.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LanguageRequestOptions {
-    tools: Vec<ToolDefinition>,
+    tools: std::sync::Arc<[ToolDefinition]>,
     tool_choice: ToolChoice,
     hosted_tools: Vec<HostedTool>,
     response_format: ResponseFormat,
@@ -1087,7 +1087,7 @@ impl LanguageRequestOptions {
         response_format.validate()?;
         validate_extensions(&extensions)?;
         let mut options = Self {
-            tools,
+            tools: tools.into(),
             tool_choice,
             hosted_tools,
             response_format,
@@ -1107,6 +1107,11 @@ impl LanguageRequestOptions {
     /// Exact space for the encoded messages array in the complete request envelope.
     pub const fn message_byte_budget(&self) -> usize {
         self.message_byte_budget
+    }
+
+    /// Canonical weight of frozen request controls, measured at construction.
+    pub fn encoded_weight(&self) -> usize {
+        MAX_REQUEST_BYTES - self.message_byte_budget + 2
     }
 
     fn compute_message_byte_budget(&self) -> Result<usize, SemanticError> {
@@ -1149,28 +1154,44 @@ struct LanguageRequestWire<'a> {
     extensions: &'a [ProviderExtension],
 }
 
-/// One validated language request; model/provider selection lives outside it.
-#[derive(Clone, Debug, PartialEq)]
+/// One validated language request; cloned requests share immutable backing storage.
+#[derive(Clone)]
 pub struct LanguageRequest {
+    data: std::sync::Arc<LanguageRequestData>,
+    retention: Option<std::sync::Arc<Vec<std::sync::Arc<dyn Send + Sync>>>>,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct LanguageRequestData {
+    encoded_weight: usize,
     messages: Vec<Message>,
-    tools: Vec<ToolDefinition>,
+    tools: std::sync::Arc<[ToolDefinition]>,
     tool_choice: ToolChoice,
     hosted_tools: Vec<HostedTool>,
     response_format: ResponseFormat,
     settings: LanguageSettings,
     extensions: Vec<ProviderExtension>,
 }
+impl std::fmt::Debug for LanguageRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.data.fmt(f)
+    }
+}
+impl PartialEq for LanguageRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
 
 impl Serialize for LanguageRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         LanguageRequestWire {
-            messages: &self.messages,
-            tools: &self.tools,
-            tool_choice: &self.tool_choice,
-            hosted_tools: &self.hosted_tools,
-            response_format: &self.response_format,
-            settings: &self.settings,
-            extensions: &self.extensions,
+            messages: &self.data.messages,
+            tools: &self.data.tools,
+            tool_choice: &self.data.tool_choice,
+            hosted_tools: &self.data.hosted_tools,
+            response_format: &self.data.response_format,
+            settings: &self.data.settings,
+            extensions: &self.data.extensions,
         }
         .serialize(serializer)
     }
@@ -1194,23 +1215,49 @@ impl<'de> Deserialize<'de> for LanguageRequest {
         }
 
         let wire = WireRequest::deserialize(deserializer)?;
-        let request = Self {
-            messages: wire.messages,
-            tools: wire.tools,
-            tool_choice: wire.tool_choice,
-            hosted_tools: wire.hosted_tools,
-            response_format: wire.response_format,
-            settings: wire.settings,
-            extensions: wire.extensions,
+        let mut request = Self {
+            data: std::sync::Arc::new(LanguageRequestData {
+                encoded_weight: 0,
+                messages: wire.messages,
+                tools: wire.tools.into(),
+                tool_choice: wire.tool_choice,
+                hosted_tools: wire.hosted_tools,
+                response_format: wire.response_format,
+                settings: wire.settings,
+                extensions: wire.extensions,
+            }),
+            retention: None,
         };
         request
-            .validate()
+            .refresh_weight()
             .map(|()| request)
             .map_err(serde::de::Error::custom)
     }
 }
 
 impl LanguageRequest {
+    /// Attaches opaque resource ownership, excluded from wire bytes and equality.
+    #[must_use]
+    pub fn with_retention<T: Send + Sync + 'static>(mut self, guard: T) -> Self {
+        let owners = self.retention.get_or_insert_with(Default::default);
+        std::sync::Arc::make_mut(owners).push(std::sync::Arc::new(guard));
+        self
+    }
+    /// Returns the cached exact canonical weight established at validation.
+    pub fn encoded_weight(&self) -> usize {
+        self.data.encoded_weight
+    }
+    fn mutable(&mut self) -> Result<&mut LanguageRequestData, SemanticError> {
+        if self.retention.is_some() {
+            return Err(SemanticError::new(
+                "request.retained",
+                "request",
+                "retained request is immutable",
+            ));
+        }
+        Ok(std::sync::Arc::make_mut(&mut self.data))
+    }
+
     /// Creates a request from one or more validated messages with default controls.
     pub fn new(messages: Vec<Message>) -> Result<Self, SemanticError> {
         Self::new_with_options(messages, LanguageRequestOptions::default())
@@ -1222,17 +1269,21 @@ impl LanguageRequest {
         options: LanguageRequestOptions,
     ) -> Result<Self, SemanticError> {
         let message_byte_budget = options.message_byte_budget;
-        let request = Self {
-            messages,
-            tools: options.tools,
-            tool_choice: options.tool_choice,
-            hosted_tools: options.hosted_tools,
-            response_format: options.response_format,
-            settings: options.settings,
-            extensions: options.extensions,
+        let mut request = Self {
+            data: std::sync::Arc::new(LanguageRequestData {
+                encoded_weight: 0,
+                messages,
+                tools: options.tools,
+                tool_choice: options.tool_choice,
+                hosted_tools: options.hosted_tools,
+                response_format: options.response_format,
+                settings: options.settings,
+                extensions: options.extensions,
+            }),
+            retention: None,
         };
         request.validate_messages()?;
-        let message_bytes = validation::encoded_len(&request.messages)
+        let message_bytes = validation::encoded_len(&request.data.messages)
             .map_err(|reason| SemanticError::new("request.encoding", "request", reason))?;
         if message_bytes > message_byte_budget {
             return Err(SemanticError::new(
@@ -1241,6 +1292,8 @@ impl LanguageRequest {
                 format!("canonical encoding exceeds {MAX_REQUEST_BYTES} bytes"),
             ));
         }
+        std::sync::Arc::make_mut(&mut request.data).encoded_weight =
+            MAX_REQUEST_BYTES - message_byte_budget + message_bytes;
         Ok(request)
     }
 
@@ -1250,9 +1303,10 @@ impl LanguageRequest {
         tools: Vec<ToolDefinition>,
         tool_choice: ToolChoice,
     ) -> Result<Self, SemanticError> {
-        self.tools = tools;
-        self.tool_choice = tool_choice;
-        self.validate()?;
+        let request = self.mutable()?;
+        request.tools = tools.into();
+        request.tool_choice = tool_choice;
+        self.refresh_weight()?;
         Ok(self)
     }
 
@@ -1261,8 +1315,8 @@ impl LanguageRequest {
         mut self,
         hosted_tools: Vec<HostedTool>,
     ) -> Result<Self, SemanticError> {
-        self.hosted_tools = hosted_tools;
-        self.validate()?;
+        self.mutable()?.hosted_tools = hosted_tools;
+        self.refresh_weight()?;
         Ok(self)
     }
 
@@ -1271,8 +1325,8 @@ impl LanguageRequest {
         mut self,
         response_format: ResponseFormat,
     ) -> Result<Self, SemanticError> {
-        self.response_format = response_format;
-        self.validate()?;
+        self.mutable()?.response_format = response_format;
+        self.refresh_weight()?;
         Ok(self)
     }
 
@@ -1281,51 +1335,58 @@ impl LanguageRequest {
         mut self,
         extensions: Vec<ProviderExtension>,
     ) -> Result<Self, SemanticError> {
-        self.extensions = extensions;
-        self.validate()?;
+        self.mutable()?.extensions = extensions;
+        self.refresh_weight()?;
         Ok(self)
     }
 
     /// Replaces the optional generation controls.
     pub fn with_settings(mut self, settings: LanguageSettings) -> Result<Self, SemanticError> {
-        self.settings = settings;
-        self.validate()?;
+        self.mutable()?.settings = settings;
+        self.refresh_weight()?;
         Ok(self)
     }
 
     pub fn messages(&self) -> &[Message] {
-        &self.messages
+        &self.data.messages
     }
 
     /// Consumes this request, transferring its messages without cloning them.
-    pub fn into_messages(self) -> Vec<Message> {
-        self.messages
+    pub fn into_messages(self) -> Result<Vec<Message>, SemanticError> {
+        if self.retention.is_some() {
+            return Err(SemanticError::new(
+                "request.retained",
+                "request",
+                "retained messages require a separately admitted copy",
+            ));
+        }
+        Ok(std::sync::Arc::unwrap_or_clone(self.data).messages)
     }
 
     /// Returns caller-executed function tools exposed to the model.
     pub fn tools(&self) -> &[ToolDefinition] {
-        &self.tools
+        &self.data.tools
     }
 
     pub fn tool_choice(&self) -> &ToolChoice {
-        &self.tool_choice
+        &self.data.tool_choice
     }
 
     /// Returns provider-executed tools requested for the operation.
     pub fn hosted_tools(&self) -> &[HostedTool] {
-        &self.hosted_tools
+        &self.data.hosted_tools
     }
 
     pub fn response_format(&self) -> &ResponseFormat {
-        &self.response_format
+        &self.data.response_format
     }
 
-    pub const fn settings(&self) -> &LanguageSettings {
-        &self.settings
+    pub fn settings(&self) -> &LanguageSettings {
+        &self.data.settings
     }
 
     pub fn extensions(&self) -> &[ProviderExtension] {
-        &self.extensions
+        &self.data.extensions
     }
 
     /// Returns deterministic canonical JSON bytes for identity and persistence.
@@ -1338,30 +1399,40 @@ impl LanguageRequest {
 
     /// Revalidates deserialized request structure, relationships, and aggregate bounds.
     pub fn validate(&self) -> Result<(), SemanticError> {
+        self.validated_weight().map(|_| ())
+    }
+
+    fn refresh_weight(&mut self) -> Result<(), SemanticError> {
+        let weight = self.validated_weight()?;
+        std::sync::Arc::make_mut(&mut self.data).encoded_weight = weight;
+        Ok(())
+    }
+
+    fn validated_weight(&self) -> Result<usize, SemanticError> {
         self.validate_messages()?;
-        self.settings.validate()?;
-        validate_tools(&self.tools, &self.tool_choice)?;
-        validate_hosted_tools(&self.hosted_tools)?;
-        self.response_format.validate()?;
-        validate_extensions(&self.extensions)?;
+        self.data.settings.validate()?;
+        validate_tools(&self.data.tools, &self.data.tool_choice)?;
+        validate_hosted_tools(&self.data.hosted_tools)?;
+        self.data.response_format.validate()?;
+        validate_extensions(&self.data.extensions)?;
         self.validate_aggregate_size()
     }
 
     fn validate_messages(&self) -> Result<(), SemanticError> {
-        if self.messages.is_empty() || self.messages.len() > MAX_MESSAGES {
+        if self.data.messages.is_empty() || self.data.messages.len() > MAX_MESSAGES {
             return Err(SemanticError::new(
                 "request.invalid_messages",
                 "messages",
                 format!("must contain 1..={MAX_MESSAGES} messages"),
             ));
         }
-        for message in &self.messages {
+        for message in &self.data.messages {
             message.validate()?;
         }
-        validate_language_media(&self.messages)?;
+        validate_language_media(&self.data.messages)?;
         let mut calls = BTreeSet::new();
         let mut results = BTreeSet::new();
-        for message in &self.messages {
+        for message in &self.data.messages {
             for block in &message.content {
                 match block {
                     MessageContent::ToolCall(call) => {
@@ -1401,7 +1472,7 @@ impl LanguageRequest {
         Ok(())
     }
 
-    fn validate_aggregate_size(&self) -> Result<(), SemanticError> {
+    fn validate_aggregate_size(&self) -> Result<usize, SemanticError> {
         let encoded = validation::encoded_len(self)
             .map_err(|reason| SemanticError::new("request.encoding", "request", reason))?;
         if encoded > MAX_REQUEST_BYTES {
@@ -1411,7 +1482,7 @@ impl LanguageRequest {
                 format!("canonical encoding exceeds {MAX_REQUEST_BYTES} bytes"),
             ));
         }
-        Ok(())
+        Ok(encoded)
     }
 
     fn canonical_bytes_unchecked(&self) -> Result<Vec<u8>, SemanticError> {

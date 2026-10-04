@@ -1631,14 +1631,25 @@ impl SessionStore for MemoryStore {
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> Result<Option<StoredContextCheckpoint>> {
-        self.inner
+        let checkpoint = self
+            .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .sessions
             .get(session_id)
             .map(|session| session.checkpoint.clone())
-            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        checkpoint
+            .map(|mut checkpoint| {
+                let admitted = reservation
+                    .reserve(checkpoint.bytes.len())
+                    .map_err(StoreError::read_admission)?;
+                checkpoint.bytes = checkpoint.bytes.with_retention(admitted);
+                Ok(checkpoint)
+            })
+            .transpose()
     }
 
     async fn write_context_checkpoint(&self, write: WriteContextCheckpoint) -> Result<()> {
@@ -1696,7 +1707,11 @@ impl SessionStore for MemoryStore {
         Ok(reference)
     }
 
-    async fn read_cas(&self, object: &CasObjectRef) -> Result<Arc<[u8]>> {
+    async fn read_cas(
+        &self,
+        object: &CasObjectRef,
+        admission: rsi_api_protocol::ByteAdmission,
+    ) -> Result<rsi_api_protocol::RetainedBytes> {
         object.validate()?;
         let bytes = self
             .inner
@@ -1713,7 +1728,10 @@ impl SessionStore for MemoryStore {
                 "CAS bytes do not match their reference".into(),
             ));
         }
-        Ok(bytes)
+        admission
+            .reserve(bytes.len())
+            .and_then(|reservation| reservation.copy(&bytes))
+            .map_err(StoreError::read_admission)
     }
 }
 

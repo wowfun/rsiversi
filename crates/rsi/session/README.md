@@ -47,7 +47,7 @@ Header fingerprint while waiting. Service retirement cancels all live streams.
 `SessionFactory` publishes `SessionContract` and trusted `SessionIngressContract`
 from one service generation, injecting its exact
 Kernel, Store, composition, Workspace, Settings and live capabilities through
-Meta. All clients of that generation receive the same service. The standard
+Meta, including the shared `ContextBudgetContract`. All clients of that generation receive the same service. The standard
 Host's approval broker is also an ordinary plugin; the launcher neither
 constructs Session adapters nor registers a second broker per client.
 

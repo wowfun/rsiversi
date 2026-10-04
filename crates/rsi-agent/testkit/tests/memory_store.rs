@@ -318,3 +318,59 @@ async fn memory_activity_membership_is_complete_at_64_65_and_1024_and_rejects_10
     let store = MemoryStore::new();
     rsi_agent_testkit::assert_activity_membership_bounds(&store, &header()).await;
 }
+
+#[tokio::test]
+async fn checkpoint_reads_share_backing_and_keep_independent_admission() {
+    let store = MemoryStore::new();
+    let header = header();
+    let session = header.session_id().clone();
+    let accepted = fact(1);
+    store
+        .append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![std::sync::Arc::new(accepted.clone())],
+        })
+        .await
+        .unwrap();
+    let bytes = rsi_api_protocol::ByteBudget::default()
+        .copy(b"shared-checkpoint")
+        .unwrap();
+    let pointer = bytes.as_ptr();
+    let length = bytes.len();
+    store
+        .write_context_checkpoint(rsi_agent_store_protocol::WriteContextCheckpoint {
+            session_id: session.clone(),
+            expected_durable_seq: 1,
+            checkpoint: rsi_agent_store_protocol::StoredContextCheckpoint {
+                header_fingerprint: header.fingerprint().unwrap(),
+                through_seq: 1,
+                fact_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256([&accepted])
+                    .unwrap(),
+                bytes,
+            },
+        })
+        .await
+        .unwrap();
+    let budget = rsi_api_protocol::ByteBudget::new(length * 2).unwrap();
+    let first = store
+        .read_context_checkpoint(&session, budget.clone().into())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = store
+        .read_context_checkpoint(&session, budget.clone().into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.bytes.as_ptr(), pointer);
+    assert_eq!(second.bytes.as_ptr(), pointer);
+    assert_eq!(budget.used(), length * 2);
+    let slice = first.bytes.slice(0..1).unwrap();
+    drop(first);
+    drop(second);
+    assert_eq!(budget.used(), length);
+    drop(slice);
+    assert_eq!(budget.used(), 0);
+}

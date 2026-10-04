@@ -1273,7 +1273,7 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
                     header_fingerprint: claim.header().fingerprint().unwrap(),
                     through_seq,
                     fact_prefix_sha256: "0".repeat(64),
-                    bytes: Arc::from(b"checkpoint".as_slice()),
+                    bytes: rsi_api_protocol::ByteBudget::default().copy(b"checkpoint".as_slice()).unwrap(),
                 },
             )
             .await,
@@ -1339,7 +1339,9 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
                     header_fingerprint: claim.header().fingerprint().unwrap(),
                     through_seq,
                     fact_prefix_sha256: fact_prefix_sha256(&durable.facts).unwrap(),
-                    bytes: Arc::from(b"disabled-checkpoint".as_slice()),
+                    bytes: rsi_api_protocol::ByteBudget::default()
+                        .copy(b"disabled-checkpoint".as_slice())
+                        .unwrap(),
                 },
             )
             .await
@@ -1347,7 +1349,10 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
     );
     assert!(
         store
-            .read_context_checkpoint(claim.session_id())
+            .read_context_checkpoint(
+                claim.session_id(),
+                rsi_api_protocol::ByteBudget::default().into()
+            )
             .await
             .unwrap()
             .is_none()

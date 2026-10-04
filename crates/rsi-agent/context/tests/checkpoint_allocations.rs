@@ -80,6 +80,7 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
         Arc::new(DefaultContextBuilder::default()),
         header,
         ContextLimits::new(1024, 32 * 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     let mut facts = Vec::new();

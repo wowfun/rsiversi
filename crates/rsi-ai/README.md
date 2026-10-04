@@ -55,3 +55,12 @@ body out of the assembler before accepting the next output.
 
 See [architecture](docs/architecture.md), [security](docs/security.md), and
 [testing](docs/testing.md).
+
+Language assemblers maintain a conservative encoded weight incrementally:
+new string fragments and source/warning metadata are counted once on ingestion,
+while bounded structural overhead covers block and counter encodings. Reading
+that weight never traverses accumulated text. Immutable Language requests cache
+their exact canonical weight at validation; construction from frozen options
+reuses the options' envelope weight, and fluent updates refresh the cache.
+These weight getters are infallible after their owning construction or ingestion
+boundary has established the invariant.

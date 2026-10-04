@@ -25,6 +25,10 @@ current pure Context projection, recorded options and recorded language profile,
 is always approximate and
 identifies its implementation and limitations. Missing evidence or reconstruction
 capacity produces an explicit unavailable diagnostic, never fabricated input.
+Shared-pool pressure is transient: the same accepted watermark can yield an
+unavailable request diagnostic under pressure and an approximate reconstruction
+after capacity is released. Persisted sections retain the same watermark and
+content; the diagnostic does not replace historical evidence.
 Missing historical language profiles likewise make reconstruction unavailable;
 export never consults a current provider or invents historical image capability.
 Response output is reconstructed from normalized durable events, not raw HTTP.
@@ -54,3 +58,18 @@ Native facts preserve Model and Program Tool origins and the sealed program role
 Program evidence remains exportable even though its internal Tool results are
 excluded from provider Context. Human-readable projections label that origin
 without fabricating a model request for an internal program call.
+
+Diagnostic request reconstruction receives the service's shared Context budget.
+It retains admission through speculative reconstruction and serialization rather
+than opening an independent pool alongside executing or parked Sessions.
+Pressure at any reconstruction stage reports `context_capacity`; semantic failure
+reports `semantic_reconstruction_unavailable`. Neither is a historical request.
+
+Evidence resolution uses conservative workspace for recorded text, decoded sections
+and metadata; reconstructed requests separately cover overlapping message/JSON
+copies. Pretty-render admission measures the selected output format: JSON retains
+one output string, while Markdown covers the pretty string, dynamically sized
+backtick fence and complete fenced output while they coexist. The producer retains
+these credits through the yielded document string. Pressure makes the diagnostic
+unavailable without model I/O. Evidence/request workspace factors are policy
+headroom, not proven allocator bounds or measurements of RSS.

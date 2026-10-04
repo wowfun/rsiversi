@@ -1185,7 +1185,7 @@ pub struct ContextCheckpoint {
     /// SHA-256 chain of the exact canonical Fact prefix folded by Context.
     pub fact_prefix_sha256: String,
     /// Versioned Context-owned bytes.
-    pub bytes: Arc<[u8]>,
+    pub bytes: rsi_api_protocol::RetainedBytes,
 }
 
 /// Read-only Kernel-owned execution elapsed budget.
@@ -1349,11 +1349,14 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         Ok(None)
     }
     /// Reads one optional Context checkpoint cache.
+    /// Admission follows the Store worker and is charged at its validated
+    /// exact-length allocation boundary; returned bytes retain the credit.
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> Result<Option<ContextCheckpoint>> {
-        let _ = session_id;
+        let _ = (session_id, reservation);
         Ok(None)
     }
     /// Installs a checkpoint only at an unchanged durable and live tail.

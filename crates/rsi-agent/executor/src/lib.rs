@@ -252,6 +252,7 @@ struct Driver {
     observations: observation::Observations,
     checkpoints: Arc<CheckpointScheduler>,
     config: ExecutorConfig,
+    context_budget: rsi_agent_context::ContextBudget,
 }
 
 #[derive(Debug)]
@@ -306,10 +307,10 @@ mod tool_settlement;
 
 use execution_support::{
     CombinedCancellation, DriveFailure, admit_claim_execution, ai_failure,
-    apply_finalization_failure, bounded, combine_cancellation, failed, failure_outcome, fatal,
-    image_ai_failure, image_operation_failure, next_effect_id, prepare_tool_effect,
-    publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay, run_executor_pool,
-    settled_tool_budget, should_retry, tool_failure,
+    apply_finalization_failure, bounded, combine_cancellation, context_failure, failed,
+    failure_outcome, fatal, image_ai_failure, image_operation_failure, next_effect_id,
+    prepare_tool_effect, publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay,
+    run_executor_pool, settled_tool_budget, should_retry, tool_failure,
 };
 
 #[derive(Debug)]
@@ -670,6 +671,7 @@ impl PluginFactory for ExecutorFactory {
         let retained = executor_config_retained_bytes(&config)?;
         let observe = config.observe_execution;
         let prepared = PreparedActivation::with_state(desired.clone(), config, retained)
+            .requiring_local::<rsi_agent_context::ContextBudgetContract>()
             .requiring_local::<TurnExecutionContract>()
             .requiring_local::<TurnFinalizationContract>()
             .requiring_local::<LanguageCallContract>()
@@ -687,6 +689,10 @@ impl PluginFactory for ExecutorFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<ExecutorConfig>()?;
+        let context_budget = plan
+            .local::<rsi_agent_context::ContextBudgetContract>()?
+            .as_ref()
+            .clone();
         let turns = plan.local::<TurnExecutionContract>()?;
         let finalization = plan.local::<TurnFinalizationContract>()?;
         let language = plan.local::<LanguageCallContract>()?;
@@ -720,6 +726,7 @@ impl PluginFactory for ExecutorFactory {
             retirement_tasks: Mutex::new(Vec::new()),
             observations: observation::Observations::default(),
             checkpoints: Arc::clone(&checkpoints),
+            context_budget,
             config,
         });
         let stop = CancellationToken::new();

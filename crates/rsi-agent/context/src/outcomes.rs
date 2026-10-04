@@ -6,8 +6,94 @@ use rsi_tools_protocol::{ToolProgramRole, ToolResultIdentity};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap};
 
-pub(super) type Batches = BTreeMap<usize, Batch>;
-
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct Batches {
+    records: BTreeMap<usize, Batch>,
+    #[serde(skip)]
+    cache: std::cell::RefCell<Option<BatchWeights>>,
+    #[serde(skip)]
+    dirty: std::cell::RefCell<std::collections::BTreeSet<usize>>,
+}
+#[derive(Clone, Debug, Default)]
+struct BatchWeights {
+    entries: BTreeMap<usize, usize>,
+    total: usize,
+    #[cfg(test)]
+    measurements: usize,
+}
+impl std::ops::Deref for Batches {
+    type Target = BTreeMap<usize, Batch>;
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
+}
+impl FromIterator<(usize, Batch)> for Batches {
+    fn from_iter<T: IntoIterator<Item = (usize, Batch)>>(values: T) -> Self {
+        Self {
+            records: values.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+impl Batches {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn insert(&mut self, key: usize, batch: Batch) -> Option<Batch> {
+        self.dirty.get_mut().insert(key);
+        self.records.insert(key, batch)
+    }
+    pub fn get_mut(&mut self, key: usize) -> Option<&mut Batch> {
+        let batch = self.records.get_mut(&key)?;
+        self.dirty.get_mut().insert(key);
+        Some(batch)
+    }
+    fn find_call_mut(
+        &mut self,
+        predicate: impl Fn(&Batch, &str, &Call) -> bool,
+    ) -> Option<&mut Call> {
+        let (key, id) = self.records.iter().find_map(|(&key, batch)| {
+            batch
+                .calls
+                .iter()
+                .find_map(|(id, call)| predicate(batch, id, call).then(|| (key, id.clone())))
+        })?;
+        self.get_mut(key)?.calls.get_mut(&id)
+    }
+    pub fn weight(&self) -> Result<usize> {
+        let mut cache = self.cache.borrow_mut();
+        if cache.is_none() {
+            self.dirty.borrow_mut().extend(self.records.keys().copied());
+            *cache = Some(BatchWeights::default());
+        }
+        let cache = cache.as_mut().expect("batch weights initialized above");
+        let mut dirty = self.dirty.borrow_mut();
+        while let Some(key) = dirty.first().copied() {
+            // A JSON map's quoted numeric key plus colon has the same width as
+            // the numeric first member, comma and brackets of this pair.
+            let next = crate::budget::weight(&(key, &self.records[&key]))?;
+            #[cfg(test)]
+            {
+                cache.measurements += 1;
+            }
+            let previous = cache.entries.get(&key).copied().unwrap_or(0);
+            let total = cache
+                .total
+                .checked_sub(previous)
+                .and_then(|bytes| bytes.checked_add(next))
+                .ok_or(ContextError::Capacity)?;
+            cache.entries.insert(key, next);
+            cache.total = total;
+            dirty.remove(&key);
+        }
+        cache
+            .total
+            .checked_add(2)
+            .and_then(|bytes| bytes.checked_add(self.records.len().saturating_sub(1)))
+            .ok_or(ContextError::Capacity)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Batch {
@@ -74,7 +160,7 @@ pub(super) fn validate(batches: &Batches, messages: &[Message]) -> Result<()> {
     let mut sources = std::collections::BTreeSet::new();
     let mut effects = std::collections::BTreeSet::new();
     let mut calls = std::collections::BTreeSet::new();
-    for (index, batch) in batches {
+    for (index, batch) in batches.iter() {
         if !sources.insert(&batch.source) {
             return Err(invalid());
         }
@@ -306,7 +392,7 @@ impl ContextFold {
         self.push_turn_message_with(turn_id, message, |turn| {
             // The validated live Turn cannot be evicted by message admission.
             turn.batches
-                .get_mut(&index)
+                .get_mut(index)
                 .expect("validated batch")
                 .calls
                 .get_mut(call_id)
@@ -348,9 +434,7 @@ impl ContextFold {
                 let parent = self
                     .turn_mut(turn_id)?
                     .batches
-                    .values_mut()
-                    .flat_map(|batch| batch.calls.values_mut())
-                    .find(|call| call.effect.as_ref() == Some(parent_effect_id))
+                    .find_call_mut(|_, _, call| call.effect.as_ref() == Some(parent_effect_id))
                     .ok_or_else(invalid)?;
                 if !parent.started
                     || parent.settled
@@ -392,12 +476,12 @@ impl ContextFold {
                 ..
             } => {
                 let calls = &mut self.turn_mut(turn_id)?.batches;
-                if let Some(program) = calls
-                    .values_mut()
-                    .flat_map(|batch| batch.calls.values_mut())
-                    .filter_map(|call| call.program.as_mut())
-                    .find(|program| program.active.contains_key(effect_id))
-                {
+                if let Some(call) = calls.find_call_mut(|_, _, call| {
+                    call.program
+                        .as_ref()
+                        .is_some_and(|program| program.active.contains_key(effect_id))
+                }) {
+                    let program = call.program.as_mut().ok_or_else(invalid)?;
                     let nested = program.active.get_mut(effect_id).ok_or_else(invalid)?;
                     if &nested.identity != identity {
                         return Err(invalid());
@@ -450,15 +534,18 @@ impl ContextFold {
                 source_model_effect_id,
             } => {
                 let turn = self.turn_mut(turn_id)?;
-                let batch = turn
+                let index = turn
                     .batches
-                    .values_mut()
-                    .find(|batch| &batch.source == source_model_effect_id)
+                    .iter()
+                    .find_map(|(index, batch)| {
+                        (&batch.source == source_model_effect_id).then_some(*index)
+                    })
                     .ok_or_else(|| {
                         ContextError::Invalid(
                             "Tool supersession has no completed model batch".into(),
                         )
                     })?;
+                let batch = turn.batches.get_mut(index).ok_or_else(invalid)?;
                 let mut count = 0;
                 for call in batch
                     .calls
@@ -488,9 +575,9 @@ impl ContextFold {
                 let call = self
                     .turn_mut(turn_id)?
                     .batches
-                    .values_mut()
-                    .find(|batch| &batch.source == source_model_effect_id)
-                    .and_then(|batch| batch.calls.get_mut(identity.call_id()))
+                    .find_call_mut(|batch, id, _| {
+                        &batch.source == source_model_effect_id && id == identity.call_id()
+                    })
                     .ok_or_else(|| ContextError::Invalid("Tool intent has no model call".into()))?;
                 if call.effect.is_some() || call.settled || call.superseded {
                     return Err(ContextError::Invalid(
@@ -510,9 +597,9 @@ impl ContextFold {
                 let call = self
                     .turn_mut(turn_id)?
                     .batches
-                    .values_mut()
-                    .filter_map(|batch| batch.calls.get_mut(identity.call_id()))
-                    .find(|call| call.effect.as_ref() == Some(effect_id))
+                    .find_call_mut(|_, id, call| {
+                        id == identity.call_id() && call.effect.as_ref() == Some(effect_id)
+                    })
                     .ok_or_else(|| ContextError::Invalid("Tool start has no intent".into()))?;
                 if call.identity.as_ref() != Some(identity)
                     || call.started
@@ -592,7 +679,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let mut fold = ContextFold::with_limits(header, crate::ContextLimits::default()).unwrap();
+        let mut fold = ContextFold::with_limits(
+            header,
+            crate::ContextLimits::default(),
+            crate::ContextBudget::default(),
+        )
+        .unwrap();
         let turn = TurnId::new("turn").unwrap();
         fold.insert_turn(&turn, Message::user_text("work").unwrap())
             .unwrap();
@@ -634,6 +726,45 @@ mod tests {
     }
 
     #[test]
+    fn batch_accounting_remeasures_only_mutated_batches_and_restores_from_records() {
+        let mut batches: Batches = (0..100)
+            .map(|key| {
+                (
+                    key,
+                    Batch {
+                        source: EffectId::new(format!("model-{key}")).unwrap(),
+                        calls: BTreeMap::from([("call".into(), Call::default())]),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            batches.weight().unwrap(),
+            serde_json::to_vec(&batches).unwrap().len()
+        );
+        assert_eq!(batches.cache.borrow().as_ref().unwrap().measurements, 100);
+        for iteration in 0..100 {
+            batches
+                .find_call_mut(|batch, _, _| batch.source.as_str() == "model-50")
+                .unwrap()
+                .started = iteration % 2 == 0;
+            assert_eq!(
+                batches.weight().unwrap(),
+                serde_json::to_vec(&batches).unwrap().len()
+            );
+            assert_eq!(
+                batches.cache.borrow().as_ref().unwrap().measurements,
+                101 + iteration
+            );
+        }
+        let encoded = serde_json::to_vec(&batches).unwrap();
+        let restored: Batches = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.weight().unwrap(), encoded.len());
+        assert_eq!(restored.cache.borrow().as_ref().unwrap().measurements, 100);
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), encoded);
+    }
+
+    #[test]
     fn model_tool_identity_is_exact_before_and_after_checkpoint() {
         for field in ["owner_id", "invocation_id", "request_sha256"] {
             let (mut fold, turn, effect, identity) = model_call();
@@ -656,6 +787,7 @@ mod tests {
                 fold.header.clone(),
                 crate::ContextLimits::default(),
                 &bytes,
+                crate::ContextBudget::default(),
             )
             .unwrap();
             let result = |identity| SessionFactBody::ToolResult {
@@ -735,7 +867,7 @@ mod tests {
             .turn_mut(&turn)
             .unwrap()
             .batches
-            .get_mut(&1)
+            .get_mut(1)
             .unwrap()
             .calls
             .get_mut("call")
@@ -762,7 +894,8 @@ mod tests {
             ContextFold::from_checkpoint(
                 fold.header.clone(),
                 crate::ContextLimits::default(),
-                &bytes
+                &bytes,
+                crate::ContextBudget::default()
             )
             .is_err()
         );
@@ -843,6 +976,13 @@ mod tests {
         fold.assemblers.insert(
             effect.clone(),
             crate::ActiveAssembler {
+                binding_bytes: crate::budget::weight(&(
+                    &effect,
+                    rsi_agent_session_protocol::ModelPurpose::Conversation,
+                    ModelRef::new("test", "model").unwrap(),
+                    &turn,
+                ))
+                .unwrap(),
                 turn_id: turn.clone(),
                 model: ModelRef::new("test", "model").unwrap(),
                 eligible_summary: false,
@@ -905,7 +1045,7 @@ mod tests {
         .unwrap()
         .unwrap();
         batch.calls.get_mut("call").unwrap().settled = true;
-        assert!(validate(&BTreeMap::from([(0, batch)]), &[message]).is_err());
+        assert!(validate(&[(0, batch)].into_iter().collect(), &[message]).is_err());
         let orphan = Message::tool_result(
             "call",
             vec![MessageContent::Text {
@@ -940,7 +1080,7 @@ mod tests {
         fold.turn_mut(&turn).unwrap().batches.insert(1, batch);
         let bytes = fold.checkpoint_bytes().unwrap();
         assert!(
-            matches!(ContextFold::from_checkpoint(fold.header.clone(), crate::ContextLimits::default(), &bytes), Err(ContextError::Invalid(reason)) if reason.contains("outcome provenance"))
+            matches!(ContextFold::from_checkpoint(fold.header.clone(), crate::ContextLimits::default(), &bytes, crate::ContextBudget::default()), Err(ContextError::Invalid(reason)) if reason.contains("outcome provenance"))
         );
     }
     #[test]

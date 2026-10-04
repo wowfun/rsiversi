@@ -11,18 +11,23 @@ default = []
 test-support = []
 
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 async-trait.workspace = true
 hex.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
 same-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["trace"] }

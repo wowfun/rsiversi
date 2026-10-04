@@ -25,8 +25,13 @@ async fn unpublished_draft_supports_every_section_combination_in_both_formats() 
             }
             let options = ExportOptions { format, include };
             let header = header();
-            let mut source =
-                empty(header.clone(), options.clone(), CancellationToken::new()).unwrap();
+            let mut source = empty(
+                header.clone(),
+                options.clone(),
+                CancellationToken::new(),
+                rsi_agent_context::ContextBudget::default(),
+            )
+            .unwrap();
             let start = source.next().await.unwrap().unwrap();
             assert!(
                 matches!(&start, ExportEvent::Start {through_seq, header_sha256, options: accepted, ..}
@@ -96,6 +101,7 @@ async fn cancellation_emits_one_error_then_eof_and_releases_pending_read_and_lea
         header,
         ExportOptions::default(),
         stop.clone(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .await
     .unwrap();
@@ -126,7 +132,13 @@ async fn cancellation_emits_one_error_then_eof_and_releases_pending_read_and_lea
     assert_eq!(store.leases.load(Ordering::SeqCst), 0);
     let stop = CancellationToken::new();
     stop.cancel();
-    let mut draft = empty(super::header(), ExportOptions::default(), stop).unwrap();
+    let mut draft = empty(
+        super::header(),
+        ExportOptions::default(),
+        stop,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     assert!(matches!(draft.next().await, Some(Err(_))));
     assert!(draft.next().await.is_none());
 }
@@ -146,7 +158,7 @@ async fn producer_rejects_changed_header_before_emitting_start() {
     .unwrap();
     store.take_fact_read_cursors();
     assert!(
-        matches!(export(store.clone(), changed, ExportOptions::default(), CancellationToken::new()).await,
+        matches!(export(store.clone(), changed, ExportOptions::default(), CancellationToken::new(), rsi_agent_context::ContextBudget::default()).await,
         Err(SessionError::Invalid(message)) if message == "export Header changed")
     );
     assert!(store.take_fact_read_cursors().is_empty());
@@ -215,7 +227,7 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
             .unwrap();
         append(&store, &child, 0, vec![accepted("child")]).await;
         assert!(
-            matches!(export(store.clone(), child, ExportOptions::default(), CancellationToken::new()).await,
+            matches!(export(store.clone(), child, ExportOptions::default(), CancellationToken::new(), rsi_agent_context::ContextBudget::default()).await,
             Err(SessionError::Invalid(message)) if message == "export inherited history binding changed"),
             "field {field}"
         );
@@ -413,7 +425,11 @@ impl SessionStore for PausedStore {
     async fn put_cas(&self, bytes: Arc<[u8]>) -> StoreResult<CasObjectRef> {
         self.inner.put_cas(bytes).await
     }
-    async fn read_cas(&self, object: &CasObjectRef) -> StoreResult<Arc<[u8]>> {
-        self.inner.read_cas(object).await
+    async fn read_cas(
+        &self,
+        object: &CasObjectRef,
+        admission: rsi_api_protocol::ByteAdmission,
+    ) -> StoreResult<rsi_api_protocol::RetainedBytes> {
+        self.inner.read_cas(object, admission).await
     }
 }

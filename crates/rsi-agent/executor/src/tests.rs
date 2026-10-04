@@ -948,7 +948,12 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     });
     let turns: Arc<dyn TurnExecution> = fixture.clone();
     let scheduler = Arc::new(CheckpointScheduler::new());
-    let request = CheckpointRequest::new(claim.clone(), ContextLimits::default(), context_pin());
+    let request = CheckpointRequest::new(
+        claim.clone(),
+        ContextLimits::default(),
+        context_pin(),
+        rsi_agent_context::ContextBudget::default(),
+    );
     assert_eq!(
         scheduler.schedule(request.clone()),
         checkpoint::ScheduleOutcome::Scheduled
@@ -971,6 +976,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
         context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     restored.restore(&writes[0].bytes).unwrap();
@@ -1012,6 +1018,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
             claim.clone(),
             ContextLimits::default(),
             context_pin(),
+            rsi_agent_context::ContextBudget::default()
         )),
         checkpoint::ScheduleOutcome::Scheduled
     );
@@ -1029,6 +1036,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
         context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     restored.restore(&checkpoint.bytes).unwrap();
@@ -1209,6 +1217,14 @@ struct EmptyTools;
 
 #[async_trait]
 impl rsi_tools_protocol::ToolRuntime for EmptyTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        let _ = visitor;
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -1226,9 +1242,6 @@ impl rsi_tools_protocol::ToolRuntime for EmptyTools {
     }
     fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
         None
-    }
-    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
-        Vec::new()
     }
 
     fn prepare(

@@ -17,6 +17,7 @@ pub(super) struct CheckpointRequest {
     claim: TurnClaim,
     limits: ContextLimits,
     composition: AgentCompositionPin,
+    budget: rsi_agent_context::ContextBudget,
 }
 
 impl CheckpointRequest {
@@ -24,11 +25,13 @@ impl CheckpointRequest {
         claim: TurnClaim,
         limits: ContextLimits,
         composition: AgentCompositionPin,
+        budget: rsi_agent_context::ContextBudget,
     ) -> Self {
         Self {
             claim,
             limits,
             composition,
+            budget,
         }
     }
 
@@ -195,25 +198,37 @@ async fn rebuild_context_checkpoint(
         request.composition.context_builder(),
         request.claim.header().clone(),
         request.limits,
+        request.budget.clone(),
     )
+    .map_err(maintenance_context_error)
     .ok()?;
     let mut cursor = 0;
     let mut restored_checkpoint = false;
-    if let Ok(Some(checkpoint)) = turns
-        .read_context_checkpoint(request.claim.session_id())
-        .await
-        && let Ok(restored) = fold.restored(&checkpoint.bytes)
-        && restored.position().through_seq == checkpoint.through_seq
-        && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
-        && request
-            .claim
-            .header()
-            .fingerprint()
-            .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
+    let checkpoint = match read_checkpoint(turns, request.claim.session_id(), &request.budget).await
     {
-        fold = restored;
-        cursor = checkpoint.through_seq;
-        restored_checkpoint = true;
+        Err(rsi_agent_turn_protocol::TurnError::Capacity) => {
+            eprintln!("optional context checkpoint declined: context.capacity");
+            return None;
+        }
+        result => result.ok().flatten(),
+    };
+    if let Some(checkpoint) = checkpoint {
+        let candidate = restore_candidate(&fold, &checkpoint.bytes)
+            .map_err(maintenance_context_error)
+            .ok()?;
+        if let Some(restored) = candidate
+            && restored.position().through_seq == checkpoint.through_seq
+            && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
+            && request
+                .claim
+                .header()
+                .fingerprint()
+                .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
+        {
+            fold = restored;
+            cursor = checkpoint.through_seq;
+            restored_checkpoint = true;
+        }
     }
     if !restored_checkpoint {
         let origin = request.claim.header().fork_origin();
@@ -234,10 +249,14 @@ async fn rebuild_context_checkpoint(
                     }
                     break;
                 }
-                fold.ingest(ContextPage::ForkSeed(&page.facts)).ok()?;
+                fold.ingest(ContextPage::ForkSeed(&page.facts))
+                    .map_err(maintenance_context_error)
+                    .ok()?;
                 parent_cursor = page.through_parent_seq;
             }
-            fold.ingest(ContextPage::FinishSeed).ok()?;
+            fold.ingest(ContextPage::FinishSeed)
+                .map_err(maintenance_context_error)
+                .ok()?;
         }
     }
     loop {
@@ -255,15 +274,50 @@ async fn rebuild_context_checkpoint(
             }
             break;
         }
-        fold.ingest(ContextPage::Canonical(&page.facts)).ok()?;
+        fold.ingest(ContextPage::Canonical(&page.facts))
+            .map_err(maintenance_context_error)
+            .ok()?;
         cursor = page.through_seq;
     }
     Some(ContextCheckpoint {
         header_fingerprint: request.claim.header().fingerprint().ok()?,
         through_seq: fold.position().through_seq,
         fact_prefix_sha256: fold.position().fact_prefix_sha256(),
-        bytes: fold.checkpoint().ok()?,
+        bytes: fold.checkpoint().map_err(maintenance_context_error).ok()?,
     })
+}
+
+fn maintenance_context_error(
+    error: rsi_agent_context::ContextError,
+) -> rsi_agent_context::ContextError {
+    if matches!(error, rsi_agent_context::ContextError::Capacity) {
+        eprintln!("optional context checkpoint declined: context.capacity");
+    }
+    error
+}
+
+/// Corrupt or incompatible caches fall back; pressure must preserve its refusal
+/// instead of initiating another expensive materialization from raw history.
+pub(super) fn restore_candidate(
+    state: &ModelContextState,
+    bytes: &[u8],
+) -> rsi_agent_context::Result<Option<ModelContextState>> {
+    match state.restored(bytes) {
+        Ok(restored) => Ok(Some(restored)),
+        Err(error @ rsi_agent_context::ContextError::Capacity) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Admission travels into the actual Store worker, including after waiter cancellation.
+pub(super) async fn read_checkpoint(
+    turns: &Arc<dyn TurnExecution>,
+    id: &SessionId,
+    budget: &rsi_agent_context::ContextBudget,
+) -> rsi_agent_turn_protocol::Result<Option<ContextCheckpoint>> {
+    turns
+        .read_context_checkpoint(id, budget.checkpoint_read())
+        .await
 }
 
 #[cfg(test)]
@@ -305,6 +359,7 @@ mod tests {
             ),
             ContextLimits::default(),
             crate::tests::context_pin(),
+            rsi_agent_context::ContextBudget::default(),
         )
     }
 

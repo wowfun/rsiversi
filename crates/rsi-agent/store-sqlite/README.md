@@ -98,8 +98,8 @@ online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It streams, decodes and hashes each canonical Agent control once, checking terminal
-control prefixes and feeding separate
+It streams, decodes and hashes each canonical Agent control once, checking the
+stored final control-prefix digest and terminal control prefixes and feeding separate
 mailbox, ready, active-activation and bounded domain-head projections. Domain
 version/request membership and exact canonical update positions are verified in
 that same pass. Domain indexes retain positions and derived capacity metadata;
@@ -141,7 +141,10 @@ text; invalid identities fail the audit as corruption instead of being skipped,
 including invalid UTF-8 and incompatible SQLite value types. The exclusive
 immutable audit still checks every Session.
 Mailbox-index verification compares each canonical control with its
-indexed row and a final cardinality check. Replay retains only bounded pending
+indexed row and a final cardinality check. Ready-index comparison streams at most
+the bounded expected cardinality plus one row, rejecting extras before collecting
+them. Offline verification reuses the control replay's count, digest and activity;
+each canonical control is decoded once. Replay retains only bounded pending
 message payloads; completed entries are compared and released as they close. It opens the existing writer-lock file and database read-only,
 performs no writes, and does not perform WAL recovery. A nonempty WAL makes the
 audit fail explicitly because the immutable read-only connection cannot inspect
@@ -175,9 +178,30 @@ behavior from a path string.
 
 SQLite owns one serialized writer, one foreground reader, and one validation
 reader. Both readers are read-only and no-create. Each lane admits at most one
-blocking job; queued async callers do not occupy blocking threads. Validation
-rechecks the proof cache after admission and publishes a successful proof from
-the admitted worker even if its waiter has been cancelled. Long cold scans
+blocking job; queued async callers do not occupy blocking threads. Cold validation
+admits at most 256 callers and 256 outstanding jobs without an unbounded outer
+queue. Private validation reads and reusable Session-proof flights share these
+caller and job pools; draining proof flights can temporarily refuse private reads.
+Session-proof misses share one flight. Each waiter needs caller admission;
+only a new flight needs job admission, so job pressure does not refuse a caller
+joining an existing flight while caller capacity remains. An admitted Session-proof
+flight finishes and publishes its proof even without waiters, so client deadlines
+cannot repeatedly restart its full scan. The finite job admission remains owned
+through completion. Completion ownership removes the flight and resolves its
+waiters even after task failure, retaining admission until actual blocking work ends.
+Other private validation reads cancel cooperatively when their
+waiter leaves; their results are not reusable Session proofs.
+The [Store failure contract](../store-protocol/src/lib.rs) owns pre-write refusal semantics.
+SQLite BUSY during owned read validation, cooperative cancellation and its interruption have that same
+classification. Connection poisoning, worker panic and closed admission remain
+I/O faults. A poisoned proof cache refuses publication rather than issuing an
+uncached proof; interruptions outside a validation read scope do not acquire refusal
+semantics.
+The validation reader uses a 100 ms busy timeout and a scoped cancellation progress
+handler checked every 1,000 SQLite VM operations, plus Rust record checkpoints.
+The handler is removed before transaction settlement and connection reuse.
+Validation rechecks the proof cache after admission. A complete successful read
+commit publishes its proof even if its last waiter subsequently leaves. Long cold scans
 therefore do not hold the foreground reader or writer.
 Multi-statement reads, including fork selection,
 use a deferred transaction so watermarks and rows come from one WAL snapshot.
@@ -185,7 +209,7 @@ Nonempty fork selections resolve on the validation lane. Empty selections retain
 the foreground indexed lookup. A Store-private LRU retains at most 256 successful
 fork boundaries, keyed by Session, invoking Turn and exact selection. Admission
 rechecks that cache; the worker publishes only after successful transaction
-completion, even if its waiter was cancelled. Append-only history keeps these
+completion; cancelled incomplete work is not cached. Append-only history keeps these
 boundaries immutable. Eviction and Store reopening require resolution again.
 This cache holds no Session pin or validation lease, never caches failures, and
 does not bypass the ordinary Session-validation gate. Cache failure falls back
@@ -289,3 +313,18 @@ stream and its immediately preceding successor link, then shares it with the
 mailbox and ready projections. It does not re-query or re-decode that link for
 each projection. Successor and receipt boundary proofs still read their bounded
 adjacent controls; these checks are not a constant-cost session-open guarantee.
+
+Opt-in control decode counters observe each record as it is decoded, including incomplete validation. The connection-scoped observer is removed before a worker can be reused.
+
+Context checkpoint reads select bounded metadata and body length first, reserve
+that exact length through the caller's deferred admission, then copy a borrowed
+SQLite blob in the same read transaction. Byte pressure returns `ReadCapacity`;
+it never labels a valid cache corrupt or reserves the 64 MiB format maximum.
+
+CAS reads reject symlinks, metadata/length
+changes, unexpected trailing bytes and digest mismatches while holding worker
+byte admission through returned buffer ownership.
+Windows CAS opens retain every parent directory without delete sharing and
+reject all reparse points before opening the leaf. Those retained handles prevent
+parent replacement during path traversal; native Windows tests own platform proof.
+An unexpected EOF within an admitted CAS body is corruption, not a retryable I/O fault.

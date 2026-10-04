@@ -490,6 +490,17 @@ fn withdraw_batch(state: &Weak<StageState>, members: &[BatchMember]) {
 
 #[async_trait]
 impl ToolRuntime for Registry {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        for entry in self.definitions.values() {
+            visitor(&entry.definition.definition);
+        }
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definitions
+            .get(name)
+            .map(|entry| entry.definition.definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definitions
             .get(name)
@@ -520,12 +531,6 @@ impl ToolRuntime for Registry {
                     .clone()
                     .map(|output| (name.clone(), output))
             })
-            .collect()
-    }
-    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
-        self.definitions
-            .values()
-            .map(|entry| entry.definition.definition.clone())
             .collect()
     }
 

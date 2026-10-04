@@ -37,5 +37,7 @@ catalog generation, invocation identity, call ID, and canonical request
 digest, so equal provider call IDs in independent Agent turns cannot alias.
 
 Program-role lookup and enumeration project only names and roles from the same
-immutable catalog as definition lookup and preparation; they do not clone schema
+immutable catalog as definition lookup and preparation. Exact-name scheduling
+lookup also borrows this authority without enumerating or cloning schemas.
+Role projections do not clone schema
 payloads. Scoped catalogs filter these projections by the same delegated names.

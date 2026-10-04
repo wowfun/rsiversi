@@ -839,6 +839,13 @@ async fn failed_idle_preset_rows_cannot_exhaust_healthy_preset_admission() {
 async fn changed_source_publishes_b_while_a_pin_stays_active() {
     let fixture = Fixture::new(&profile("a")).await;
     let a = fixture.service.pin(&fixture.id, None).await.unwrap();
+    let repeated = fixture.service.pin(&fixture.id, None).await.unwrap();
+    assert!(a.same_generation(&repeated));
+    assert_eq!(
+        a.tool_definition_weight().unwrap(),
+        repeated.tool_definition_weight().unwrap()
+    );
+    drop(repeated);
     fixture.replace_source(&profile("b"));
     let b = fixture.service.pin(&fixture.id, None).await.unwrap();
 

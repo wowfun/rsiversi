@@ -160,7 +160,7 @@ pub struct StoredContextCheckpoint {
     /// SHA-256 chain of the exact canonical Fact prefix folded by Context.
     pub fact_prefix_sha256: String,
     /// Context-owned versioned bytes.
-    pub bytes: Arc<[u8]>,
+    pub bytes: rsi_api_protocol::RetainedBytes,
 }
 
 impl StoredContextCheckpoint {
@@ -2222,11 +2222,16 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Reads one optional opaque Context checkpoint.
+    /// The actual worker invokes admission once, after validating the durable
+    /// length and before allocating the copied body. Missing caches use no
+    /// credit. Capacity refusal is a caller-side resource error, not corruption.
+    /// Returned clones and nonempty slices retain the read reservation.
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> Result<Option<StoredContextCheckpoint>> {
-        let _ = session_id;
+        let _ = (session_id, reservation);
         Ok(None)
     }
     /// Installs a checkpoint only if the durable tail still matches exactly.
@@ -2238,8 +2243,13 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     }
     /// Publishes bounded immutable bytes and returns their computed identity.
     async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef>;
-    /// Reads and verifies one immutable object.
-    async fn read_cas(&self, object: &CasObjectRef) -> Result<Arc<[u8]>>;
+    /// Verifies durable length before worker-owned allocation admission. Returned
+    /// clones retain the byte reservation until their last owner is released.
+    async fn read_cas(
+        &self,
+        object: &CasObjectRef,
+        admission: rsi_api_protocol::ByteAdmission,
+    ) -> Result<rsi_api_protocol::RetainedBytes>;
 }
 
 /// Nominal process-local Store contract.
@@ -2254,6 +2264,14 @@ impl LocalContract for SessionStoreContract {
 /// Closed Store failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreError {
+    /// Cold read validation refused admission; the requested durable mutation
+    /// has not been admitted or applied. This is not an uncertain write outcome.
+    #[error("Agent Store validation capacity is busy")]
+    ValidationBusy,
+    /// Read allocation refused its supplied byte admission before copying.
+    /// Only an API Capacity refusal maps here; malformed admission is Invalid.
+    #[error("Agent Store read byte capacity exhausted")]
+    ReadCapacity,
     /// A complete domain replacement observed another predecessor revision.
     #[error("domain `{domain}` revision conflict: expected {expected}, actual {actual}")]
     DomainRevisionConflict {
@@ -2333,6 +2351,16 @@ pub enum StoreError {
     /// Bounded storage I/O failure.
     #[error("Agent Store I/O failed: {0}")]
     Io(String),
+}
+
+impl StoreError {
+    /// Classifies supplied read admission: only Capacity is a retryable refusal.
+    pub fn read_admission(error: rsi_api_protocol::ApiError) -> Self {
+        match error {
+            rsi_api_protocol::ApiError::Capacity => Self::ReadCapacity,
+            error => Self::Invalid(error.to_string()),
+        }
+    }
 }
 
 /// Store result.

@@ -9,7 +9,7 @@ use rsi_agent_session_protocol::{AgentPresetId, DomainIdentity, SessionHeader};
 use rsi_meta_contract::LocalContract;
 use rsi_tools_protocol::ToolRuntime;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 mod manifest;
@@ -58,6 +58,7 @@ pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
+    tool_weight: Arc<OnceLock<Result<usize>>>,
     context_builder: Arc<dyn ModelContextBuilder>,
     domains: DomainCatalog,
     contributions: ContributionCatalog,
@@ -96,6 +97,7 @@ impl AgentCompositionPin {
             preset_id,
             source_digest,
             tools,
+            tool_weight: Arc::default(),
             context_builder,
             domains,
             contributions,
@@ -139,6 +141,61 @@ impl AgentCompositionPin {
         Arc::clone(&self.tools)
     }
 
+    /// Exact encoded array weight of the immutable selected Tool catalog, cached
+    /// without copying schema payloads. Cloned pins share the measurement.
+    ///
+    /// # Errors
+    /// Returns [`AgentCompositionError::InvalidInput`] if the catalog exceeds
+    /// its bounded encoded allowance.
+    pub fn tool_definition_weight(&self) -> Result<usize> {
+        self.tool_weight
+            .get_or_init(|| {
+                let mut weights = Some((2usize, 0usize, 0usize));
+                self.tools.visit_definitions(&mut |definition| {
+                    weights = weights.and_then(|(bytes, schemas, count)| {
+                        let count = count.checked_add(1)?;
+                        if count > rsi_ai_protocol::MAX_TOOLS {
+                            return None;
+                        }
+                        let measure = |value: &serde_json::Value| {
+                            rsi_api_protocol::measure_json(
+                                value,
+                                rsi_ai_protocol::MAX_TOOL_SCHEMA_BYTES,
+                            )
+                            .ok()
+                        };
+                        let schemas = schemas
+                            .checked_add(measure(definition.input_schema())?)?
+                            .checked_add(definition.freeform().map_or(Some(0), |freeform| {
+                                rsi_api_protocol::measure_json(
+                                    freeform.grammar(),
+                                    rsi_ai_protocol::MAX_TOOL_SCHEMA_BYTES,
+                                )
+                                .ok()
+                            })?)?;
+                        let bytes = bytes
+                            .checked_add(
+                                rsi_api_protocol::measure_json(
+                                    definition,
+                                    rsi_ai_protocol::MAX_REQUEST_BYTES,
+                                )
+                                .ok()?,
+                            )?
+                            .checked_add(usize::from(count > 1))?;
+                        (schemas <= rsi_ai_protocol::MAX_TOOL_SCHEMA_BYTES
+                            && bytes <= rsi_ai_protocol::MAX_REQUEST_BYTES)
+                            .then_some((bytes, schemas, count))
+                    });
+                });
+                weights.map(|(bytes, _, _)| bytes).ok_or_else(|| {
+                    AgentCompositionError::InvalidInput(
+                        "Tool catalog exceeds AI count, schema or request encoding bounds".into(),
+                    )
+                })
+            })
+            .clone()
+    }
+
     /// Applies a claim's immutable restriction without mutating the generation catalog.
     #[must_use]
     pub fn for_delegation(
@@ -146,6 +203,7 @@ impl AgentCompositionPin {
         policy: Option<&rsi_agent_session_protocol::DelegationPolicy>,
     ) -> Self {
         if let Some(policy) = policy {
+            self.tool_weight = Arc::default();
             self.tools = Arc::new(scoped_tools::ScopedTools {
                 inner: self.tools,
                 allowed: policy.tools().clone(),
@@ -168,6 +226,7 @@ impl AgentCompositionPin {
             owner,
             contract.clone(),
         )?);
+        self.tool_weight = Arc::default();
         self.output_contract = Some(contract);
         Ok(self)
     }

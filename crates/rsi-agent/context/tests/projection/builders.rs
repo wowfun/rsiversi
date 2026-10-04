@@ -8,6 +8,20 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn projected_messages_keep_admission_after_the_source_fold_drops() {
+    let budget = rsi_agent_context::ContextBudget::new(1024 * 1024).unwrap();
+    let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
+    fold.apply(&complete_facts()).unwrap();
+    let projection = fold.project(ContextLimits::default()).unwrap();
+    let expected = serde_json::to_vec(projection.messages()).unwrap();
+    drop(fold);
+    assert!(budget.used() > 0, "projected storage lost its admission");
+    assert_eq!(serde_json::to_vec(projection.messages()).unwrap(), expected);
+    drop(projection);
+    assert_eq!(budget.used(), 0);
+}
+
 #[derive(Debug)]
 struct SelectedBuilder {
     identity: ContextBuilderIdentity,
@@ -56,7 +70,7 @@ impl ModelContextCursor for WrongPosition {
     ) -> rsi_agent_context::Result<rsi_ai_protocol::LanguageRequest> {
         self.0.build(options, profile)
     }
-    fn checkpoint(&self) -> rsi_agent_context::Result<Arc<[u8]>> {
+    fn checkpoint(&self) -> rsi_agent_context::Result<rsi_api_protocol::RetainedBytes> {
         self.0.checkpoint()
     }
     fn position(&self) -> rsi_agent_context::ContextPosition {
@@ -73,8 +87,13 @@ fn restored_provider_position_must_match_the_envelope_before_replacing_state() {
         opened: Arc::new(AtomicUsize::new(0)),
         wrong_restore_position: true,
     });
-    let mut state =
-        ModelContextState::open(provider, header("system"), ContextLimits::default()).unwrap();
+    let mut state = ModelContextState::open(
+        provider,
+        header("system"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     state
         .ingest(ContextPage::Canonical(&complete_facts()))
         .unwrap();
@@ -133,13 +152,28 @@ fn complete_facts() -> Vec<Arc<SessionFact>> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one selected-builder fixture checks exact projection and complete cache binding"
+)]
 fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
     let builder = selected("test.context", "1.0.0", &"a".repeat(64));
     let limits = ContextLimits::default();
     let history = complete_facts();
-    let mut state = ModelContextState::open(builder.clone(), header("system"), limits).unwrap();
+    let mut state = ModelContextState::open(
+        builder.clone(),
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     state.ingest(ContextPage::Canonical(&history)).unwrap();
-    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&history).unwrap();
     assert_eq!(
         state
@@ -152,7 +186,13 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
             .unwrap()
     );
     let checkpoint = state.checkpoint().unwrap();
-    let mut restored = ModelContextState::open(builder.clone(), header("system"), limits).unwrap();
+    let mut restored = ModelContextState::open(
+        builder.clone(),
+        header("system"),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     restored.restore(&checkpoint).unwrap();
     assert_eq!(restored.position(), state.position());
     assert_eq!(
@@ -176,8 +216,13 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
         selected("test.context", "2.0.0", &"a".repeat(64)),
         selected("test.context", "1.0.0", &"b".repeat(64)),
     ] {
-        let mut other_state =
-            ModelContextState::open(other.clone(), header("system"), limits).unwrap();
+        let mut other_state = ModelContextState::open(
+            other.clone(),
+            header("system"),
+            limits,
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
         assert!(other_state.restore(&checkpoint).is_err());
         assert_eq!(
             other.opened.load(Ordering::SeqCst),
@@ -193,7 +238,13 @@ fn selected_builder_matches_fold_and_restores_only_its_bound_cache() {
             ContextLimits::new(17, limits.max_bytes).unwrap(),
         ),
     ] {
-        let mut wrong = ModelContextState::open(builder.clone(), header, limits).unwrap();
+        let mut wrong = ModelContextState::open(
+            builder.clone(),
+            header,
+            limits,
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
         assert!(wrong.restore(&checkpoint).is_err());
     }
     let mut corrupt = checkpoint.to_vec();
@@ -227,6 +278,7 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
         builder.clone(),
         fork_header("system", 2, 1),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     child.ingest(ContextPage::ForkSeed(&history[..1])).unwrap();
@@ -251,8 +303,13 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
         .contains("retained input")
     );
 
-    let mut claim =
-        ModelContextState::open(builder, header("system"), ContextLimits::default()).unwrap();
+    let mut claim = ModelContextState::open(
+        builder,
+        header("system"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     claim
         .ingest(ContextPage::ClaimVisible {
             facts: &history,
@@ -264,4 +321,105 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
         claim.checkpoint().is_err(),
         "filtered scan became canonical checkpoint"
     );
+}
+
+#[test]
+fn shared_context_pressure_precedes_copy_and_keeps_parked_state_and_restore_source() {
+    let budget = rsi_agent_context::ContextBudget::new(1024 * 1024).unwrap();
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("system"),
+        ContextLimits::default(),
+        budget.clone(),
+    )
+    .unwrap();
+    state
+        .ingest(ContextPage::Canonical(&complete_facts()))
+        .unwrap();
+    let checkpoint = state.checkpoint().unwrap();
+    let position = state.position();
+    let retained = budget.used();
+    let hold = budget.reserve(budget.maximum() - retained).unwrap();
+    assert!(matches!(
+        state.build(
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+            &super::compaction::profile()
+        ),
+        Err(rsi_agent_context::ContextError::Capacity)
+    ));
+    assert!(matches!(
+        state.restore(&checkpoint),
+        Err(rsi_agent_context::ContextError::Capacity)
+    ));
+    assert_eq!(state.position(), position);
+    assert_eq!(budget.used(), budget.maximum());
+    drop(hold);
+    let request = state
+        .build(
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+            &super::compaction::profile(),
+        )
+        .unwrap();
+    let sibling = request.clone();
+    assert_eq!(request.messages().as_ptr(), sibling.messages().as_ptr());
+    assert!(
+        sibling
+            .clone()
+            .with_settings(rsi_ai_protocol::LanguageSettings::default())
+            .is_err()
+    );
+    assert!(sibling.clone().into_messages().is_err());
+    let slice = checkpoint.slice(1..2).unwrap();
+    assert_eq!(slice.allocation_weight(), checkpoint.allocation_weight());
+    drop(state);
+    drop(checkpoint);
+    drop(request);
+    assert!(budget.used() > 0);
+    drop(sibling);
+    assert!(budget.used() > 0);
+    drop(slice);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn checkpoint_restore_needs_headroom_beyond_read_and_decode_and_preserves_old_state() {
+    let budget = rsi_agent_context::ContextBudget::new(1024 * 1024).unwrap();
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("system"),
+        ContextLimits::default(),
+        budget.clone(),
+    )
+    .unwrap();
+    state
+        .ingest(ContextPage::Canonical(&complete_facts()))
+        .unwrap();
+    let checkpoint = state.checkpoint().unwrap();
+    let read = budget
+        .checkpoint_read()
+        .reserve(checkpoint.len())
+        .unwrap()
+        .copy(&checkpoint)
+        .unwrap();
+    drop(checkpoint);
+    let retained = budget.used();
+    let position = state.position();
+    let held = budget
+        .reserve(budget.maximum() - retained - 3 * read.len())
+        .unwrap();
+    assert!(matches!(state.restore(&read), Err(ContextError::Capacity)));
+    assert_eq!(state.position(), position);
+    assert_eq!(budget.used(), retained + held.bytes());
+    drop(held);
+    state.restore(&read).unwrap();
+    assert_eq!(state.position(), position);
+    assert_eq!(
+        budget.used(),
+        retained,
+        "restored accounting changed retained ownership"
+    );
+    drop(state);
+    assert_eq!(budget.used(), read.len());
+    drop(read);
+    assert_eq!(budget.used(), 0);
 }

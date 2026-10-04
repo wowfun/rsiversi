@@ -69,6 +69,9 @@ impl AgentKernel {
         lease: &mutation::AgentMutationLease,
         error: StoreError,
     ) -> TurnResult<()> {
+        if matches!(error, StoreError::ValidationBusy | StoreError::ReadCapacity) {
+            return Err(turn_store_error(error));
+        }
         match read_turn_boundary_bounded(&self.inner, claim.session_id(), claim.turn_id()).await {
             Ok(boundary) if boundary.terminal() == Some(terminal) => Ok(()),
             Ok(boundary) if boundary.terminal().is_none() => Err(turn_store_error(error)),

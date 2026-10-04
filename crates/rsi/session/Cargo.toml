@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-context = { path = "../../rsi-agent/context" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-session-export = { path = "../session-export" }
 rsi-process = { path = "../../rsi-process/core" }
@@ -43,7 +44,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-client = { path = "../client" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
-rsi-agent-context = { path = "../../rsi-agent/context" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 rsi-agent-testkit = { path = "../../rsi-agent/testkit" }

@@ -914,7 +914,9 @@ impl SessionStore for SqliteStore {
             return Ok(boundary);
         }
         let owner = self.inner.clone();
-        let resolve = move |connection: &mut Connection| {
+        let cache_key = key.clone();
+        let publisher = owner.clone();
+        let resolve = move |transaction: &Transaction<'_>| {
             if historical
                 && let Some(boundary) = owner
                     .fork_boundaries
@@ -924,9 +926,6 @@ impl SessionStore for SqliteStore {
             {
                 return Ok(boundary);
             }
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
             let invoking_accepted_seq = transaction
                 .query_row(
                     "SELECT accepted_seq FROM turns WHERE session_id = ?1 AND turn_id = ?2",
@@ -1082,16 +1081,26 @@ impl SessionStore for SqliteStore {
                 terminal_prefix_sha256,
                 effective_turns,
             };
-            transaction.commit().map_err(sql_error)?;
-            if historical && let Ok(mut cache) = owner.fork_boundaries.lock() {
-                cache.insert(key, boundary.clone());
-            }
             Ok(boundary)
         };
         if historical {
-            self.with_validation(resolve).await
+            self.with_validation_publish(resolve, move |boundary| {
+                if let Ok(mut cache) = publisher.fork_boundaries.lock() {
+                    cache.insert(cache_key, boundary.clone());
+                }
+                Ok(boundary)
+            })
+            .await
         } else {
-            self.with_reader(resolve).await
+            self.with_reader(move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(sql_error)?;
+                let result = resolve(&transaction)?;
+                transaction.commit().map_err(sql_error)?;
+                Ok(result)
+            })
+            .await
         }
     }
 
@@ -1936,6 +1945,7 @@ impl SessionStore for SqliteStore {
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> Result<Option<StoredContextCheckpoint>> {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
@@ -1959,10 +1969,8 @@ impl SessionStore for SqliteStore {
                 .query_row(
                     "SELECT c.header_fingerprint, c.through_seq, c.fact_prefix_sha256,
                             length(c.checkpoint_bytes),
-                            CASE WHEN length(c.checkpoint_bytes) <= ?2
-                                 THEN c.checkpoint_bytes END,
                             length(CAST(s.header_json AS BLOB)),
-                            CASE WHEN length(CAST(s.header_json AS BLOB)) <= ?3
+                            CASE WHEN length(CAST(s.header_json AS BLOB)) <= ?2
                                  THEN s.header_json END,
                             s.durable_seq
                      FROM context_checkpoints c
@@ -1970,27 +1978,70 @@ impl SessionStore for SqliteStore {
                      WHERE c.session_id = ?1",
                     params![
                         session_id.as_str(),
-                        i64::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES)
-                            .expect("checkpoint bound fits SQLite INTEGER"),
                         i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
                             .expect("session header bound fits SQLite INTEGER"),
                     ],
                     |row| {
-                        Ok((
-                            bounded_text(row, 0, 64)?,
-                            row.get::<_, i64>(1)?,
-                            bounded_text(row, 2, 64)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, Option<Vec<u8>>>(4)?,
-                            row.get::<_, i64>(5)?,
-                            row.get::<_, Option<String>>(6)?,
-                            row.get::<_, i64>(7)?,
-                        ))
+                        let encoded_len =
+                            usize::try_from(row.get::<_, i64>(3)?).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Integer,
+                                    Box::new(error),
+                                )
+                            })?;
+                        Ok(cas::ContextCheckpointProjection {
+                            header_fingerprint: bounded_text(row, 0, 64)?,
+                            through_seq: row.get(1)?,
+                            fact_prefix_sha256: bounded_text(row, 2, 64)?,
+                            encoded_len,
+                            header_encoded_len: row.get(4)?,
+                            header_json: row.get(5)?,
+                            durable_seq: row.get(6)?,
+                        })
                     },
                 )
                 .optional()
                 .map_err(sql_error)?;
-            let checkpoint = projection.map(decode_context_checkpoint).transpose()?;
+            let checkpoint = if let Some(value) = projection {
+                let length = value.encoded_len;
+                if length == 0 {
+                    return Err(StoreError::Corrupt("checkpoint bytes are empty".into()));
+                }
+                if length > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
+                    return Err(StoreError::Corrupt(
+                        "checkpoint length exceeds its durable bound".into(),
+                    ));
+                }
+                let reservation = reservation
+                    .reserve(length)
+                    .map_err(StoreError::read_admission)?;
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT checkpoint_bytes FROM context_checkpoints WHERE session_id = ?1",
+                    )
+                    .map_err(sql_error)?;
+                let mut rows = statement.query([session_id.as_str()]).map_err(sql_error)?;
+                let row = rows.next().map_err(sql_error)?.ok_or_else(|| {
+                    StoreError::Corrupt("checkpoint disappeared within its read snapshot".into())
+                })?;
+                let bytes = row
+                    .get_ref(0)
+                    .map_err(sql_error)?
+                    .as_blob()
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                if bytes.len() != length {
+                    return Err(StoreError::Corrupt(
+                        "checkpoint byte length changed within its read snapshot".into(),
+                    ));
+                }
+                let bytes = reservation
+                    .copy(bytes)
+                    .map_err(StoreError::read_admission)?;
+                Some(decode_context_checkpoint(value, bytes)?)
+            } else {
+                None
+            };
             transaction.commit().map_err(sql_error)?;
             Ok(checkpoint)
         })
@@ -2138,7 +2189,11 @@ impl SessionStore for SqliteStore {
         .await
     }
 
-    async fn read_cas(&self, object: &CasObjectRef) -> Result<Arc<[u8]>> {
+    async fn read_cas(
+        &self,
+        object: &CasObjectRef,
+        admission: rsi_api_protocol::ByteAdmission,
+    ) -> Result<rsi_api_protocol::RetainedBytes> {
         object.validate()?;
         let object = object.clone();
         let verified = object.clone();
@@ -2162,12 +2217,12 @@ impl SessionStore for SqliteStore {
         .await?;
         let cas_dir = Arc::clone(&self.inner.cas_dir);
         self.with_cas(move || {
-            let bytes = cas::read_cas_file_bounded(
-                &cas_dir,
-                &verified.sha256,
-                usize::try_from(verified.byte_len)
-                    .map_err(|_| StoreError::Corrupt("CAS reference length exceeds host".into()))?,
-            )?;
+            let maximum = usize::try_from(verified.byte_len)
+                .map_err(|_| StoreError::Corrupt("CAS length exceeds host".into()))?;
+            let reservation = admission
+                .reserve(maximum)
+                .map_err(StoreError::read_admission)?;
+            let bytes = cas::read_cas_file_admitted(&cas_dir, &verified.sha256, maximum)?;
             if u64::try_from(bytes.len())
                 .map_err(|_| StoreError::Corrupt("CAS body length exceeds u64".into()))?
                 != verified.byte_len
@@ -2176,7 +2231,9 @@ impl SessionStore for SqliteStore {
                     "CAS body length disagrees with metadata".into(),
                 ));
             }
-            Ok(Arc::from(bytes))
+            reservation
+                .retain_vec(bytes)
+                .map_err(StoreError::read_admission)
         })
         .await
     }
@@ -2197,11 +2254,16 @@ impl StoreInner {
                 let _ = release.recv();
             }
         }
-        let decoded = validate_session(connection, session_id)?;
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = decoded;
+        cold_validation::check()?;
+        #[cfg(test)]
+        validation::READY_ROWS.set(0);
         #[cfg(any(test, feature = "test-support"))]
-        self.control_decodes.fetch_add(decoded, Ordering::Relaxed);
+        let _observer = validation::ControlObserver::enter(self.control_decodes.clone());
+        let result = validate_session(connection, session_id);
+        #[cfg(test)]
+        self.ready_rows_decoded
+            .fetch_add(validation::READY_ROWS.get() as u64, Ordering::Relaxed);
+        result?;
         Ok(())
     }
 

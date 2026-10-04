@@ -23,6 +23,7 @@ fn cursor() -> ModelContextState {
         Arc::new(DefaultContextBuilder::default()),
         header("instructions"),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap()
 }
@@ -282,6 +283,7 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
             Arc::new(DefaultContextBuilder::default()),
             child_header.clone(),
             ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap()
     };
@@ -620,6 +622,7 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
             Arc::new(DefaultContextBuilder::default()),
             fork_header("instructions", history.last().unwrap().seq(), 2),
             ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
         fork.ingest(ContextPage::ForkSeed(&history)).unwrap();
@@ -714,6 +717,7 @@ fn encoded_plan_bound_keeps_long_identifier_history_recoverable() {
                 Arc::new(DefaultContextBuilder::default()),
                 header.clone(),
                 ContextLimits::default(),
+                rsi_agent_context::ContextBudget::default(),
             )
             .unwrap()
         };
@@ -1172,6 +1176,7 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             Arc::new(DefaultContextBuilder::default()),
             child_header,
             ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
         let selected: Vec<_> = history
@@ -1498,6 +1503,7 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             Arc::new(DefaultContextBuilder::default()),
             child_header,
             ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
         let selected: Vec<_> = history
@@ -1514,7 +1520,11 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
 #[test]
 fn both_fold_modes_reject_orphan_results_during_ingestion() {
     let mut semantic = cursor();
-    let mut legacy = ContextFold::new(header("instructions")).unwrap();
+    let mut legacy = ContextFold::new(
+        header("instructions"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     let facts = vec![
         SessionFact::new(1, 1, accepted("orphan", "read the evidence")).unwrap(),
         SessionFact::new(
@@ -1780,6 +1790,7 @@ fn emission_pressure_respects_ai_message_limit_above_configured_default() {
             Arc::new(DefaultContextBuilder::default()),
             header(""),
             ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
         let mut history = Vec::new();
@@ -1848,6 +1859,7 @@ fn bounded_partial_summaries_remain_replayable_until_the_request_fits() {
             Arc::new(DefaultContextBuilder::default()),
             header(""),
             ContextLimits::new(4096, 32 * 1024 * 1024).unwrap(),
+            rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
         let mut history = Vec::new();
@@ -1911,6 +1923,7 @@ fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_indepe
         Arc::new(DefaultContextBuilder::default()),
         header("system"),
         ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     let mut history = Vec::new();
@@ -1995,6 +2008,7 @@ fn final_catalog_overhead_triggers_pressure_and_summary_replay_is_catalog_indepe
         Arc::new(DefaultContextBuilder::default()),
         header("system"),
         ContextLimits::new(512, 32 * 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     replay.ingest(ContextPage::Canonical(&history)).unwrap();
@@ -2084,7 +2098,11 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
 
 #[test]
 fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() {
-    let mut fold = ContextFold::new(header("instructions")).unwrap();
+    let mut fold = ContextFold::new(
+        header("instructions"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     let mut bodies = partial_tool_batch(None);
     bodies.push(SessionFactBody::TurnTerminal {
         turn_id: TurnId::new("interrupted").unwrap(),
@@ -2095,7 +2113,7 @@ fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() 
     fold.apply(&facts(bodies)).unwrap();
     // The raw five-message projection fits, but two missing tool results require
     // eviction of the completed old Turn to preserve an adjacent provider view.
-    let raw_bytes = serde_json::to_vec(&fold.project(ContextLimits::default()).unwrap().messages)
+    let raw_bytes = serde_json::to_vec(fold.project(ContextLimits::default()).unwrap().messages())
         .unwrap()
         .len();
     for limits in [

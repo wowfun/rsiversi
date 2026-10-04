@@ -42,7 +42,10 @@ pub const REFERENCES_FACTORY: &str = "rsi.agent.references";
 pub const SESSION_REFERENCES_INSTANCE: &str = "agent-references";
 /// Linked factory key for the durable Agent Kernel.
 pub const KERNEL_FACTORY: &str = "rsi.agent.kernel";
-/// Linked factory key for the sequential Agent executor.
+/// Linked factory key for shared Context byte admission.
+pub const CONTEXT_BUDGET_FACTORY: &str = "rsi.agent.context-budget";
+
+/// Linked factory key for the Agent executor.
 pub const EXECUTOR_FACTORY: &str = "rsi.agent.executor";
 
 /// Stable Session Agent Profile fragment identity.
@@ -131,6 +134,7 @@ pub fn session_fragment(config: &SessionAgentConfig) -> ProfileFragment {
     ProfileFragment::new(
         SESSION_FRAGMENT_ID,
         [
+            ProfileEntry::new("rsi-context-budget", CONTEXT_BUDGET_FACTORY, json!({})),
             ProfileEntry::new(
                 SESSION_STORE_INSTANCE,
                 SQLITE_STORE_FACTORY,

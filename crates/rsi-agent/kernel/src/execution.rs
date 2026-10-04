@@ -762,6 +762,7 @@ impl TurnExecution for AgentKernel {
     async fn read_context_checkpoint(
         &self,
         session_id: &SessionId,
+        reservation: rsi_api_protocol::ByteAdmission,
     ) -> TurnResult<Option<ContextCheckpoint>> {
         if !context_checkpoints_enabled(&self.inner) {
             return Ok(None);
@@ -771,7 +772,7 @@ impl TurnExecution for AgentKernel {
             session_id,
             MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
             true,
-            |store, id| async move { store.read_context_checkpoint(&id).await },
+            move |store, id| async move { store.read_context_checkpoint(&id, reservation).await },
         )
         .await;
         let (checkpoint, _permit, _lease) = match checkpoint {

@@ -106,7 +106,7 @@ mod tests {
         )
         .unwrap();
         let projected = project_tool_images(
-            request.into_messages(),
+            request.into_messages().unwrap(),
             LanguageRequestOptions::default(),
             &profile,
             ContextLimits::default(),

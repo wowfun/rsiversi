@@ -966,7 +966,9 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
                 header_fingerprint: session_header.fingerprint().unwrap(),
                 through_seq: 1,
                 fact_prefix_sha256,
-                bytes: Arc::from(&b"opaque"[..]),
+                bytes: rsi_api_protocol::ByteBudget::default()
+                    .copy(&b"opaque"[..])
+                    .unwrap(),
             },
         })
         .await
@@ -981,7 +983,7 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
         .unwrap();
     drop(connection);
     assert!(matches!(
-        store.read_context_checkpoint(&session).await,
+        store.read_context_checkpoint(&session, rsi_api_protocol::ByteBudget::default().into()).await,
         Err(StoreError::Corrupt(message)) if message.contains("header fingerprint")
     ));
 
@@ -995,7 +997,7 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
         .unwrap();
     drop(connection);
     assert!(matches!(
-        store.read_context_checkpoint(&session).await,
+        store.read_context_checkpoint(&session, rsi_api_protocol::ByteBudget::default().into()).await,
         Err(StoreError::Corrupt(message)) if message.contains("durable tail")
     ));
 }
@@ -1532,6 +1534,20 @@ fn verify_never_creates_a_missing_store() {
 }
 
 #[tokio::test]
+async fn admitted_cas_read_preserves_missing_file_identity_and_releases_credit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let reference = store.put_cas(Arc::from(&b"missing"[..])).await.unwrap();
+    std::fs::remove_file(root.path().join("cas").join(&reference.sha256)).unwrap();
+    let budget = rsi_api_protocol::ByteBudget::default();
+    assert!(matches!(
+        store.read_cas(&reference, budget.clone().into()).await,
+        Err(StoreError::NotFound(id)) if id == reference.sha256
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
 async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
     let root = tempfile::tempdir().unwrap();
     let unrelated = root.path().join("keep-me.txt");
@@ -1539,7 +1555,14 @@ async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(&b"immutable"[..]);
     let reference = store.put_cas(bytes.clone()).await.unwrap();
-    assert_eq!(store.read_cas(&reference).await.unwrap(), bytes);
+    assert_eq!(
+        store
+            .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap()
+            .as_bytes(),
+        bytes.as_ref()
+    );
     assert_eq!(b"immutable".len(), b"mutated!!".len());
     std::fs::write(
         root.path().join("cas").join(&reference.sha256),
@@ -1547,7 +1570,9 @@ async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
     )
     .unwrap();
     assert!(matches!(
-        store.read_cas(&reference).await,
+        store
+            .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+            .await,
         Err(StoreError::Corrupt(_))
     ));
     // The caller's recorded length is the physical-read ceiling, before hashing.
@@ -1556,7 +1581,10 @@ async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
         vec![b'x'; 1024 * 1024],
     )
     .unwrap();
-    let failure = store.read_cas(&reference).await.unwrap_err();
+    let failure = store
+        .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+        .await
+        .unwrap_err();
     assert!(failure.to_string().contains("exceeds 9 bytes"), "{failure}");
     drop(store);
     assert_eq!(std::fs::read(unrelated).unwrap(), b"user-owned");
@@ -2349,4 +2377,157 @@ async fn sqlite_activity_membership_is_complete_at_64_65_and_1024_and_rejects_10
     let store = SqliteStore::open(root.path()).unwrap();
     rsi_agent_testkit::assert_activity_membership_bounds(&store, &header("activity-template"))
         .await;
+}
+
+#[tokio::test]
+async fn workflow_cas_admission_precedes_allocation_and_clones_retain_credit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let object = store.put_cas(Arc::from(&b"workflow"[..])).await.unwrap();
+    let budget = rsi_api_protocol::ByteBudget::new(8).unwrap();
+    let read = store
+        .read_cas(&object, budget.clone().into())
+        .await
+        .unwrap();
+    assert_eq!(budget.used(), 8);
+    let clone = read.clone();
+    drop(read);
+    assert_eq!(budget.used(), 8);
+    assert!(matches!(
+        store.read_cas(&object, budget.clone().into()).await,
+        Err(StoreError::ReadCapacity)
+    ));
+    drop(clone);
+    assert_eq!(budget.used(), 0);
+    assert_eq!(
+        store
+            .read_cas(&object, budget.into())
+            .await
+            .unwrap()
+            .as_bytes(),
+        b"workflow"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_cas_rejects_leaf_and_directory_symlinks_without_retaining_credit() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let object = store.put_cas(Arc::from(&b"workflow"[..])).await.unwrap();
+    let budget = rsi_api_protocol::ByteBudget::new(8).unwrap();
+    let cas = root.path().join("cas");
+    let leaf = cas.join(&object.sha256);
+    let saved = root.path().join("saved-object");
+    std::fs::rename(&leaf, &saved).unwrap();
+    symlink(&saved, &leaf).unwrap();
+    assert!(
+        store
+            .read_cas(&object, budget.clone().into())
+            .await
+            .is_err()
+    );
+    assert_eq!(budget.used(), 0);
+    std::fs::remove_file(&leaf).unwrap();
+    std::fs::rename(&saved, &leaf).unwrap();
+    let saved_directory = root.path().join("saved-cas");
+    std::fs::rename(&cas, &saved_directory).unwrap();
+    symlink(&saved_directory, &cas).unwrap();
+    assert!(
+        store
+            .read_cas(&object, budget.clone().into())
+            .await
+            .is_err()
+    );
+    assert_eq!(budget.used(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_payload_and_publication_both_reject_symlink_entries_without_retaining_credit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let body: Arc<[u8]> = Arc::from(&b"immutable"[..]);
+    let reference = store.put_cas(body.clone()).await.unwrap();
+    let path = root.path().join("cas").join(&reference.sha256);
+    let original = root.path().join("original-cas");
+    std::fs::rename(&path, &original).unwrap();
+    std::os::unix::fs::symlink(&original, path).unwrap();
+    let budget = rsi_api_protocol::ByteBudget::default();
+    assert!(matches!(
+        store.read_cas(&reference, budget.clone().into()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(budget.used(), 0);
+    assert!(matches!(
+        store.put_cas(body).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(std::fs::read(original).unwrap(), b"immutable");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_read_rejects_a_symlinked_parent_as_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let reference = store.put_cas(Arc::from(&b"immutable"[..])).await.unwrap();
+    let cas = root.path().join("cas");
+    let moved = root.path().join("moved-cas");
+    std::fs::rename(&cas, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &cas).unwrap();
+    let budget = rsi_api_protocol::ByteBudget::default();
+    assert!(matches!(
+        store.read_cas(&reference, budget.clone().into()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+async fn cas_read_distinguishes_capacity_from_invalid_admission_in_both_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let stores: [Arc<dyn SessionStore>; 2] = [
+        Arc::new(rsi_agent_testkit::MemoryStore::new()),
+        Arc::new(SqliteStore::open(root.path()).unwrap()),
+    ];
+    for store in stores {
+        let object = store.put_cas(Arc::from(&b"workflow"[..])).await.unwrap();
+        let result = store
+            .read_cas(
+                &object,
+                rsi_api_protocol::ByteAdmission::new(|_| {
+                    Err(rsi_api_protocol::ApiError::Invalid(
+                        "broken admission".into(),
+                    ))
+                }),
+            )
+            .await;
+        assert!(matches!(result, Err(StoreError::Invalid(_))), "{result:?}");
+        let result = store
+            .read_cas(
+                &object,
+                rsi_api_protocol::ByteAdmission::new(|_| Err(rsi_api_protocol::ApiError::Capacity)),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(StoreError::ReadCapacity)),
+            "{result:?}"
+        );
+        let budget = rsi_api_protocol::ByteBudget::new(64).unwrap();
+        let allocator = budget.clone();
+        let result = store
+            .read_cas(
+                &object,
+                rsi_api_protocol::ByteAdmission::new(move |bytes| allocator.reserve(bytes + 1)),
+            )
+            .await;
+        assert!(matches!(result, Err(StoreError::Invalid(_))), "{result:?}");
+        assert_eq!(
+            budget.used(),
+            0,
+            "malformed reservation must release its guard"
+        );
+    }
 }

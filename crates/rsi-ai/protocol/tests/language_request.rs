@@ -8,6 +8,54 @@ use rsi_ai_protocol::{
 };
 
 #[test]
+fn composed_request_retentions_drop_on_a_small_stack_and_preserve_clone_ownership() {
+    const CHILD: &str = "RSI_REQUEST_RETENTION_STACK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "composed_request_retentions_drop_on_a_small_stack_and_preserve_clone_ownership",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            struct Guard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut request =
+                LanguageRequest::new(vec![Message::user_text("bounded ownership").unwrap()])
+                    .unwrap();
+            for _ in 0..8192 {
+                request = request.with_retention(Guard(drops.clone()));
+            }
+            let earlier = request.clone();
+            request = request.with_retention(Guard(drops.clone()));
+            drop(request);
+            assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+            drop(earlier);
+            assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 8193);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn model_profiles_own_identifier_uniqueness_and_capacity_bounds() {
     let limits = LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits");
     let profiles = LanguageModelProfiles::default()
@@ -783,4 +831,90 @@ fn frozen_options_share_exact_complete_envelope_budget_and_wire() {
             assert_eq!(request.unwrap_err().code(), "request.too_large");
         }
     }
+}
+
+#[test]
+fn cached_request_weight_matches_wire_after_every_control_update_and_deserialization() {
+    fn check(request: &LanguageRequest) {
+        let expected = serde_json::to_vec(request).unwrap().len();
+        assert_eq!(request.encoded_weight(), expected);
+        assert_eq!(request.clone().encoded_weight(), expected);
+    }
+    let request =
+        LanguageRequest::new(vec![Message::user_text("escaped \" 中文").unwrap()]).unwrap();
+    check(&request);
+    let original = request.clone();
+    let request = request
+        .with_tools(vec![lookup()], ToolChoice::Auto)
+        .unwrap();
+    check(&request);
+    check(&original);
+    let request = request
+        .with_hosted_tools(vec![HostedTool::WebSearch { max_uses: Some(3) }])
+        .unwrap();
+    check(&request);
+    let request = request
+        .with_response_format(ResponseFormat::JsonSchema {
+            name: "result".into(),
+            description: None,
+            schema: json!({"type":"object"}),
+            strict: true,
+        })
+        .unwrap();
+    check(&request);
+    let request = request
+        .with_extensions(vec![
+            ProviderExtension::new("fixture.control", 0, json!({"escaped": "\n"})).unwrap(),
+        ])
+        .unwrap();
+    check(&request);
+    let request = request
+        .with_settings(
+            LanguageSettings::default()
+                .with_max_output_tokens(42)
+                .unwrap(),
+        )
+        .unwrap();
+    check(&request);
+    let restored: LanguageRequest =
+        serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+    check(&restored);
+    assert_eq!(request, restored);
+    let retained = restored.with_retention(std::sync::Arc::new(()));
+    check(&retained);
+}
+
+#[test]
+fn cloned_validated_options_share_schema_storage_across_request_builds() {
+    let options = rsi_ai_protocol::LanguageRequestOptions::new(
+        vec![
+            ToolDefinition::new(
+                "test",
+                "shared schema",
+                serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            )
+            .unwrap(),
+        ],
+        ToolChoice::Auto,
+        vec![],
+        rsi_ai_protocol::ResponseFormat::Text,
+        LanguageSettings::default(),
+        vec![],
+    )
+    .unwrap();
+    let first = LanguageRequest::new_with_options(
+        vec![Message::user_text("first").unwrap()],
+        options.clone(),
+    )
+    .unwrap();
+    let second =
+        LanguageRequest::new_with_options(vec![Message::user_text("second").unwrap()], options)
+            .unwrap();
+    assert!(std::ptr::eq(
+        first.tools().as_ptr(),
+        second.tools().as_ptr()
+    ));
+    let decoded: LanguageRequest =
+        serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(first, decoded);
 }

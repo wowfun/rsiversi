@@ -110,6 +110,8 @@ pub struct ContextInit<'a> {
     pub header: SessionHeader,
     /// Exact retention and model-request limits.
     pub limits: ContextLimits,
+    /// Mandatory shared resource admission, inherited from the service.
+    pub budget: crate::ContextBudget,
     /// Bounded provider payload from a matching generic envelope, if restoring.
     pub checkpoint: Option<&'a [u8]>,
 }
@@ -167,7 +169,7 @@ pub trait ModelContextCursor: fmt::Debug + Send + 'static {
         false
     }
     /// Encodes a bounded payload only for an exact checkpointable Fact prefix.
-    fn checkpoint(&self) -> Result<Arc<[u8]>>;
+    fn checkpoint(&self) -> Result<rsi_api_protocol::RetainedBytes>;
     /// Returns the current child Fact position.
     fn position(&self) -> ContextPosition;
 }
@@ -188,6 +190,8 @@ pub struct ModelContextState {
     header: SessionHeader,
     header_fingerprint: String,
     limits: ContextLimits,
+    budget: crate::ContextBudget,
+    _header_credit: crate::ContextCredit,
     cursor: Box<dyn ModelContextCursor>,
 }
 
@@ -206,7 +210,10 @@ impl ModelContextState {
         builder: Arc<dyn ModelContextBuilder>,
         header: SessionHeader,
         limits: ContextLimits,
+        budget: crate::ContextBudget,
     ) -> Result<Self> {
+        // Owns the wrapper Header independently of the cursor; README defines the 3H opening peak.
+        let header_credit = budget.reserve(crate::budget::weight(&header)?)?;
         header
             .validate()
             .map_err(|error| invalid(&error.to_string()))?;
@@ -219,6 +226,7 @@ impl ModelContextState {
             identity: &identity,
             header: header.clone(),
             limits,
+            budget: budget.clone(),
             checkpoint: None,
         })?;
         Ok(Self {
@@ -227,6 +235,8 @@ impl ModelContextState {
             header,
             header_fingerprint,
             limits,
+            budget,
+            _header_credit: header_credit,
             cursor,
         })
     }
@@ -265,7 +275,7 @@ impl ModelContextState {
     }
 
     /// Encodes the generic binding metadata and raw provider payload once.
-    pub fn checkpoint(&self) -> Result<Arc<[u8]>> {
+    pub fn checkpoint(&self) -> Result<rsi_api_protocol::RetainedBytes> {
         let position = self.position();
         if position.through_seq == 0 {
             return Err(invalid("checkpoint requires a nonempty prefix"));
@@ -295,6 +305,9 @@ impl ModelContextState {
         digest.update(length);
         digest.update(&metadata);
         digest.update(&payload);
+        let credit = self.budget.reserve(size)?;
+        let reservation = rsi_api_protocol::ByteReservation::from_retention(size, credit)
+            .map_err(|e| ContextError::Invalid(e.to_string()))?;
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&digest.finalize());
@@ -302,7 +315,9 @@ impl ModelContextState {
         bytes.extend_from_slice(&metadata);
         bytes.extend_from_slice(&payload);
         drop(payload);
-        Ok(bytes.into())
+        reservation
+            .retain_vec(bytes)
+            .map_err(|e| invalid(&e.to_string()))
     }
 
     /// Restores a matching cache; any rejection preserves the current cursor.
@@ -358,10 +373,12 @@ impl ModelContextState {
                 "context checkpoint builder, header, limits, or position mismatch",
             ));
         }
+        let header_credit = self.budget.reserve(crate::budget::weight(&self.header)?)?;
         let cursor = self.builder.open(ContextInit {
             identity: &self.identity,
             header: self.header.clone(),
             limits: self.limits,
+            budget: self.budget.clone(),
             checkpoint: Some(payload),
         })?;
         if cursor.position() != metadata.position {
@@ -373,6 +390,8 @@ impl ModelContextState {
             header: self.header.clone(),
             header_fingerprint: self.header_fingerprint.clone(),
             limits: self.limits,
+            budget: self.budget.clone(),
+            _header_credit: header_credit,
             cursor,
         })
     }

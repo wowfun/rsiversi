@@ -169,11 +169,24 @@ impl Driver {
             composition.context_builder(),
             claim.header().clone(),
             limits,
+            self.context_budget.clone(),
         ) {
             Ok(fold) => fold,
             Err(error) => {
                 deadline_task.abort();
-                self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
+                let _ignored = self
+                    .finish(
+                        &claim,
+                        job_scope.as_ref(),
+                        failure_outcome(
+                            if matches!(error, rsi_agent_context::ContextError::Capacity) {
+                                "context.capacity"
+                            } else {
+                                "context.invalid"
+                            },
+                            error.to_string(),
+                        ),
+                    )
                     .await;
                 return;
             }
@@ -497,20 +510,15 @@ impl Driver {
                 ));
             }
             let tools = composition.tools();
-            let definitions = tools.definitions();
             let mut scheduled = VecDeque::with_capacity(calls.len());
             let total_calls = calls.len();
             for (index, call) in calls.into_iter().enumerate() {
-                let scheduling = definitions
-                    .iter()
-                    .find(|definition| definition.name() == call.name)
-                    .map(rsi_tools_protocol::ToolDefinition::scheduling)
-                    .ok_or_else(|| {
-                        failed(
-                            "tool.not_found",
-                            format!("Tool '{}' is absent from the sealed catalog", call.name),
-                        )
-                    })?;
+                let scheduling = tools.scheduling(&call.name).ok_or_else(|| {
+                    failed(
+                        "tool.not_found",
+                        format!("Tool '{}' is absent from the sealed catalog", call.name),
+                    )
+                })?;
                 if scheduling == ToolScheduling::ExclusiveFinal && index + 1 != total_calls {
                     return Err(failed(
                         "tool.exclusive_final_not_last",
@@ -923,7 +931,7 @@ impl Driver {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
             rsi_agent_context::validate_summary_output(&plan, output)
-                .map_err(|error| failed("context.compaction_failed", error.to_string()))?;
+                .map_err(|error| context_failure("context.compaction_failed", &error))?;
             if !fold.summary_installed(&effect_id) {
                 return Err(failed(
                     "context.compaction_failed",
@@ -2033,6 +2041,7 @@ impl Driver {
             claim.clone(),
             self.context_limits(),
             composition.clone(),
+            self.context_budget.clone(),
         ));
     }
 
@@ -2060,7 +2069,7 @@ impl Driver {
             .position(|fact| fact.seq() > fold.position().through_seq)
         {
             fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
-                .map_err(|error| failed("context.incremental", error.to_string()))?;
+                .map_err(|error| context_failure("context.incremental", &error))?;
         }
         Ok(facts)
     }
@@ -2120,7 +2129,7 @@ impl Driver {
                 facts: &page.facts,
                 through_seq: page.through_seq,
             })
-            .map_err(|error| failed("context.incremental", error.to_string()))?;
+            .map_err(|error| context_failure("context.incremental", &error))?;
         }
     }
 
@@ -2132,10 +2141,26 @@ impl Driver {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
         let mut restored_checkpoint = false;
-        if let Ok(Some(checkpoint)) = self.turns.read_context_checkpoint(claim.session_id()).await
+        let checkpoint = match checkpoint::read_checkpoint(
+            &self.turns,
+            claim.session_id(),
+            &self.context_budget,
+        )
+        .await
+        {
+            Err(rsi_agent_turn_protocol::TurnError::Capacity) => {
+                return Err(context_failure(
+                    "context.restore",
+                    &rsi_agent_context::ContextError::Capacity,
+                ));
+            }
+            result => result.ok().flatten(),
+        };
+        if let Some(checkpoint) = checkpoint
             && checkpoint.through_seq < claim.accepted_seq()
             && checkpoint.through_seq <= claim.live_seq()
-            && let Ok(restored) = fold.restored(&checkpoint.bytes)
+            && let Some(restored) = checkpoint::restore_candidate(fold, &checkpoint.bytes)
+                .map_err(|error| context_failure("context.restore", &error))?
             && restored.position().through_seq == checkpoint.through_seq
             && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
             && claim
@@ -2168,7 +2193,7 @@ impl Driver {
                 facts: &page.facts,
                 through_seq: page.through_seq,
             })
-            .map_err(|error| failed("context.invalid", error.to_string()))?;
+            .map_err(|error| context_failure("context.invalid", &error))?;
             scan_turn(claim, &mut state, &page.facts)
                 .map_err(|message| failed("executor.invalid_history", message))?;
         }
@@ -2209,11 +2234,11 @@ impl Driver {
                 break;
             }
             fold.ingest(ContextPage::ForkSeed(&page.facts))
-                .map_err(|error| failed("context.invalid_fork", error.to_string()))?;
+                .map_err(|error| context_failure("context.invalid_fork", &error))?;
             cursor = page.through_parent_seq;
         }
         fold.ingest(ContextPage::FinishSeed)
-            .map_err(|error| failed("context.invalid_fork", error.to_string()))
+            .map_err(|error| context_failure("context.invalid_fork", &error))
     }
 }
 

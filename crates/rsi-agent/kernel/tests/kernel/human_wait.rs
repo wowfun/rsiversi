@@ -880,3 +880,89 @@ async fn retired_and_shutdown_human_waits_finish_the_durable_park() {
         assert_eq!(pool.available_permits(), 1, "{mode}");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn shared_wait_capacity_refusal_recovers_without_fencing() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header("busy-wait")),
+            message: mailbox_message("busy-wait"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let executor = kernel.register("busy-wait".into()).unwrap();
+    let claim = kernel
+        .claim("busy-wait", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let pool = Arc::new(Semaphore::new(1));
+    let lane = Arc::new(Lane {
+        permit: Mutex::new(Some(pool.clone().acquire_owned().await.unwrap())),
+        pool: pool.clone(),
+        resumed: Notify::new(),
+    });
+    let waiting = kernel
+        .park_human_wait(&claim, ToolLaneParkingAuthority::new(lane))
+        .await
+        .unwrap();
+    *store.wait_resume_fault.lock().unwrap() =
+        Some(WaitResumeFault::Commit(StoreError::ValidationBusy));
+    let waiter = tokio::spawn(waiting.resume(CancellationToken::new()));
+    while store.wait_resume_attempts.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        matches!(waiter.await.unwrap(), Err(TurnError::Flush(message)) if message.contains("owned cleanup continues")),
+        "the caller deadline must leave cleanup owned instead of fencing the Session"
+    );
+    *store.wait_resume_fault.lock().unwrap() = Some(WaitResumeFault::Commit(StoreError::Io(
+        "transient unrelated failure".into(),
+    )));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        memory
+            .inspect_session(claim.session_id())
+            .await
+            .unwrap()
+            .activation_phase,
+        Some(StoreActivationPhase::Parked)
+    );
+    *store.wait_resume_fault.lock().unwrap() = None;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while memory
+            .inspect_session(claim.session_id())
+            .await
+            .unwrap()
+            .activation_phase
+            != Some(StoreActivationPhase::Running)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned cleanup must recover after the shared refusal clears");
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(executor);
+    kernel.shutdown(workers).await.unwrap();
+    assert_eq!(pool.available_permits(), 1);
+}

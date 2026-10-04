@@ -118,6 +118,18 @@ impl PreparedToolCall for PreparedReport {
 }
 #[async_trait]
 impl ToolRuntime for ReportTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        self.inner.visit_definitions(visitor);
+        visitor(&self.report.definition);
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        if name == REPORT_RESULT_TOOL {
+            Some(self.report.definition.scheduling())
+        } else {
+            self.inner.scheduling(name)
+        }
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         if name == REPORT_RESULT_TOOL {
             Some(self.report.definition.program_role())
@@ -141,11 +153,6 @@ impl ToolRuntime for ReportTools {
         &self,
     ) -> std::collections::BTreeMap<String, rsi_tools_protocol::ToolOutputDeclaration> {
         self.inner.output_declarations()
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = self.inner.definitions();
-        definitions.push(self.report.definition.clone());
-        definitions
     }
     fn prepare(
         &self,

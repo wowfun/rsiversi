@@ -66,6 +66,9 @@ exact contribution catalog. Compilation, resolution and activation retain that
 snapshot even if the source publishes a replacement meanwhile. A failed snapshot
 query fails selection before Runtime mutation, including a cache hit.
 
+Pins from one published generation share its immutable base catalog measurement.
+Claim-specific membership changes retain their own measurements.
+
 An unchanged Profile program, catalog and seed identity reuse the published
 generation. Each preset retains separate current slots for fresh and restoring
 inputs, so alternating draft creation and cold resume does not reactivate both

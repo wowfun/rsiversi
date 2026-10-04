@@ -83,7 +83,9 @@ fn assemble_view<'a>(
 }
 
 /// A pure frozen plan and the complete no-Tool provider request it describes.
-#[derive(Clone, Debug)]
+/// Keep the request alive until its plan is admitted as a `ModelIntent`: the request
+/// owns the Context credit for both fields, and moving the plan alone does not.
+#[derive(Debug)]
 pub struct PlannedCompaction {
     /// Durable interpretation and source authority, published in `ModelIntent`.
     pub plan: ContextCompactionPlan,
@@ -127,6 +129,22 @@ enum InstructionKind {
 }
 
 impl SemanticState {
+    pub(super) fn global_weight(&self) -> Result<usize> {
+        crate::budget::weight(&(&self.identity, &self.usage, &self.summary))
+    }
+    pub(super) fn turn_weight(&self, turn: &TurnId) -> Result<usize> {
+        let source = self.sources.get(turn).map(|source| {
+            let mut source = source.clone();
+            source.after_seq = u64::MAX;
+            source.through_seq = u64::MAX;
+            source
+        });
+        crate::budget::weight(&(
+            source,
+            self.instructions.get(turn),
+            self.last_human.get(turn),
+        ))
+    }
     fn selection_bytes(
         &self,
         selection: &CompactionSelection,
@@ -165,15 +183,16 @@ impl SemanticState {
         session: &SessionId,
         fact: &SessionFact,
         message_index: usize,
-    ) -> Result<()> {
+    ) -> Result<Vec<TurnId>> {
         let turn = fact.body().turn_id();
-        match fact.body() {
+        let changed = match fact.body() {
             rsi_agent_session_protocol::SessionFactBody::TurnAccepted { .. }
             | rsi_agent_session_protocol::SessionFactBody::InputMessageEntered {
                 source: rsi_agent_session_protocol::InputMessageSource::Human { .. },
                 ..
             } => {
                 self.last_human.insert(turn.clone(), message_index);
+                Vec::new()
             }
             rsi_agent_session_protocol::SessionFactBody::InputMessageEntered {
                 source:
@@ -194,8 +213,8 @@ impl SemanticState {
                 source: rsi_agent_session_protocol::InputMessageSource::SkillCatalog { .. },
                 ..
             } => self.protect_instruction(turn, message_index, InstructionKind::SkillCatalog, true),
-            _ => {}
-        }
+            _ => Vec::new(),
+        };
         let source = self
             .sources
             .entry(turn.clone())
@@ -212,7 +231,7 @@ impl SemanticState {
         if self.sources.len() > crate::MAXIMUM_CONTEXT_MESSAGES {
             return Err(ContextError::TooLarge);
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn protect_instruction(
@@ -221,10 +240,15 @@ impl SemanticState {
         index: usize,
         kind: InstructionKind,
         replacement: bool,
-    ) {
+    ) -> Vec<TurnId> {
+        let mut changed = Vec::new();
         if replacement {
-            self.instructions.retain(|_, indices| {
+            self.instructions.retain(|previous_turn, indices| {
+                let before = indices.len();
                 indices.retain(|_, previous| previous != &kind);
+                if indices.len() != before {
+                    changed.push(previous_turn.clone());
+                }
                 !indices.is_empty()
             });
         }
@@ -232,6 +256,7 @@ impl SemanticState {
             .entry(turn.clone())
             .or_default()
             .insert(index, kind);
+        changed
     }
 }
 
@@ -352,9 +377,9 @@ impl ContextFold {
         &mut self,
         session: &SessionId,
         fact: &SessionFact,
-    ) -> Result<()> {
+    ) -> Result<Vec<TurnId>> {
         if self.semantic.is_none() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let index = self
             .turn_index
@@ -366,12 +391,13 @@ impl ContextFold {
                 self.turns[index].messages.len().saturating_sub(1)
             });
         if let Some(state) = &mut self.semantic {
-            state.record(session, fact, index)?;
+            return state.record(session, fact, index);
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     pub(crate) fn enable_semantic(&mut self, identity: &ContextBuilderIdentity) -> Result<()> {
+        let introduced = self.semantic.is_none();
         let expected = SemanticState::new(identity);
         match &self.semantic {
             Some(state) if state.identity != expected.identity => {
@@ -380,7 +406,17 @@ impl ContextFold {
             Some(_) => {}
             None => self.semantic = Some(expected),
         }
-        let state = self.semantic.as_ref().expect("enabled semantic state");
+        self.validate_semantic()?;
+        if introduced {
+            self.reaccount()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_semantic(&self) -> Result<()> {
+        let Some(state) = &self.semantic else {
+            return Ok(());
+        };
         if state.sources.len() > crate::MAXIMUM_CONTEXT_MESSAGES
             || state.instructions.len() > crate::MAXIMUM_CONTEXT_MESSAGES
             || state.last_human.len() > crate::MAXIMUM_CONTEXT_MESSAGES
@@ -388,7 +424,10 @@ impl ContextFold {
             return Err(invalid("semantic cache metadata exceeds its bounds"));
         }
         for (turn, source) in &state.sources {
-            if turn != &source.turn || source.after_seq >= source.through_seq {
+            if turn != &source.turn
+                || source.after_seq >= source.through_seq
+                || !self.turn_index.contains_key(turn)
+            {
                 return Err(invalid("semantic cache source binding is invalid"));
             }
             crate::decode_sha256("semantic cache source", &source.facts_sha256)?;
@@ -466,20 +505,26 @@ impl ContextFold {
         )
     }
 
-    pub(crate) fn semantic_project(&self, limits: ContextLimits) -> Result<crate::ModelContext> {
+    pub(super) fn semantic_projection(
+        &self,
+        limits: ContextLimits,
+    ) -> Result<crate::ProjectedMessages> {
         let messages = self.semantic_messages()?;
-        if messages.len() > limits.max_messages
-            || crate::encoded_bytes(&messages)? > limits.max_bytes
-        {
+        let bytes = crate::encoded_bytes(&messages)?;
+        if messages.len() > limits.max_messages || bytes > limits.max_bytes {
             return Err(ContextError::TooLarge);
         }
-        Ok(crate::ModelContext {
+        Ok(crate::ProjectedMessages {
             messages,
             omitted_turns: 0,
-            through_seq: self.through_seq,
+            encoded_bytes: bytes,
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admitted projection selects and binds the complete compaction plan"
+    )]
     pub(crate) fn plan_compaction(
         &self,
         options: &LanguageRequestOptions,
@@ -488,12 +533,14 @@ impl ContextFold {
         force: Option<CompactionTrigger>,
         shrink: bool,
     ) -> Result<Option<PlannedCompaction>> {
+        self.ensure_usable()?;
         let Some(state) = &self.semantic else {
             return Ok(None);
         };
         if !self.assemblers.is_empty() {
             return Err(invalid("cannot compact an unfinished interaction"));
         }
+        let mut credit = self.projection_credit(options.encoded_weight())?;
         let projected = self.projected_turns()?;
         let view = self.semantic_messages_from(&projected)?;
         let limits = crate::emission_limits(self.retention_limits.unwrap_or_default(), options)?;
@@ -589,7 +636,19 @@ impl ContextFold {
             plan.maximum_output_tokens,
             options.settings().reasoning_effort().cloned(),
         )?;
-        Ok(Some(PlannedCompaction { plan, request }))
+        drop(units);
+        drop(view);
+        drop(projected);
+        credit.resize(
+            request
+                .encoded_weight()
+                .checked_add(crate::budget::weight(&plan)?)
+                .ok_or(ContextError::Capacity)?,
+        )?;
+        Ok(Some(PlannedCompaction {
+            plan,
+            request: request.with_retention(credit),
+        }))
     }
 
     fn summary_replacements(&self, selections: &[CompactionSelection]) -> SummaryReplacements {
@@ -1175,7 +1234,7 @@ mod view_tests {
             .unwrap(),
         )
         .unwrap();
-        let mut fold = ContextFold::new(header).unwrap();
+        let mut fold = ContextFold::new(header, crate::ContextBudget::default()).unwrap();
         fold.enable_semantic(DefaultContextBuilder::default().identity())
             .unwrap();
         for id in ["affected", "untouched"] {
@@ -1195,7 +1254,7 @@ mod view_tests {
                 messages,
                 message_bytes,
                 terminal: true,
-                batches: BTreeMap::new(),
+                batches: crate::outcomes::Batches::new(),
             });
         }
         let affected = fold.turns[0].id.clone();
@@ -1207,7 +1266,7 @@ mod view_tests {
         })])
         .unwrap();
         let mut batch = crate::outcomes::prepare_batch(
-            &BTreeMap::new(),
+            &crate::outcomes::Batches::new(),
             3,
             &EffectId::new("tool-model").unwrap(),
             &call,

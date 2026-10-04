@@ -13,6 +13,7 @@ mod owner;
 mod reconciliation;
 mod state;
 mod view;
+mod workbench;
 use state::RunState;
 
 // Process-local owners retain Jobs, scripts and frozen composition pins.

@@ -1199,6 +1199,7 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         header,
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     // Stop before the final answer: compare the exact request sent after steering.

@@ -1300,6 +1300,19 @@ impl BaseStack {
                 .await
                 .expect("executor end-to-end test admission remains open");
         let runtime = Runtime::default();
+        runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "rsi.agent.context-budget",
+                    "context-budget",
+                    UpdateMode::RestartRequired,
+                    Arc::new(rsi_agent_context::ContextBudgetFactory),
+                ),
+                json!({}),
+            )
+            .await
+            .unwrap();
         let store = Arc::new(MemoryStore::new());
         let store_fiber = runtime
             .root()

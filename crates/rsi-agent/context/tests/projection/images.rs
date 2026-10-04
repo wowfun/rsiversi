@@ -68,6 +68,7 @@ fn tool_images_follow_each_target_without_changing_facts_checkpoint_or_fork() {
         Arc::new(DefaultContextBuilder::default()),
         header(""),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     state.ingest(ContextPage::Canonical(&source)).unwrap();
@@ -125,6 +126,7 @@ fn tool_images_follow_each_target_without_changing_facts_checkpoint_or_fork() {
         Arc::new(DefaultContextBuilder::default()),
         fork_header("", source.len() as u64, 1),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     child.ingest(ContextPage::ForkSeed(&source)).unwrap();
@@ -157,6 +159,7 @@ fn installed_image_history_summary_survives_cold_restore_and_profile_switching()
         Arc::new(DefaultContextBuilder::default()),
         header(""),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     state.ingest(ContextPage::Canonical(&history)).unwrap();
@@ -225,6 +228,7 @@ fn installed_image_history_summary_survives_cold_restore_and_profile_switching()
         Arc::new(DefaultContextBuilder::default()),
         header(""),
         ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     replay.ingest(ContextPage::Canonical(&history)).unwrap();

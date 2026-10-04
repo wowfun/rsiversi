@@ -1333,7 +1333,7 @@ fn pause_next_validation(
     (entered_rx, release_tx)
 }
 
-async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
+pub(super) async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
     let id = SessionId::new(name).unwrap();
     store
         .append(AppendBatch {
@@ -1382,8 +1382,28 @@ async fn paused_cold_validation_does_not_block_foreground_reads_or_writes() {
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 2);
 }
 
+async fn drain_cold_validation(store: &SqliteStore) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if store
+                .inner
+                .cold_validation
+                .flights
+                .lock()
+                .unwrap()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cold worker did not settle");
+}
+
 #[tokio::test]
-async fn cancelled_admitted_validation_publishes_proof_before_next_waiter() {
+async fn last_waiter_cancellation_preserves_reusable_validation_proof() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "cancelled-validator").await;
@@ -1396,9 +1416,59 @@ async fn cancelled_admitted_validation_publishes_proof_before_next_waiter() {
     entered.await.unwrap();
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
+    let mut next = Box::pin(store.validate_session(&id));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(next.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), next)
+        .await
+        .unwrap()
+        .unwrap();
+    drain_cold_validation(&store).await;
+    assert!(store.touch_validated_session(&id));
+    store.read_facts(&id, 0, 1).await.unwrap();
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn one_cancelled_waiter_preserves_shared_work_for_another() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "shared-validator").await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (entered, release) = pause_next_validation(&store);
     let worker = store.clone();
     let candidate = id.clone();
-    let second = tokio::spawn(async move { worker.read_facts(&candidate, 0, 1).await });
+    let first = tokio::spawn(async move { worker.validate_session(&candidate).await });
+    entered.await.unwrap();
+    let worker = store.clone();
+    let candidate = id.clone();
+    let second = tokio::spawn(async move { worker.validate_session(&candidate).await });
+    loop {
+        if store
+            .inner
+            .cold_validation
+            .flights
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .waiters
+            == 2
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
     release.send(()).unwrap();
     second.await.unwrap().unwrap();
     assert!(store.touch_validated_session(&id));
@@ -1406,7 +1476,7 @@ async fn cancelled_admitted_validation_publishes_proof_before_next_waiter() {
 }
 
 #[tokio::test]
-async fn cancelled_queued_validation_never_dispatches_a_worker() {
+async fn queued_reusable_validation_survives_last_waiter_cancellation() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "queued-validator").await;
@@ -1419,20 +1489,17 @@ async fn cancelled_queued_validation_never_dispatches_a_worker() {
         .acquire_owned()
         .await
         .unwrap();
-    let worker = store.clone();
-    let first = tokio::spawn(async move { worker.validate_session(&id).await });
-    tokio::task::yield_now().await;
-    first.abort();
-    assert!(first.await.unwrap_err().is_cancelled());
+    let mut first = Box::pin(store.validate_session(&id));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(first.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(first);
     drop(permit);
-    let _drained = store
-        .inner
-        .validation_admission
-        .clone()
-        .acquire_owned()
-        .await
-        .unwrap();
-    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
+    drain_cold_validation(&store).await;
+    assert!(store.touch_validated_session(&id));
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -1530,7 +1597,41 @@ async fn cold_control_replay_decodes_each_record_once() {
     assert_eq!(store.inner.control_decodes.load(Ordering::Relaxed), 500);
     assert_one_header_read_for_control_validation(&store, &id).await;
     drop(store);
+    validation::CONTROL_DECODES.set(0);
     SqliteStore::verify(root.path()).unwrap();
+    assert_eq!(
+        validation::CONTROL_DECODES.get(),
+        500,
+        "offline audit must decode each control only once"
+    );
+    // Fixed valid history; vary only short FK-valid excess index cardinality.
+    for count in [1, 125, 250] {
+        let database = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        database
+            .execute_batch("PRAGMA foreign_keys = ON; DELETE FROM ready_messages")
+            .unwrap();
+        database.execute("INSERT INTO ready_messages SELECT ?1, ?1, printf('excess-%04d', seq), seq, seq, 'next_turn' FROM agent_controls WHERE session_id=?1 AND seq % 2 = 1 LIMIT ?2", params![id.as_str(), count]).unwrap();
+        let violations: i64 = database
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        drop(database);
+        let store = SqliteStore::open(root.path()).unwrap();
+        assert!(matches!(
+            store.read_facts(&id, 0, 1).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(store.inner.ready_rows_decoded.load(Ordering::Relaxed), 1);
+        drop(store);
+        validation::READY_ROWS.set(0);
+        assert!(matches!(
+            SqliteStore::verify(root.path()),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(validation::READY_ROWS.get(), 1);
+    }
 }
 
 async fn assert_one_header_read_for_control_validation(store: &SqliteStore, id: &SessionId) {
@@ -1538,10 +1639,7 @@ async fn assert_one_header_read_for_control_validation(store: &SqliteStore, id: 
     let reads = store
         .with_validation(move |connection| {
             crate::validation::HEADER_READS.set(0);
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
-            validate_session(&transaction, &id)?;
+            validate_session(connection, &id)?;
             Ok(crate::validation::HEADER_READS.get())
         })
         .await
@@ -2018,6 +2116,50 @@ async fn prepared_proof_survives_its_own_validated_tail_advances() {
 }
 
 #[tokio::test]
+async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "changed-control-prefix").await;
+    store
+        .commit_agent(settlement::commit(vec![settlement::append(&id, 0)]))
+        .await
+        .unwrap();
+    drop(store);
+    let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE sessions SET control_prefix_sha256 = ?1 WHERE session_id = ?2",
+        rusqlite::params!["f".repeat(64), id.as_str()],
+    )
+    .unwrap();
+    drop(db);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        store.read_facts(&id, 0, 1).await,
+        Err(StoreError::Corrupt(message)) if message.contains("control-prefix digest")
+    ));
+    assert!(!store.touch_validated_session(&id));
+    assert!(matches!(
+        store
+            .commit_agent(settlement::commit(vec![settlement::append(&id, 2)]))
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(
+        store
+            .read_watermarks(&id)
+            .await
+            .unwrap()
+            .durable_control_seq,
+        2
+    );
+    drop(store);
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
 async fn scalar_watermarks_never_authorize_a_corrupt_session_commit() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -2226,4 +2368,296 @@ async fn warm_subtree_reads_no_full_headers_and_cold_owner_corruption_is_rejecte
         SqliteStore::verify(root.path()),
         Err(StoreError::Corrupt(_))
     ));
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the test deliberately blocks the native reader to prove retained worker admission"
+)]
+async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "checkpoint-worker-credit").await;
+    let page = store.read_facts(&id, 0, 1).await.unwrap();
+    store
+        .write_context_checkpoint(WriteContextCheckpoint {
+            session_id: id.clone(),
+            expected_durable_seq: 1,
+            checkpoint: StoredContextCheckpoint {
+                header_fingerprint: test_header("checkpoint-worker-credit")
+                    .fingerprint()
+                    .unwrap(),
+                through_seq: 1,
+                fact_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256(&page.facts)
+                    .unwrap(),
+                bytes: rsi_api_protocol::ByteBudget::default()
+                    .copy(b"worker-checkpoint")
+                    .unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let reader = store.inner.connections.reader.lock().unwrap();
+    let guard = Arc::new(());
+    let weak = Arc::downgrade(&guard);
+    let pool = rsi_api_protocol::ByteBudget::default();
+    let allocated = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let measured = allocated.clone();
+    let reading = pool.clone();
+    let reservation = rsi_api_protocol::ByteAdmission::new(move |bytes| {
+        measured.fetch_add(bytes, Ordering::Relaxed);
+        Ok(reading.reserve(bytes)?.with_retention(guard))
+    });
+    let worker = store.clone();
+    let task = tokio::spawn(async move { worker.read_context_checkpoint(&id, reservation).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while store.inner.reader_admission.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(weak.upgrade().is_some());
+    assert_eq!(pool.used(), 0);
+    drop(reader);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while weak.strong_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+        while store.inner.reader_admission.available_permits() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(pool.used(), 0);
+    assert_eq!(
+        allocated.load(Ordering::Relaxed),
+        b"worker-checkpoint".len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "report-only cancellation during increasing actual cold control histories"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one measured matrix retains fixed input shapes and actual cold worker outcomes"
+)]
+async fn report_cold_history_cancellation_and_small_session_progress() {
+    for count in [512u64, 4096, 16384] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let id = seed_session(&store, "long-cancel-history").await;
+        let small = seed_session(&store, "small-after-cancel").await;
+        for start in (1..=count).step_by(512) {
+            let mut controls = vec![];
+            for seq in (start..start + 512).step_by(2) {
+                let message_id = MessageId::new(format!("cancel-message-{seq}")).unwrap();
+                controls.push(
+                    AgentControlRecord::new(
+                        seq,
+                        seq,
+                        AgentControlRecordBody::MessageAccepted {
+                            message: AgentMessage {
+                                message_id: message_id.clone(),
+                                source: AgentMessageSource::Human,
+                                content: vec![
+                                    rsi_agent_session_protocol::AgentMessageContent::Text {
+                                        text: "bounded".into(),
+                                    },
+                                ],
+                                options: rsi_agent_session_protocol::MessageOptions::default(),
+                            },
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                            bound_turn_id: None,
+                            root_session_id: id.clone(),
+                            target: MessageTarget::NextTurn,
+                            wake_required: true,
+                        },
+                    )
+                    .unwrap(),
+                );
+                controls.push(
+                    AgentControlRecord::new(
+                        seq + 1,
+                        seq + 1,
+                        AgentControlRecordBody::MessageDiscarded {
+                            message_id,
+                            reason: MessageDiscardReason::Cancelled,
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+            store
+                .commit_agent(AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: id.clone(),
+                        expected_fact_seq: 1,
+                        expected_control_seq: start - 1,
+                        header: None,
+                        facts: vec![],
+                        controls,
+                    }],
+                    required_active_activations: vec![],
+                    quiescent_descendants_of: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(store);
+        let store = SqliteStore::open(root.path()).unwrap();
+        let worker = store.clone();
+        let selected = id.clone();
+        let cold = tokio::spawn(async move { worker.validate_session(&selected).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store.inner.control_decodes.load(Ordering::Relaxed) < 16 {
+                assert!(
+                    !cold.is_finished(),
+                    "history completed before cancellation sampling"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = store.inner.control_decodes.load(Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        cold.abort();
+        assert!(cold.await.unwrap_err().is_cancelled());
+        drain_cold_validation(&store).await;
+        let cancelled_ns = started.elapsed().as_nanos();
+        let decoded = store.inner.control_decodes.load(Ordering::Relaxed);
+        assert!(
+            decoded < count,
+            "cancelled worker completed its entire long history"
+        );
+        assert!(
+            decoded.saturating_sub(before) <= 128,
+            "cancellation failed to stop between bounded controls"
+        );
+        assert!(!store.touch_validated_session(&id));
+        assert_eq!(store.inner.validation_admission.available_permits(), 1);
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), store.validate_session(&small))
+            .await
+            .unwrap()
+            .unwrap();
+        println!(
+            "history_controls={count} controls_before_cancel={before} controls_after_cancel={decoded} cancellation_ns={cancelled_ns} small_cold_ns={} vm_steps={}",
+            started.elapsed().as_nanos(),
+            store.inner.validation_vm_steps.load(Ordering::Relaxed)
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_proof_reuses_subtree_validation_published_before_lane_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "queued-subtree-proof").await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (entered, release) = pause_next_validation(&store);
+    let worker = store.clone();
+    let candidate = id.clone();
+    let subtree = tokio::spawn(async move { worker.read_agent_subtree_snapshot(&candidate).await });
+    entered.await.unwrap();
+    let worker = store.clone();
+    let candidate = id.clone();
+    let proof = tokio::spawn(async move { worker.validate_session(&candidate).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !store
+            .inner
+            .cold_validation
+            .flights
+            .lock()
+            .unwrap()
+            .contains_key(&id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    release.send(()).unwrap();
+    subtree.await.unwrap().unwrap();
+    proof.await.unwrap().unwrap();
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "checkpoint-read-snapshot").await;
+    let facts = store.read_facts(&id, 0, 1).await.unwrap();
+    store
+        .write_context_checkpoint(WriteContextCheckpoint {
+            session_id: id.clone(),
+            expected_durable_seq: 1,
+            checkpoint: StoredContextCheckpoint {
+                header_fingerprint: test_header("checkpoint-read-snapshot")
+                    .fingerprint()
+                    .unwrap(),
+                through_seq: 1,
+                fact_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256(&facts.facts)
+                    .unwrap(),
+                bytes: rsi_api_protocol::ByteBudget::default()
+                    .copy(b"original")
+                    .unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let database = root.path().join("sessions.sqlite3");
+    let selected = id.clone();
+    let pool = rsi_api_protocol::ByteBudget::new(8).unwrap();
+    let reading = pool.clone();
+    let admission = rsi_api_protocol::ByteAdmission::new(move |length| {
+        assert_eq!(length, 8);
+        let writer = Connection::open(database).unwrap();
+        writer
+            .execute(
+                "UPDATE context_checkpoints SET checkpoint_bytes=?1 WHERE session_id=?2",
+                params![vec![b'x'; 65536], selected.as_str()],
+            )
+            .unwrap();
+        reading.reserve(length)
+    });
+    let checkpoint = store
+        .read_context_checkpoint(&id, admission)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.bytes.as_bytes(), b"original");
+    assert_eq!(pool.used(), 8);
+    drop(checkpoint);
+    assert_eq!(pool.used(), 0);
+    assert_eq!(
+        store
+            .read_context_checkpoint(&id, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len(),
+        65536
+    );
+    Connection::open(root.path().join("sessions.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE context_checkpoints SET checkpoint_bytes=x'' WHERE session_id=?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    let refuse = rsi_api_protocol::ByteAdmission::new(|_| {
+        panic!("empty checkpoint reached allocation admission")
+    });
+    assert!(
+        matches!(store.read_context_checkpoint(&id, refuse).await, Err(StoreError::Corrupt(reason)) if reason.contains("empty"))
+    );
 }

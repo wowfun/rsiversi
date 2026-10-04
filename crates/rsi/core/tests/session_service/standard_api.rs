@@ -146,6 +146,13 @@ async fn real_service_profiles_share_an_application_runtime_with_isolated_lifeti
             .lookup_local::<rsi_session_protocol::SessionReadContract>()
             .is_none()
     );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_agent_context::ContextBudgetContract>()
+            .is_none(),
+        "Service budget must remain in its isolated Profile"
+    );
     let service_instances = || {
         runtime.snapshot().fibers.into_iter().filter(|fiber| {
         fiber.state == rsi_meta::FiberState::Active &&
@@ -778,4 +785,42 @@ async fn managed_owner_waits_for_parent_profile_publication() {
         .unwrap();
     assert!(matches!(reply, rsi_api_protocol::ApiOutput::Reply(_)));
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_profile_patch_configures_the_shared_context_budget() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let source = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile, format!("{source}\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-context-budget'\nconfig = {{ maximum_bytes = 1048576 }}\n")).unwrap();
+    let host = composition(fixture.paths.clone())
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    crate::product::ready(&host).await;
+    assert!(
+        host.profile_status()
+            .observed()
+            .iter()
+            .any(|instance| instance.id().as_str() == "rsi-context-budget"
+                && matches!(instance.state(), rsi_host::ProfileInstanceState::Active))
+    );
+    let patched = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile, patched.replace("1048576", "2097152")).unwrap();
+    assert!(matches!(
+        host.reload().await.unwrap(),
+        rsi_host::ReloadOutcome::RestartRequired(_)
+    ));
+    assert!(host.shutdown().await.is_clean());
+    drop(host);
+    std::fs::write(&fixture.profile, patched.replace("1048576", "0")).unwrap();
+    assert!(
+        composition(fixture.paths.clone())
+            .build()
+            .unwrap()
+            .start_file(&fixture.profile)
+            .await
+            .is_err()
+    );
 }

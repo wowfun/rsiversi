@@ -69,7 +69,7 @@ async fn adapter(
     let pin = AgentCompositionPin::new(
         AgentPresetId::new("alpha").unwrap(),
         "a".repeat(64),
-        Arc::new(EmptyTools),
+        Arc::new(EmptyTools::default()),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         DomainCatalog::default(),
         catalog,

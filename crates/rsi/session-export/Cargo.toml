@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 async-trait.workspace = true
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }

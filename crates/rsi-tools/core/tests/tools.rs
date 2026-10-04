@@ -334,6 +334,13 @@ async fn output_catalog_admission_is_atomic_and_withdrawal_releases_its_budget()
         tools.definition("new"),
         tools.definitions().into_iter().next()
     );
+    assert_eq!(
+        tools.scheduling("new"),
+        tools
+            .definition("new")
+            .map(|definition| definition.scheduling())
+    );
+    assert!(tools.scheduling("old-0").is_none());
     assert!(tools.definition("old-0").is_none());
     assert!(tools.definition("must-not-leak").is_none());
     assert_eq!(

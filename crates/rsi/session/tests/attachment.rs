@@ -28,8 +28,7 @@ use rsi_session_protocol::{
     validate_session_input,
 };
 use rsi_tools_protocol::{
-    PreparedToolCall, RetainedToolResult, ToolCall, ToolDefinition, ToolError, ToolResultIdentity,
-    ToolRuntime,
+    PreparedToolCall, RetainedToolResult, ToolCall, ToolError, ToolResultIdentity, ToolRuntime,
 };
 use rsi_workspace_protocol::{
     WorkspaceCursor, WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry,
@@ -164,6 +163,14 @@ struct EmptyTools;
 
 #[async_trait]
 impl ToolRuntime for EmptyTools {
+    fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
+        let _ = visitor;
+    }
+
+    fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
+        self.definition(name)
+            .map(|definition| definition.scheduling())
+    }
     fn program_role(&self, name: &str) -> Option<rsi_tools_protocol::ToolProgramRole> {
         self.definition(name)
             .map(|definition| definition.program_role())
@@ -181,9 +188,6 @@ impl ToolRuntime for EmptyTools {
     }
     fn definition(&self, _name: &str) -> Option<rsi_tools_protocol::ToolDefinition> {
         None
-    }
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        Vec::new()
     }
 
     fn prepare(
@@ -972,6 +976,7 @@ async fn new_drafts_read_current_defaults_while_existing_headers_remain_frozen()
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         Arc::new(AvailableWorkspace::at(directory.path())),
         defaults.clone(),
@@ -1022,6 +1027,7 @@ async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() 
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         Arc::new(AvailableWorkspace::at(directory.path())),
         Arc::new(TextSettings),
@@ -1256,6 +1262,7 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
         Arc::new(UnavailableProjections),
         turns.clone(),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(TextSettings),
@@ -1357,6 +1364,7 @@ async fn assert_competing_image_publication(concurrent: bool) {
         Arc::new(UnavailableProjections),
         turns.clone(),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(ImageSettings),
@@ -1471,6 +1479,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
         Arc::new(UnavailableProjections),
         turns.clone(),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(UnavailableSettings),
@@ -1519,6 +1528,7 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(FailingComposition),
         workspace.clone(),
         Arc::new(TextSettings),
@@ -1600,6 +1610,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
         Arc::new(UnavailableProjections),
         Arc::new(RejectingResumeTurns),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         workspace.clone(),
         Arc::new(UnavailableSettings),
@@ -1680,6 +1691,7 @@ async fn attach_and_history_need_only_the_durable_store() {
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         store_service,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         Arc::new(UnavailableWorkspace),
         Arc::new(UnavailableSettings),
@@ -1779,6 +1791,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
             ..Default::default()
         }),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         Arc::new(UnavailableWorkspace),
         Arc::new(UnavailableSettings),
@@ -1846,6 +1859,7 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
         Arc::new(UnavailableProjections),
         Arc::new(ImageTurns),
         store,
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         workspace.clone(),
         Arc::new(ImageSettings),
@@ -1932,6 +1946,7 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
             Arc::new(UnavailableProjections),
             Arc::new(ImageTurns),
             Arc::new(MemoryStore::new()),
+            rsi_agent_context::ContextBudget::default(),
             Arc::new(AvailableComposition),
             Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
             Arc::new(ImageSettings),
@@ -2034,6 +2049,7 @@ async fn fresh_interactions_release_composition_pin_and_follow_tree_publication_
             ..Default::default()
         }),
         Arc::new(MemoryStore::new()),
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(PinTracker(leases.clone())),
         Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(TextSettings),
@@ -2123,6 +2139,7 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(AvailableComposition),
         workspace.clone(),
         Arc::new(TextSettings),

@@ -109,6 +109,7 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
         roster.clone(),
         Arc::new(UnavailableTurns::default()),
         store.clone(),
+        rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         Arc::new(UnavailableWorkspace),
         Arc::new(UnavailableSettings),

@@ -116,6 +116,7 @@ impl AgentKernel {
         })?;
         let kernel = Self {
             inner: Arc::new(KernelInner {
+                program_bytes: rsi_api_protocol::ByteBudget::default(),
                 execution_messages: execution_admission::Messages::default(),
                 tasks: TaskTracker::new(),
                 store,
@@ -493,6 +494,11 @@ impl AgentKernel {
                     evict_session = session.admission_reservations == 0
                         && session.turns.is_empty()
                         && session.pending.is_empty();
+                }
+                Err(StoreError::ValidationBusy | StoreError::ReadCapacity) => {
+                    // Shared admission and read-lock contention do not establish a
+                    // permanent fault in this Session. Caller durability waits remain bounded.
+                    session.retry_not_before = Some(Instant::now() + MINIMUM_RETRY_BACKOFF);
                 }
                 Err(StoreError::Io(_)) => {
                     session.retry_failures = session.retry_failures.saturating_add(1);

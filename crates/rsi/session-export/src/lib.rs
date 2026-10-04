@@ -31,6 +31,7 @@ struct Interval {
     through: u64,
 }
 struct Cut {
+    context_budget: rsi_agent_context::ContextBudget,
     store: Option<Arc<dyn SessionStore>>,
     header: SessionHeader,
     through: u64,
@@ -55,10 +56,12 @@ pub fn empty(
     header: SessionHeader,
     options: ExportOptions,
     stopped: CancellationToken,
+    context_budget: rsi_agent_context::ContextBudget,
 ) -> Result<ExportStream> {
     options.validate()?;
     stream(
         Cut {
+            context_budget,
             store: None,
             header,
             through: 0,
@@ -79,6 +82,7 @@ pub async fn export(
     header: SessionHeader,
     options: ExportOptions,
     stopped: CancellationToken,
+    context_budget: rsi_agent_context::ContextBudget,
 ) -> Result<ExportStream> {
     options.validate()?;
     let lease = store
@@ -141,6 +145,7 @@ pub async fn export(
     });
     stream(
         Cut {
+            context_budget,
             store: Some(store),
             header,
             through,
@@ -240,8 +245,19 @@ fn document(cut: Arc<Cut>, options: ExportOptions) -> TextStream {
                     yield render_value(&value, json_format)?;
                 }
                 ExportInclude::LastProviderRequest => {
-                    let value = match &latest { Some(latest) => diagnostic::request(&cut, latest).await?, None => json!({"availability":"unavailable","reason":"no_completed_conversation"}) };
-                    yield render_value(&value, json_format)?;
+                    let mut diagnostic = match &latest {
+                        Some(latest) => diagnostic::request(&cut, latest).await?,
+                        None => diagnostic::Diagnostic { value: json!({"availability":"unavailable","reason":"no_completed_conversation"}), credit: None },
+                    };
+                    if let Some(credit) = &mut diagnostic.credit {
+                        let bytes = rendered_workspace_weight(&diagnostic.value, json_format)?;
+                        let admitted = credit.bytes().checked_add(bytes);
+                        if admitted.is_none_or(|bytes| credit.resize(bytes).is_err()) {
+                            diagnostic.value = json!({"availability":"unavailable","reason":"context_capacity"});
+                        }
+                    }
+                    yield render_value(&diagnostic.value, json_format)?;
+                    drop(diagnostic);
                 }
                 ExportInclude::Messages | ExportInclude::ProviderInputEvidence | ExportInclude::LastProviderResponse => {
                     if section == ExportInclude::LastProviderResponse {
@@ -294,6 +310,49 @@ fn document(cut: Arc<Cut>, options: ExportOptions) -> TextStream {
         if json_format { yield "\n}\n".into(); }
     })
 }
+fn rendered_workspace_weight(value: &Value, json_format: bool) -> Result<usize> {
+    #[derive(Default)]
+    struct Counter {
+        bytes: usize,
+        ticks: usize,
+        longest: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("diagnostic size overflow"))?;
+            for byte in bytes {
+                if *byte == b'`' {
+                    self.ticks += 1;
+                    self.longest = self.longest.max(self.ticks);
+                } else {
+                    self.ticks = 0;
+                }
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter::default();
+    serde_json::to_writer_pretty(&mut counter, value).map_err(encoding)?;
+    if json_format {
+        return Ok(counter.bytes);
+    }
+    // fenced() holds pretty JSON and the fence while building a complete output:
+    // two pretty lengths, three fence lengths, "json" and four newlines.
+    let fence = counter.longest.max(2).checked_add(1);
+    counter
+        .bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(fence?.checked_mul(3)?))
+        .and_then(|bytes| bytes.checked_add(8))
+        .ok_or_else(|| invalid("diagnostic size overflow"))
+}
+
 fn render_value(value: &Value, json_format: bool) -> Result<String> {
     let text = serde_json::to_string_pretty(value).map_err(encoding)?;
     Ok(if json_format {

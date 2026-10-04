@@ -291,17 +291,33 @@ pub async fn assert_mechanical_store_contract(
                     header_fingerprint: header.fingerprint().unwrap(),
                     through_seq: 3,
                     fact_prefix_sha256: "b".repeat(64),
-                    bytes: Arc::from(b"self-consistent-forged-checkpoint".as_slice()),
+                    bytes: rsi_api_protocol::ByteBudget::default()
+                        .copy(b"self-consistent-forged-checkpoint".as_slice())
+                        .unwrap(),
                 },
             })
             .await,
         Err(StoreError::Invalid(_))
     ));
+    assert!(
+        store
+            .read_context_checkpoint(
+                &session_id,
+                rsi_api_protocol::ByteAdmission::new(|_| panic!(
+                    "an absent checkpoint must not reserve bytes"
+                ))
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     let checkpoint = StoredContextCheckpoint {
         header_fingerprint: header.fingerprint().unwrap(),
         through_seq: 3,
         fact_prefix_sha256: fact_prefix_sha256([&accepted, &event, &terminal]).unwrap(),
-        bytes: Arc::from(b"context-checkpoint-v2".as_slice()),
+        bytes: rsi_api_protocol::ByteBudget::default()
+            .copy(b"context-checkpoint-v2".as_slice())
+            .unwrap(),
     };
     store
         .write_context_checkpoint(WriteContextCheckpoint {
@@ -312,14 +328,73 @@ pub async fn assert_mechanical_store_contract(
         .await
         .expect("write terminal-tail checkpoint");
     assert_eq!(
-        store.read_context_checkpoint(&session_id).await.unwrap(),
-        Some(checkpoint)
+        store
+            .read_context_checkpoint(&session_id, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap(),
+        Some(checkpoint.clone())
     );
+    assert!(matches!(
+        store
+            .read_context_checkpoint(
+                &session_id,
+                rsi_api_protocol::ByteAdmission::new(
+                    |_| rsi_api_protocol::ByteBudget::default().reserve(1)
+                )
+            )
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    let read_budget = rsi_api_protocol::ByteBudget::new(checkpoint.bytes.len()).unwrap();
+    let first = store
+        .read_context_checkpoint(&session_id, read_budget.clone().into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_budget.used(), checkpoint.bytes.len());
+    assert!(matches!(
+        store
+            .read_context_checkpoint(&session_id, read_budget.clone().into())
+            .await,
+        Err(StoreError::ReadCapacity)
+    ));
+    let last_slice = first.bytes.slice(0..1).unwrap();
+    drop(first);
+    assert_eq!(read_budget.used(), checkpoint.bytes.len());
+    drop(last_slice);
+    assert_eq!(read_budget.used(), 0);
+    let tiny_budget = rsi_api_protocol::ByteBudget::new(1).unwrap();
+    assert!(matches!(
+        store
+            .read_context_checkpoint(&session_id, tiny_budget.into())
+            .await,
+        Err(StoreError::ReadCapacity)
+    ));
+    let concurrent_budget = rsi_api_protocol::ByteBudget::new(checkpoint.bytes.len() * 16).unwrap();
+    let mut retained_checkpoints = Vec::new();
+    for _ in 0..16 {
+        retained_checkpoints.push(
+            store
+                .read_context_checkpoint(&session_id, concurrent_budget.clone().into())
+                .await
+                .unwrap(),
+        );
+    }
+    assert!(
+        retained_checkpoints
+            .iter()
+            .all(|read| read.as_ref() == Some(&checkpoint))
+    );
+    assert_eq!(concurrent_budget.used(), checkpoint.bytes.len() * 16);
+    drop(retained_checkpoints);
+    assert_eq!(concurrent_budget.used(), 0);
     let replacement = StoredContextCheckpoint {
         header_fingerprint: header.fingerprint().unwrap(),
         through_seq: 3,
         fact_prefix_sha256: fact_prefix_sha256([&accepted, &event, &terminal]).unwrap(),
-        bytes: Arc::from(b"context-checkpoint-v2-replacement".as_slice()),
+        bytes: rsi_api_protocol::ByteBudget::default()
+            .copy(b"context-checkpoint-v2-replacement".as_slice())
+            .unwrap(),
     };
     store
         .write_context_checkpoint(WriteContextCheckpoint {
@@ -330,7 +405,10 @@ pub async fn assert_mechanical_store_contract(
         .await
         .expect("replace terminal-tail checkpoint");
     assert_eq!(
-        store.read_context_checkpoint(&session_id).await.unwrap(),
+        store
+            .read_context_checkpoint(&session_id, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap(),
         Some(replacement)
     );
     assert!(matches!(
@@ -342,7 +420,9 @@ pub async fn assert_mechanical_store_contract(
                     header_fingerprint: header.fingerprint().unwrap(),
                     through_seq: 2,
                     fact_prefix_sha256: "c".repeat(64),
-                    bytes: Arc::from(b"stale-checkpoint-v2".as_slice()),
+                    bytes: rsi_api_protocol::ByteBudget::default()
+                        .copy(b"stale-checkpoint-v2".as_slice())
+                        .unwrap(),
                 },
             })
             .await,
@@ -1641,7 +1721,14 @@ pub async fn assert_mechanical_store_contract(
     let bytes: Arc<[u8]> = Arc::from(b"shared Store contract".as_slice());
     let object = store.put_cas(Arc::clone(&bytes)).await.unwrap();
     assert_eq!(store.put_cas(Arc::clone(&bytes)).await.unwrap(), object);
-    assert_eq!(store.read_cas(&object).await.unwrap(), bytes);
+    assert_eq!(
+        store
+            .read_cas(&object, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap()
+            .as_bytes(),
+        bytes.as_ref()
+    );
     assert_unbound_steer_inspection(store, &header).await;
     assert_program_store_contract(store, &header, &accepted).await;
 }

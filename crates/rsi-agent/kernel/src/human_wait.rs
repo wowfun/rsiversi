@@ -7,6 +7,7 @@ use rsi_tools_protocol::{ParkedToolLane, ToolLaneParkingAuthority};
 
 pub(super) enum WaitControlError {
     Retry(TurnError),
+    StoreBusy,
     Permanent(TurnError),
 }
 
@@ -14,6 +15,7 @@ impl WaitControlError {
     pub(super) fn into_turn(self) -> TurnError {
         match self {
             Self::Retry(error) | Self::Permanent(error) => error,
+            Self::StoreBusy => TurnError::Capacity,
         }
     }
 }
@@ -21,6 +23,7 @@ impl WaitControlError {
 impl From<StoreError> for WaitControlError {
     fn from(error: StoreError) -> Self {
         match error {
+            StoreError::ValidationBusy | StoreError::ReadCapacity => Self::StoreBusy,
             error @ (StoreError::Io(_)
             | StoreError::Conflict { .. }
             | StoreError::ControlConflict { .. }) => Self::Retry(turn_store_error(error)),
@@ -301,6 +304,7 @@ impl Parked {
                 outcome = Err(lane_error(error));
             }
         }
+        let mut capacity_refused_since = None;
         loop {
             if let Some(error) = lock_state(&self.kernel.inner)
                 .sessions
@@ -332,7 +336,15 @@ impl Parked {
                 .await;
                 match result {
                     Ok(()) => {}
-                    Err(WaitControlError::Retry(_)) => {
+                    Err(error @ (WaitControlError::Retry(_) | WaitControlError::StoreBusy)) => {
+                        if capacity_timeout(&mut capacity_refused_since, &error) {
+                            let error = TurnError::Flush(format!(
+                                "wait resume capacity admission remained refused for {} seconds",
+                                DURABILITY_WAIT_TIMEOUT.as_secs()
+                            ));
+                            self.mutation.fail_session(&error);
+                            return Err(error);
+                        }
                         // A cancelled waiter cannot retire a recoverable durable park.
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
@@ -376,6 +388,18 @@ impl Parked {
     }
 }
 
+fn capacity_timeout(since: &mut Option<Instant>, error: &WaitControlError) -> bool {
+    if matches!(error, WaitControlError::Retry(TurnError::Capacity)) {
+        let now = Instant::now();
+        let started = *since.get_or_insert(now);
+        now.duration_since(started) >= DURABILITY_WAIT_TIMEOUT
+    } else {
+        // Each non-capacity retry interrupts the interval, even if it did not commit.
+        *since = None;
+        false
+    }
+}
+
 impl Drop for Parked {
     fn drop(&mut self) {
         if let Some(elapsed) = &self.elapsed {
@@ -389,5 +413,27 @@ fn lane_error(error: rsi_tools_protocol::ToolError) -> TurnError {
         rsi_tools_protocol::ToolError::Cancelled => TurnError::Cancelled,
         rsi_tools_protocol::ToolError::ShuttingDown => TurnError::ShuttingDown,
         other => TurnError::Invalid(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn capacity_deadline_requires_continuous_local_refusals() {
+        let capacity = WaitControlError::Retry(TurnError::Capacity);
+        let mut since = None;
+        assert!(!capacity_timeout(&mut since, &capacity));
+        tokio::time::advance(DURABILITY_WAIT_TIMEOUT).await;
+        assert!(!capacity_timeout(
+            &mut since,
+            &WaitControlError::Retry(TurnError::Flush("unrelated retry".into()))
+        ));
+        assert!(!capacity_timeout(&mut since, &capacity));
+        tokio::time::advance(DURABILITY_WAIT_TIMEOUT).await;
+        assert!(!capacity_timeout(&mut since, &WaitControlError::StoreBusy));
+        assert!(!capacity_timeout(&mut since, &capacity));
+        tokio::time::advance(DURABILITY_WAIT_TIMEOUT).await;
+        assert!(capacity_timeout(&mut since, &capacity));
     }
 }

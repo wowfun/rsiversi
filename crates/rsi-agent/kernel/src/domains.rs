@@ -303,6 +303,9 @@ impl AgentKernel {
             })
             .await;
         if let Err(error) = result {
+            if matches!(error, StoreError::ValidationBusy | StoreError::ReadCapacity) {
+                return Err(TurnError::Capacity);
+            }
             let request_id = receipt
                 .commit()
                 .request_id()

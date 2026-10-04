@@ -503,6 +503,12 @@ impl AgentKernel {
                 .then(|| session_id.clone().into()),
             })
             .await;
+        if matches!(
+            &result,
+            Ok(Err(StoreError::ValidationBusy | StoreError::ReadCapacity))
+        ) {
+            return Err(TurnError::Capacity);
+        }
         if let Err(error) = result.and_then(|result| {
             result.map_err(|error| match error {
                 StoreError::SessionNotQuiescent { .. } => TurnError::SessionBusy,

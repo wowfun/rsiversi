@@ -91,12 +91,17 @@ fn contribution_history() -> Vec<SessionFact> {
 #[test]
 fn plugin_text_and_tool_rejection_replay_without_live_producers() {
     let history = contribution_history();
-    let mut fold = ContextFold::with_limits(header(""), ContextLimits::default()).unwrap();
+    let mut fold = ContextFold::with_limits(
+        header(""),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
     fold.apply(&history).unwrap();
     let projected = fold.project(ContextLimits::default()).unwrap();
     assert_eq!(
         projected
-            .messages
+            .messages()
             .iter()
             .map(rsi_ai_protocol::Message::role)
             .collect::<Vec<_>>(),
@@ -108,16 +113,17 @@ fn plugin_text_and_tool_rejection_replay_without_live_producers() {
         ]
     );
     assert!(
-        matches!(projected.messages[1].content(), [MessageContent::Text { text }] if text == "Sampled at 42 ms")
+        matches!(projected.messages()[1].content(), [MessageContent::Text { text }] if text == "Sampled at 42 ms")
     );
     assert!(
-        matches!(projected.messages[3].content(), [MessageContent::ToolResult { call_id, is_error: true, content }]
+        matches!(projected.messages()[3].content(), [MessageContent::ToolResult { call_id, is_error: true, content }]
         if call_id == "call" && matches!(content.as_slice(), [MessageContent::Text { text }] if text == "Only reading is permitted"))
     );
     let restored = ContextFold::from_checkpoint(
         header(""),
         ContextLimits::default(),
         &fold.checkpoint_bytes().unwrap(),
+        rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
     assert_eq!(
