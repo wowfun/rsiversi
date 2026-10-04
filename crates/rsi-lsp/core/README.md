@@ -37,7 +37,9 @@ values. The decoder rejects conflicting lengths, malformed envelopes and mismatc
 response IDs.
 Each connection owns a continuously running protocol pump, including while idle.
 One persistent whole-frame write advances alongside reads; incoming messages never
-restart a partially accepted write. At most 256 compact server-reply descriptors
+restart a partially accepted write. Receipt of a response for a fully written RPC
+completes that protocol step before waiting for another I/O event, including
+during shutdown grace. At most 256 compact server-reply descriptors
 are outstanding, including the reply being written, with a thirty-second deadline
 from the oldest admission. Overflow retires the connection. Processing yields after
 32 envelopes. A query charges all unprocessed pre-read bytes on admission and every

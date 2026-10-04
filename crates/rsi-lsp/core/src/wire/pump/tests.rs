@@ -340,6 +340,47 @@ async fn idle_pump_panic_publishes_failure_and_reaps_without_close() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn decoded_rpc_completion_does_not_wait_for_another_io_event() {
+    for envelopes in [1, 32] {
+        let (mut pump, _send) = pump();
+        pump.active = Some(Rpc {
+            id: 1,
+            reply: None,
+            flushed: true,
+            result: None,
+        });
+        pump.append(&frame(&json!({"jsonrpc":"2.0","id":1,"result":null})))
+            .unwrap();
+        for _ in 1..envelopes {
+            pump.append(&frame(
+                &json!({"jsonrpc":"2.0","method":"progress","params":{}}),
+            ))
+            .unwrap();
+        }
+        {
+            let mut step = Box::pin(pump.step(false));
+            let progress = futures_util::poll!(&mut step);
+            if envelopes == 32 {
+                assert_eq!(
+                    progress,
+                    std::task::Poll::Pending,
+                    "retain the envelope yield"
+                );
+                step.await.unwrap();
+            } else {
+                assert_eq!(
+                    progress,
+                    std::task::Poll::Ready(Ok(())),
+                    "a completed RPC must let shutdown grace recheck its state"
+                );
+            }
+        }
+        assert!(pump.active.is_none());
+        assert!(pump.writing.is_none());
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn expired_queued_reply_does_not_suppress_safe_shutdown_grace() {
     let (process, ports, send) = process();
     ports.release.notify_one();
