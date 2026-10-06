@@ -128,7 +128,7 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
         hex::encode(Sha256::digest(&bytes))
     );
     // The v10 fold carries complete model Tool identity alongside Program provenance; the generic
-    // v6 outer envelope is unchanged; Session 19 and builder 2.8.0 bind the current cache.
+    // v6 outer envelope is unchanged; Session 20 and builder 2.8.0 bind the current cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
@@ -151,7 +151,7 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "70d9f950326c0b2aaa8838e355468b8e2e8b21112d7042e8a5e9b46f6b632fca"
+        "c22d1029abe21b2247005530002d5bffe5ca02bbf72b32709266e20ad84c7362"
     );
     assert!(
         additional < 3 * bytes.len(),

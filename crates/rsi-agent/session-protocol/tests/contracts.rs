@@ -16,6 +16,72 @@ fn agent_path_compact_encoding_fits_its_protocol_owned_byte_bound() {
 }
 
 #[test]
+fn protection_is_bounded_immutable_and_part_of_header_identity() {
+    let ordinary = SessionHeader::new_local(
+        SessionId::new("protected").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("automation").unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let scope = SessionProtectionScope::new("automation", "source:rule").unwrap();
+    let protected = ordinary.clone().with_protection(scope.clone()).unwrap();
+    let mut obsolete = serde_json::to_value(&protected).unwrap();
+    obsolete["format_version"] = json!(19);
+    assert!(serde_json::from_value::<SessionHeader>(obsolete).is_err());
+    assert_ne!(
+        ordinary.fingerprint().unwrap(),
+        protected.fingerprint().unwrap()
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionHeader>(serde_json::to_value(&protected).unwrap())
+            .unwrap()
+            .protection(),
+        Some(&scope)
+    );
+    let origin = ForkOrigin {
+        parent_session_id: protected.session_id().clone(),
+        root_session_id: protected.session_id().clone(),
+        path: AgentPath::new(vec![1]).unwrap(),
+        task_name: "child".into(),
+        parent_header_fingerprint: protected.fingerprint().unwrap(),
+        invoking_turn_id: TurnId::new("turn").unwrap(),
+        resolved_after_seq: 0,
+        resolved_terminal_seq: 0,
+        terminal_prefix_sha256: "0".repeat(64),
+        resolved_terminal_control_seq: 0,
+        terminal_control_prefix_sha256: "0".repeat(64),
+        requested_turns: ForkTurnSelection::All,
+        effective_turns: 0,
+    };
+    let child = protected
+        .forked_child(
+            SessionId::new("child").unwrap(),
+            2,
+            origin,
+            ModelSelection::baseline(&settings()),
+        )
+        .unwrap();
+    assert_eq!(child.protection(), Some(&scope));
+    assert!(protected.with_protection(scope).is_err());
+    for value in [
+        json!({"namespace":"","key":"rule"}),
+        json!({"namespace":"automation","key":"a".repeat(257)}),
+        json!({"namespace":"automation","key":"../rule"}),
+    ] {
+        assert!(serde_json::from_value::<SessionProtectionScope>(value).is_err());
+    }
+    assert!(
+        !serde_json::to_value(ordinary)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("protection")
+    );
+}
+
+#[test]
 fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
     let plan = json!({
         "version":1,"session":"session","builder":{"id":"builder","semantic_version":"2.3.0","config_sha256":"a".repeat(64)},
@@ -343,9 +409,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 19);
+    assert_eq!(current["format_version"], 20);
     assert!(current.get("workspace_trust").is_none());
-    for version in [18, 17, 16, 15, 14, 1] {
+    for version in [19, 18, 17, 16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#

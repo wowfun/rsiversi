@@ -80,7 +80,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 19;
+pub const SESSION_FORMAT_VERSION: u32 = 20;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1588,6 +1588,63 @@ impl FrozenAgentSettings {
     }
 }
 
+/// Immutable product-owned protection identity; this data conveys no live authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionProtectionScope {
+    namespace: String,
+    key: String,
+}
+impl SessionProtectionScope {
+    /// Constructs a bounded opaque scope, independent of task evidence retention.
+    pub fn new(namespace: impl Into<String>, key: impl Into<String>) -> Result<Self> {
+        let value = Self {
+            namespace: namespace.into(),
+            key: key.into(),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    /// Owning product namespace.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    /// Stable owner-issued identity.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    /// Validates both fields before crossing the durable boundary.
+    pub fn validate(&self) -> Result<()> {
+        for (value, maximum) in [(&self.namespace, 64), (&self.key, 256)] {
+            if value.is_empty()
+                || value.len() > maximum
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+            {
+                return Err(SessionError::Invalid(
+                    "invalid Session protection scope".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+impl<'de> Deserialize<'de> for SessionProtectionScope {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            namespace: String,
+            key: String,
+        }
+        let value = Wire::deserialize(deserializer)?;
+        Self::new(value.namespace, value.key).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Immutable durable session header written with the first durable admission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1598,6 +1655,8 @@ pub struct SessionHeader {
     coordinates: ExecutionCoordinates,
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protection: Option<SessionProtectionScope>,
     fork_origin: Option<ForkOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_owner: Option<ExecutionOwner>,
@@ -1620,6 +1679,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             coordinates: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
+            protection: Option<SessionProtectionScope>,
             fork_origin: Option<serde_json::Value>,
             execution_owner: Option<serde_json::Value>,
             delegation_policy: Option<serde_json::Value>,
@@ -1651,6 +1711,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             coordinates: decode_header_field(wire.coordinates, "coordinates")?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
             settings: decode_header_field(wire.settings, "settings")?,
+            protection: wire.protection,
             fork_origin: wire
                 .fork_origin
                 .map(serde_json::from_value)
@@ -1697,6 +1758,21 @@ where
 }
 
 impl SessionHeader {
+    /// Sets product protection before the first durable admission. Never grants access.
+    pub fn with_protection(mut self, scope: SessionProtectionScope) -> Result<Self> {
+        if self.protection.is_some() {
+            return Err(SessionError::Invalid(
+                "Session protection is immutable".into(),
+            ));
+        }
+        self.protection = Some(scope);
+        self.validate()?;
+        Ok(self)
+    }
+    /// Immutable product protection; absence denotes an ordinary Session.
+    pub const fn protection(&self) -> Option<&SessionProtectionScope> {
+        self.protection.as_ref()
+    }
     /// Creates a Header explicitly belonging to the Service's Local filesystem.
     pub fn new_local(
         session_id: SessionId,
@@ -1737,6 +1813,7 @@ impl SessionHeader {
 
             agent_preset_id,
             settings,
+            protection: None,
             fork_origin: None,
             execution_owner: None,
             delegation_policy: None,
@@ -1759,6 +1836,9 @@ impl SessionHeader {
         }
         validate_canonical_path(self.coordinates.path())?;
         self.settings.validate()?;
+        if let Some(scope) = &self.protection {
+            scope.validate()?;
+        }
         if let Some(policy) = &self.delegation_policy {
             policy.validate()?;
         }
@@ -1907,7 +1987,7 @@ impl SessionHeader {
                 "fork origin parent does not match the source Header".into(),
             ));
         }
-        Self::new(
+        let mut child = Self::new(
             session_id,
             created_at_ms,
             self.coordinates.clone(),
@@ -1915,7 +1995,10 @@ impl SessionHeader {
             self.settings.clone().with_model_selection(selection)?,
         )?
         .with_fork_origin(origin)?
-        .with_delegation_policy(self.delegation_policy.clone())
+        .with_delegation_policy(self.delegation_policy.clone())?;
+        child.protection.clone_from(&self.protection);
+        child.validate()?;
+        Ok(child)
     }
 
     /// Exact definition and original request of this child's named spawn.

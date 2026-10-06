@@ -134,3 +134,9 @@ any other retry cause resets that interval. These checks occur between completed
 and never abandon an admitted native operation. Durable parked state remains for
 authoritative restart recovery; a refusal never permits replaying an admitted
 mutation.
+
+Session Headers may carry a bounded immutable product protection scope. Agent
+validates and persists the opaque namespace/key with the first admission; it
+does not interpret product access policy or grant authority from serialized
+data. Product Session, history, reference and export adapters enforce the scope
+for their actual callers. Evidence retention never removes Header protection.

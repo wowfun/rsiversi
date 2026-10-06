@@ -3,7 +3,7 @@
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden deliberately binds builder 2.8.0 and Session format 19,
+The allocation golden deliberately binds builder 2.8.0 and Session format 20,
 while retaining the v10 fold and v6 envelope formats.
 
 The single deep module for prompt projection, incremental model context, and
