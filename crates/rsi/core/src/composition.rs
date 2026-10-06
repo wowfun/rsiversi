@@ -124,6 +124,17 @@ const STANDARD_AGENT_METADATA: &[u8] = include_bytes!(concat!(
 
 const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
     (
+        "automation",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/presets/automation/agent.profile.toml"
+        )),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/presets/automation/preset.toml"
+        )),
+    ),
+    (
         rsi_session_protocol::WORKFLOW_PRESET_ID,
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -273,6 +284,10 @@ fn standard_agent_addon(
         Arc::new(rsi_agent_model_selection::ModelSelectionFactory),
     )?;
     register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))?;
+    register(
+        "rsi.automation.browser.tools",
+        Arc::new(rsi_automation::BrowserToolsFactory),
+    )?;
     register(
         "rsi.agent.schedule",
         Arc::new(rsi_agent_schedule::ScheduleFactory),
@@ -1398,6 +1413,10 @@ impl StandardComposition {
                             .expect("static preset"),
                         system_root.join(rsi_session_protocol::WORKFLOW_PRESET_ID),
                     )
+                    .with_system_preset(
+                        AgentPresetId::new("automation").expect("static preset"),
+                        system_root.join("automation"),
+                    )
                     .with_user_root(user_agent_preset_root(&paths)),
                 compiler,
             )
@@ -1593,6 +1612,38 @@ impl StandardComposition {
             ],
         ))?;
         crate::api_composition::register(&mut builder, self.user_home.clone())?;
+        #[cfg(target_os = "linux")]
+        {
+            builder.register_local_contract::<rsi_automation::AutomationContract>()?;
+            builder.register_local_contract::<rsi_automation::BrowserRegistryContract>()?;
+            register(
+                &mut builder,
+                "rsi.automation",
+                UpdateMode::RestartRequired,
+                DaemonAutomationFactory {
+                    daemon: local_api.is_some(),
+                },
+            )?;
+            builder.register_fragment(ProfileFragment::program(
+                "rsi.standard.automation",
+                [
+                    rsi_meta_profile::ProfileStep::Node(rsi_meta_profile::ProfileNode::Plugin(
+                        ProfileEntry::new(
+                            "automation",
+                            "rsi.automation",
+                            json!({"directory":paths.state().join("automation")}),
+                        ),
+                    )),
+                    rsi_meta_profile::ProfileStep::Patch(
+                        rsi_meta_profile::ProfilePatch::SetEnabled {
+                            target: "automation".into(),
+                            enabled: false,
+                        },
+                    ),
+                ],
+            ))?;
+        }
+
         if let Some(launch_key) = local_api {
             builder.register_fragment(ProfileFragment::new(
                 "rsi.standard.local-api",
@@ -2810,5 +2861,28 @@ mod tests {
         symlink(&outside, &root).unwrap();
         let error = standard_agent_preset_root(&paths).unwrap_err();
         assert!(error.to_string().contains("not a real directory"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct DaemonAutomationFactory {
+    daemon: bool,
+}
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl PluginFactory for DaemonAutomationFactory {
+    fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        rsi_automation::AutomationFactory::default().prepare(config)
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        if !self.daemon {
+            return Err(MetaError::Activation(
+                "Automation requires the Linux daemon composition".into(),
+            ));
+        }
+        rsi_automation::AutomationFactory::default()
+            .activate(plan)
+            .await
     }
 }

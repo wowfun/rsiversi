@@ -1,5 +1,14 @@
 # rsi
 
+The Linux daemon registers opt-in `rsi.automation` and the disabled
+`rsi.standard.automation` fragment. Its dedicated directory, fixed browser
+runtime and owner-local webhook credential references are explicit Profile
+inputs. [Automation](../automation/README.md) owns standing-rule execution and
+its separate ledger. The shipped `automation` preset contributes only the
+default context builder, Goal domain and two private preview Tools; it imports
+no workspace context. Operators authorize the exact generation digest before
+enabling exploration. Embedded clients do not own the listener or scheduler.
+
 The standard native TUI and Desktop application Profiles mount the shared
 Plugins workbench. Their application catalog registers its Local contract and
 factory, matching the browser Worker's ordinary registration path.
@@ -656,7 +665,8 @@ outside the leased Agent Store root, and publishes the bounded
 [history API](../history-api/README.md) to authenticated clients.
 
 Host startup waits for enabled history/cache, navigation and Attention API owners
-as well as the managed provider owner and MCP API registration before returning
+as well as the managed provider owner, MCP API registration and enabled
+Automation owner before returning
 the service for client capability negotiation. MCP endpoint discovery/readiness
 is independent; an offline endpoint must not prevent the configuration API from
 becoming available. Direct
@@ -757,3 +767,13 @@ Enabling a Profile leaf prepares its evaluated saved configuration through the
 resolved factory before publication. ProgramRuntimeFactory rejects missing or
 invalid Node configuration, including for custom instance names.
 Disabled leaves may remain unconfigured until an explicit configuration edit.
+
+## Local deployment Automation enablement
+
+The Linux standard catalog includes a disabled Automation leaf during pure Host
+preview, so configuration patches have the same target before daemon startup.
+Actual activation requires the daemon composition's nonserializable authority;
+an embedded Host cannot start the owner, listener or browser. Configure the
+absolute private directory and pinned runtime, enable the existing leaf, then
+start the selected Host daemon. [Automation](../automation/README.md) owns rules,
+grants, intake diagnostics and manual redelivery.

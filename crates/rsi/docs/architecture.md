@@ -39,3 +39,13 @@ continuations through the Session bridge. Reading durable state or reopening an
 application does not recreate either scheduling authority. Agent owns the
 [Program runtime](../../rsi-agent/program/README.md) and durable workflow
 lifecycle; the standard product supplies its native Process and Jobs composition.
+
+The opt-in Linux daemon [Automation owner](../automation/README.md) issues fresh,
+bounded protected Goals from signed deployment events and standing operator
+rules. It owns a dedicated admission ledger and queue independently of Agent
+durability and process-local Jobs. The [Browser owner](../browser/README.md)
+consumes Process, Sandbox and Retrieval's public destination validation for
+isolated checking and private MCP attachment. Its rule policy remains above
+Agent and Meta; results and public Session reads share the immutable Header's
+product protection scope. Reopening an application or reading history issues no
+standing execution authority.

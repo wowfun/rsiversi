@@ -41,6 +41,8 @@ mod acp;
 mod addon_acceptance;
 #[path = "session_service/attention.rs"]
 mod attention;
+#[path = "session_service/automation.rs"]
+mod automation;
 #[path = "session_service/external.rs"]
 mod external;
 #[path = "session_service/goal.rs"]

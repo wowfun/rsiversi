@@ -15,6 +15,9 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-automation = { path = "../automation" }
+rsi-automation-api = { path = "../automation-api" }
+rsi-browser = { path = "../browser" }
 rsi-execution-local = { path = "../../rsi-execution/local" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
@@ -152,6 +155,8 @@ toml.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
+rsi-automation = { path = "../automation", features = ["test-support"] }
+ring.workspace = true
 rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
 rusqlite.workspace = true
 base64.workspace = true

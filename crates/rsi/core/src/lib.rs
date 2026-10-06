@@ -124,6 +124,7 @@ const STARTUP_OWNERS: &[&str] = &[
     "rsi-mcp-api",
     "rsi-workspace-review",
     "rsi.workspace-review.api",
+    "automation",
 ];
 
 /// Running standard Host and its application-facing operations.
@@ -624,7 +625,7 @@ mod tests {
     async fn converged_profile_waits_for_enabled_navigation_api_owners() {
         use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
         use std::sync::Arc;
-        for id in ["rsi.attention", "rsi.navigation"] {
+        for id in ["rsi.attention", "rsi.navigation", "automation"] {
             let temporary = tempfile::tempdir().unwrap();
             let paths = HostPaths::new(
                 temporary.path().join("config"),

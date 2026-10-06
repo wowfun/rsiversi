@@ -1,0 +1,16 @@
+format = 1
+
+[[steps]]
+kind = "plugin"
+id = "context"
+plugin = "rsi.agent.context.default"
+
+[[steps]]
+kind = "plugin"
+id = "goal"
+plugin = "rsi.agent.goal"
+
+[[steps]]
+kind = "plugin"
+id = "preview-tools"
+plugin = "rsi.automation.browser.tools"
