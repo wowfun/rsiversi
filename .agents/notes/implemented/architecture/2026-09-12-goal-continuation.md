@@ -36,6 +36,11 @@ completion only after a successful canonical Turn outcome. Failed, partial,
 interrupted and exhausted Turns block first; cancellation pauses. Unknown Store
 or receipt outcomes disarm without inventing a durable transition or a new ID.
 
+The product's [standing preview authority](2026-10-06-standing-preview-automation.md)
+adds a fresh authenticated deployment plus operator rule as an explicit bounded
+issuer for a protected new root. It does not arm persisted Goal history or grant
+public Session handles execution control.
+
 ## Alternatives considered
 
 A claim-time domain mutation would add an unnecessary transaction seam. Existing

@@ -47,6 +47,11 @@ the changed blocker. They do not allocate a continuation lease or revive an inpu
 that earlier Human admission superseded. This keeps an edit independent from the
 user's authority to start automatic work.
 
+The product's [standing preview authority](2026-10-06-standing-preview-automation.md)
+adds a fresh authenticated deployment plus operator rule as an explicit bounded
+issuer for a protected new root. It does not arm persisted Goal history or grant
+public Session handles execution control.
+
 ## Alternatives considered
 
 Adding another ad hoc timer or process loop would bypass existing owner and

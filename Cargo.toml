@@ -57,6 +57,7 @@ ratatui = "0.30.2"
 # Repository CST checks depend on this unstable 0.0.x syntax API and token behavior.
 ra_ap_syntax = "=0.0.349"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+ring = "0.17.14"
 rhai = { version = "1.23", features = ["serde", "sync"] }
 rustix = { version = "1.1", features = ["fs", "process"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
