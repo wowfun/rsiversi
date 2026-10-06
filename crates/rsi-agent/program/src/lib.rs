@@ -160,15 +160,15 @@ impl ProgramRuntime {
         if script.len() > rsi_agent_session_protocol::MAXIMUM_PROGRAM_SCRIPT_BYTES {
             return Err("script exceeds 64 KiB".into());
         }
-        if execution.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
-            return Err("program preparation cancelled".into());
-        }
         if execution.cancellation.is_cancelled()
             || cancellation.is_cancelled()
             || self.cancellation.is_cancelled()
         {
             return Err("program preparation cancelled".into());
         }
+        let definitions = runtime::contain_sync(|| rpc.definitions()).map_err(|_| {
+            ProgramError::Failed("program RPC definitions panicked before admission".into())
+        })?;
         let (outcome, result) = tokio::sync::watch::channel(None);
         let request = Arc::new(runtime::Request {
             spec: Mutex::new(Some(DuplexProcessSpec {
@@ -179,11 +179,13 @@ impl ProgramRuntime {
                 termination_grace_ms: 500,
             })),
             script,
+            definitions,
             rpc,
             cancelled_at_settlement: std::sync::atomic::AtomicBool::new(false),
             start: CancellationToken::new(),
             cancel: cancellation.child_token(),
-            outcome,
+            outcome: result.clone(),
+            completion: Mutex::new(Some(outcome)),
         });
         let id = self
             .jobs
@@ -248,7 +250,8 @@ impl AdmittedProgram {
             _ => Err(reason.into()),
         }
     }
-    /// Waits for the bounded complete result or terminal diagnostic.
+    /// Waits for RPC and process settlement and their bounded result/diagnostic.
+    /// A non-cooperative handler can retain settlement after process termination.
     ///
     /// # Errors
     /// Reports script, protocol, cancellation or process-settlement failure.
@@ -290,16 +293,20 @@ impl PluginFactory for ProgramRuntimeFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let configuration = plan.take_state::<ProgramConfiguration>()?;
         let jobs = plan.local::<JobsContract>()?;
+        let tasks = tokio_util::task::TaskTracker::new();
         let producer = jobs
             .register_producer(JobProducerRegistration {
                 name: PRODUCER.into(),
-                producer: Arc::new(runtime::Producer(plan.local::<DuplexProcessContract>()?)),
+                producer: Arc::new(runtime::Producer {
+                    process: plan.local::<DuplexProcessContract>()?,
+                    tasks: tasks.clone(),
+                }),
             })
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let runtime = Arc::new(ProgramRuntime {
             configuration,
             jobs,
-            tasks: tokio_util::task::TaskTracker::new(),
+            tasks,
             cancellation: CancellationToken::new(),
         });
         let supply = plan

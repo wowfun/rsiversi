@@ -2,7 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::{ExecutionOwner, ProgramOutcome, ProgramRunEvent};
 use rsi_agent_turn_protocol::{PrepareProgram, ProgramAgentRequest, ProgramRead, ProgramRun};
 struct Fixture {
-    store: Arc<MemoryStore>,
+    store: Arc<dyn SessionStore>,
     faults: Arc<FactReadRaceStore>,
     policy: rsi_agent_composition_protocol::DomainHandle<bool>,
     kernel: AgentKernel,
@@ -26,7 +26,15 @@ async fn fixture_with_execution(
     lose_ack: bool,
     execution: Option<rsi_execution::ExecutionLease>,
 ) -> Fixture {
-    let store = Arc::new(MemoryStore::new());
+    fixture_with_store(lose_ack, execution, Arc::new(MemoryStore::new()), true).await
+}
+#[allow(clippy::too_many_lines)] // Reuses real Kernel authority with either mechanical Store implementation.
+async fn fixture_with_store(
+    lose_ack: bool,
+    execution: Option<rsi_execution::ExecutionLease>,
+    store: Arc<dyn SessionStore>,
+    accept: bool,
+) -> Fixture {
     let faults = Arc::new(FactReadRaceStore::new(store.clone()));
     let definition = rsi_agent_composition_protocol::DomainDefinition::new(
         rsi_agent_session_protocol::DomainIdentity::new("fixture.program-policy", 1).unwrap(),
@@ -126,18 +134,20 @@ async fn fixture_with_execution(
         "preparation must not publish CAS"
     );
     assert!(run.start().await.is_err());
-    faults
-        .fail_program_after_apply
-        .store(lose_ack, Ordering::Release);
-    run.accept(&caller).await.unwrap();
-    run.start().await.unwrap();
-    let admitted_cas = faults.cas_writes.load(Ordering::SeqCst);
-    assert!(run.accept(&caller).await.is_err());
-    assert_eq!(
-        faults.cas_writes.load(Ordering::SeqCst),
-        admitted_cas,
-        "duplicate admission must not write CAS"
-    );
+    if accept {
+        faults
+            .fail_program_after_apply
+            .store(lose_ack, Ordering::Release);
+        run.accept(&caller).await.unwrap();
+        run.start().await.unwrap();
+        let admitted_cas = faults.cas_writes.load(Ordering::SeqCst);
+        assert!(run.accept(&caller).await.is_err());
+        assert_eq!(
+            faults.cas_writes.load(Ordering::SeqCst),
+            admitted_cas,
+            "duplicate admission must not write CAS"
+        );
+    }
     Fixture {
         store,
         faults,
@@ -967,6 +977,61 @@ async fn workflow_reconciles_lost_acceptance_progress_and_terminal_acknowledgeme
     assert_eq!(records.records.len(), 4);
     assert!(records.head.terminal);
     f.kernel.shutdown(f.workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_commit_with_lost_ack_and_unavailable_readback_is_unknown() {
+    for operation in ["accept", "start", "progress", "finish"] {
+        let f = fixture_with_store(
+            false,
+            None,
+            Arc::new(MemoryStore::new()),
+            !matches!(operation, "accept" | "start"),
+        )
+        .await;
+        let caller = f
+            .kernel
+            .tool_caller(&f.root, &EffectId::new("workflow").unwrap())
+            .unwrap();
+        if operation == "start" {
+            f.run.accept(&caller).await.unwrap();
+        }
+        f.faults
+            .fail_program_after_apply
+            .store(true, Ordering::Release);
+        *f.faults.control_read_error.lock().unwrap() =
+            Some(StoreError::Io("unavailable Program reconciliation".into()));
+        let result = match operation {
+            "accept" => f.run.accept(&caller).await,
+            "start" => f.run.start().await,
+            "progress" => f.run.progress(None, "committed progress".into()).await,
+            "finish" => f
+                .run
+                .finish(ProgramOutcome::Completed, None)
+                .await
+                .map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            result.unwrap_err(),
+            TurnError::ExecutionOutcomeUnknown,
+            "{operation}"
+        );
+        let durable = f
+            .store
+            .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            durable
+                .records
+                .iter()
+                .any(|record| matches!(record.body(), AgentControlRecordBody::ProgramRun { .. }))
+        );
+        f.run.finish(ProgramOutcome::Cancelled, None).await.unwrap();
+        f.kernel.shutdown(f.workers).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -2249,4 +2314,117 @@ async fn workbench_missing_blob_reports_store_failure_with_object_identity() {
         "model observation must preserve the missing object identity too"
     );
     f.kernel.shutdown(f.workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn creator_cancellation_after_acceptance_refuses_start_and_detach_before_launch() {
+    let f = fixture_with_store(false, None, Arc::new(MemoryStore::new()), false).await;
+    let caller = f
+        .kernel
+        .tool_caller(&f.root, &EffectId::new("workflow").unwrap())
+        .unwrap();
+    f.run.accept(&caller).await.unwrap();
+    f.creator_cancellation.cancel();
+    assert_eq!(f.run.start().await, Err(TurnError::Cancelled));
+    assert_eq!(f.run.detach().await, Err(TurnError::Cancelled));
+    assert!(f.run.cancellation().is_cancelled());
+    let records = f
+        .store
+        .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!records.records.iter().any(|record| matches!(
+        record.body(),
+        AgentControlRecordBody::ProgramRun {
+            event: ProgramRunEvent::Started | ProgramRunEvent::Detached,
+            ..
+        }
+    )));
+    assert_eq!(
+        f.run
+            .finish(ProgramOutcome::Completed, Some(serde_json::json!(42)))
+            .await
+            .unwrap(),
+        ProgramOutcome::Cancelled
+    );
+    end_creator(&f).await;
+    f.kernel.shutdown(f.workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_publication_faults_prevent_kernel_acceptance_and_result_reference_commits() {
+    use rsi_agent_store_sqlite::{
+        SqliteStore,
+        test_support::{CasPublicationPhase as Phase, CasPublicationStep as Step},
+    };
+    for step in [
+        Step::FileSync,
+        Step::Link,
+        Step::TemporaryRemoval,
+        Step::StagingSync,
+        Step::NamespaceSync,
+    ] {
+        for phase in [Phase::Before, Phase::After] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(SqliteStore::open(root.path()).unwrap());
+            let f = fixture_with_store(false, None, store.clone(), false).await;
+            let caller = f
+                .kernel
+                .tool_caller(&f.root, &EffectId::new("workflow").unwrap())
+                .unwrap();
+            let id = &f.run.descriptor().run_id;
+            let before = store.read_watermarks(f.root.session_id()).await.unwrap();
+            store.fail_next_cas_publication(step, phase);
+            assert!(
+                f.run.accept(&caller).await.is_err(),
+                "accept {step:?} {phase:?}"
+            );
+            assert_eq!(
+                store.read_watermarks(f.root.session_id()).await.unwrap(),
+                before
+            );
+            assert!(
+                store
+                    .read_program_records(f.root.session_id(), id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            f.run.accept(&caller).await.unwrap();
+            f.run.start().await.unwrap();
+            store.fail_next_cas_publication(step, phase);
+            assert!(
+                f.run
+                    .finish(
+                        ProgramOutcome::Completed,
+                        Some(serde_json::json!({"total":42}))
+                    )
+                    .await
+                    .is_err(),
+                "finish {step:?} {phase:?}"
+            );
+            let records = store
+                .read_program_records(f.root.session_id(), id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !records.records.iter().any(|record| matches!(
+                    record.body(),
+                    AgentControlRecordBody::ProgramRun {
+                        event: ProgramRunEvent::Terminal {
+                            result: Some(_),
+                            ..
+                        },
+                        ..
+                    }
+                )),
+                "failed publication admitted a result reference"
+            );
+            // The adapter does not infer a committed terminal from readable bytes.
+            // Shutdown retains the unfinished ledger for recovery.
+            f.kernel.shutdown(f.workers).await.unwrap();
+        }
+    }
 }

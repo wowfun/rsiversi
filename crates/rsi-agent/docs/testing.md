@@ -16,6 +16,16 @@ and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs the
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
 
+Workflow settlement tests drive the production observation loop and terminal
+cleanup, including runtime retirement with a still-pending Program result.
+Paused-clock tests bound both queued and admitted observation commands, preserve
+their original owner after timeout, and prioritize authoritative completion.
+Foreground observation returns acknowledged detach refusals without waiting for
+the independent run's terminal result. Error projection preserves known refusal
+categories through setup, and native Node tests still allow scripts to catch known
+RPC refusals while uncertainty prevents continuation. Abort during RPC draining
+retains the original pending handler until it actually finishes.
+
 Protocol suites exercise constructor and deserialization rejection, exact
 round trips, Agent preset identity grammar and required Header membership,
 sequence invariants, byte limits, and dependency direction. The

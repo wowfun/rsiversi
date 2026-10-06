@@ -46,6 +46,26 @@ having interrupted execution. An uncertain admitted write still signals the
 owner; exact canonical readback can resolve a lost acknowledgement. The
 [Turn contract](../../../../crates/rsi-agent/turn-protocol/README.md) owns these outcomes.
 
+Program completion belongs to one tracked owner, installed before admitted work
+is polled. Aborting its driver transfers the original pending spawn and effect
+futures; it does not reconstruct an operation or publish settlement from Drop.
+Workflow setup, observation commands and terminal work likewise live in one
+retained owner. Callback construction and polling are contained together, and
+admitted callback panic remains typed uncertainty through RPC, Jobs and Tool
+projections. Pure definitions are frozen before admission. Process termination
+starts before effect draining, but result delivery still waits for actual effects
+and process settlement. A non-cooperating effect can therefore retain completion
+indefinitely; a bounded result would need a separate observation contract.
+
+Losing a foreground observer during setup cannot revoke a single-use operation
+whose admission may already have committed. The retained driver completes setup
+and cleanup; Kernel still checks creator cancellation at start and detach.
+Foreground command acknowledgement is a separate bounded observation: timeout
+reports uncertainty while the original command remains with its owner. Waiting
+again for terminal completion on that timeout would reintroduce the same hang
+when the command itself holds settlement. It does not authorize a watchdog to
+publish Interrupted before actual effect and process settlement.
+
 A common native Node runtime serves foreground `run_code` and workflow scripts
 through Process duplex framing and Jobs. Process owns spawn/reap and Jobs owns
 live controls; Agent owns durable provenance and run policy. Each workflow scope
@@ -120,6 +140,16 @@ Skills are installed per workspace and require an enforced read-only Session;
 prose restrictions alone cannot make parallel child collection read-only.
 
 ## Alternatives considered
+
+Stringifying known refusals at each preparation, setup or control adapter erases
+distinctions already owned by the Tool protocol. ProgramError therefore carries
+those categories through retained operations, with one shared Tool projection.
+Returning a known detach refusal keeps the foreground observation bounded;
+waiting for terminal settlement after that refusal would couple it again to the
+independent run's lifetime.
+Known cleanup errors preserve the first execution failure for diagnosis;
+uncertainty still takes precedence because a useful diagnostic cannot prove an
+effect's outcome.
 
 Inventing model responses would corrupt evidence and context. Retaining old Tool
 claims would make detachment depend on a dead authority. Routing every child

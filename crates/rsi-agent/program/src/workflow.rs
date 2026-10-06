@@ -1,4 +1,5 @@
 use crate::{ProgramError, ProgramRpc, ProgramRuntime, ProgramRuntimeContract};
+mod owner;
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     DomainIdentity, ForkTurnSelection, OutputContract, ProgramDomainGuard, ProgramOutcome,
@@ -58,6 +59,9 @@ pub(super) fn meta(error: impl std::fmt::Display) -> MetaError {
 }
 pub(super) fn failure(error: impl std::fmt::Display) -> ToolError {
     ToolError::Execution(error.to_string())
+}
+pub(super) fn turn_failure(error: rsi_agent_turn_protocol::TurnError) -> ToolError {
+    ProgramError::from(error).into()
 }
 #[derive(Debug)]
 struct Workflow {
@@ -120,82 +124,43 @@ impl ToolExecutor for Workflow {
             .extension::<AgentCallerAuthority>()
             .ok_or_else(|| failure("workflow creator authority is absent"))?;
         let run = self.prepare_run(&args, &execution, &caller).await?;
-        let scope = acquire_workflow_scope(
-            self.jobs.as_ref(),
-            caller.session_id(),
-            &run.descriptor().run_id,
-        )?;
-        let mut program = match self
-            .runtime
-            .admit_owned(
-                args.script,
-                &execution,
-                &scope,
-                Arc::new(WorkflowRpc(run.clone())),
-                run.cancellation(),
-                execution.take_prepared_process()?,
-            )
-            .await
-        {
-            Ok(program) => program,
-            Err(error) => {
-                self.jobs.finalize_scope(&scope).await.map_err(failure)?;
-                return Err(error.into());
-            }
-        };
-        if let Err(error) = run.accept(&caller).await {
-            program.cancel();
-            let _ = program.result().await;
-            self.jobs.finalize_scope(&scope).await.map_err(failure)?;
-            return Err(failure(error));
-        }
-        if let Err(error) = run.start().await {
-            program.cancel();
-            let _ = program.result().await;
-            settle_setup_failure(
-                run.finish(ProgramOutcome::Cancelled, None),
-                self.jobs.finalize_scope(&scope),
-            )
-            .await?;
-            return Err(failure(error));
-        }
-        let start = async {
-            if args.background {
-                run.detach().await.map_err(|e| e.to_string())?;
-            }
-            program.start()
-        }
-        .await;
-        if let Err(error) = start {
-            program.cancel();
-            let _ = program.result().await;
-            settle_setup_failure(
-                run.finish(ProgramOutcome::Cancelled, None),
-                self.jobs.finalize_scope(&scope),
-            )
-            .await?;
-            return Err(failure(error));
-        }
-        let (finished, mut receiver) = tokio::sync::watch::channel(None);
-        let owner = run.clone();
-        let jobs = self.jobs.clone();
-        let retiring = self.runtime.cancellation.clone();
-        self.runtime.tasks.spawn(async move {
-            finished.send_replace(Some(
-                settle_workflow(owner, jobs, scope, program, retiring).await,
-            ));
-        });
         let identity = WorkflowRunLocator {
             run_id: run.descriptor().run_id.clone(),
             session_id: run.descriptor().session_id.clone(),
         };
-        if args.background {
+        let process = execution.take_prepared_process()?;
+        let scope =
+            acquire_workflow_scope(self.jobs.as_ref(), caller.session_id(), &identity.run_id)?;
+        let background = args.background;
+        let observation = Duration::from_secs(args.observe_seconds);
+        let (ready, mut receiver, commands) = owner::spawn(
+            self.runtime.clone(),
+            self.jobs.clone(),
+            run,
+            scope,
+            args,
+            execution.clone(),
+            caller,
+            process,
+        );
+        ready
+            .await
+            .map_err(|_| ToolError::OutcomeUnknown)?
+            .map_err(ToolError::from)?;
+        if background {
             return invocation_result(WorkflowInvocationResult::running(identity), false);
         }
-        let observed=tokio::select! {biased;()=execution.cancellation.cancelled()=>{run.cancel_from_creator().await.map_err(failure)?;wait_finished(&mut receiver).await},result=wait_finished(&mut receiver)=>result,()=tokio::time::sleep(Duration::from_secs(args.observe_seconds))=>{
-            if run.detach().await.is_ok() {return invocation_result(WorkflowInvocationResult::running(identity),false);}
-            wait_finished(&mut receiver).await
-        }}.map_err(failure)?;
+        let Some(observed) = observe_foreground(
+            &execution.cancellation,
+            observation,
+            &mut receiver,
+            &commands,
+        )
+        .await
+        .map_err(ToolError::from)?
+        else {
+            return invocation_result(WorkflowInvocationResult::running(identity), false);
+        };
         if observed.0 == ProgramOutcome::Interrupted {
             return Err(ToolError::OutcomeUnknown);
         }
@@ -208,6 +173,31 @@ impl ToolExecutor for Workflow {
             observed.0 != ProgramOutcome::Completed,
         )
     }
+}
+async fn observe_foreground(
+    cancellation: &CancellationToken,
+    observation: Duration,
+    receiver: &mut tokio::sync::watch::Receiver<Option<Finished>>,
+    commands: &owner::Commands,
+) -> Result<Option<(ProgramOutcome, Option<Value>)>, ProgramError> {
+    let observed = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            if let Some(result) = owner::observe(commands, owner::Observation::CancelFromCreator, receiver).await {
+                result?;
+            }
+            wait_finished(receiver).await
+        }
+        result = wait_finished(receiver) => result,
+        () = tokio::time::sleep(observation) => {
+            match owner::observe(commands, owner::Observation::Detach, receiver).await {
+                Some(Ok(_)) => return Ok(None),
+                Some(Err(error)) => return Err(error),
+                None => wait_finished(receiver).await,
+            }
+        }
+    }?;
+    Ok(Some(observed))
 }
 fn invocation_result(
     value: WorkflowInvocationResult,
@@ -242,7 +232,7 @@ impl Workflow {
             .turns
             .domain_states(caller.session_id())
             .await
-            .map_err(failure)?;
+            .map_err(turn_failure)?;
         let guard = workflow_guard(&domains)?;
         let run = self
             .turns
@@ -262,7 +252,7 @@ impl Workflow {
                 ],
             })
             .await
-            .map_err(failure)?;
+            .map_err(turn_failure)?;
         Ok(run)
     }
 }
@@ -282,54 +272,7 @@ fn workflow_guard(
         snapshot_sha256: state.snapshot.sha256().map_err(failure)?,
     })
 }
-async fn settle_workflow(
-    owner: Arc<dyn ProgramRun>,
-    jobs: Arc<dyn Jobs>,
-    scope: rsi_jobs::JobScopeAuthority,
-    program: crate::AdmittedProgram,
-    retiring: CancellationToken,
-) -> Finished {
-    let cancellation = owner.cancellation();
-    let value = tokio::select! {
-        biased;
-        () = retiring.cancelled() => {
-            let _ = owner.cancel().await;
-            program.cancel_with("workflow runtime retired").await
-        }
-        () = cancellation.cancelled() => {
-            program.cancel_with("workflow cancelled").await
-        }
-        value = program.result() => value,
-    };
-    let reported = jobs.wait(&scope, program.job_id(), 0, 0).await;
-    let finalized = jobs.finalize_scope(&scope).await;
-    let uncertain = value == Err(ProgramError::OutcomeUnknown)
-        || matches!(&reported, Ok(read) if read.job.status == rsi_jobs::JobStatus::OutcomeUnknown)
-        || matches!(&reported, Err(rsi_jobs::JobsError::OutcomeUnknown))
-        || matches!(&finalized, Ok(report) if report.outcome_unknown)
-        || matches!(&finalized, Err(rsi_jobs::JobsError::OutcomeUnknown));
-    let cleanup = reported.map(|_| ()).and(finalized.map(|_| ()));
-    let outcome = match (&value, cleanup) {
-        _ if uncertain => ProgramOutcome::Interrupted,
-        (_, _) if cancellation.is_cancelled() => ProgramOutcome::Cancelled,
-        (_, Err(error)) => ProgramOutcome::Failed {
-            code: "program.cleanup".into(),
-            message: bounded(&error.to_string()),
-        },
-        (Ok(_), Ok(())) => ProgramOutcome::Completed,
-        (Err(error), Ok(())) => ProgramOutcome::Failed {
-            code: "program.execution".into(),
-            message: bounded(&error.to_string()),
-        },
-    };
-    let outcome = owner
-        .finish(outcome, value.as_ref().ok().cloned())
-        .await
-        .map_err(|error| error.to_string())?;
-    let value = value.ok().filter(|_| outcome == ProgramOutcome::Completed);
-    Ok((outcome, value))
-}
-type Finished = Result<(ProgramOutcome, Option<Value>), String>;
+type Finished = Result<(ProgramOutcome, Option<Value>), ProgramError>;
 async fn wait_finished(receiver: &mut tokio::sync::watch::Receiver<Option<Finished>>) -> Finished {
     loop {
         if let Some(value) = receiver.borrow().clone() {
@@ -338,7 +281,7 @@ async fn wait_finished(receiver: &mut tokio::sync::watch::Receiver<Option<Finish
         receiver
             .changed()
             .await
-            .map_err(|_| "workflow owner closed".to_owned())?;
+            .map_err(|_| ProgramError::OutcomeUnknown)?;
     }
 }
 fn bounded(value: &str) -> String {
@@ -388,7 +331,28 @@ impl ProgramRpc for WorkflowRpc {
                         .map_err(|e| e.to_string())?,
                     role: None,
                 };
-                let result = tokio::select! {biased;()=cancellation.cancelled()=>{self.0.cancel().await.map_err(|e|e.to_string())?;return Err("workflow RPC cancelled".into());},result=self.0.agent(request)=>result.map_err(|e|e.to_string())?};
+                let owner = self.0.clone();
+                let agent = crate::runtime::contain(async move {
+                    owner.agent(request).await.map_err(ProgramError::from)
+                });
+                tokio::pin!(agent);
+                let result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        let owner = self.0.clone();
+                        let cancel = crate::runtime::contain(async move { owner.cancel().await.map_err(ProgramError::from) });
+                        // Child admission may own the lease needed by cancellation.
+                        // Preserve and drive both original operations concurrently.
+                        let (cancelled, settled) = tokio::join!(cancel, &mut agent);
+                        if cancelled == Err(ProgramError::OutcomeUnknown)
+                            || matches!(settled, Err(ProgramError::OutcomeUnknown)) {
+                            return Err(ProgramError::OutcomeUnknown);
+                        }
+                        cancelled?;
+                        return Err("workflow RPC cancelled".into());
+                    }
+                    result = &mut agent => result?,
+                };
                 Ok(
                     json!({"receipt":result.receipt,"value":result.structured.as_ref().map(|result|result.value.clone()).or(result.reply.map(Value::String)),"reference":result.structured.map(|result|result.reference)}),
                 )
@@ -413,7 +377,7 @@ impl ProgramRpc for WorkflowRpc {
                 self.0
                     .progress(phase, message)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ProgramError::from)?;
                 Ok(Value::Null)
             }
             _ => Err("workflow admits only agent, phase and log RPCs".into()),
@@ -422,17 +386,109 @@ impl ProgramRpc for WorkflowRpc {
 }
 
 // Retire Jobs before publishing terminal state; attempt both even if either fails.
-async fn settle_setup_failure(
-    settle: impl std::future::Future<Output = rsi_agent_turn_protocol::Result<ProgramOutcome>>,
-    finalize: impl std::future::Future<Output = rsi_jobs::Result<rsi_jobs::JobFinalization>>,
-) -> rsi_tools_protocol::Result<()> {
-    let finalized = finalize.await;
-    let settled = settle.await;
-    settled.map_err(failure)?;
-    finalized.map(|_| ()).map_err(failure)
-}
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn acknowledged_detach_refusal_returns_without_joining_run_completion() {
+        for error in [
+            ProgramError::Failed("known detach refusal".into()),
+            ProgramError::Cancelled,
+            ProgramError::Capacity,
+            ProgramError::InvalidInput("invalid detach request".into()),
+            ProgramError::OutcomeUnknown,
+        ] {
+            let cancellation = CancellationToken::new();
+            let (commands, mut received) = tokio::sync::mpsc::channel(1);
+            let (completion, mut finished) = tokio::sync::watch::channel(None);
+            let observing = observe_foreground(
+                &cancellation,
+                Duration::from_secs(30),
+                &mut finished,
+                &commands,
+            );
+            tokio::pin!(observing);
+            let (action, reply) = tokio::select! {
+                result = &mut observing => panic!("unexpected completion {result:?}"),
+                command = received.recv() => command.unwrap(),
+            };
+            assert!(matches!(action, owner::Observation::Detach));
+            reply.send(Err(error.clone())).unwrap();
+            tokio::select! {
+                result = &mut observing => assert_eq!(result, Err(error)),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
+                    panic!("acknowledged refusal waited for the independent run")
+                }
+            }
+            assert!(received.try_recv().is_err(), "one command, without retry");
+            assert!(
+                completion.borrow().is_none(),
+                "run completion is still pending"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_observation_preserves_completion_and_successful_detachment() {
+        for completed in [false, true] {
+            let cancellation = CancellationToken::new();
+            let (commands, mut received) = tokio::sync::mpsc::channel(1);
+            let terminal = (ProgramOutcome::Completed, Some(json!(42)));
+            let (_completion, mut finished) =
+                tokio::sync::watch::channel(completed.then(|| Ok(terminal.clone())));
+            let observing = observe_foreground(
+                &cancellation,
+                Duration::from_secs(30),
+                &mut finished,
+                &commands,
+            );
+            tokio::pin!(observing);
+            if completed {
+                assert_eq!(observing.await.unwrap(), Some(terminal));
+                assert!(
+                    received.try_recv().is_err(),
+                    "completion needs no detach command"
+                );
+            } else {
+                let (action, reply) = tokio::select! {
+                    result = &mut observing => panic!("unexpected completion {result:?}"),
+                    command = received.recv() => command.unwrap(),
+                };
+                assert!(matches!(action, owner::Observation::Detach));
+                reply.send(Ok(true)).unwrap();
+                assert!(
+                    observing.await.unwrap().is_none(),
+                    "the run remains independently owned"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn turn_refusals_preserve_tool_categories_and_uncertainty() {
+        use rsi_agent_turn_protocol::TurnError;
+        use rsi_tools_protocol::ToolError;
+        for (turn, tool) in [
+            (TurnError::Cancelled, ToolError::Cancelled),
+            (TurnError::Capacity, ToolError::Capacity),
+            (
+                TurnError::Invalid("known refusal".into()),
+                ToolError::InvalidInput("known refusal".into()),
+            ),
+            (
+                TurnError::ExecutionOutcomeUnknown,
+                ToolError::OutcomeUnknown,
+            ),
+            (
+                TurnError::DomainOutcomeUnknown {
+                    request_id: "request".into(),
+                },
+                ToolError::OutcomeUnknown,
+            ),
+        ] {
+            assert_eq!(super::turn_failure(turn), tool);
+        }
+    }
+
     use super::*;
     #[test]
     fn workflow_requires_disabled_plan_policy_and_captures_its_revision() {
@@ -504,50 +560,17 @@ mod tests {
         assert!(runtime.shutdown().await.is_clean());
     }
 
-    #[tokio::test]
-    async fn setup_terminal_failure_still_finalizes_owned_jobs_scope() {
-        let finalized = std::sync::atomic::AtomicBool::new(false);
-        let result = settle_setup_failure(
-            async {
-                Err(rsi_agent_turn_protocol::TurnError::Invalid(
-                    "terminal failed".into(),
-                ))
-            },
-            async {
-                finalized.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(rsi_jobs::JobFinalization {
-                    unreported: vec![],
-                    outcome_unknown: false,
-                })
-            },
-        )
-        .await;
-        assert!(finalized.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(result.unwrap_err().to_string().contains("terminal failed"));
-    }
-    #[tokio::test]
-    async fn setup_cleanup_precedes_terminal_even_when_both_fail() {
-        let finalized = std::sync::atomic::AtomicBool::new(false);
-        let result = settle_setup_failure(
-            async {
-                assert!(finalized.load(std::sync::atomic::Ordering::SeqCst));
-                Err(rsi_agent_turn_protocol::TurnError::Invalid(
-                    "terminal failed".into(),
-                ))
-            },
-            async {
-                finalized.store(true, std::sync::atomic::Ordering::SeqCst);
-                Err(rsi_jobs::JobsError::InvalidInput("cleanup failed".into()))
-            },
-        )
-        .await;
-        assert!(result.unwrap_err().to_string().contains("terminal failed"));
-    }
     #[derive(Debug)]
-    struct RecordingRun {
-        jobs: Arc<dyn Jobs>,
-        scope: rsi_jobs::JobScopeAuthority,
-        durable: std::sync::Mutex<Option<ProgramOutcome>>,
+    pub(super) struct RecordingRun {
+        pub(super) jobs: Arc<dyn Jobs>,
+        pub(super) scope: rsi_jobs::JobScopeAuthority,
+        pub(super) durable: std::sync::Mutex<Option<ProgramOutcome>>,
+        pub(super) fault: Option<rsi_agent_turn_protocol::TurnError>,
+        pub(super) entered: CancellationToken,
+        pub(super) release: Option<CancellationToken>,
+        pub(super) calls: std::sync::atomic::AtomicUsize,
+        pub(super) terminal: Option<ProgramOutcome>,
+        pub(super) cancellation: CancellationToken,
     }
     #[async_trait]
     impl ProgramRun for RecordingRun {
@@ -555,7 +578,7 @@ mod tests {
             unreachable!()
         }
         fn cancellation(&self) -> CancellationToken {
-            CancellationToken::new()
+            self.cancellation.clone()
         }
         async fn accept(&self, _: &AgentCallerAuthority) -> rsi_agent_turn_protocol::Result<()> {
             unreachable!()
@@ -570,20 +593,28 @@ mod tests {
             unreachable!()
         }
         async fn cancel(&self) -> rsi_agent_turn_protocol::Result<()> {
-            unreachable!()
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.cancellation.cancel();
+            self.fault.clone().map_or(Ok(()), Err)
         }
         async fn agent(
             &self,
             _: ProgramAgentRequest,
         ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ProgramAgentResult> {
-            unreachable!()
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.cancel();
+            if let Some(release) = &self.release {
+                release.cancelled().await;
+            }
+            Err(self.fault.clone().unwrap())
         }
         async fn progress(
             &self,
             _: Option<String>,
             _: String,
         ) -> rsi_agent_turn_protocol::Result<()> {
-            unreachable!()
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.fault.clone().unwrap())
         }
         async fn finish(
             &self,
@@ -595,14 +626,17 @@ mod tests {
                 "scope must already be finalized before terminal publication"
             );
             *self.durable.lock().unwrap() = Some(outcome.clone());
-            Ok(outcome)
+            if let Some(error) = &self.fault {
+                return Err(error.clone());
+            }
+            Ok(self.terminal.clone().unwrap_or(outcome))
         }
     }
 
     #[tokio::test]
-    async fn cleanup_failure_is_terminalized_before_foreground_reports_the_same_outcome() {
-        let runtime = rsi_meta::Runtime::default();
-        let plugin = runtime
+    async fn workflow_rpc_retains_typed_uncertainty_and_the_original_agent_on_cancel() {
+        let meta = rsi_meta::Runtime::default();
+        let plugin = meta
             .root()
             .apply(
                 rsi_meta::ResolvedFactory::linked(
@@ -615,52 +649,57 @@ mod tests {
             )
             .await
             .unwrap();
-        let jobs = runtime.root().lookup_local::<JobsContract>().unwrap();
-        let scope = jobs
-            .acquire_scope(JobScopeId::new("test", ["cleanup"]).unwrap())
-            .unwrap();
-        let owner = Arc::new(RecordingRun {
-            jobs: jobs.clone(),
-            scope: scope.clone(),
-            durable: std::sync::Mutex::new(None),
-        });
-        let (outcome, result) =
-            tokio::sync::watch::channel(Some(Ok(json!({"script":"succeeded"}))));
-        // The process has already settled. Only the Jobs reporting path is faulted
-        // by a missing job; no process is spawned or provider contacted.
-        let request = Arc::new(crate::runtime::Request {
-            spec: std::sync::Mutex::new(None),
-            script: String::new(),
-            rpc: Arc::new(WorkflowRpc(owner.clone())),
-            start: CancellationToken::new(),
-            cancel: CancellationToken::new(),
-            cancelled_at_settlement: std::sync::atomic::AtomicBool::new(false),
-            outcome,
-        });
-        let program = crate::AdmittedProgram {
-            id: "missing-job".into(),
-            request,
-            result,
-            started: true,
-        };
-        let (reported, value) = settle_workflow(
-            owner.clone(),
-            jobs,
-            scope,
-            program,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            matches!(&reported, ProgramOutcome::Failed { code, .. } if code == "program.cleanup")
-        );
-        assert_eq!(*owner.durable.lock().unwrap(), Some(reported));
-        assert_eq!(
-            value, None,
-            "failed cleanup must not expose a successful script value"
-        );
+        let jobs = meta.root().lookup_local::<JobsContract>().unwrap();
+        for fault in [
+            rsi_agent_turn_protocol::TurnError::ExecutionOutcomeUnknown,
+            rsi_agent_turn_protocol::TurnError::DomainOutcomeUnknown {
+                request_id: "uncertain-domain".into(),
+            },
+        ] {
+            let scope = jobs
+                .acquire_scope(JobScopeId::new("test", ["rpc-uncertainty"]).unwrap())
+                .unwrap();
+            let release = CancellationToken::new();
+            let run = Arc::new(RecordingRun {
+                jobs: jobs.clone(),
+                scope: scope.clone(),
+                durable: std::sync::Mutex::new(None),
+                fault: Some(fault),
+                entered: CancellationToken::new(),
+                release: Some(release.clone()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                terminal: None,
+                cancellation: CancellationToken::new(),
+            });
+            let rpc = WorkflowRpc(run.clone());
+            for method in ["log", "phase"] {
+                assert_eq!(
+                    rpc.call(
+                        method.into(),
+                        json!({"name":"phase", "value":"progress"}),
+                        CancellationToken::new()
+                    )
+                    .await,
+                    Err(ProgramError::OutcomeUnknown)
+                );
+            }
+            let cancel = CancellationToken::new();
+            let future = rpc.call("agent".into(), json!({"message":"effect"}), cancel.clone());
+            tokio::pin!(future);
+            tokio::select! { result = &mut future => panic!("early settlement: {result:?}"), () = run.entered.cancelled() => {} }
+            cancel.cancel();
+            assert!(futures_util::FutureExt::now_or_never(future.as_mut()).is_none());
+            assert_eq!(run.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+            release.cancel();
+            assert_eq!(future.await, Err(ProgramError::OutcomeUnknown));
+            assert_eq!(
+                run.calls.load(std::sync::atomic::Ordering::SeqCst),
+                4,
+                "agent was constructed once"
+            );
+            jobs.finalize_scope(&scope).await.unwrap();
+        }
         assert!(plugin.dispose().await.is_clean());
-        assert!(runtime.shutdown().await.is_clean());
+        assert!(meta.shutdown().await.is_clean());
     }
 }

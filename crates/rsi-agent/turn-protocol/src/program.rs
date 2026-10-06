@@ -105,6 +105,9 @@ pub trait ProgramRun: fmt::Debug + Send + Sync + 'static {
     /// Durably admits one stable initial child and waits for its exclusive receipt.
     /// Run cancellation drains admitted source mutations, then releases this waiter
     /// with `TurnError::Cancelled`; the run owner still settles actual child terminals.
+    /// Adapters retain this operation through cancellation, concurrently driving
+    /// cancellation when both operations may need the same admission. Typed
+    /// uncertainty survives even when cancellation also succeeds.
     async fn agent(&self, request: ProgramAgentRequest) -> crate::Result<ProgramAgentResult>;
     /// Records bounded progress, charged to the independent run budget.
     async fn progress(&self, phase: Option<String>, message: String) -> crate::Result<()>;

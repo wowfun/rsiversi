@@ -85,7 +85,7 @@ type ProgramReadBarrier = (
 );
 #[derive(Debug)]
 struct FactReadRaceStore {
-    inner: Arc<MemoryStore>,
+    inner: Arc<dyn SessionStore>,
     pause_reply_for: Mutex<Option<SessionId>>,
     fail_reply_read: AtomicBool,
     reply_pages: AtomicUsize,
@@ -181,7 +181,7 @@ struct FactReadRaceStore {
 }
 
 impl FactReadRaceStore {
-    fn new(inner: Arc<MemoryStore>) -> Self {
+    fn new(inner: Arc<dyn SessionStore>) -> Self {
         Self {
             inner,
             pause_reply_for: Mutex::new(None),

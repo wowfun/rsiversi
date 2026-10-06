@@ -2,12 +2,44 @@ use super::*;
 use rsi_process::DuplexRead;
 use std::{collections::VecDeque, sync::atomic::AtomicUsize};
 
+#[tokio::test]
+async fn containment_survives_panic_payload_destructors() {
+    struct HostilePayload(Arc<AtomicUsize>);
+    impl Drop for HostilePayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::panic::panic_any(Self(self.0.clone()));
+        }
+    }
+    for synchronous in [true, false] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let payload = HostilePayload(drops.clone());
+        let result: Result<(), ProgramError> = if synchronous {
+            contain_sync(|| std::panic::panic_any(payload))
+        } else {
+            contain(async move { std::panic::panic_any(payload) }).await
+        };
+        assert_eq!(result, Err(ProgramError::OutcomeUnknown));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            2,
+            "last hostile payload must be forgotten"
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct Port {
     incoming: Mutex<VecDeque<u8>>,
     written: Mutex<Vec<u8>>,
     read_bytes: AtomicUsize,
     hold_open: bool,
+    capture_failure: Option<CaptureFailure>,
+}
+#[derive(Clone, Copy, Debug)]
+enum CaptureFailure {
+    Io,
+    Panic,
 }
 #[async_trait]
 impl DuplexInput for Port {
@@ -88,15 +120,392 @@ impl ProgramRpc for Rpc {
         }
     }
 }
-fn request(rpc: Arc<Rpc>) -> Request {
+fn request(rpc: Arc<dyn ProgramRpc>) -> Request {
     Request {
         spec: Mutex::new(None),
         script: "return 42".into(),
+        definitions: json!([]),
         rpc,
         start: CancellationToken::new(),
         cancel: CancellationToken::new(),
         cancelled_at_settlement: AtomicBool::new(false),
-        outcome: watch::channel(None).0,
+        outcome: watch::channel(None).1,
+        completion: Mutex::new(None),
+    }
+}
+
+#[tokio::test]
+async fn multibyte_script_error_frames_stay_within_the_diagnostic_byte_bound() {
+    let request = request(Arc::new(Rpc::default()));
+    for message in ["x".repeat(16384), "界".repeat(4096)] {
+        let port = frames([json!({"type":"error","message":message})], false);
+        let ProgramError::Failed(diagnostic) =
+            exchange(port.clone(), port, &request).await.unwrap_err()
+        else {
+            panic!("script error");
+        };
+        assert!(diagnostic.len() <= 4096);
+        assert!(message.starts_with(&diagnostic));
+        assert!(diagnostic.len() >= 4094);
+    }
+}
+
+#[derive(Debug)]
+struct UnusedProvider;
+#[async_trait]
+impl DuplexProcess for UnusedProvider {
+    async fn spawn(&self, _: DuplexProcessSpec) -> rsi_process::Result<ManagedDuplexProcess> {
+        panic!("retained spawn must not be replaced with another invocation");
+    }
+}
+
+#[derive(Debug, Default)]
+struct ControlledProcess {
+    terminated: CancellationToken,
+    settled: CancellationToken,
+    port: Arc<Port>,
+    panic_termination: AtomicBool,
+    fail_settlement: bool,
+}
+impl rsi_process::ProcessOutput for Port {
+    fn read_from(&self, _: u64) -> rsi_process::Result<rsi_process::ProcessRead> {
+        match self.capture_failure {
+            Some(CaptureFailure::Io) => {
+                return Err(rsi_process::ProcessError::Io("stderr read".into()));
+            }
+            Some(CaptureFailure::Panic) => panic!("stderr capture panic"),
+            None => {}
+        }
+        Ok(rsi_process::ProcessRead {
+            bytes: vec![],
+            oldest_offset: 0,
+            next_offset: 0,
+            lossy: false,
+            full_output: None,
+        })
+    }
+    fn peek_tail(&self, _: usize) -> rsi_process::Result<rsi_process::ProcessRead> {
+        self.read_from(0)
+    }
+}
+#[async_trait]
+impl rsi_process::DuplexControl for ControlledProcess {
+    fn pid(&self) -> u32 {
+        42
+    }
+    fn stdin(&self) -> Arc<dyn DuplexInput> {
+        self.port.clone()
+    }
+    fn stdout(&self) -> Arc<dyn DuplexOutput> {
+        self.port.clone()
+    }
+    fn stderr(&self) -> Arc<dyn rsi_process::ProcessOutput> {
+        self.port.clone()
+    }
+    fn terminate(&self) {
+        self.terminated.cancel();
+        assert!(
+            !self.panic_termination.swap(false, Ordering::SeqCst),
+            "termination panic"
+        );
+    }
+    async fn wait(&self) -> rsi_process::Result<rsi_process::ProcessOutcome> {
+        self.settled.cancelled().await;
+        Ok(rsi_process::ProcessOutcome {
+            exit_code: Some(0),
+            signal: None,
+        })
+    }
+    async fn wait_settlement(&self) -> rsi_process::Result<()> {
+        self.settled.cancelled().await;
+        if self.fail_settlement {
+            Err(rsi_process::ProcessError::Io("settlement failed".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn owned_execution(
+    tasks: &tokio_util::task::TaskTracker,
+) -> (
+    ExecutionGuard,
+    watch::Receiver<Option<Result<Value, ProgramError>>>,
+) {
+    let mut req = request(Arc::new(Rpc::default()));
+    let (sender, receiver) = watch::channel(None);
+    req.outcome = receiver.clone();
+    let request = Arc::new(req);
+    let control = Arc::new(Control {
+        request: request.clone(),
+        stderr: Mutex::new(None),
+    });
+    let execution = Execution {
+        request: request.clone(),
+        control,
+        provider: Arc::new(UnusedProvider),
+        spawning: None,
+        process: None,
+        calls: Calls::new(),
+        rpc_cancel: request.cancel.child_token(),
+        result: None,
+        completion: Completion(Some(sender)),
+    };
+    (ExecutionGuard::new(execution, tasks.clone()), receiver)
+}
+
+#[tokio::test]
+async fn settlement_preserves_execution_failure_and_still_escalates_uncertainty() {
+    for panic_termination in [false, true] {
+        let tasks = tokio_util::task::TaskTracker::new();
+        let (mut guard, receiver) = owned_execution(&tasks);
+        let mut state = guard.state.take().unwrap();
+        let process = Arc::new(ControlledProcess {
+            panic_termination: AtomicBool::new(panic_termination),
+            fail_settlement: true,
+            ..ControlledProcess::default()
+        });
+        process.settled.cancel();
+        state.process = Some(ManagedDuplexProcess::new(process.clone()));
+        let original = ProgramError::Failed("script root cause".into());
+        state.result = Some(Err(original.clone()));
+        state.settle().await;
+        assert_eq!(
+            wait_result(receiver).await,
+            Err(if panic_termination {
+                ProgramError::OutcomeUnknown
+            } else {
+                original
+            })
+        );
+        assert!(process.terminated.is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn settlement_distinguishes_diagnostic_errors_from_process_boundary_failure() {
+    for (capture_failure, panic_termination, fail_settlement, initial_unknown, expected) in [
+        (Some(CaptureFailure::Io), false, false, false, Ok(json!(42))),
+        (
+            Some(CaptureFailure::Panic),
+            false,
+            false,
+            false,
+            Err(ProgramError::OutcomeUnknown),
+        ),
+        (None, true, false, false, Err(ProgramError::OutcomeUnknown)),
+        (
+            None,
+            false,
+            true,
+            false,
+            Err("process I/O failed: settlement failed".into()),
+        ),
+        (
+            Some(CaptureFailure::Io),
+            false,
+            true,
+            true,
+            Err(ProgramError::OutcomeUnknown),
+        ),
+    ] {
+        let tasks = tokio_util::task::TaskTracker::new();
+        let (mut guard, receiver) = owned_execution(&tasks);
+        let mut state = guard.state.take().unwrap();
+        let process = Arc::new(ControlledProcess {
+            port: Arc::new(Port {
+                capture_failure,
+                ..Port::default()
+            }),
+            panic_termination: AtomicBool::new(panic_termination),
+            fail_settlement,
+            ..ControlledProcess::default()
+        });
+        process.settled.cancel();
+        state.process = Some(ManagedDuplexProcess::new(process.clone()));
+        state.result = Some(if initial_unknown {
+            Err(ProgramError::OutcomeUnknown)
+        } else {
+            Ok(json!(42))
+        });
+        state.settle().await;
+        let result = wait_result(receiver).await;
+        assert_eq!(result, expected);
+        assert!(process.terminated.is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn abort_during_settlement_keeps_provisional_success_unknown_until_actual_cleanup() {
+    let tasks = tokio_util::task::TaskTracker::new();
+    let (mut guard, receiver) = owned_execution(&tasks);
+    let process = Arc::new(ControlledProcess::default());
+    guard.state.as_mut().unwrap().process = Some(ManagedDuplexProcess::new(process.clone()));
+    guard.state.as_mut().unwrap().result = Some(Ok(json!(42)));
+    // Begin at the fixture's parsed-result boundary and exercise the production
+    // settlement and guard destructor, with process cleanup still pending.
+    let task = tasks.spawn(async move {
+        guard.state.as_mut().unwrap().settle().await;
+        guard.state.take();
+    });
+    process.terminated.cancelled().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tasks.close();
+    assert!(wait_result(receiver.clone()).now_or_never().is_none());
+    assert!(tasks.wait().now_or_never().is_none());
+    process.settled.cancel();
+    assert_eq!(
+        wait_result(receiver).await,
+        Err(ProgramError::OutcomeUnknown)
+    );
+    tasks.wait().await;
+}
+
+#[tokio::test]
+async fn abort_before_first_poll_preserves_completion_for_all_observers() {
+    let tasks = tokio_util::task::TaskTracker::new();
+    let (owner, receiver) = owned_execution(&tasks);
+    let task = tasks.spawn(owner.run());
+    tasks.close();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let (first, second) = tokio::join!(wait_result(receiver.clone()), wait_result(receiver));
+    assert_eq!(first, Err(ProgramError::OutcomeUnknown));
+    assert_eq!(second, first);
+    tasks.wait().await;
+}
+#[tokio::test]
+async fn abort_mid_drain_preserves_the_original_handler_until_it_finishes() {
+    struct HandlerDrop(Arc<AtomicUsize>);
+    impl Drop for HandlerDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let tasks = tokio_util::task::TaskTracker::new();
+    let (mut guard, receiver) = owned_execution(&tasks);
+    let entered = CancellationToken::new();
+    let release = CancellationToken::new();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let process = Arc::new(ControlledProcess::default());
+    process.settled.cancel();
+    let state = guard.state.as_mut().unwrap();
+    state.process = Some(ManagedDuplexProcess::new(process));
+    state.result = Some(Ok(json!(42)));
+    let handler = {
+        let entered = entered.clone();
+        let release = release.clone();
+        let polls = polls.clone();
+        let drops = drops.clone();
+        async move {
+            let _drop = HandlerDrop(drops);
+            polls.fetch_add(1, Ordering::SeqCst);
+            entered.cancel();
+            release.cancelled().await;
+            (1, Ok(Value::Null))
+        }
+        .boxed()
+    };
+    state.calls.push(handler);
+    let task = tasks.spawn(async move {
+        guard.state.as_mut().unwrap().settle().await;
+        guard.state.take();
+    });
+    entered.cancelled().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tasks.close();
+    assert!(wait_result(receiver.clone()).now_or_never().is_none());
+    assert!(tasks.wait().now_or_never().is_none());
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        0,
+        "the pending handler is still owned"
+    );
+    release.cancel();
+    assert_eq!(
+        wait_result(receiver).await,
+        Err(ProgramError::OutcomeUnknown)
+    );
+    tasks.wait().await;
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        1,
+        "the handler was not reconstructed"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn abort_retains_the_pending_spawn_and_rpc_until_actual_settlement() {
+    for pending_spawn in [false, true] {
+        let tasks = tokio_util::task::TaskTracker::new();
+        let (mut owner, receiver) = owned_execution(&tasks);
+        let process = Arc::new(ControlledProcess::default());
+        let release = CancellationToken::new();
+        let spawn_polls = Arc::new(AtomicUsize::new(0));
+        if pending_spawn {
+            let control = process.clone();
+            let release = release.clone();
+            let polls = spawn_polls.clone();
+            let spawning = async move {
+                polls.fetch_add(1, Ordering::SeqCst);
+                release.cancelled().await;
+                Ok(ManagedDuplexProcess::new(control))
+            }
+            .boxed();
+            owner.state.as_mut().unwrap().spawning = Some(spawning);
+            // Poll once without consuming the retained single-use future.
+            assert!(
+                owner
+                    .state
+                    .as_mut()
+                    .unwrap()
+                    .spawning
+                    .as_mut()
+                    .unwrap()
+                    .now_or_never()
+                    .is_none()
+            );
+        } else {
+            owner.state.as_mut().unwrap().process =
+                Some(ManagedDuplexProcess::new(process.clone()));
+            let release = release.clone();
+            owner.state.as_mut().unwrap().calls.push(
+                async move {
+                    release.cancelled().await;
+                    (1, Err("released RPC".into()))
+                }
+                .boxed(),
+            );
+        }
+        let task = tasks.spawn(owner.run());
+        tasks.close();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        if pending_spawn {
+            assert!(wait_result(receiver.clone()).now_or_never().is_none());
+            release.cancel();
+        }
+        process.terminated.cancelled().await;
+        assert!(wait_result(receiver.clone()).now_or_never().is_none());
+        assert!(
+            tasks.wait().now_or_never().is_none(),
+            "cleanup retains its tracker token"
+        );
+        release.cancel();
+        process.settled.cancel();
+        assert_eq!(
+            wait_result(receiver).await,
+            Err(ProgramError::OutcomeUnknown)
+        );
+        tasks.wait().await;
+        assert_eq!(
+            spawn_polls.load(Ordering::SeqCst),
+            usize::from(pending_spawn)
+        );
     }
 }
 #[tokio::test]
@@ -140,7 +549,9 @@ async fn oversized_prefix_is_rejected_before_body_read_and_oversized_write_emits
 async fn fragmented_duplex_preserves_reply_and_exact_result_bound() {
     for extra in [0, 1] {
         let rpc = Arc::new(Rpc::default());
-        let req = request(rpc.clone());
+        let mut req = request(rpc.clone());
+        req.script = "return {text: '中\\n\\\"'};".into();
+        req.definitions = json!([{"name":"echo", "schema":{"text":"中\n\""}}]);
         let value =
             Value::String("中".repeat((MAXIMUM_RESULT - 2) / 3) + "xx" + &"x".repeat(extra));
         assert_eq!(
@@ -171,6 +582,13 @@ async fn fragmented_duplex_preserves_reply_and_exact_result_bound() {
             offset += length;
         }
         assert_eq!(output.len(), 2);
+        assert_eq!(
+            output[0],
+            json!({
+                "type":"start", "script":req.script, "definitions":req.definitions,
+                "maximum_calls":MAXIMUM_PROGRAM_OUTSTANDING_CALLS,
+            })
+        );
         assert_eq!(
             output[1],
             json!({"type":"reply","id":1,"value":{"text":"中\n\""}})

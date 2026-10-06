@@ -369,7 +369,10 @@ impl AgentKernel {
             quiescent_descendants_of: None,
         })
         .await?
-        .map_err(turn_store_error)?;
+        .map_err(|error| match error {
+            StoreError::Io(_) => TurnError::ExecutionOutcomeUnknown,
+            other => turn_store_error(other),
+        })?;
         Ok(())
     }
 }

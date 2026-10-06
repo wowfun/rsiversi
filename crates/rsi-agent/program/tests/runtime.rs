@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use rsi_agent_program::{
     AdmittedProgram, ProgramRpc, ProgramRuntimeContract, ProgramRuntimeFactory,
 };
@@ -18,6 +19,206 @@ struct Fixture {
     jobs: Arc<dyn Jobs>,
     scope: JobScopeAuthority,
     workspace: tempfile::TempDir,
+}
+
+#[derive(Debug)]
+struct PanickingEffect {
+    construction: bool,
+    effects: std::sync::atomic::AtomicUsize,
+}
+impl ProgramRpc for PanickingEffect {
+    fn definitions(&self) -> Value {
+        json!([])
+    }
+    fn call<'life0, 'async_trait>(
+        &'life0 self,
+        _: String,
+        _: Value,
+        _: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Value, rsi_agent_program::ProgramError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        if self.construction {
+            self.effects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("injected callback construction panic after effect");
+        }
+        Box::pin(async move {
+            self.effects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("injected callback polling panic after effect");
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn actual_node_cannot_retry_panicked_effect_in_construction_or_polling() {
+    for construction in [false, true] {
+        let fixture = Fixture::new().await;
+        let rpc = Arc::new(PanickingEffect {
+            construction,
+            effects: std::sync::atomic::AtomicUsize::default(),
+        });
+        let mut program = fixture.prepare(
+            "try { await tools.call('effect', {}); } catch { require('fs').writeFileSync('retried', 'yes'); await tools.call('effect', {}); } return 'continued';", rpc.clone()).await;
+        program.start().unwrap();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(program.result(), program.result())
+        })
+        .await
+        .unwrap();
+        assert_eq!(first, Err(rsi_agent_program::ProgramError::OutcomeUnknown));
+        assert_eq!(second, first);
+        assert_eq!(rpc.effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!fixture.workspace.path().join("retried").exists());
+        assert_eq!(
+            fixture
+                .jobs
+                .wait(&fixture.scope, program.job_id(), 0, 0)
+                .await
+                .unwrap()
+                .job
+                .status,
+            JobStatus::OutcomeUnknown
+        );
+        fixture.close().await;
+    }
+}
+
+#[derive(Debug)]
+struct DefinitionsPanic;
+#[async_trait]
+impl ProgramRpc for DefinitionsPanic {
+    fn definitions(&self) -> Value {
+        panic!("injected pure definitions panic");
+    }
+    async fn call(
+        &self,
+        _: String,
+        _: Value,
+        _: CancellationToken,
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn definitions_panic_refuses_job_admission() {
+    let fixture = Fixture::new().await;
+    let execution = fixture.execution(
+        CancellationToken::new(),
+        fixture
+            .runtime
+            .root()
+            .lookup_local::<SandboxContract>()
+            .unwrap(),
+    );
+    let runtime = fixture
+        .runtime
+        .root()
+        .lookup_local::<ProgramRuntimeContract>()
+        .unwrap();
+    let process = runtime.prepare_process(&execution).await.unwrap();
+    let result = runtime
+        .admit(
+            "return 42".into(),
+            &execution,
+            &fixture.scope,
+            Arc::new(DefinitionsPanic),
+            process,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(rsi_agent_program::ProgramError::Failed(message)) if message.contains("before admission"))
+    );
+    assert!(fixture.jobs.list(&fixture.scope).unwrap().is_empty());
+    fixture.close().await;
+}
+
+#[derive(Debug, Default)]
+struct Noncooperative {
+    entered: Notify,
+    release: CancellationToken,
+    pid: std::sync::atomic::AtomicUsize,
+}
+#[async_trait]
+impl ProgramRpc for Noncooperative {
+    fn definitions(&self) -> Value {
+        json!([])
+    }
+    async fn call(
+        &self,
+        _: String,
+        args: Value,
+        _: CancellationToken,
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
+        self.pid.store(
+            usize::try_from(args["arguments"]["pid"].as_u64().unwrap()).unwrap(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.entered.notify_one();
+        self.release.cancelled().await;
+        Err("handler released".into())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn cancellation_terminates_node_before_noncooperative_rpc_settles() {
+    let fixture = Fixture::new().await;
+    let gate = Arc::new(Noncooperative::default());
+    let mut program = fixture
+        .prepare(
+            "return await tools.call('gate', {pid:process.pid})",
+            gate.clone(),
+        )
+        .await;
+    program.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let pid = gate.pid.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(pid > 0);
+    program.cancel();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        program.result().now_or_never().is_none(),
+        "unsettled RPC must remain owned"
+    );
+    gate.release.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), program.result())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .jobs
+            .wait(&fixture.scope, program.job_id(), 0, 0)
+            .await
+            .unwrap()
+            .job
+            .status,
+        JobStatus::Cancelled
+    );
+    fixture.close().await;
 }
 impl Fixture {
     async fn new() -> Self {
@@ -394,6 +595,52 @@ impl ProgramRpc for UncertainRpc {
     ) -> Result<Value, rsi_agent_program::ProgramError> {
         Err(rsi_agent_program::ProgramError::OutcomeUnknown)
     }
+}
+#[derive(Debug)]
+struct KnownRefusalRpc(rsi_agent_turn_protocol::TurnError);
+#[async_trait]
+impl ProgramRpc for KnownRefusalRpc {
+    fn definitions(&self) -> Value {
+        json!([])
+    }
+    async fn call(
+        &self,
+        _: String,
+        _: Value,
+        _: CancellationToken,
+    ) -> Result<Value, rsi_agent_program::ProgramError> {
+        Err(self.0.clone().into())
+    }
+}
+#[tokio::test]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn actual_node_can_catch_known_rpc_refusals_and_return_a_curated_result() {
+    let fixture = Fixture::new().await;
+    for refusal in [
+        rsi_agent_turn_protocol::TurnError::Cancelled,
+        rsi_agent_turn_protocol::TurnError::Capacity,
+        rsi_agent_turn_protocol::TurnError::Invalid("known invalid request".into()),
+    ] {
+        let mut program = fixture.prepare(
+            "try { await tools.call('effect', {}); } catch { return 'caught known refusal'; } throw Error('RPC should refuse');",
+            Arc::new(KnownRefusalRpc(refusal)),
+        ).await;
+        program.start().unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), program.result())
+                .await
+                .unwrap()
+                .unwrap(),
+            json!("caught known refusal"),
+        );
+        let read = fixture
+            .jobs
+            .wait(&fixture.scope, program.job_id(), 0, 0)
+            .await
+            .unwrap();
+        assert_eq!(read.job.status, JobStatus::Completed);
+    }
+    fixture.close().await;
 }
 #[tokio::test]
 #[ignore = "requires explicit RSI_TEST_NODE native integration"]

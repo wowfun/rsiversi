@@ -1,5 +1,10 @@
 # rsi-agent-kernel
 
+Program append commits reconcile lost acknowledgements against the exact durable
+suffix. If an I/O failure cannot be reconciled, acceptance, progress and terminal
+publication report `ExecutionOutcomeUnknown`; pre-admission refusals retain their
+known categories. An unreadable acknowledgement never proves that a write failed.
+
 Claim issuance validates the execution binding and claim horizon before consuming
 the queue entry or installing an executor owner. An invalid binding quarantines that Session, reports a permanent observation
 error, and releases its unused prepared tree lane. Other Sessions continue claiming.

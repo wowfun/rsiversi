@@ -1,4 +1,4 @@
-use crate::workflow::{failure, meta};
+use crate::workflow::{failure, meta, turn_failure};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::ProgramRunId;
 use rsi_agent_turn_protocol::{
@@ -80,7 +80,7 @@ impl ToolExecutor for Control {
             self.turns
                 .cancel_program(&caller, &args.run_id)
                 .await
-                .map_err(failure)?;
+                .map_err(turn_failure)?;
             ToolResult::new(
                 json!({"run_id":args.run_id,"cancellation_requested":true}),
                 vec![],
@@ -91,7 +91,7 @@ impl ToolExecutor for Control {
                 .turns
                 .read_program(&caller, &args.run_id)
                 .await
-                .map_err(failure)?;
+                .map_err(turn_failure)?;
             page(&snapshot, &args)
         }
     }
