@@ -58,6 +58,22 @@ object can be read but cannot acknowledge a repeated publication. Windows flushe
 file contents but does not promise power-loss durability for CAS directory
 entries. Staging cleanup is separate from existing-object publication.
 
+`SqliteStore::inspect_cas` is an explicit offline, read-only inspection under the
+existing writer lease, with the same no-create and nonempty-WAL refusal as
+`verify`. Default `Metadata` mode reports bounded registry/file observations;
+optional `Full` mode also hashes registered bodies and checks typed Program and
+frozen-reference addresses in canonical Facts and controls. It does not interpret
+opaque domain payloads or change lightweight `verify`. Inspection streams bounded
+events to a visitor and reports completion, cancellation or visitor stop; fatal
+errors retain partial counts. It retains no global object inventory and never
+deletes files, including metadata-owned abandoned captures. Interrupted inspection
+can restart safely but has no persistent directory cursor. This synchronous API
+performs blocking database and filesystem work, including full-body hashing in
+`Full` mode. Async callers must run it on a blocking worker. Dropping that worker's
+join handle does not stop inspection: cancel the supplied token and await the
+worker to release its lease. Cancellation is cooperative between rows, entries
+and hash chunks, and cannot interrupt an active syscall or visitor callback.
+
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
@@ -257,7 +273,9 @@ immutable file publication do not hold a SQLite connection mutex; metadata is
 checked or inserted only after the file phase completes.
 
 Every admitted blocking database or CAS job retains the complete Store owner,
-including its writer lease, even after its async waiter is cancelled. The three
+including its writer lease, even after its async waiter is cancelled. A reusable
+Session-proof flight can notify its waiters before dropping its final owner;
+completion of `validate_session` is not a writer-lease release barrier. The three
 connections share that lifetime: clean shutdown closes both readers first
 and the writer last, checkpointing the WAL into `sessions.sqlite3`, then explicitly
 unlocks and closes the persistent writer-lock file. Ordinary operation never removes the lock path.
@@ -354,3 +372,6 @@ Windows CAS opens retain every parent directory without delete sharing and
 reject all reparse points before opening the leaf. Those retained handles prevent
 parent replacement during path traversal; native Windows tests own platform proof.
 An unexpected EOF within an admitted CAS body is corruption, not a retryable I/O fault.
+
+CAS payload and inspection reads retry interrupted trailing EOF probes. A signal
+alone cannot classify a complete object as unreadable or growing.

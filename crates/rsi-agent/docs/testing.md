@@ -63,6 +63,11 @@ requires the exact child-test selector and explicit fixture environment; each
 intentional exit reports its boundary. The child entrypoint is ignored in ordinary
 test runs and selected explicitly by its parent subprocess tests. These tests
 establish process-crash ordering and refusal, not physical power-loss durability.
+Offline inspection tests preserve storage and cover bounded corrupt keys, exact
+EOF, cancellation, native references and no-follow filesystem access. Completion
+tests check that a stop marker cannot hide a different fatal error.
+Async inspection tests dispatch the synchronous scan onto a blocking worker, with an
+explicit visitor barrier proving the runtime can cancel a still-running scan.
 Concurrent warm reads are sampled during cold validation without a pass/fail
 timing threshold or a claim that process memory is OS-cold.
 

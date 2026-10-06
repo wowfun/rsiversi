@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) trait CanonicalObserver {
+    fn checkpoint(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn control(&mut self, _: &SessionId, _: &AgentControlRecord) -> Result<()> {
+        Ok(())
+    }
+    fn fact(&mut self, _: &SessionId, _: &SessionFact) -> Result<()> {
+        Ok(())
+    }
+}
+struct Unobserved;
+impl CanonicalObserver for Unobserved {}
+
 pub(super) fn initialize_or_validate_schema(
     connection: &mut Connection,
     may_initialize: bool,
@@ -137,6 +151,14 @@ pub(super) fn validate_session(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<ControlReplaySummary> {
+    validate_session_observed(connection, session_id, &mut Unobserved)
+}
+
+pub(super) fn validate_session_observed(
+    connection: &Connection,
+    session_id: &SessionId,
+    observer: &mut impl CanonicalObserver,
+) -> Result<ControlReplaySummary> {
     let (header, durable_seq) = read_session_header_row(connection, session_id)?;
     rsi_agent_store_protocol::validate_program_header(
         &super::program_graph::Graph(connection),
@@ -186,7 +208,7 @@ pub(super) fn validate_session(
 
     validate_turn_index(connection, session_id)?;
     validate_session_lineage(connection, &header)?;
-    validate_agent_indexes(connection, &header)
+    validate_agent_indexes_observed(connection, &header, observer)
 }
 
 fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> Result<()> {
@@ -426,6 +448,13 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
 }
 
 pub(super) fn validate_database(connection: &Connection) -> Result<()> {
+    validate_database_observed(connection, &mut Unobserved)
+}
+
+pub(super) fn validate_database_observed(
+    connection: &Connection,
+    observer: &mut impl CanonicalObserver,
+) -> Result<()> {
     let integrity = connection
         .query_row("PRAGMA integrity_check", [], |row| {
             bounded_text(
@@ -470,13 +499,15 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
     }
     let mut cursor = None;
     loop {
+        observer.checkpoint()?;
         let page = session_id_page(connection, cursor.as_ref())?;
         if page.is_empty() {
             break;
         }
         for session_id in &page {
-            let controls = validate_session(connection, session_id)?;
-            let facts = validate_canonical_fact_prefix(connection, session_id)?;
+            observer.checkpoint()?;
+            let controls = validate_session_observed(connection, session_id, observer)?;
+            let facts = validate_canonical_fact_prefix(connection, session_id, observer)?;
             let (created, activity) = connection
                 .query_row(
                     "SELECT created_at_ms, last_activity_ms FROM sessions WHERE session_id = ?1",
@@ -1048,9 +1079,10 @@ impl ActivationProjection {
 }
 
 #[allow(clippy::too_many_lines)] // One canonical scan compares the complete Fact-derived session projection.
-pub(super) fn validate_canonical_fact_prefix(
+fn validate_canonical_fact_prefix(
     connection: &Connection,
     session_id: &SessionId,
+    observer: &mut impl CanonicalObserver,
 ) -> Result<u64> {
     let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let expected_digest = connection
@@ -1078,6 +1110,7 @@ pub(super) fn validate_canonical_fact_prefix(
         ])
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
+        observer.checkpoint()?;
         let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
         let turn_id = bounded_text(row, 1, 256).map_err(sql_error)?;
         let fact_kind = bounded_text(row, 2, 8).map_err(sql_error)?;
@@ -1099,6 +1132,7 @@ pub(super) fn validate_canonical_fact_prefix(
                 "session Fact JSON differs from its durable turn index columns".into(),
             ));
         }
+        observer.fact(session_id, &fact)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
@@ -1313,9 +1347,19 @@ pub(super) struct ControlReplaySummary {
 
 /// Decode each bounded canonical control once and feed all index projections.
 #[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
+#[cfg(test)]
 pub(super) fn validate_agent_indexes(
     connection: &Connection,
     header: &SessionHeader,
+) -> Result<ControlReplaySummary> {
+    validate_agent_indexes_observed(connection, header, &mut Unobserved)
+}
+
+#[allow(clippy::too_many_lines)] // One canonical pass validates all related projections.
+fn validate_agent_indexes_observed(
+    connection: &Connection,
+    header: &SessionHeader,
+    observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
     let selected = header.session_id();
     let mut mailbox = MailboxProjection::default();
@@ -1344,6 +1388,7 @@ pub(super) fn validate_agent_indexes(
         ])
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
+        observer.checkpoint()?;
         let record: AgentControlRecord = decode_projected_json(
             "Agent control record",
             (
@@ -1353,6 +1398,7 @@ pub(super) fn validate_agent_indexes(
             MAXIMUM_SESSION_FACT_BYTES,
         )?;
         decoded += 1;
+        observer.control(selected, &record)?;
         activity.observe_control(&record);
         #[cfg(test)]
         CONTROL_DECODES.set(CONTROL_DECODES.get() + 1);

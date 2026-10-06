@@ -12,6 +12,46 @@ pub(super) fn read_retry(
     }
 }
 
+pub(super) struct OfflineStore {
+    pub(super) connection: Connection,
+    pub(super) root: PathBuf,
+    _writer_lock: WriterLease,
+}
+
+pub(super) fn open_offline_store(path: &Path) -> Result<OfflineStore> {
+    let root = existing_root(path)?;
+    let writer_lock = acquire_existing_writer_lock(&root)?;
+    reject_uncheckpointed_wal(&root)?;
+    let database_path = root.join("sessions.sqlite3");
+    let metadata = fs::symlink_metadata(&database_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::NotFound(database_path.display().to_string())
+        } else {
+            io_error(error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(StoreError::Corrupt(
+            "SQLite database is not a regular file".into(),
+        ));
+    }
+    let connection = open_verification_database(&database_path)?;
+    configure_reader(&connection)?;
+    let version = pragma_user_version(&connection)?;
+    if version != AGENT_STORE_SCHEMA_VERSION {
+        return Err(StoreError::SchemaMismatch {
+            expected: AGENT_STORE_SCHEMA_VERSION,
+            actual: version,
+        });
+    }
+    validate_schema_shape(&connection)?;
+    Ok(OfflineStore {
+        connection,
+        root,
+        _writer_lock: writer_lock,
+    })
+}
+
 pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
     let normalized = normalized_root_path(path)?;
     let path = normalized.as_path();

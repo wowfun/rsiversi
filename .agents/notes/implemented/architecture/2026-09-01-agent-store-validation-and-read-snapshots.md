@@ -104,6 +104,14 @@ Eliminating that residue requires a recoverable filesystem/SQLite publication
 protocol or an explicit bounded maintenance operation, not eager whole-CAS
 validation in ordinary open.
 
+Explicit offline CAS inspection shares verification's exclusive lease and
+immutable database opening, but streams bounded observations independently of
+lightweight SQLite verification. Full mode reuses canonical replay for native
+Program and frozen-reference addresses; opaque domain JSON remains uninterpreted.
+Metadata ownership includes abandoned captures, so lack of a current reference
+cannot authorize deletion. Inspection preserves every file and can restart after
+cancellation, without claiming a portable directory-resume cursor.
+
 CAS publication cannot recover a failed synchronization from visible readback.
 An existing target is verified and synchronized through the same handle before
 its namespace is synchronized. Filesystem publication and metadata commit remain

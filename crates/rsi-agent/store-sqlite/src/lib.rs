@@ -693,33 +693,8 @@ impl SqliteStore {
     /// Header and Fact, durable watermark, recomputed canonical Fact-prefix
     /// digest, and all turn-index relationships.
     pub fn verify(root: impl AsRef<Path>) -> Result<()> {
-        let root = existing_root(root.as_ref())?;
-        let _writer_lock = acquire_existing_writer_lock(&root)?;
-        reject_uncheckpointed_wal(&root)?;
-        let database_path = root.join("sessions.sqlite3");
-        let metadata = fs::symlink_metadata(&database_path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                StoreError::NotFound(database_path.display().to_string())
-            } else {
-                io_error(error)
-            }
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(StoreError::Corrupt(
-                "SQLite database is not a regular file".into(),
-            ));
-        }
-        let connection = open_verification_database(&database_path)?;
-        configure_reader(&connection)?;
-        let version = pragma_user_version(&connection)?;
-        if version != AGENT_STORE_SCHEMA_VERSION {
-            return Err(StoreError::SchemaMismatch {
-                expected: AGENT_STORE_SCHEMA_VERSION,
-                actual: version,
-            });
-        }
-        validate_schema_shape(&connection)?;
-        validate_database(&connection)
+        let offline = filesystem::open_offline_store(root.as_ref())?;
+        validate_database(&offline.connection)
     }
 
     async fn with_database<T, F>(
@@ -920,6 +895,11 @@ mod cas;
 mod cold_validation;
 mod domain;
 mod filesystem;
+mod inspection;
+pub use inspection::{
+    CasInspectionCompletion, CasInspectionError, CasInspectionEvent, CasInspectionIssue,
+    CasInspectionLocation, CasInspectionMode, CasInspectionStream, CasInspectionSummary,
+};
 mod program;
 mod program_graph;
 mod queue;
@@ -946,9 +926,8 @@ use cas::{
     sync_directory, validate_sha256,
 };
 use filesystem::{
-    acquire_existing_writer_lock, acquire_writer_lock, configure_reader, configure_writer,
-    existing_root, open_verification_database, prepare_cas_staging_directory,
-    prepare_owned_directory, prepare_root, reject_symlink_if_present, reject_uncheckpointed_wal,
+    acquire_writer_lock, configure_reader, configure_writer, prepare_cas_staging_directory,
+    prepare_owned_directory, prepare_root, reject_symlink_if_present,
 };
 use validation::{
     initialize_or_validate_schema, pragma_user_version, read_session_header_row, validate_database,

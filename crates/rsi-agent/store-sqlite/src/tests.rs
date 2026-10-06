@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tests/inspection.rs"]
+mod inspection;
+
 #[tokio::test]
 async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() {
     use cas::{PublicationPhase as Phase, PublicationStep as Step};
