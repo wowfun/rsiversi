@@ -57,6 +57,17 @@ Separate operational matrices traverse every member of 257- and 512-session
 working sets over repeated cycles and read a fixed one-Fact page against long
 control histories. Report latency distributions and actual API call counts;
 unit tests own exact decode counts and deterministic lane-blocking assertions.
+With `--features test-support`, the optimized `store_scaling` benchmark also
+samples small reads against a near-maximum encoded Fact page and sustained writes,
+retaining lane-separated samples in an explicit `RSI_STORE_BENCH_EVIDENCE` directory.
+The same benchmark measures explicit new/repeated CAS puts; set
+`RSI_STORE_BENCH_CAS_ONLY=1` to run that matrix alone. Large inline Fact bodies do
+not imply CAS publication. `RSI_STORE_BENCH_SKIP_MIXED=1` skips only the large
+mixed-lane workload. Mixed lanes start with validated sessions; an empty validation
+series means this warm phase required no cold validation. The separate cold phase
+measures validation latency. Capture includes the separate CAS lane and retains only the
+first 4096 completions per lane; distributions from a truncated capture describe
+that prefix, not the entire workload.
 CAS publication tests inject failures before and after required operations and
 crash a subprocess at file, link, namespace and metadata boundaries. Crash injection
 requires the exact child-test selector and explicit fixture environment; each

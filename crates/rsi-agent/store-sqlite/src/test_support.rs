@@ -76,29 +76,30 @@ impl SqliteStore {
     }
 }
 
-/// Timing observations for one completed normal reader operation. Nanoseconds are
+/// Timing observations for one completed Store lane operation. Nanoseconds are
 /// diagnostic samples, not deterministic performance gates or pure `SQLite` CPU time.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ReaderMeasurement {
-    /// Rust result type distinguishes Fact pages from small metadata reads.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct LaneMeasurement {
+    /// Diagnostic Rust result type for distinguishing operation samples.
+    /// This label is neither unique nor stable across compiler versions.
     pub result_type: &'static str,
-    /// Time waiting for the single normal reader permit.
+    /// Time waiting for the selected lane permit.
     pub admission_ns: u128,
     /// Time from dispatch to the blocking worker starting.
     pub scheduling_ns: u128,
-    /// Complete reader operation, including SQL, row extraction and validation.
+    /// Complete worker operation, including SQL, row extraction and validation.
     pub worker_ns: u128,
     /// JSON decoding inside that operation; remaining work includes SQL and paging.
     pub json_decode_ns: u128,
 }
 thread_local! { static DECODE_NS: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) }; }
-type Measurements = Arc<Mutex<Option<Vec<ReaderMeasurement>>>>;
-pub(super) struct ReaderProbe {
+type Measurements = Arc<Mutex<Option<Vec<LaneMeasurement>>>>;
+pub(super) struct LaneProbe {
     measurements: Measurements,
     started: std::time::Instant,
-    value: ReaderMeasurement,
+    value: LaneMeasurement,
 }
-impl ReaderProbe {
+impl LaneProbe {
     pub(super) fn start(
         measurements: Option<Measurements>,
         queued: std::time::Instant,
@@ -114,7 +115,7 @@ impl ReaderProbe {
         Some(Self {
             measurements,
             started,
-            value: ReaderMeasurement {
+            value: LaneMeasurement {
                 result_type,
                 admission_ns: dispatched.duration_since(queued).as_nanos(),
                 scheduling_ns: started.duration_since(dispatched).as_nanos(),
@@ -124,14 +125,14 @@ impl ReaderProbe {
         })
     }
 }
-impl Drop for ReaderProbe {
+impl Drop for LaneProbe {
     fn drop(&mut self) {
         self.value.worker_ns = self.started.elapsed().as_nanos();
         self.value.json_decode_ns = DECODE_NS.with(|value| value.take().unwrap_or(0));
         if let Some(values) = self.measurements.lock().unwrap().as_mut() {
             // Instrumentation itself cannot accumulate an unbounded history.
             if values.len() < 4096 {
-                values.push(self.value.clone());
+                values.push(self.value);
             }
         }
     }
@@ -161,16 +162,73 @@ impl SqliteStore {
     pub fn begin_reader_measurements(&self) {
         *self.inner.reader_measurements.lock().unwrap() = Some(Vec::new());
     }
-    /// Stops capture and consumes at most 4096 completed observations.
+    /// Stops capture and returns the first 4096 completed observations, or fewer.
+    /// Excess completions are dropped until capture stops; this is a prefix sample.
     ///
     /// # Panics
     /// Panics if the test instrumentation mutex was poisoned.
-    pub fn take_reader_measurements(&self) -> Vec<ReaderMeasurement> {
+    pub fn take_reader_measurements(&self) -> Vec<LaneMeasurement> {
         self.inner
             .reader_measurements
             .lock()
             .unwrap()
             .take()
             .unwrap_or_default()
+    }
+}
+
+/// Bounded diagnostic samples, separated by independently admitted Store lanes.
+#[derive(Debug, serde::Serialize)]
+pub struct StoreMeasurements {
+    /// Normal foreground reads.
+    pub reader: Vec<LaneMeasurement>,
+    /// Serialized writes.
+    pub writer: Vec<LaneMeasurement>,
+    /// Cold validation/proof operations.
+    pub validation: Vec<LaneMeasurement>,
+    /// Filesystem CAS publication and payload reads.
+    pub cas: Vec<LaneMeasurement>,
+}
+impl SqliteStore {
+    /// Starts bounded captures of reader, writer, cold-validation and CAS workers.
+    ///
+    /// # Panics
+    /// Panics if a diagnostic mutex is poisoned.
+    pub fn begin_store_measurements(&self) {
+        self.begin_reader_measurements();
+        *self.inner.writer_measurements.lock().unwrap() = Some(Vec::new());
+        *self.inner.validation_measurements.lock().unwrap() = Some(Vec::new());
+        *self.inner.cas_measurements.lock().unwrap() = Some(Vec::new());
+    }
+    /// Stops capture and returns the first 4096 completed observations per lane, or fewer.
+    /// Excess completions are dropped until capture stops; these are prefix samples.
+    ///
+    /// # Panics
+    /// Panics if a diagnostic mutex is poisoned.
+    pub fn take_store_measurements(&self) -> StoreMeasurements {
+        StoreMeasurements {
+            reader: self.take_reader_measurements(),
+            writer: self
+                .inner
+                .writer_measurements
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_default(),
+            validation: self
+                .inner
+                .validation_measurements
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_default(),
+            cas: self
+                .inner
+                .cas_measurements
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_default(),
+        }
     }
 }

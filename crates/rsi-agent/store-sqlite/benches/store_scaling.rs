@@ -58,6 +58,16 @@ async fn run() {
         counts.push(1_000_000);
     }
 
+    #[cfg(feature = "test-support")]
+    {
+        benchmark_cas_publication().await;
+        if std::env::var_os("RSI_STORE_BENCH_CAS_ONLY").is_some() {
+            return;
+        }
+        if std::env::var_os("RSI_STORE_BENCH_SKIP_MIXED").is_none() {
+            benchmark_mixed_lanes().await;
+        }
+    }
     for sessions in [128, 256, 512] {
         benchmark_metadata(sessions).await;
     }
@@ -109,7 +119,7 @@ async fn benchmark_case(fact_count: usize, payload_bytes: usize, shape: Shape) {
     });
     let mut first_validation = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
-        let store = SqliteStore::open(root.path()).expect("validation open");
+        let store = open_after_settlement(root.path()).await;
         first_validation.push(
             timed_async(async {
                 store
@@ -120,9 +130,10 @@ async fn benchmark_case(fact_count: usize, payload_bytes: usize, shape: Shape) {
             .await,
         );
     }
-    let verify = sample(3, || {
-        SqliteStore::verify(root.path()).expect("full verify");
-    });
+    let mut verify = Vec::with_capacity(3);
+    for _ in 0..3 {
+        verify.push(verify_after_settlement(root.path()).await);
+    }
 
     let copied = tempfile::tempdir().expect("copied benchmark root");
     std::fs::copy(&database, copied.path().join("sessions.sqlite3")).expect("copy database");
@@ -136,7 +147,7 @@ async fn benchmark_case(fact_count: usize, payload_bytes: usize, shape: Shape) {
     })
     .await;
     drop(copied_store);
-    let cold_verify = timed(|| SqliteStore::verify(copied.path()).expect("copied verify"));
+    let cold_verify = verify_after_settlement(copied.path()).await;
 
     println!(
         "case facts={fact_count} payload={payload_bytes} shape={shape:?} db_bytes={db_bytes} \
@@ -277,6 +288,10 @@ fn sample(mut count: usize, mut operation: impl FnMut()) -> Vec<Duration> {
 }
 
 fn report(label: &str, samples: &[Duration]) {
+    if samples.is_empty() {
+        println!("{label} samples=0");
+        return;
+    }
     let mut nanos = samples.iter().map(Duration::as_nanos).collect::<Vec<_>>();
     nanos.sort_unstable();
     let median = nanos[(nanos.len() - 1) / 2];
@@ -455,6 +470,8 @@ async fn benchmark_operational_working_set(sessions: usize) {
     }
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
+    #[cfg(feature = "test-support")]
+    store.begin_store_measurements();
     let mut durations = Vec::new();
     let mut returned = 0;
     for _ in 0..3 {
@@ -475,6 +492,15 @@ async fn benchmark_operational_working_set(sessions: usize) {
         durations.len()
     );
     report("operational_one_fact_page", &durations);
+    println!(
+        "cold_metrics={}",
+        serde_json::to_string(&store.cold_validation_metrics()).unwrap()
+    );
+    #[cfg(feature = "test-support")]
+    save_measurements(
+        &format!("working-set-{sessions}"),
+        &store.take_store_measurements(),
+    );
 }
 
 #[allow(clippy::too_many_lines)] // Report setup, fixed-page workload, and concurrent sampling together.
@@ -586,5 +612,167 @@ async fn benchmark_control_history(count: u64) {
     if !concurrent_headers.is_empty() {
         report("concurrent_warm_header", &concurrent_headers);
         report("concurrent_warm_fact_page", &concurrent_facts);
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn save_measurements(
+    case: &str,
+    samples: &rsi_agent_store_sqlite::test_support::StoreMeasurements,
+) {
+    for (lane, values) in [
+        ("reader", &samples.reader),
+        ("writer", &samples.writer),
+        ("validation", &samples.validation),
+        ("cas", &samples.cas),
+    ] {
+        let admission = values
+            .iter()
+            .map(|value| Duration::from_nanos(u64::try_from(value.admission_ns).unwrap()))
+            .collect::<Vec<_>>();
+        let worker = values
+            .iter()
+            .map(|value| Duration::from_nanos(u64::try_from(value.worker_ns).unwrap()))
+            .collect::<Vec<_>>();
+        report(&format!("{case}.{lane}.admission"), &admission);
+        report(&format!("{case}.{lane}.worker"), &worker);
+    }
+    if let Some(root) = std::env::var_os("RSI_STORE_BENCH_EVIDENCE") {
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(format!("{case}.json")),
+            serde_json::to_vec_pretty(&samples).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn benchmark_cas_publication() {
+    for bytes in [64, 64 * 1024, 1024 * 1024] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let body: std::sync::Arc<[u8]> = vec![b'x'; bytes].into();
+        store.begin_store_measurements();
+        let first = timed_async(async {
+            black_box(store.put_cas(body.clone()).await.unwrap());
+        })
+        .await;
+        let mut repeats = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            repeats.push(
+                timed_async(async {
+                    black_box(store.put_cas(body.clone()).await.unwrap());
+                })
+                .await,
+            );
+        }
+        let case = format!("cas-publication-{bytes}");
+        println!("cas_case body_bytes={bytes} first_put_calls=1 repeated_put_calls={SAMPLES}");
+        report(&format!("{case}.first_call"), &[first]);
+        report(&format!("{case}.repeated_call"), &repeats);
+        save_measurements(&case, &store.take_store_measurements());
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn benchmark_mixed_lanes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    // Two 31 MiB bodies approach the 64 MiB page budget while staying below
+    // the independent 36 MiB per-Fact boundary. The exact encoded size is reported.
+    append_session(&store, 0, 4, 31 * 1024 * 1024, true).await;
+    append_session(&store, 1, 2, 256, false).await;
+    let large = SessionId::new("session-000").unwrap();
+    let small = SessionId::new("session-001").unwrap();
+    store.validate_session(&large).await.unwrap();
+    store.validate_session(&small).await.unwrap();
+    let page = store.read_facts(&large, 0, 4).await.unwrap();
+    let bytes: usize = page.facts.iter().map(SessionFact::encoded_len).sum();
+    drop(page);
+    store.begin_store_measurements();
+    let pages = async {
+        for _ in 0..12 {
+            black_box(store.read_facts(&large, 0, 4).await.unwrap());
+        }
+    };
+    let headers = async {
+        for _ in 0..100 {
+            black_box(store.header(&small).await.unwrap());
+            tokio::task::yield_now().await;
+        }
+    };
+    let writes = async {
+        for seq in 3..103 {
+            let fact = SessionFact::new(
+                seq,
+                seq,
+                SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                    turn_id: TurnId::new("turn-001").unwrap(),
+                    effect_id: EffectId::new("effect-001").unwrap(),
+                    event: LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: ContentDelta::Text("sustained write".into()),
+                    },
+                },
+            )
+            .unwrap();
+            rsi_agent_testkit::append_history_fixture(
+                &store,
+                AppendBatch {
+                    session_id: small.clone(),
+                    expected_seq: seq - 1,
+                    header: None,
+                    facts: vec![fact.into()],
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let started = Instant::now();
+    tokio::join!(pages, headers, writes);
+    println!(
+        "mixed_lanes encoded_page_bytes={bytes} large_reads=12 small_reads=100 writes=100 elapsed_ns={} cold_metrics={}",
+        started.elapsed().as_nanos(),
+        serde_json::to_string(&store.cold_validation_metrics()).unwrap()
+    );
+    save_measurements("mixed-lanes", &store.take_store_measurements());
+}
+
+async fn open_after_settlement(root: &Path) -> SqliteStore {
+    // Result delivery can precede the proof owner's final drop. Observe the
+    // actual lease instead of treating scheduler latency as storage failure.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match SqliteStore::open(root) {
+            Ok(store) => return store,
+            Err(rsi_agent_store_protocol::StoreError::WriterLocked)
+                if Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!("benchmark reopen: {error}"),
+        }
+    }
+}
+
+async fn verify_after_settlement(root: &Path) -> Duration {
+    // Retry only lease retirement. Do not reopen/clean the Store to establish an
+    // offline verification precondition, and exclude lease waiting from samples.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let started = Instant::now();
+        match SqliteStore::verify(root) {
+            Ok(()) => return started.elapsed(),
+            Err(rsi_agent_store_protocol::StoreError::WriterLocked)
+                if Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!("benchmark offline verification: {error}"),
+        }
     }
 }

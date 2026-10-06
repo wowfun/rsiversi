@@ -451,9 +451,7 @@ struct StoreInner {
     pin_entries_examined: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
     validation_runs: Arc<AtomicU64>,
-    #[cfg(any(test, feature = "test-support"))]
     validation_queue_ns: AtomicU64,
-    #[cfg(any(test, feature = "test-support"))]
     validation_work_ns: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
     fact_materializations: Arc<AtomicU64>,
@@ -469,7 +467,13 @@ struct StoreInner {
     #[cfg(feature = "test-support")]
     fact_page_barrier: Arc<Mutex<Option<FactPagePause>>>,
     #[cfg(feature = "test-support")]
-    reader_measurements: Arc<Mutex<Option<Vec<test_support::ReaderMeasurement>>>>,
+    reader_measurements: Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
+    #[cfg(feature = "test-support")]
+    writer_measurements: Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
+    #[cfg(feature = "test-support")]
+    validation_measurements: Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
+    #[cfg(feature = "test-support")]
+    cas_measurements: Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
     cas_admission: Arc<Semaphore>,
     cas_publication_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
@@ -662,9 +666,7 @@ impl SqliteStore {
                 pin_entries_examined: AtomicU64::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 validation_runs: Arc::new(AtomicU64::new(0)),
-                #[cfg(any(test, feature = "test-support"))]
                 validation_queue_ns: AtomicU64::new(0),
-                #[cfg(any(test, feature = "test-support"))]
                 validation_work_ns: AtomicU64::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
@@ -676,6 +678,12 @@ impl SqliteStore {
                 fact_page_barrier: Arc::new(Mutex::new(None)),
                 #[cfg(feature = "test-support")]
                 reader_measurements: Arc::new(Mutex::new(None)),
+                #[cfg(feature = "test-support")]
+                writer_measurements: Arc::new(Mutex::new(None)),
+                #[cfg(feature = "test-support")]
+                validation_measurements: Arc::new(Mutex::new(None)),
+                #[cfg(feature = "test-support")]
+                cas_measurements: Arc::new(Mutex::new(None)),
                 cas_admission: Arc::new(Semaphore::new(1)),
                 cas_publication_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
@@ -701,7 +709,7 @@ impl SqliteStore {
         admission: Arc<Semaphore>,
         closed_message: &'static str,
         #[cfg(feature = "test-support")] measurements: Option<
-            Arc<Mutex<Option<Vec<test_support::ReaderMeasurement>>>>,
+            Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
         >,
         operation: F,
     ) -> Result<T>
@@ -720,7 +728,7 @@ impl SqliteStore {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             #[cfg(feature = "test-support")]
-            let measurement = test_support::ReaderProbe::start(
+            let measurement = test_support::LaneProbe::start(
                 measurements,
                 queued,
                 dispatched,
@@ -745,7 +753,7 @@ impl SqliteStore {
             Arc::clone(&self.inner.writer_admission),
             "SQLite writer admission closed",
             #[cfg(feature = "test-support")]
-            None,
+            Some(self.inner.writer_measurements.clone()),
             move || {
                 let mut connection = owner.connections.writer.lock().map_err(|_| {
                     StoreError::Io("SQLite writer connection mutex was poisoned".into())
@@ -865,15 +873,31 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
+        #[cfg(feature = "test-support")]
+        let queued = std::time::Instant::now();
         let permit = admission
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io("CAS file admission closed".into()))?;
+        #[cfg(feature = "test-support")]
+        let dispatched = std::time::Instant::now();
+        #[cfg(feature = "test-support")]
+        let measurements = self.inner.cas_measurements.clone();
         let owner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let _owner = owner;
             let _permit = permit;
-            operation()
+            #[cfg(feature = "test-support")]
+            let measurement = test_support::LaneProbe::start(
+                Some(measurements),
+                queued,
+                dispatched,
+                std::any::type_name::<T>(),
+            );
+            let result = operation();
+            #[cfg(feature = "test-support")]
+            drop(measurement);
+            result
         })
         .await
         .map_err(|error| StoreError::Io(format!("CAS worker failed: {error}")))?
@@ -893,6 +917,7 @@ mod activity;
 mod append;
 mod cas;
 mod cold_validation;
+pub use cold_validation::ColdValidationMetrics;
 mod domain;
 mod filesystem;
 mod inspection;

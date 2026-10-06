@@ -2410,6 +2410,67 @@ async fn measure_warm_fact_pages_and_small_metadata() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn store_measurements_include_successful_and_failed_cas_workers() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let bytes: Arc<[u8]> = Arc::from(b"measured CAS body".as_slice());
+    store.begin_store_measurements();
+    let object = store.put_cas(bytes.clone()).await.unwrap();
+    let samples = store.take_store_measurements();
+    assert!(
+        !samples.writer.is_empty(),
+        "publication metadata worker must be observable"
+    );
+    let captured = serde_json::to_value(samples).unwrap();
+    assert!(
+        !captured["cas"].as_array().unwrap().is_empty(),
+        "new publication must be observable"
+    );
+    store.begin_store_measurements();
+    assert_eq!(store.put_cas(bytes.clone()).await.unwrap(), object);
+    assert!(
+        !store.take_store_measurements().cas.is_empty(),
+        "reuse must be observable"
+    );
+    store.begin_store_measurements();
+    store
+        .read_cas(&object, rsi_api_protocol::ByteBudget::default().into())
+        .await
+        .unwrap();
+    let samples = store.take_store_measurements();
+    assert!(!samples.cas.is_empty(), "payload read must be observable");
+    assert!(
+        !samples.reader.is_empty(),
+        "payload metadata worker must be observable"
+    );
+    store.begin_store_measurements();
+    store.fail_next_cas_publication(
+        cas::PublicationStep::NamespaceSync,
+        cas::PublicationPhase::Before,
+    );
+    assert!(matches!(store.put_cas(bytes).await, Err(StoreError::Io(_))));
+    let samples = store.take_store_measurements();
+    let captured = serde_json::to_value(&samples).unwrap();
+    assert!(
+        !captured["cas"].as_array().unwrap().is_empty(),
+        "failed worker must be observable"
+    );
+    assert!(samples.validation.is_empty());
+    let stopped = store.take_store_measurements();
+    assert!(
+        [
+            stopped.reader,
+            stopped.writer,
+            stopped.validation,
+            stopped.cas
+        ]
+        .iter()
+        .all(Vec::is_empty)
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn warm_reader_measurements_cover_workers_without_revalidation() {
     warm_reader_case(4, 1024, 2, false).await;
 }

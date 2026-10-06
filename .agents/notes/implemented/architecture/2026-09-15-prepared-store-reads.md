@@ -57,3 +57,10 @@ terminal work and new Sessions progress. Additional tests cover pin saturation,
 cache churn, cancellation, zero-decode watermarks and preallocation corruption
 rejection. Abrupt Tokio runtime destruction is distinct from caller cancellation;
 normal shutdown drains accepted work under the existing failure policy.
+
+Cumulative cold-validation reuse, refusal and work observations are available
+without retaining identities. Explicit diagnostic captures separate lane admission,
+worker dispatch, service and JSON decoding and retain bounded samples. Large warm
+pages can still delay small foreground reads. Reader pooling, durable incremental
+proofs and archival are deferred until measurements justify their authority and
+memory costs; measurements do not themselves establish a deployment latency SLA.

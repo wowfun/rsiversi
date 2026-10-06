@@ -332,11 +332,18 @@ Indexed text is checked as a borrowed SQLite value before owned allocation:
 storage type, UTF-8 and owning protocol byte bounds fail as corruption. Existing
 JSON projection and page-lookahead gates remain in force.
 
-The opt-in `test-support` reader measurements distinguish permit admission,
-blocking-worker scheduling, total reader work and projected-JSON decoding.
-The remainder includes SQL, row extraction, page checks and other reader work;
-it is not reported as pure SQL CPU time. Capture is explicit and retains at
-most 4096 completed samples. Default builds contain no timing instrumentation.
+`SqliteStore::cold_validation_metrics` exposes cumulative cache hits, shared-flight
+joins, admission refusals, queue/dispatch time and validation work time without
+retaining session identities. The opt-in `test-support` capture separates reader,
+writer, validation and CAS admission, blocking-worker dispatch, service and JSON decode
+samples, retaining the first 4096 completed samples per lane and dropping excess
+samples until the capture ends. These observations do not change
+admission or establish a latency guarantee; benchmarks report optimized-build
+measurements separately from correctness tests.
+
+The diagnostic sample remainder includes SQL, row extraction, page checks and
+other worker work; it is not pure SQL CPU time. Default builds retain cumulative
+cold-validation metrics but no individual timing samples.
 
 The Agent CI job explicitly lints this feature and runs its ordinary tests,
 including a small warm-reader case with exact sample and validation counts.

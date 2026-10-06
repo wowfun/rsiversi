@@ -11,6 +11,9 @@ pub(super) struct ColdValidation {
     callers: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     pub(super) flights: Mutex<BTreeMap<SessionId, Arc<Flight>>>,
+    cache_hits: AtomicU64,
+    shared_flights: AtomicU64,
+    refusals: AtomicU64,
 }
 impl Default for ColdValidation {
     fn default() -> Self {
@@ -18,21 +21,30 @@ impl Default for ColdValidation {
             callers: Arc::new(Semaphore::new(CAPACITY)),
             jobs: Arc::new(Semaphore::new(CAPACITY)),
             flights: Mutex::new(BTreeMap::new()),
+            cache_hits: AtomicU64::new(0),
+            shared_flights: AtomicU64::new(0),
+            refusals: AtomicU64::new(0),
         }
     }
 }
 impl ColdValidation {
+    fn shared(&self) {
+        self.shared_flights.fetch_add(1, Ordering::Relaxed);
+    }
+    fn hit(&self) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
     fn caller(&self) -> Result<OwnedSemaphorePermit> {
-        self.callers
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| StoreError::ValidationBusy)
+        self.callers.clone().try_acquire_owned().map_err(|_| {
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            StoreError::ValidationBusy
+        })
     }
     fn job(&self) -> Result<OwnedSemaphorePermit> {
-        self.jobs
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| StoreError::ValidationBusy)
+        self.jobs.clone().try_acquire_owned().map_err(|_| {
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            StoreError::ValidationBusy
+        })
     }
 }
 
@@ -154,19 +166,26 @@ where
     F: FnOnce(&Transaction<'_>) -> Result<T> + Send + 'static,
     G: FnOnce(T) -> Result<U> + Send + 'static,
 {
-    #[cfg(any(test, feature = "test-support"))]
     let queued = std::time::Instant::now();
     let permit = tokio::select! { biased;
         () = stop.cancelled() => return Err(abandoned()),
         permit = owner.validation_admission.clone().acquire_owned() =>
             permit.map_err(|_| StoreError::Io("SQLite validation admission closed".into()))?,
     };
+    #[cfg(feature = "test-support")]
+    let dispatched = std::time::Instant::now();
     tokio::task::spawn_blocking(move || {
+        #[cfg(feature = "test-support")]
+        let _measurement = test_support::LaneProbe::start(
+            Some(owner.validation_measurements.clone()),
+            queued,
+            dispatched,
+            std::any::type_name::<U>(),
+        );
         let _job = job;
         let _permit = permit;
         let _scope = ReadScope::enter(stop.clone());
         check()?;
-        #[cfg(any(test, feature = "test-support"))]
         owner.validation_queue_ns.fetch_add(
             u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
@@ -192,10 +211,8 @@ where
             .map_err(sql_error)?;
         // Declared after the transaction: unwinding removes the hook before rollback.
         let progress = ProgressGuard(&transaction);
-        #[cfg(any(test, feature = "test-support"))]
         let started = std::time::Instant::now();
         let result = operation(&transaction);
-        #[cfg(any(test, feature = "test-support"))]
         owner.validation_work_ns.fetch_add(
             u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
@@ -239,6 +256,7 @@ impl SqliteStore {
 
     pub(super) async fn session_proof(&self, id: &SessionId) -> Result<Proof> {
         if let Some(proof) = self.inner.session_proof(id) {
+            self.inner.cold_validation.hit();
             return Ok(proof);
         }
         let caller = self.inner.cold_validation.caller()?;
@@ -250,9 +268,11 @@ impl SqliteStore {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(proof) = self.inner.session_proof(id) {
+                self.inner.cold_validation.hit();
                 return Ok(proof);
             }
             if let Some(flight) = flights.get(id) {
+                self.inner.cold_validation.shared();
                 #[cfg(test)]
                 {
                     let mut state = flight
@@ -560,11 +580,13 @@ mod tests {
             Poll::Ready(())
         })
         .await;
+        assert_eq!(store.cold_validation_metrics().shared_flights, 1);
         let fresh = SessionId::new("new-flight-at-capacity").unwrap();
         assert!(matches!(
             store.session_proof(&fresh).await,
             Err(StoreError::ValidationBusy)
         ));
+        assert_eq!(store.cold_validation_metrics().admission_refusals, 1);
         assert_eq!(
             store.inner.cold_validation.callers.available_permits(),
             CAPACITY - 2
@@ -770,5 +792,33 @@ mod tests {
         ));
         drop(scope);
         assert!(matches!(sql_error(interrupted()), StoreError::Io(_)));
+    }
+}
+
+/// Cumulative observations of this Store's bounded cold-validation lane.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct ColdValidationMetrics {
+    /// Calls satisfied by an existing validated Session proof.
+    pub cache_hits: u64,
+    /// Callers joining an already-owned proof flight.
+    pub shared_flights: u64,
+    /// Refused cold caller or job admissions.
+    pub admission_refusals: u64,
+    /// Total nanoseconds queued and dispatched before validation starts.
+    pub queue_dispatch_ns: u64,
+    /// Total nanoseconds executing validation operations.
+    pub work_ns: u64,
+}
+impl SqliteStore {
+    /// Returns cumulative observations without retaining identities or individual samples.
+    pub fn cold_validation_metrics(&self) -> ColdValidationMetrics {
+        let cold = &self.inner.cold_validation;
+        ColdValidationMetrics {
+            cache_hits: cold.cache_hits.load(Ordering::Relaxed),
+            shared_flights: cold.shared_flights.load(Ordering::Relaxed),
+            admission_refusals: cold.refusals.load(Ordering::Relaxed),
+            queue_dispatch_ns: self.inner.validation_queue_ns.load(Ordering::Relaxed),
+            work_ns: self.inner.validation_work_ns.load(Ordering::Relaxed),
+        }
     }
 }
