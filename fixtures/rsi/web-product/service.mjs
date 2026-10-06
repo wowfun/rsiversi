@@ -191,7 +191,7 @@ export async function startService({ binary, assets, report, configure, onReques
     await startProcess();
     return { origin, workspace, run, provider, close, get pid() { return child.pid; },
       probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
-      async restart() { await stopProcess(); await startProcess(); },
+      async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
       register(label) {
         const receipt = JSON.parse(run(["--profile", "devices", "register", label]).stdout);
         const grants = JSON.parse(run(["--profile", "devices", "configuration", "list"]).stdout);

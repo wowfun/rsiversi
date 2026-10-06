@@ -241,3 +241,21 @@ and verifies an actual Node result plus frozen script through native WebKit inpu
 Its provider remains deterministic and keyless.
 `python3 fixtures/rsi/desktop-product/test_workflow.py` checks the isolated Host
 profile edit, including whitespace around an empty steps array, without WebKit.
+
+`--daemon --automation-fixture ABSOLUTE_PRIVATE_SEED` enables the standing-rule
+owner in the isolated daemon and reads the actual Automation API through the
+paired native bootstrap and Worker. The seed is prepared with the opt-in core
+`automation::prepare_visual_fixture` test and a canonical checker PNG. The
+scenario verifies the fixed failed predicate, screenshot and manual new-attempt
+identity. It uses anonymous nonexistent fixture destinations for the new check;
+its policy-blocked result is separate from the original assertion failure.
+The JSON report derives verdicts and mutation identity from observed native
+frames, screenshot dimensions from the decoded image, and transport evidence
+from actual native route responses. It also rereads the original Attempt.
+
+The ignored CLI PTY test
+`tui::automation::model_free_home_reads_automation_and_current_readiness` uses
+`RSI_TEST_AUTOMATION_BINARY`, `RSI_TEST_AUTOMATION_SEED` and
+`RSI_TUI_PTY_REPORT` to check the paired native binary from model-free Home.
+It uses isolated Host paths and real UDS API negotiation. ANSI, terminal cells
+and text captures retain projection evidence separately from provider results.

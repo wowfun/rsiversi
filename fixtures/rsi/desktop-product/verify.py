@@ -33,6 +33,7 @@ from attention import verify as verify_attention, provider_reply as attention_re
 from file_previews import verify as verify_previews
 from native_window import request_close as native_window_close
 from session_export import verify as verify_export
+from automation import configure as configure_automation, verify as verify_automation
 from typed_results import verify as verify_typed, provider_reply as typed_reply
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -44,6 +45,7 @@ parser.add_argument('--window-close', action='store_true')
 parser.add_argument('--restart', action='store_true')
 parser.add_argument('--reload', action='store_true')
 parser.add_argument('--daemon', action='store_true')
+parser.add_argument('--automation-fixture', type=Path)
 parser.add_argument('--foreign-bundle', type=Path)
 parser.add_argument('--ack-timeout', action='store_true')
 parser.add_argument('--save-failure', action='store_true')
@@ -78,6 +80,7 @@ if args.foreign_bundle and not args.daemon: parser.error('foreign build check re
 if args.ack_timeout and args.restart: parser.error('ACK timeout and clean restart are distinct scenarios')
 if args.close_timeout and (args.restart or args.save_failure or args.ack_timeout or args.live_env_file or args.refresh_during_click):
     parser.error('close timeout is a separate deterministic scenario')
+if args.automation_fixture and not args.daemon: parser.error('Automation requires the opt-in daemon')
 secret = None
 if args.live_env_file:
     source = args.live_env_file.read_bytes()
@@ -133,6 +136,7 @@ env['XDG_RUNTIME_DIR'] = runtime_directory.name
 config = Path(env['XDG_CONFIG_HOME']) / 'rsi'
 host = config / 'host-profiles/fixture'; host.mkdir(parents=True)
 (host / 'host.profile.toml').write_text('format = 1\nsteps = []\n')
+if args.automation_fixture: configure_automation(host / 'host.profile.toml', args.automation_fixture)
 if args.profiles:
     editable = config / 'host-profiles/editable'; editable.mkdir()
     editable_source = editable / 'host.profile.toml'
@@ -377,6 +381,7 @@ try:
     if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace)
     if args.queue: verify_queue(script, button, fill, until, screenshot, args.report, requests)
     if args.presentation: verify_presentation(script, button, fill, until, screenshot, args.report, args.system_theme)
+    if args.automation_fixture: verify_automation(script, button, click, until, screenshot, args.report)
     if args.workflows: verify_workflow(script,button,lambda item: call('POST',root+f'/element/{eid(item)}/click',{}),fill,until,screenshot,args.report)
     if args.plan_review: verify_plan_review(script, button, fill, until, screenshot, args.report)
     if args.export: verify_export(script, button, fill, until, screenshot, args.report, requests)

@@ -484,3 +484,20 @@ canonical run/result/script/child reads, restart, narrow layout and cancellation
 with actual Node cleanup. The default command additionally checks Workflow inline
 navigation. Those inline assertions remain a separate opt-in integration check;
 passing the Dock gate does not establish inline navigation evidence.
+
+`automation-verify.mjs` is an explicit Automation presentation check. Supply
+`RSI_WEB_BINARY`, `RSI_WEB_ASSETS`, `RSI_AUTOMATION_WEB_SEED` and a new
+`RSI_AUTOMATION_WEB_REPORT`. The seed is created by the ignored core
+`automation::prepare_visual_fixture` test through PolicyOwner and Ledger, using
+an actual normalized native checker PNG. It exercises the real Worker/API,
+per-rule Device grants, retained fixed verdict and new-attempt control in wide
+light and narrow light/dark views. The injected exploration report is labelled
+fixture data; this scenario does not claim webhook or live Goal execution.
+The service is stopped before changing the isolated seed's grants and restarted
+before client negotiation. It never creates a second Service Host owner.
+
+The Automation scenario also injects a display-only investigation link into a
+Worker presentation frame and an empty surface projection. It verifies that the actual
+Open action displays its refusal inside the modal. The report labels this as
+presentation fault injection; it does not claim that the injected Session exists
+or that an authorization boundary was exercised by that action.
