@@ -15,7 +15,6 @@ curated-result bounds without Node. Native Node tests require explicit `RSI_TEST
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
-
 Workflow settlement tests drive the production observation loop and terminal
 cleanup, including runtime retirement with a still-pending Program result.
 Paused-clock tests bound both queued and admitted observation commands, preserve
@@ -25,6 +24,8 @@ the independent run's terminal result. Error projection preserves known refusal
 categories through setup, and native Node tests still allow scripts to catch known
 RPC refusals while uncertainty prevents continuation. Abort during RPC draining
 retains the original pending handler until it actually finishes.
+The Kernel transition matrix checks every event against live and terminal states,
+including rejection without mutation and Accepted returning a typed error.
 
 Protocol suites exercise constructor and deserialization rejection, exact
 round trips, Agent preset identity grammar and required Header membership,

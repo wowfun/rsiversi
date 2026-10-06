@@ -574,7 +574,11 @@ serialized refresh lock. Unchanged reads share the immutable fold; applying a
 new suffix copies it only while an earlier reader still retains that version.
 Readers consume only new indexed controls under process-wide Store-read byte
 admission, then compare the recomputed head before publishing the refreshed fold.
-Progress records are not retained in the fold. Cold reads replay a bounded run; recovery can revisit it after committing child
+
+Transition admission validates the immutable fold without copying child history;
+canonical application uses the same validation rules. Failed commits never
+publish an advanced cache revision. Progress records are not retained in the fold.
+Cold reads replay a bounded run; recovery can revisit it after committing child
 or activation settlement. No cache survives its live owner or grants authority.
 
 Kernel retains at most eight live Program owners process-wide, with at most one

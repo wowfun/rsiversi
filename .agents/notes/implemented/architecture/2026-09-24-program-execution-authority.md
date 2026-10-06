@@ -95,7 +95,13 @@ bound used by dispatch and durable Context replay; Node receives it at startup.
 
 Live readers share immutable folded state until a new canonical suffix arrives.
 The cache still verifies each incremental mechanical head and never publishes a
-precommit transition. Cancellation reuses tree snapshots but rechecks membership
+precommit transition.
+
+Immutable transition admission avoids copying the
+unrelated child map, while canonical mutation uses the same rules. This preserves
+precommit refusal without maintaining two lifecycle reducers.
+
+Cancellation reuses tree snapshots but rechecks membership
 after source mutation drain; a one-time membership snapshot could miss a child
 admitted concurrently with cancellation.
 

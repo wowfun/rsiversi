@@ -2353,6 +2353,40 @@ async fn creator_cancellation_after_acceptance_refuses_start_and_detach_before_l
 }
 
 #[tokio::test]
+async fn rejected_progress_does_not_advance_cached_or_canonical_state() {
+    let f = fixture().await;
+    let caller = f
+        .kernel
+        .tool_caller(&f.root, &EffectId::new("workflow").unwrap())
+        .unwrap();
+    let id = &f.run.descriptor().run_id;
+    let before = f.kernel.read_program(&caller, id).await.unwrap();
+    *f.faults.commit_admission_refusal.lock().unwrap() =
+        Some(StoreError::Invalid("refused progress".into()));
+    assert!(
+        f.run
+            .progress(Some("rejected".into()), "not committed".into())
+            .await
+            .is_err()
+    );
+    *f.faults.commit_admission_refusal.lock().unwrap() = None;
+    let after = f.kernel.read_program(&caller, id).await.unwrap();
+    assert_eq!(before.control_seq, after.control_seq);
+    assert_eq!(before.phase, after.phase);
+    assert_eq!(before.progress, after.progress);
+    f.run
+        .progress(Some("accepted".into()), "committed".into())
+        .await
+        .unwrap();
+    let after = f.kernel.read_program(&caller, id).await.unwrap();
+    assert_eq!(after.phase.as_deref(), Some("accepted"));
+    assert_eq!(after.progress.as_deref(), Some("committed"));
+    f.run.finish(ProgramOutcome::Completed, None).await.unwrap();
+    end_creator(&f).await;
+    f.kernel.shutdown(f.workers).await.unwrap();
+}
+
+#[tokio::test]
 async fn sqlite_publication_faults_prevent_kernel_acceptance_and_result_reference_commits() {
     use rsi_agent_store_sqlite::{
         SqliteStore,

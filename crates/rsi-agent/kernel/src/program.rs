@@ -335,7 +335,9 @@ impl AgentKernel {
         event: ProgramRunEvent,
     ) -> TurnResult<AtomicSessionAppend> {
         if !matches!(event, ProgramRunEvent::Accepted { .. }) {
-            Arc::unwrap_or_clone(self.read_program_state(session, run).await?).apply(&event)?;
+            self.read_program_state(session, run)
+                .await?
+                .validate_transition(&event)?;
         }
         self.fence_pending_terminal(session).await?;
         let tail = self
