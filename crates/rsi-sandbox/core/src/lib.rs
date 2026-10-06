@@ -229,6 +229,9 @@ impl EnforcementStamp {
                     || (self.requested == SandboxMode::ReadOnly
                         && self.scratch == SandboxScratch::Host
                         && self.network == SandboxNetwork::Isolated)
+                    || (self.requested == SandboxMode::ReadOnly
+                        && self.scratch == SandboxScratch::PrivateTmp
+                        && self.network == SandboxNetwork::Isolated)
             }
             SandboxBackend::Landlock { .. } => {
                 self.requested != SandboxMode::DangerFullAccess
@@ -303,6 +306,20 @@ pub type Result<T> = std::result::Result<T, SandboxError>;
 /// Process-plan confinement service.
 #[async_trait]
 pub trait Sandbox: fmt::Debug + Send + Sync + 'static {
+    /// Builds a narrow PID/net/mount-isolated, pipe-only runtime with private scratch.
+    /// Explicit mounts and cgroup supervisor are issuer-selected; unsupported providers fail closed.
+    async fn confine_isolated(&self, _request: IsolatedProcessRequest) -> Result<ConfinedProcess> {
+        Err(SandboxError::Unsupported(SandboxMode::ReadOnly))
+    }
+    /// Verifies effective limits of a launched isolated scope before untrusted work starts.
+    /// The issuer supplies the same immutable request and its private user-manager directory.
+    async fn verify_isolated_limits(
+        &self,
+        _request: &IsolatedProcessRequest,
+        _user_runtime: &Path,
+    ) -> Result<()> {
+        Err(SandboxError::Unsupported(SandboxMode::ReadOnly))
+    }
     /// Confines a trusted fixed source collector without masking read-only host scratch.
     /// Providers that cannot guarantee this view must reject it.
     async fn confine_source_reader(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
@@ -312,6 +329,86 @@ pub trait Sandbox: fmt::Debug + Send + Sync + 'static {
     async fn workspace_read(&self, request: WorkspaceReadRequest) -> Result<WorkspaceReadScope>;
     /// Validates and wraps one process request.
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess>;
+}
+
+/// Explicit read-only mount; no ambient root bind is implied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadOnlyMount {
+    /// Absolute operator-selected resource, checked without following a final symlink at planning.
+    /// The issuer keeps this pathname and its ancestors stable through process settlement.
+    pub source: PathBuf,
+    /// Absolute location inside the isolated root.
+    pub destination: PathBuf,
+}
+/// Exact resource-limited isolated runtime intent, distinct from source collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IsolatedProcessRequest {
+    /// Host-side immutable supervisor executable.
+    pub supervisor: PathBuf,
+    /// Unique owner-created transient user service identity: `rsi-` plus bounded ASCII alphanumeric/dashes.
+    pub unit: String,
+    /// Fixed executable inside the restricted mount view.
+    pub program: PathBuf,
+    /// Bounded literal arguments; never shell syntax.
+    pub arguments: Vec<String>,
+    /// The issuer's private runtime directory, retained as the stamp coordinate.
+    pub workspace: PathBuf,
+    /// Exact read-only runtime resources, at most sixteen.
+    pub mounts: Vec<ReadOnlyMount>,
+}
+impl IsolatedProcessRequest {
+    /// Checks the whole intent before selecting native enforcement.
+    pub fn validate(&self) -> Result<()> {
+        if !is_lexically_normal_absolute(&self.supervisor)
+            || !is_lexically_normal_absolute(&self.program)
+            || !is_lexically_normal_absolute(&self.workspace)
+            || matches!(self.workspace.to_str(), Some("/" | "/tmp"))
+            || !self.unit.starts_with("rsi-")
+            || self.unit.len() <= 4
+            || self.unit.len() > 80
+            || !self
+                .unit
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || self.arguments.len() > 32
+            || self
+                .arguments
+                .iter()
+                .any(|a| a.len() > 8192 || a.contains('\0'))
+            || self.mounts.is_empty()
+            || self.mounts.len() > 16
+        {
+            return Err(SandboxError::InvalidInput(
+                "invalid isolated runtime intent".into(),
+            ));
+        }
+        let mut destinations = std::collections::BTreeSet::new();
+        for mount in &self.mounts {
+            if !is_lexically_normal_absolute(&mount.source)
+                || !is_lexically_normal_absolute(&mount.destination)
+                || mount.source == Path::new("/")
+                || mount.destination == Path::new("/")
+                || ["/tmp", "/proc", "/dev"]
+                    .iter()
+                    .any(|root| mount.destination.starts_with(root))
+                || !destinations.insert(&mount.destination)
+            {
+                return Err(SandboxError::InvalidInput(
+                    "invalid isolated read-only mount".into(),
+                ));
+            }
+        }
+        if !self
+            .mounts
+            .iter()
+            .any(|m| self.program.starts_with(&m.destination))
+        {
+            return Err(SandboxError::InvalidInput(
+                "isolated executable has no explicit mount".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Nominal Local contract for [`Sandbox`].
@@ -446,5 +543,74 @@ mod tests {
                 assert!(stamp.validate().is_err(), "accepted {stamp:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod isolated_request_tests {
+    use super::*;
+    #[test]
+    fn isolated_intent_cannot_shadow_private_mounts_or_execute_unmounted_programs() {
+        let request = IsolatedProcessRequest {
+            supervisor: "/usr/bin/systemd-run".into(),
+            unit: "rsi-browser-test".into(),
+            program: "/runtime/node".into(),
+            arguments: vec![],
+            workspace: "/owned/scratch".into(),
+            mounts: vec![ReadOnlyMount {
+                source: "/installed/node".into(),
+                destination: "/runtime/node".into(),
+            }],
+        };
+        request.validate().unwrap();
+        for destination in ["/runtime/node-extra", "/runtime/node2"] {
+            let mut bad = request.clone();
+            bad.mounts[0].destination = destination.into();
+            assert!(
+                bad.validate().is_err(),
+                "path prefixes are not mount containment"
+            );
+        }
+        let mut shortest = request.clone();
+        shortest.unit = "rsi-x".into();
+        shortest.validate().unwrap();
+        let mut other_consumer = request.clone();
+        other_consumer.unit = "rsi-source-index-test".into();
+        other_consumer.validate().unwrap();
+        for unit in [
+            "",
+            "rsi-",
+            "other-owner",
+            "rsi-../scope",
+            "rsi-scope.service",
+            "rsi-\0scope",
+        ] {
+            let mut bad = request.clone();
+            bad.unit = unit.into();
+            assert!(bad.validate().is_err());
+        }
+        let mut bad = request.clone();
+        bad.unit = format!("rsi-{}", "x".repeat(77));
+        assert!(bad.validate().is_err());
+        for destination in [
+            "/",
+            "/tmp",
+            "/dev",
+            "/proc",
+            "/tmp/cache",
+            "/proc/self",
+            "/dev/shm",
+        ] {
+            let mut bad = request.clone();
+            bad.mounts[0].destination = destination.into();
+            bad.program = PathBuf::from(destination).join("node");
+            assert!(bad.validate().is_err());
+        }
+        let mut bad = request.clone();
+        bad.program = "/usr/bin/sh".into();
+        assert!(bad.validate().is_err());
+        let mut bad = request;
+        bad.arguments = vec!["x".into(); 33];
+        assert!(bad.validate().is_err());
     }
 }

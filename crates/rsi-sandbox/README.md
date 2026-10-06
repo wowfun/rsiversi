@@ -46,7 +46,8 @@ cannot block or fill staging storage.
 `read-only` and `workspace-write` describe file writes, not secrecy or network
 policy. Durable stamps identify the staged backend bytes by SHA-256 rather than
 an ephemeral staging path and separately record filesystem, scratch, and
-network evidence. Bubblewrap restricted plans use a private tmpfs `/tmp`; a
+network evidence. A provider supplies its selected network explicitly when
+constructing a stamp. Bubblewrap restricted plans use a private tmpfs `/tmp`; a
 workspace whose live canonical path names the system temporary root is rejected
 in either restricted mode because its later bind
 would erase that boundary. Bubblewrap also rejects the logical or canonical
@@ -83,3 +84,28 @@ Mount-internal rename safety still depends on the selected Bubblewrap backend.
 Older bind-fd backports can resolve the descriptor to a path without checking the
 mounted inode afterward. A successful plan or pre-launch replacement test does
 not prove that stronger guarantee against concurrent host filesystem mutation.
+
+The separate `confine_isolated` port supports Linux isolated process scopes. It
+accepts issuer-owned service identities with a bounded `rsi-` namespace; the
+consumer owns its suffix and uniqueness, independently of its product family. It
+requires verified Bubblewrap, clears the child environment, unshares PID,
+network and mount namespaces, binds fixed runtime resources read-only, and
+creates private `/tmp`, `/proc` and `/dev`. It wraps the scope with a user systemd
+unit: MemoryMax 1 GiB, TasksMax 256, RuntimeMaxSec 600, TimeoutStopSec 10,
+KillMode control-group and UMask 0077. There is no Landlock or unconfined fallback.
+Before sending initialization or untrusted work, the consumer calls
+`verify_isolated_limits` on the launched scope. The Linux provider requires the
+unified cgroup hierarchy, the active owned unit and its control-group kill/runtime
+policy, and reads that unit's actual `memory.max` and `pids.max`. Missing or weaker
+limits fail closed. A requested systemd property alone is insufficient evidence.
+Process owns launch and reaping; Browser verifies the runtime and readiness and
+owns its bounded egress broker. These are separate guarantees from ordinary
+pipe/PTY plans. Native proof lives in Browser's explicit Linux acceptance tests.
+
+Isolated read-only mounts cannot target `/tmp`, `/proc`, `/dev` or their
+descendants; those complete subtrees belong to private scratch and kernel mounts.
+These mounts are issuer-owned immutable pathnames, not hostile-host file
+capabilities. The issuer keeps each resource and its ancestors unchanged from
+plan validation through scope retirement. A concurrent host operator replacing
+those paths is outside this contract; isolated plans do not carry bind-fd mounts
+through the systemd user-service launch. Program containment uses path components.

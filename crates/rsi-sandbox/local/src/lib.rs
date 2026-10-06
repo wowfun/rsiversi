@@ -20,6 +20,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod isolated;
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_SUCCESS_CODE: i32 = 23;
 const BUBBLEWRAP_PROBE_ARGUMENTS: &[&str] = &[
@@ -182,6 +184,102 @@ impl ProbeBudget {
 
 #[async_trait]
 impl Sandbox for Service {
+    async fn verify_isolated_limits(
+        &self,
+        request: &rsi_sandbox::IsolatedProcessRequest,
+        user_runtime: &Path,
+    ) -> Result<()> {
+        isolated::verify(request, user_runtime).await
+    }
+    async fn confine_isolated(
+        &self,
+        request: rsi_sandbox::IsolatedProcessRequest,
+    ) -> Result<ConfinedProcess> {
+        request.validate()?;
+        let backend = self
+            .backend
+            .as_ref()
+            .ok_or(SandboxError::Unsupported(SandboxMode::ReadOnly))?;
+        if backend.kind != BackendKind::Bubblewrap {
+            return Err(SandboxError::Unsupported(SandboxMode::ReadOnly));
+        }
+        if !request.supervisor.is_file() {
+            return Err(SandboxError::InvalidInput(
+                "missing isolated supervisor".into(),
+            ));
+        }
+        let mut arguments: Vec<OsString> = vec![
+            "--user".into(),
+            "--wait".into(),
+            "--pipe".into(),
+            "--quiet".into(),
+            "--collect".into(),
+            format!("--unit={}", request.unit).into(),
+            "--property=MemoryMax=1073741824".into(),
+            "--property=TasksMax=256".into(),
+            "--property=RuntimeMaxSec=600".into(),
+            "--property=TimeoutStopSec=10".into(),
+            "--property=KillMode=control-group".into(),
+            "--property=UMask=0077".into(),
+            backend.path.as_os_str().to_owned(),
+            "--die-with-parent".into(),
+            "--new-session".into(),
+            "--unshare-all".into(),
+            "--clearenv".into(),
+            "--setenv".into(),
+            "HOME".into(),
+            "/tmp".into(),
+            "--setenv".into(),
+            "LANG".into(),
+            "C.UTF-8".into(),
+            "--setenv".into(),
+            "PATH".into(),
+            "/usr/bin".into(),
+        ];
+        for mount in &request.mounts {
+            let metadata = std::fs::symlink_metadata(&mount.source)
+                .map_err(|e| SandboxError::InvalidInput(e.to_string()))?;
+            if metadata.file_type().is_symlink() || !(metadata.is_dir() || metadata.is_file()) {
+                return Err(SandboxError::InvalidInput(
+                    "isolated resource is not a fixed file or directory".into(),
+                ));
+            }
+            arguments.extend([
+                "--ro-bind".into(),
+                mount.source.as_os_str().to_owned(),
+                mount.destination.as_os_str().to_owned(),
+            ]);
+        }
+        arguments.extend([
+            "--proc".into(),
+            "/proc".into(),
+            "--dev".into(),
+            "/dev".into(),
+            "--tmpfs".into(),
+            "/tmp".into(),
+            "--chdir".into(),
+            "/tmp".into(),
+            "--".into(),
+            request.program.into_os_string(),
+        ]);
+        arguments.extend(request.arguments.into_iter().map(OsString::from));
+        let mut evidence = stamp(
+            SandboxMode::ReadOnly,
+            Some(backend),
+            request.workspace.clone(),
+            SandboxNetwork::Isolated,
+        );
+        evidence.scratch = rsi_sandbox::SandboxScratch::PrivateTmp;
+        evidence.validate()?;
+        Ok(ConfinedProcess {
+            owner: None,
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            program: request.supervisor,
+            arguments,
+            cwd: request.workspace,
+            stamp: evidence,
+        })
+    }
     async fn workspace_read(
         &self,
         request: rsi_sandbox::WorkspaceReadRequest,
@@ -219,7 +317,7 @@ impl Service {
                 program,
                 arguments: request.arguments.into_iter().map(OsString::from).collect(),
                 cwd,
-                stamp: stamp(request.mode, None, workspace),
+                stamp: stamp(request.mode, None, workspace, SandboxNetwork::Host),
             });
         }
         let backend = self
@@ -284,10 +382,18 @@ impl Service {
             (wrapper, arguments, cwd)
         };
         validate_plan(&wrapper, &arguments, &cwd, &workspace)?;
-        let mut evidence = stamp(request.mode, Some(&backend), workspace);
+        let mut evidence = stamp(
+            request.mode,
+            Some(&backend),
+            workspace,
+            if source_reader {
+                SandboxNetwork::Isolated
+            } else {
+                SandboxNetwork::Host
+            },
+        );
         if source_reader {
             evidence.scratch = SandboxScratch::Host;
-            evidence.network = SandboxNetwork::Isolated;
             evidence.validate()?;
         }
         Ok(ConfinedProcess {
@@ -782,6 +888,7 @@ fn stamp(
     mode: SandboxMode,
     backend: Option<&SelectedBackend>,
     workspace: PathBuf,
+    network: SandboxNetwork,
 ) -> EnforcementStamp {
     let filesystem = match mode {
         SandboxMode::ReadOnly => SandboxFileSystem::ReadOnly,
@@ -816,7 +923,7 @@ fn stamp(
         workspace,
         filesystem,
         scratch,
-        network: SandboxNetwork::Host,
+        network,
     };
     debug_assert!(stamp.validate().is_ok());
     stamp

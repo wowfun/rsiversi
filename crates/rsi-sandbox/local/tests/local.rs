@@ -1241,3 +1241,84 @@ async fn native_source_reader_reads_tmp_ancestors_without_write_or_host_network_
     assert!(fiber.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn isolated_plan_keeps_namespaces_resource_limits_mounts_and_literal_arguments() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bwrap = temporary.path().join("bwrap");
+    let supervisor = temporary.path().join("systemd-run");
+    let node = temporary.path().join("node");
+    for path in [&bwrap, &supervisor, &node] {
+        std::fs::write(path, b"probe").unwrap();
+    }
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "isolated",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(Arc::new(Probe {
+                    replace_during_probe: None,
+                    calls: Mutex::new(vec![]),
+                }))),
+            ),
+            json!({"bubblewrap":[bwrap],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let plan = sandbox
+        .confine_isolated(rsi_sandbox::IsolatedProcessRequest {
+            supervisor: supervisor.clone(),
+            unit: "rsi-browser-plan".into(),
+            program: "/runtime/node".into(),
+            arguments: vec!["worker.mjs".into(), "literal $() argument".into()],
+            workspace: temporary.path().into(),
+            mounts: vec![rsi_sandbox::ReadOnlyMount {
+                source: node.clone(),
+                destination: "/runtime/node".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.program, supervisor);
+    let args = plan
+        .arguments
+        .iter()
+        .map(|s| s.to_str().unwrap())
+        .collect::<Vec<_>>();
+    for required in [
+        "--user",
+        "--pipe",
+        "--wait",
+        "--unit=rsi-browser-plan",
+        "--property=MemoryMax=1073741824",
+        "--property=TasksMax=256",
+        "--property=RuntimeMaxSec=600",
+        "--property=KillMode=control-group",
+        "--property=TimeoutStopSec=10",
+        "--unshare-all",
+        "--die-with-parent",
+        "--clearenv",
+    ] {
+        assert!(args.contains(&required), "missing {required}");
+    }
+    for triple in [
+        ["--ro-bind", node.to_str().unwrap(), "/runtime/node"],
+        ["--tmpfs", "/tmp", "--chdir"],
+    ] {
+        assert!(args.windows(3).any(|window| window == triple));
+    }
+    assert!(!args.contains(&"--share-net"));
+    assert_eq!(
+        &args[args.len() - 4..],
+        ["--", "/runtime/node", "worker.mjs", "literal $() argument"]
+    );
+    assert_eq!(plan.stamp.network, SandboxNetwork::Isolated);
+    assert_eq!(plan.stamp.scratch, SandboxScratch::PrivateTmp);
+    drop(plan);
+    assert!(runtime.shutdown().await.is_clean());
+}
