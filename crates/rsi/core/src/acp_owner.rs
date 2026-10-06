@@ -201,18 +201,15 @@ impl rsi_acp_agent::SessionOwner for Owner {
             .list_recent(cursor.as_ref(), 64)
             .await
             .map_err(|_| Failure::Backend)?;
-        let next = if page.has_more {
-            page.sessions
-                .last()
-                .map(|last| {
-                    serde_json::to_vec(&last.cursor())
-                        .map(hex::encode)
-                        .map_err(|_| Failure::Backend)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let next = page
+            .next
+            .as_ref()
+            .map(|cursor| {
+                serde_json::to_vec(cursor)
+                    .map(hex::encode)
+                    .map_err(|_| Failure::Backend)
+            })
+            .transpose()?;
         let sessions = page
             .sessions
             .into_iter()

@@ -145,6 +145,8 @@ pub struct Navigation {
     session: Arc<dyn SessionService>,
     resolver: Arc<dyn rsi_execution::ExecutionResolver>,
     store: Arc<dyn SessionStore>,
+    protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
+    cursors: Mutex<CursorBook>,
     workspace: Arc<dyn WorkspaceRegistry>,
     epoch: HostEpoch,
     state: Mutex<State>,
@@ -187,7 +189,10 @@ impl Navigation {
     ) -> Result<BoxFuture<'static, Result<NavigationPage>>> {
         filter.validate()?;
         let visibility = self.resolver.visibility(origin)?;
-        self.run(move |owner| Box::pin(async move { owner.scan(visibility, filter, after).await }))
+        let origin = origin.clone();
+        self.run(move |owner| {
+            Box::pin(async move { owner.scan(visibility, origin, filter, after).await })
+        })
     }
     #[expect(
         clippy::too_many_lines,
@@ -196,6 +201,7 @@ impl Navigation {
     async fn scan(
         &self,
         visibility: rsi_execution::ExecutionVisibility,
+        origin: CallOrigin,
         filter: NavigationFilter,
         after: Option<NavigationCursor>,
     ) -> Result<NavigationPage> {
@@ -205,7 +211,10 @@ impl Navigation {
             && (after.filter != filter
                 || after.host_epoch != self.epoch
                 || revision(&after.metadata_revision)? != document.revision
-                || after.after.last_activity_ms == 0)
+                || after
+                    .after
+                    .as_ref()
+                    .is_some_and(|key| key.last_activity_ms == 0))
         {
             return Err(ApiError::Invalid(
                 "navigation changed; refresh this search".into(),
@@ -236,19 +245,30 @@ impl Navigation {
             }
             _ => None,
         };
+        let cut = after
+            .as_ref()
+            .map(|after| {
+                self.cursors
+                    .lock()
+                    .map_err(|_| ApiError::Unavailable)?
+                    .read(&origin, after)
+            })
+            .transpose()?;
         let page = self
             .store
             .list_session_activity(
                 visibility.locations(),
                 coordinates.as_ref(),
-                after.as_ref().map(|after| &after.after),
+                cut.as_ref(),
                 256,
             )
             .await
             .map_err(|_| ApiError::Unavailable)?;
         let mut entries = Vec::new();
+        let mut leases = Vec::new();
         let mut scanned = 0;
         let mut cursor = None;
+        let mut visible_cut = after.as_ref().and_then(|c| c.after.clone());
         let query = filter.query.to_lowercase();
         let default_metadata = SessionMetadata::default();
         let lookups = self.workspace_lookups(page.sessions.iter().map(|row| {
@@ -283,6 +303,11 @@ impl Navigation {
             if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
+            let Some(lease) = self.scope_view(id, &origin).await? else {
+                continue;
+            };
+            leases.push(lease);
+            visible_cut = Some(row.cursor());
             entries.push(NavigationEntry {
                 session: id.clone(),
                 created_at_ms: row.created_at_ms.to_string(),
@@ -298,19 +323,47 @@ impl Navigation {
         }
         drop(rows);
         let more = scanned < page.sessions.len() || page.has_more;
+        let newest = match page.newest {
+            Some(key) => {
+                if let Some(lease) = self.scope_view(&key.session_id, &origin).await? {
+                    leases.push(lease);
+                    Some(key)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        finish_scope(&origin, &leases)?;
         Ok(NavigationPage {
-            newest: page.newest,
+            newest,
             metadata_revision: document.revision.to_string(),
             entries,
-            scanned: u16::try_from(scanned).expect("bounded Session page"),
+            scanned: u16::try_from(scanned).map_err(|_| ApiError::Unavailable)?,
             next: if more {
-                cursor.map(|after| NavigationCursor {
-                    filter,
-                    host_epoch: self.epoch.clone(),
-                    metadata_revision: document.revision.to_string(),
-                    after,
-                })
+                cursor
+                    .map(|cut| {
+                        self.cursors
+                            .lock()
+                            .map_err(|_| ApiError::Unavailable)?
+                            .issue(
+                                &origin,
+                                filter,
+                                self.epoch.clone(),
+                                document.revision.to_string(),
+                                cut,
+                                visible_cut.clone(),
+                                after.as_ref(),
+                            )
+                    })
+                    .transpose()?
             } else {
+                if let Some(after) = &after {
+                    self.cursors
+                        .lock()
+                        .map_err(|_| ApiError::Unavailable)?
+                        .release(&origin, after)?;
+                }
                 None
             },
         })
@@ -356,6 +409,10 @@ impl Navigation {
     ///
     /// # Panics
     /// Panics if a prior panic poisoned navigation state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep cursor issuance and authorized delivery in one owning operation"
+    )]
     pub fn pinned(
         self: &Arc<Self>,
         origin: CallOrigin,
@@ -373,6 +430,7 @@ impl Navigation {
                     .document
                     .clone();
                 let mut available = Vec::new();
+                let mut leases = Vec::new();
                 let mut missing = Vec::new();
                 let query = filter.query.to_lowercase();
                 let selected = document
@@ -408,6 +466,10 @@ impl Navigation {
                 let mut rows = stream::iter(selected.iter().zip(&rows)).zip(lookups);
                 while let Some((((id, metadata), row), workspace)) = rows.next().await {
                     let Some(row) = row else {
+                        let Some(lease) = owner.scope_view(id, &origin).await? else {
+                            continue;
+                        };
+                        leases.push(lease);
                         if matches!(origin, CallOrigin::Local)
                             && filter.workspace == WorkspaceFilter::All
                             && matches_query(&query, id, metadata, None)
@@ -422,6 +484,10 @@ impl Navigation {
                     if !visibility.locations().contains(row.coordinates.location()) {
                         continue;
                     }
+                    let Some(lease) = owner.scope_view(id, &origin).await? else {
+                        continue;
+                    };
+                    leases.push(lease);
                     let path = row.coordinates.path();
                     if !matches_query(&query, id, metadata, Some(path)) {
                         continue;
@@ -449,6 +515,7 @@ impl Navigation {
                 available.sort_by(|a, b| (&b.0, &b.1).cmp(&(&a.0, &a.1)));
                 let mut entries: Vec<_> = available.into_iter().map(|(_, _, row)| row).collect();
                 entries.extend(missing.into_iter().rev());
+                finish_scope(&origin, &leases)?;
                 Ok(PinnedPage {
                     metadata_revision: document.revision.to_string(),
                     entries,
@@ -493,11 +560,17 @@ impl Navigation {
                     ));
                 }
                 let _admission = match owner.session.read_header(&session).await {
-                    Ok(header) => Some(
-                        owner
-                            .resolver
-                            .admit(&origin, header.coordinates().location())?,
-                    ),
+                    Ok(header) => {
+                        let _lease = owner
+                            .scope_view(&session, &origin)
+                            .await?
+                            .ok_or(ApiError::Unauthorized)?;
+                        Some(
+                            owner
+                                .resolver
+                                .admit(&origin, header.coordinates().location())?,
+                        )
+                    }
                     Err(SessionError::NotFound(_))
                         if matches!(origin, CallOrigin::Local)
                             && document.records.get(&session).is_some_and(|old| {
@@ -613,6 +686,13 @@ impl PluginFactory for NavigationFactory {
             session: plan.local::<SessionContract>()?,
             resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
             store: plan.local::<SessionStoreContract>()?,
+            cursors: Mutex::new(CursorBook::default()),
+            protection: Some(Arc::new({
+                let context = plan.context().clone();
+                rsi_session_protocol::SessionProtectionLookup::new(move || {
+                    context.lookup_local::<rsi_session_protocol::SessionProtectionContract>()
+                })
+            })),
             workspace: plan.local::<WorkspaceRegistryContract>()?,
             epoch: plan
                 .local::<ConnectionDescriptionContract>()?
@@ -660,3 +740,145 @@ fn activation(error: impl std::fmt::Display) -> MetaError {
 
 #[cfg(test)]
 mod tests;
+
+impl Navigation {
+    async fn scope_view(
+        &self,
+        id: &SessionId,
+        origin: &CallOrigin,
+    ) -> Result<Option<tokio_util::sync::CancellationToken>> {
+        let Some(header) = visible_header(self.store.header(id).await)? else {
+            return Ok(None);
+        };
+        Ok(match header.protection() {
+            None => Some(tokio_util::sync::CancellationToken::new()),
+            Some(scope) => match self.protection.as_ref().map(|p| p.view(scope, origin)) {
+                None
+                | Some(Err(rsi_session_protocol::SessionError::Api(ApiError::Unauthorized))) => {
+                    None
+                }
+                Some(Ok(lease)) => Some(lease),
+                Some(Err(_)) => return Err(ApiError::Unavailable),
+            },
+        })
+    }
+}
+fn visible_header(
+    result: rsi_agent_store_protocol::Result<rsi_agent_session_protocol::SessionHeader>,
+) -> Result<Option<rsi_agent_session_protocol::SessionHeader>> {
+    match result {
+        Ok(header) => Ok(Some(header)),
+        Err(rsi_agent_store_protocol::StoreError::NotFound(_)) => Ok(None),
+        Err(_) => Err(ApiError::Unavailable),
+    }
+}
+fn finish_scope(origin: &CallOrigin, leases: &[tokio_util::sync::CancellationToken]) -> Result<()> {
+    if leases
+        .iter()
+        .any(tokio_util::sync::CancellationToken::is_cancelled)
+        || matches!(origin,CallOrigin::Device(d)if d.revoked.is_cancelled())
+    {
+        Err(ApiError::Unauthorized)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct CursorBook {
+    cuts: std::collections::VecDeque<ScanCut>,
+}
+#[derive(Debug)]
+struct ScanCut {
+    principal: String,
+    issued: NavigationCursor,
+    cut: rsi_agent_store_protocol::StoreActivityCursor,
+    expires: tokio::time::Instant,
+}
+impl CursorBook {
+    fn principal(origin: &CallOrigin) -> String {
+        match origin {
+            CallOrigin::Local => "local".into(),
+            CallOrigin::Device(d) => d.id.as_str().into(),
+        }
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep one complete ownership operation or acceptance scenario together"
+    )]
+    fn issue(
+        &mut self,
+        origin: &CallOrigin,
+        filter: NavigationFilter,
+        host_epoch: HostEpoch,
+        metadata_revision: String,
+        cut: rsi_agent_store_protocol::StoreActivityCursor,
+        visible_cut: Option<rsi_agent_store_protocol::StoreActivityCursor>,
+        predecessor: Option<&NavigationCursor>,
+    ) -> Result<NavigationCursor> {
+        let now = tokio::time::Instant::now();
+        self.cuts.retain(|entry| entry.expires > now);
+        let principal = Self::principal(origin);
+        if let Some(cursor) = predecessor {
+            self.read(origin, cursor)?;
+        }
+        let own = self
+            .cuts
+            .iter()
+            .filter(|entry| entry.principal == principal)
+            .count();
+        if self.cuts.len() == 128 && own == 0 {
+            return Err(ApiError::Capacity);
+        }
+        let mut entropy = [0u8; 16];
+        getrandom::fill(&mut entropy).map_err(|_| ApiError::Unavailable)?;
+        let token = hex::encode(entropy);
+        let cursor = NavigationCursor {
+            filter,
+            host_epoch,
+            metadata_revision,
+            token: token.clone(),
+            after: visible_cut,
+        };
+        if let Some(cursor) = predecessor {
+            self.release(origin, cursor)?;
+        } else if own >= 8 || self.cuts.len() == 128 {
+            let first = self
+                .cuts
+                .iter()
+                .position(|entry| entry.principal == principal)
+                .expect("principal owns cuts");
+            self.cuts.remove(first);
+        }
+        self.cuts.push_back(ScanCut {
+            principal,
+            issued: cursor.clone(),
+            cut,
+            expires: now + std::time::Duration::from_mins(5),
+        });
+        Ok(cursor)
+    }
+    fn read(
+        &self,
+        origin: &CallOrigin,
+        cursor: &NavigationCursor,
+    ) -> Result<rsi_agent_store_protocol::StoreActivityCursor> {
+        self.cuts
+            .iter()
+            .find(|entry| {
+                entry.principal == Self::principal(origin)
+                    && &entry.issued == cursor
+                    && entry.expires > tokio::time::Instant::now()
+            })
+            .map(|entry| entry.cut.clone())
+            .ok_or(ApiError::Invalid(
+                "Navigation cursor expired or belongs to a different caller; refresh explicitly"
+                    .into(),
+            ))
+    }
+    fn release(&mut self, origin: &CallOrigin, cursor: &NavigationCursor) -> Result<()> {
+        self.read(origin, cursor)?;
+        self.cuts.retain(|entry| &entry.issued != cursor);
+        Ok(())
+    }
+}

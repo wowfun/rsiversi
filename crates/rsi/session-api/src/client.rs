@@ -1,10 +1,7 @@
 use crate::wire::{self, Failure, HandleReply, HandleRequest, Operation, Target};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{AgentMessage, MessageId, SessionHeader, SessionId};
-use rsi_agent_store_protocol::{
-    StoreBackwardFactPage, StoreRecentSession, StoreRecentSessionCursor, StoreRecentSessionPage,
-    StoreSessionInspection,
-};
+use rsi_agent_store_protocol::{StoreBackwardFactPage, StoreSessionInspection};
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, ObservationRetention,
 };
@@ -13,8 +10,8 @@ use rsi_approval_protocol::{ApprovalDecision, ApprovalRequest};
 use rsi_session_protocol::SessionObservationStream;
 use rsi_session_protocol::{
     CreateSession, InteractionRetention, InteractionStream, RecentSessionCursor, RecentSessionPage,
-    SessionError, SessionHandle, SessionHistoryPage, SessionService, SessionSummary,
-    SubmitDirectImage, SubmitInput, TurnReceipt, validate_session_input,
+    SessionError, SessionHandle, SessionHistoryPage, SessionService, SubmitDirectImage,
+    SubmitInput, TurnReceipt, validate_session_input,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeSet, sync::Arc};
@@ -270,6 +267,9 @@ impl SessionService for SessionClient {
     ) -> rsi_session_protocol::Result<RecentSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        if let Some(cursor) = after {
+            cursor.validate()?;
+        }
         let page: RecentSessionPage = self
             .state
             .call(
@@ -280,32 +280,9 @@ impl SessionService for SessionClient {
                 },
             )
             .await?;
-        if page.sessions.len() > limit.min(wire::RECENT_READ_LIMIT) {
-            return Err(malformed(Operation::Recent));
-        }
-        let checked = StoreRecentSessionPage {
-            after: after.map(|cursor| StoreRecentSessionCursor {
-                created_at_ms: cursor.created_at_ms,
-                session_id: cursor.session_id.clone(),
-            }),
-            sessions: page
-                .sessions
-                .into_iter()
-                .map(|row| StoreRecentSession { header: row.header })
-                .collect(),
-            has_more: page.has_more,
-        };
-        checked
-            .validate()
+        page.validate(after, limit.min(wire::RECENT_READ_LIMIT))
             .map_err(|_| malformed(Operation::Recent))?;
-        Ok(RecentSessionPage {
-            sessions: checked
-                .sessions
-                .into_iter()
-                .map(|row| SessionSummary { header: row.header })
-                .collect(),
-            has_more: checked.has_more,
-        })
+        Ok(page)
     }
 }
 

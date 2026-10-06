@@ -181,6 +181,8 @@ async fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
         session: Arc::new(Rows(rows, reads)),
         resolver: Arc::new(Visibility),
         store,
+        protection: None,
+        cursors: Mutex::new(CursorBook::default()),
         workspace: Arc::new(Workspaces::default()),
         epoch: HostEpoch::generate().unwrap(),
         state: Mutex::new(State {
@@ -317,7 +319,19 @@ async fn empty_search_page_advances_last_scanned_position_and_fences_query_and_e
     assert!(first.entries.is_empty());
     assert_eq!(first.scanned, 256);
     let cursor = first.next.unwrap();
-    assert_eq!(cursor.after.session_id.as_str(), "row-045");
+    assert_eq!(cursor.token.len(), 32);
+    assert!(cursor.after.is_none());
+    assert_eq!(
+        owner
+            .cursors
+            .lock()
+            .unwrap()
+            .read(&CallOrigin::Local, &cursor)
+            .unwrap()
+            .session_id
+            .as_str(),
+        "row-045"
+    );
     let last = owner
         .query(&CallOrigin::Local, filter.clone(), Some(cursor.clone()))
         .unwrap()
@@ -588,7 +602,7 @@ fn metadata_bounds_reject_durable_and_external_oversize_or_control_titles() {
 }
 
 #[tokio::test]
-async fn old_and_missing_pins_are_complete_without_attach_and_excluded_from_pages() {
+async fn pins_without_authorizable_headers_are_hidden_and_metadata_is_retained() {
     let owner = owner().await;
     let metadata = SessionMetadata {
         title: Some("Pinned project".into()),
@@ -609,7 +623,7 @@ async fn old_and_missing_pins_are_complete_without_attach_and_excluded_from_page
         .await
         .unwrap();
     assert_eq!(pins.metadata_revision, "7");
-    assert_eq!(pins.entries.len(), 3);
+    assert_eq!(pins.entries.len(), 2);
     assert!(
         matches!(&pins.entries[0], PinnedEntry::Available {entry} if entry.session.as_str()=="row-300")
     );
@@ -617,7 +631,13 @@ async fn old_and_missing_pins_are_complete_without_attach_and_excluded_from_page
         matches!(&pins.entries[1], PinnedEntry::Available {entry} if entry.session.as_str()=="row-001")
     );
     assert!(
-        matches!(&pins.entries[2], PinnedEntry::Missing {session,..} if session.as_str()=="gone")
+        owner
+            .state
+            .lock()
+            .unwrap()
+            .document
+            .records
+            .contains_key(&SessionId::new("gone").unwrap())
     );
     let mut filter = NavigationFilter {
         workspace: WorkspaceFilter::Unregistered,
@@ -704,7 +724,7 @@ fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
 }
 
 #[tokio::test]
-async fn pinned_summaries_preserve_sorted_order_without_reading_headers() {
+async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
     let reads = Arc::new(ReadConcurrency::default());
     let owner = owner_with_reads(reads.clone()).await;
     owner.state.lock().unwrap().document = Arc::new(Document {
@@ -887,14 +907,7 @@ async fn visibility_filters_before_order_capacity_cursors_pins_and_exact_summari
         .unwrap();
     assert_eq!(page.entries.len(), 64);
     assert_eq!(page.newest.unwrap().session_id.as_str(), "row-300");
-    assert!(
-        page.next
-            .unwrap()
-            .after
-            .session_id
-            .as_str()
-            .starts_with("row-")
-    );
+    assert_eq!(page.next.unwrap().token.len(), 32);
     let seed = owner
         .order_seed(&origin, OrderScope::All)
         .unwrap()
@@ -1067,4 +1080,342 @@ fn metadata_incremental_sizes_match_the_durable_wrapper_through_edits() {
             .is_err()
     );
     assert_eq!(document.accounting.unwrap().pins, 64);
+}
+
+#[derive(Debug)]
+struct ProtectedView;
+impl rsi_session_protocol::SessionProtection for ProtectedView {
+    fn view(
+        &self,
+        _: &rsi_agent_session_protocol::SessionProtectionScope,
+        origin: &CallOrigin,
+    ) -> rsi_session_protocol::Result<tokio_util::sync::CancellationToken> {
+        if matches!(origin, CallOrigin::Local) {
+            Ok(tokio_util::sync::CancellationToken::new())
+        } else {
+            Err(SessionError::Api(ApiError::Unauthorized))
+        }
+    }
+}
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Exercise all protected navigation surfaces in one authorization scenario"
+)]
+async fn protected_scope_is_hidden_in_pages_pins_order_membership_and_exact_summaries() {
+    #[derive(Debug)]
+    struct Unavailable;
+    impl rsi_session_protocol::SessionProtection for Unavailable {
+        fn view(
+            &self,
+            _: &rsi_agent_session_protocol::SessionProtectionScope,
+            _: &CallOrigin,
+        ) -> rsi_session_protocol::Result<tokio_util::sync::CancellationToken> {
+            Err(SessionError::Api(ApiError::Unavailable))
+        }
+    }
+    let mut owner = owner().await;
+    Arc::get_mut(&mut owner).unwrap().protection = Some(Arc::new(ProtectedView));
+    let header = SessionHeader::new_local(
+        SessionId::new("protected").unwrap(),
+        1000,
+        "/protected-only-workspace",
+        AgentPresetId::new("fixture").unwrap(),
+        FrozenAgentSettings::new(
+            "fixture",
+            "system",
+            rsi_ai_protocol::ModelRef::new("fixture", "model").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .with_protection(
+        rsi_agent_session_protocol::SessionProtectionScope::new("automation", "source:rule")
+            .unwrap(),
+    )
+    .unwrap();
+    owner
+        .store
+        .append(AppendBatch {
+            session_id: header.session_id().clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![Arc::new(
+                SessionFact::new(
+                    1,
+                    1000,
+                    SessionFactBody::TurnAccepted {
+                        turn_id: TurnId::new("turn").unwrap(),
+                        text: "hidden".into(),
+                        model: None,
+                        reasoning_effort: None,
+                        sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+                        require_approval: false,
+                    },
+                )
+                .unwrap(),
+            )],
+        })
+        .await
+        .unwrap();
+    let device = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+        id: rsi_api_protocol::DeviceId::from_bytes([9; 16]),
+        revoked: tokio_util::sync::CancellationToken::new(),
+    });
+    let local = owner
+        .query(&CallOrigin::Local, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(local.entries[0].session, header.session_id().clone());
+    let hidden = owner
+        .query(&device, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(
+        !hidden
+            .entries
+            .iter()
+            .any(|row| row.session == *header.session_id())
+    );
+    assert!(hidden.newest.is_none());
+    let summaries = owner
+        .summaries(
+            &device,
+            rsi_navigation_api::SummaryRequest {
+                sessions: vec![header.session_id().clone()],
+                metadata_revision: "0".into(),
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(summaries.entries, vec![None]);
+    let seed = owner
+        .order_seed(&device, rsi_navigation_api::OrderScope::All)
+        .unwrap()
+        .await
+        .unwrap();
+    let encoded = serde_json::to_string(&seed).unwrap();
+    assert!(!encoded.contains("protected"));
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        records: BTreeMap::from([(
+            header.session_id().clone(),
+            SessionMetadata {
+                pinned: true,
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    });
+    assert!(
+        owner
+            .pinned(device, NavigationFilter::default())
+            .unwrap()
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    Arc::get_mut(&mut owner).unwrap().protection = Some(Arc::new(Unavailable));
+    assert!(matches!(
+        owner
+            .query(&CallOrigin::Local, NavigationFilter::default(), None)
+            .unwrap()
+            .await,
+        Err(ApiError::Unavailable)
+    ));
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn scan_cursors_hide_store_cuts_and_reject_forgery_foreign_callers_and_eviction() {
+    let owner = owner().await;
+    let page = owner
+        .query(&CallOrigin::Local, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    let cursor = page.next.unwrap();
+    assert_eq!(cursor.token.len(), 32);
+    let foreign = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+        id: rsi_api_protocol::DeviceId::from_bytes([8; 16]),
+        revoked: tokio_util::sync::CancellationToken::new(),
+    });
+    assert!(
+        owner
+            .query(&foreign, cursor.filter.clone(), Some(cursor.clone()))
+            .unwrap()
+            .await
+            .is_err()
+    );
+    let mut forged = cursor.clone();
+    forged.token = "f".repeat(32);
+    assert!(
+        owner
+            .query(&CallOrigin::Local, forged.filter.clone(), Some(forged))
+            .unwrap()
+            .await
+            .is_err()
+    );
+    for _ in 0..128 {
+        owner
+            .query(&CallOrigin::Local, NavigationFilter::default(), None)
+            .unwrap()
+            .await
+            .unwrap();
+    }
+    assert!(
+        owner
+            .query(&CallOrigin::Local, cursor.filter.clone(), Some(cursor))
+            .unwrap()
+            .await
+            .is_err()
+    );
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn one_principal_cannot_evict_another_principals_scan() {
+    let owner = owner().await;
+    let cursor = owner
+        .query(&CallOrigin::Local, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap()
+        .next
+        .unwrap();
+    let foreign = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+        id: rsi_api_protocol::DeviceId::from_bytes([8; 16]),
+        revoked: tokio_util::sync::CancellationToken::new(),
+    });
+    for _ in 0..130 {
+        owner
+            .query(&foreign, NavigationFilter::default(), None)
+            .unwrap()
+            .await
+            .unwrap();
+    }
+    owner
+        .query(&CallOrigin::Local, cursor.filter.clone(), Some(cursor))
+        .unwrap()
+        .await
+        .expect("foreign scans must preserve this caller's continuation");
+    owner.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_linear_scan_replaces_its_cut_and_expires_after_five_minutes() {
+    let mut book = CursorBook::default();
+    let owner = owner().await;
+    let cursor = owner
+        .query(&CallOrigin::Local, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap()
+        .next
+        .unwrap();
+    let cut = owner
+        .cursors
+        .lock()
+        .unwrap()
+        .read(&CallOrigin::Local, &cursor)
+        .unwrap();
+    let mut current = book
+        .issue(
+            &CallOrigin::Local,
+            cursor.filter.clone(),
+            cursor.host_epoch.clone(),
+            cursor.metadata_revision.clone(),
+            cut.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+    for _ in 0..130 {
+        let previous = current.clone();
+        current = book
+            .issue(
+                &CallOrigin::Local,
+                cursor.filter.clone(),
+                cursor.host_epoch.clone(),
+                cursor.metadata_revision.clone(),
+                cut.clone(),
+                None,
+                Some(&previous),
+            )
+            .unwrap();
+        assert!(book.read(&CallOrigin::Local, &previous).is_err());
+        assert_eq!(book.cuts.len(), 1);
+    }
+    tokio::time::advance(std::time::Duration::from_secs(299)).await;
+    assert!(book.read(&CallOrigin::Local, &current).is_ok());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(book.read(&CallOrigin::Local, &current).is_err());
+    owner.close().await;
+}
+
+#[test]
+fn header_failure_is_not_silently_treated_as_a_protection_denial() {
+    use rsi_agent_store_protocol::StoreError;
+    assert!(matches!(
+        visible_header(Err(StoreError::NotFound("missing".into()))),
+        Ok(None)
+    ));
+    assert!(matches!(
+        visible_header(Err(StoreError::ValidationBusy)),
+        Err(ApiError::Unavailable)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cursor_successors_and_refreshes_preserve_both_caps_at_global_capacity() {
+    let mut book = CursorBook::default();
+    let owner = CallOrigin::Local;
+    let issue =
+        |book: &mut CursorBook, origin: &CallOrigin, previous: Option<&NavigationCursor>| {
+            book.issue(
+                origin,
+                NavigationFilter::default(),
+                HostEpoch::from_bytes([1; 16]),
+                "0".into(),
+                rsi_agent_store_protocol::StoreActivityCursor {
+                    last_activity_ms: 1,
+                    session_id: SessionId::new("hidden").unwrap(),
+                },
+                None,
+                previous,
+            )
+        };
+    for _ in 0..8 {
+        issue(&mut book, &owner, None).unwrap();
+    }
+    for id in 1..=120 {
+        issue(
+            &mut book,
+            &CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+                id: rsi_api_protocol::DeviceId::from_bytes([id; 16]),
+                revoked: tokio_util::sync::CancellationToken::new(),
+            }),
+            None,
+        )
+        .unwrap();
+    }
+    assert_eq!(book.cuts.len(), 128);
+    let first = book.cuts.front().unwrap().issued.clone();
+    let foreign = book.cuts.back().unwrap().issued.clone();
+    let successor = issue(&mut book, &owner, Some(&first)).unwrap();
+    assert_eq!(book.cuts.len(), 128);
+    assert_eq!(
+        book.cuts.iter().filter(|c| c.principal == "local").count(),
+        8
+    );
+    assert!(book.read(&owner, &first).is_err());
+    issue(&mut book, &owner, None).unwrap();
+    assert_eq!(book.cuts.len(), 128);
+    assert!(book.read(&owner, &successor).is_ok());
+    assert!(book.cuts.iter().any(|c| c.issued == foreign));
 }

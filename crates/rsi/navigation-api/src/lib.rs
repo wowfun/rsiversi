@@ -104,8 +104,10 @@ pub struct NavigationCursor {
     pub host_epoch: HostEpoch,
     /// Exact metadata revision.
     pub metadata_revision: String,
-    /// Last scanned durable Store position.
-    pub after: ActivityCursor,
+    /// Opaque caller-bound random scan token, 32 lowercase hexadecimal characters (16 bytes).
+    pub token: String,
+    /// Last visible result across these pages; never a skipped source coordinate.
+    pub after: Option<ActivityCursor>,
 }
 /// One navigation result derived from durable Header and optional metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -215,7 +217,7 @@ impl NavigationOperation {
                     Self::Summaries => "summaries",
                     Self::Replace => "replace",
                 },
-                3,
+                4,
             )
             .expect("static navigation operation"),
             access: OperationAccess::Authenticated,
@@ -352,11 +354,6 @@ impl NavigationClient {
         Ok(receipt)
     }
 }
-/// Checks strict descending activity/identity progress through durable rows.
-pub fn cursor_advances(previous: &ActivityCursor, next: &ActivityCursor) -> bool {
-    (next.last_activity_ms, &next.session_id) < (previous.last_activity_ms, &previous.session_id)
-}
-
 /// Shared title/path/identity search semantics at both sides of the wire.
 pub fn matches_query(
     query: &str,

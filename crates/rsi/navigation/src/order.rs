@@ -13,6 +13,7 @@ impl Navigation {
         scope: OrderScope,
     ) -> Result<BoxFuture<'static, Result<OrderSeed>>> {
         let visibility = self.resolver.visibility(origin)?;
+        let origin = origin.clone();
         self.run(move |owner| {
             Box::pin(async move {
                 let document = owner.document();
@@ -28,24 +29,50 @@ impl Navigation {
                     .map_err(|_| ApiError::Unavailable)?
                 {
                     StoreOrderSeed::TooLarge => OrderMembership::TooLarge,
-                    StoreOrderSeed::Available { members, groups } => OrderMembership::Available {
-                        groups,
-                        members: members
-                            .into_iter()
-                            .map(|member| {
-                                let session = member.session;
-                                let metadata =
-                                    document.records.get(&session).cloned().unwrap_or_default();
-                                OrderMember {
-                                    last_activity_ms: member.last_activity_ms.to_string(),
-                                    group: member.group,
-                                    session,
-                                    pinned: metadata.pinned,
-                                    archived: metadata.archived,
-                                }
-                            })
-                            .collect(),
-                    },
+                    StoreOrderSeed::Available { members, groups } => {
+                        let mut selected = Vec::new();
+                        let mut leases = Vec::new();
+                        let mut remap = std::collections::BTreeMap::new();
+                        let mut visible_groups = Vec::new();
+                        for member in members {
+                            let Some(lease) = owner.scope_view(&member.session, &origin).await?
+                            else {
+                                continue;
+                            };
+                            leases.push(lease);
+                            let group = if let Some(group) = remap.get(&member.group) {
+                                *group
+                            } else {
+                                let group = u16::try_from(visible_groups.len())
+                                    .map_err(|_| ApiError::Capacity)?;
+                                visible_groups.push(
+                                    groups
+                                        .get(usize::from(member.group))
+                                        .ok_or(ApiError::Unavailable)?
+                                        .clone(),
+                                );
+                                remap.insert(member.group, group);
+                                group
+                            };
+                            let metadata = document
+                                .records
+                                .get(&member.session)
+                                .cloned()
+                                .unwrap_or_default();
+                            selected.push(OrderMember {
+                                last_activity_ms: member.last_activity_ms.to_string(),
+                                group,
+                                session: member.session,
+                                pinned: metadata.pinned,
+                                archived: metadata.archived,
+                            });
+                        }
+                        super::finish_scope(&origin, &leases)?;
+                        OrderMembership::Available {
+                            groups: visible_groups,
+                            members: selected,
+                        }
+                    }
                 };
                 let seed = OrderSeed {
                     scope,
@@ -65,6 +92,7 @@ impl Navigation {
     ) -> Result<BoxFuture<'static, Result<SummaryPage>>> {
         request.validate()?;
         let visibility = self.resolver.visibility(origin)?;
+        let origin = origin.clone();
         self.run(move |owner| {
             Box::pin(async move {
                 let document = owner.document();
@@ -73,11 +101,23 @@ impl Navigation {
                         "Navigation changed; refresh the complete order seed".into(),
                     ));
                 }
-                let rows = owner
+                let mut rows = owner
                     .store
                     .session_activity_summaries(&request.sessions)
                     .await
                     .map_err(|_| ApiError::Unavailable)?;
+                let mut leases = Vec::new();
+                for row in &mut rows {
+                    if let Some(candidate) = row {
+                        if let Some(lease) =
+                            owner.scope_view(&candidate.session_id, &origin).await?
+                        {
+                            leases.push(lease);
+                        } else {
+                            *row = None;
+                        }
+                    }
+                }
                 let mut entries = Vec::with_capacity(rows.len());
                 let lookups = owner.workspace_lookups(rows.iter().map(|row| {
                     row.as_ref()
@@ -109,6 +149,7 @@ impl Navigation {
                         },
                     );
                 }
+                super::finish_scope(&origin, &leases)?;
                 Ok(SummaryPage {
                     metadata_revision: request.metadata_revision,
                     entries,

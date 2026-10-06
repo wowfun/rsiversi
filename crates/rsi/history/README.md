@@ -39,8 +39,11 @@ caller's exact coordinates and retain its current execution lease, never a Local
 Service grant. The accepted finite worker retains the location permit through
 actual source/cache settlement. Offline metadata authority suffices for API
 history reads; searching never connects an SSH target. A stale cache or hit grants
-no access after Use withdrawal. Freeze checks the receiving Session independently
-and requires the same admitted workspace.
+no access after Use withdrawal. Freeze checks the receiving Header and requires
+the same admitted workspace. The retained execution-location permit covers
+ordinary receiving Sessions there; protected sources and targets are forbidden.
+Session authentication refusals retain Unauthorized; unavailable Session identities
+and backend reads surface Unavailable through the History API.
 
 The `history_search` Tool derives workspace and target from AgentCallerAuthority,
 uses the same owner operations, and emits the `rsi.history` version-1 typed output.

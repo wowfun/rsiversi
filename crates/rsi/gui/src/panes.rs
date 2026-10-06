@@ -115,6 +115,7 @@ struct Attachment {
     workspace: rsi_workspace_protocol::WorkspaceId,
     header: String,
     agent_preset: String,
+    protected: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
     defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
@@ -325,8 +326,8 @@ impl Pane {
         let metadata = serde_json::json!({
             "kind":"native","conversation":rsi_conversation::ConversationIdentity::Native(current.id.clone()),
             "capabilities":rsi_conversation::ConversationCapabilities::native(
-                current.controller.goal_changes().borrow().as_ref().is_some_and(std::result::Result::is_ok),
-                current.creation.is_some() && !current.durable.load(std::sync::atomic::Ordering::Acquire), true),
+                !current.protected&&current.controller.goal_changes().borrow().as_ref().is_some_and(std::result::Result::is_ok),
+                !current.protected&&current.creation.is_some() && !current.durable.load(std::sync::atomic::Ordering::Acquire), !current.protected),
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace":current.workspace,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
@@ -336,7 +337,7 @@ impl Pane {
             "completions":*current.completions.lock().expect("GUI completions poisoned"),
             "resource":resource, "resource_revision":resource_revision,
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
-            "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
+            "protected":current.protected, "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
@@ -920,6 +921,7 @@ impl GuiApplication {
             workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
             header: header.fingerprint().map_err(error)?,
             agent_preset: header.agent_preset_id().to_string(),
+            protected: header.protection().is_some(),
             creation,
             defaults: match (before_defaults, self.defaults_stamp().await) {
                 (Some(before), Some(after)) if before == after => Some(after),

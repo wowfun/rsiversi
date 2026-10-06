@@ -33,6 +33,15 @@ impl Drop for Working {
 
 impl Client {
     pub(super) fn queue_message_menu(&mut self, message: StorePendingMessage) {
+        if self.state.header.protection().is_some() {
+            let handle = self.handle.clone();
+            self.spawn_detail(async move {
+                read(|| handle.read_message(&message.message_id, message.accepted_control_seq))
+                    .await
+                    .map(Update::Message)
+            });
+            return;
+        }
         let item = rsi_client::QueueItem::new(&message, self.presented_turn.as_ref());
         let mut items = vec![(
             item.read_label.into(),
@@ -79,6 +88,9 @@ impl Client {
         });
     }
     pub(super) fn queue_content(&mut self, selected: &StorePendingMessage, message: AgentMessage) {
+        if self.state.header.protection().is_some() {
+            return;
+        }
         let message = Arc::new(message);
         let mut items = message
             .content
@@ -112,6 +124,9 @@ impl Client {
         message: Arc<AgentMessage>,
         index: usize,
     ) {
+        if self.state.header.protection().is_some() {
+            return;
+        }
         let text = match message.content.get(index) {
             Some(AgentMessageContent::Text { text }) => text.clone(),
             None if index == message.content.len() => String::new(),
@@ -185,6 +200,11 @@ impl Client {
         selected: StorePendingMessage,
         mutation: QueueMutation,
     ) -> bool {
+        if self.state.header.protection().is_some() {
+            self.state
+                .notice("Protected investigation Sessions are read-only");
+            return false;
+        }
         if self.queue_pending.is_some() {
             self.queue_result_menu();
             return false;

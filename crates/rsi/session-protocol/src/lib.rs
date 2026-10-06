@@ -327,10 +327,37 @@ pub struct SessionHistoryPage {
     pub has_more: bool,
 }
 
-/// Public cursor for recent-session listing.
+/// Opaque principal-bound scan continuation with a public visible ordering cut.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecentSessionCursor {
+    /// Random service-generation token; never a skipped Session identity.
+    pub token: String,
+    /// Last published Header, if any, for client ordering checks.
+    pub after: Option<RecentSessionPosition>,
+}
+impl RecentSessionCursor {
+    /// Validates external cursor syntax; its owner authenticates the private cut.
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .after
+            .as_ref()
+            .is_some_and(|position| position.created_at_ms == 0)
+            || self.token.len() != 32
+            || !self
+                .token
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(SessionError::Invalid("invalid recent cursor".into()));
+        }
+        Ok(())
+    }
+}
+/// Public ordering position of an already visible Header.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentSessionPosition {
     /// Durable creation timestamp in Unix milliseconds.
     pub created_at_ms: u64,
     /// Descending identity tie-breaker.
@@ -346,9 +373,9 @@ pub struct SessionSummary {
 }
 
 impl SessionSummary {
-    /// Returns the cursor selecting summaries after this one.
-    pub fn cursor(&self) -> RecentSessionCursor {
-        RecentSessionCursor {
+    /// Returns this visible Header's ordering position.
+    pub fn position(&self) -> RecentSessionPosition {
+        RecentSessionPosition {
             created_at_ms: self.header.created_at_ms(),
             session_id: self.header.session_id().clone(),
         }
@@ -361,8 +388,46 @@ impl SessionSummary {
 pub struct RecentSessionPage {
     /// Exact summaries in descending creation order.
     pub sessions: Vec<SessionSummary>,
-    /// Whether a later page exists.
+    /// Whether more scanning work exists, possibly containing only hidden rows.
     pub has_more: bool,
+    /// Continuation for the last scanned row; present exactly when `has_more`.
+    pub next: Option<RecentSessionCursor>,
+}
+impl RecentSessionPage {
+    /// Validates external page bounds, visible ordering and scan continuation against the request.
+    pub fn validate(&self, after: Option<&RecentSessionCursor>, limit: usize) -> Result<()> {
+        rsi_agent_store_protocol::validate_session_read_limit(limit)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        if let Some(cursor) = after {
+            cursor.validate()?;
+        }
+        if self.sessions.len() > limit || self.has_more != self.next.is_some() {
+            return Err(SessionError::Invalid("invalid recent page bounds".into()));
+        }
+        let mut previous = after
+            .and_then(|c| c.after.as_ref())
+            .map(|p| (p.created_at_ms, &p.session_id));
+        for row in &self.sessions {
+            let current = (row.header.created_at_ms(), row.header.session_id());
+            if previous.is_some_and(|previous| current >= previous) {
+                return Err(SessionError::Invalid(
+                    "recent page is not strictly descending".into(),
+                ));
+            }
+            previous = Some(current);
+        }
+        if let Some(next) = &self.next {
+            next.validate()?;
+            let visible = next
+                .after
+                .as_ref()
+                .map(|p| (p.created_at_ms, &p.session_id));
+            if visible != previous || after.is_some_and(|old| next.token == old.token) {
+                return Err(SessionError::Invalid("invalid recent continuation".into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One attached Session interface.
@@ -864,5 +929,71 @@ mod creation_tests {
                 .to_string()
                 .contains("workspace_trust")
         );
+    }
+}
+
+/// Caller-bound access to immutable product-protected Session data.
+pub trait SessionProtection: fmt::Debug + Send + Sync + 'static {
+    /// Returns a reading lease cancelled on grant revocation. Unknown scopes deny.
+    fn view(
+        &self,
+        scope: &rsi_agent_session_protocol::SessionProtectionScope,
+        origin: &rsi_api_protocol::CallOrigin,
+    ) -> Result<tokio_util::sync::CancellationToken>;
+}
+
+/// Trusted nonserializable frozen Session admission; no wire adapter supplies it.
+#[async_trait]
+pub trait FrozenSessionOwner: fmt::Debug + Send + Sync + 'static {
+    /// Retains the exact private generation and returns an internal control handle.
+    async fn create_frozen(
+        &self,
+        header: SessionHeader,
+        pin: rsi_agent_composition_protocol::AgentCompositionPin,
+    ) -> Result<Arc<dyn SessionHandle>>;
+}
+/// Product-only admission capability, independent of the public Session domain.
+#[derive(Debug)]
+pub struct FrozenSessionOwnerContract;
+impl rsi_meta_contract::LocalContract for FrozenSessionOwnerContract {
+    const KEY: &'static str = "rsi.session.frozen-owner";
+    type Service = dyn FrozenSessionOwner;
+}
+/// Optional product policy; ordinary Sessions do not depend on this supply.
+#[derive(Debug)]
+pub struct SessionProtectionContract;
+impl rsi_meta_contract::LocalContract for SessionProtectionContract {
+    const KEY: &'static str = "rsi.session.protection";
+    type Service = dyn SessionProtection;
+}
+
+/// Optional product scope policy lookup. Unknown policy denies protected reads.
+#[derive(Clone)]
+pub struct SessionProtectionLookup(
+    std::sync::Arc<dyn Fn() -> Option<std::sync::Arc<dyn SessionProtection>> + Send + Sync>,
+);
+impl std::fmt::Debug for SessionProtectionLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionProtectionLookup")
+            .finish_non_exhaustive()
+    }
+}
+impl SessionProtectionLookup {
+    /// Binds a trusted process-local lookup without retaining a policy generation.
+    pub fn new(
+        lookup: impl Fn() -> Option<std::sync::Arc<dyn SessionProtection>> + Send + Sync + 'static,
+    ) -> Self {
+        Self(std::sync::Arc::new(lookup))
+    }
+}
+impl SessionProtection for SessionProtectionLookup {
+    fn view(
+        &self,
+        scope: &rsi_agent_session_protocol::SessionProtectionScope,
+        origin: &rsi_api_protocol::CallOrigin,
+    ) -> Result<tokio_util::sync::CancellationToken> {
+        (self.0)()
+            .ok_or(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))?
+            .view(scope, origin)
     }
 }

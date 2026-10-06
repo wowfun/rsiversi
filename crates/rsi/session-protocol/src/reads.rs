@@ -61,7 +61,7 @@ impl SessionReadLease {
     pub fn header(&self) -> &SessionHeader {
         &self.header
     }
-    /// Cancel a read when its owning Session service retires.
+    /// Cancel a read when its owning Session service retires or scoped View is revoked.
     pub fn retiring(&self) -> &CancellationToken {
         &self.retiring
     }

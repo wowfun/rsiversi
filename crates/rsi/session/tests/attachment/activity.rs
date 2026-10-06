@@ -3,7 +3,132 @@ use rsi_agent_turn_protocol::{
     ResidentActivity, ResidentActivityPage, ResidentComposition, SessionProjectionChanges,
     SessionProjections,
 };
+use rsi_session_protocol::SessionIngress as _;
 use rsi_session_protocol::{ActivityRequest, ActivityStatus};
+
+#[derive(Debug)]
+struct ReadingPolicy {
+    lease: CancellationToken,
+    reads: AtomicUsize,
+}
+impl rsi_session_protocol::SessionProtection for ReadingPolicy {
+    fn view(
+        &self,
+        _: &rsi_agent_session_protocol::SessionProtectionScope,
+        _: &rsi_api_protocol::CallOrigin,
+    ) -> rsi_session_protocol::Result<CancellationToken> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.lease.is_cancelled() {
+            Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+        } else {
+            Ok(self.lease.clone())
+        }
+    }
+}
+
+#[tokio::test]
+async fn activity_revocation_during_collection_refuses_protected_and_device_delivery() {
+    for revoke_scope in [true, false] {
+        let store = Arc::new(MemoryStore::new());
+        let id = SessionId::new("protected-activity").unwrap();
+        let header = SessionHeader::new_local(
+            id.clone(),
+            1,
+            std::env::current_dir().unwrap().to_str().unwrap(),
+            AgentPresetId::new("removed").unwrap(),
+            test_settings(),
+        )
+        .unwrap()
+        .with_protection(
+            rsi_agent_session_protocol::SessionProtectionScope::new("fixture", "activity").unwrap(),
+        )
+        .unwrap();
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: 0,
+                header: Some(header),
+                facts: vec![
+                    SessionFact::new(
+                        1,
+                        1,
+                        SessionFactBody::TurnAccepted {
+                            reasoning_effort: None,
+                            turn_id: TurnId::new("protected-turn").unwrap(),
+                            text: "protected activity".into(),
+                            model: None,
+                            sandbox: SandboxMode::WorkspaceWrite,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap()
+                    .into(),
+                ],
+            })
+            .await
+            .unwrap();
+        let roster = Arc::new(Roster {
+            id,
+            present: std::sync::atomic::AtomicBool::new(true),
+            revision: std::sync::atomic::AtomicU64::new(0),
+        });
+        let approvals = Arc::new(TreeApprovals::default());
+        let gate = approvals.pending.lock().await;
+        let policy = Arc::new(ReadingPolicy {
+            lease: CancellationToken::new(),
+            reads: AtomicUsize::new(0),
+        });
+        let device_stop = CancellationToken::new();
+        let service = LocalSessionService::new(
+            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            Arc::new(UnavailableCommands),
+            roster,
+            Arc::new(UnavailableTurns::default()),
+            store,
+            rsi_agent_context::ContextBudget::default(),
+            Arc::new(UnavailableComposition),
+            Arc::new(UnavailableWorkspace),
+            Arc::new(UnavailableSettings),
+            Arc::new(UnavailableLanguage),
+            Arc::new(UnavailableImage),
+            Arc::new(UnavailableMedia),
+            approvals.clone(),
+        )
+        .with_protection(policy.clone());
+        let scoped = service.scoped(rsi_api_protocol::CallOrigin::Device(
+            rsi_api_protocol::AuthenticatedDevice {
+                id: rsi_api_protocol::DeviceId::from_bytes([1; 16]),
+                revoked: device_stop.clone(),
+            },
+        ));
+        let mut reading = Box::pin(scoped.activity());
+        assert!(futures_util::poll!(&mut reading).is_pending());
+        assert_eq!(
+            (
+                policy.reads.load(Ordering::SeqCst),
+                approvals.reads.load(Ordering::SeqCst)
+            ),
+            (1, 1),
+            "collection is blocked after authorization"
+        );
+        if revoke_scope {
+            policy.lease.cancel();
+        } else {
+            device_stop.cancel();
+        }
+        drop(gate);
+        let reply = reading.await;
+        service.stop().await.unwrap();
+        assert!(
+            matches!(
+                reply,
+                Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+            ),
+            "revoked page leaked: {reply:?}"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct Roster {
     id: SessionId,

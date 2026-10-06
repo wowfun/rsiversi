@@ -178,7 +178,7 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create | Self::Inspect => 7,
+                    Self::Create | Self::Inspect | Self::Recent => 7,
                     Self::Submit => 4,
                     Self::MessageStatus => 3,
                     Self::ListWorkflows
@@ -187,11 +187,7 @@ impl Operation {
                     | Self::Interactions
                     | Self::Questions
                     | Self::AnswerQuestion => 2,
-                    Self::Attach
-                    | Self::Recent
-                    | Self::DraftSnapshot
-                    | Self::SelectPreset
-                    | Self::Observe => 6,
+                    Self::Attach | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 6,
                     Self::History | Self::ReadMessage => 5,
                     _ => 1,
                 },

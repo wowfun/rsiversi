@@ -231,3 +231,29 @@ reject an unavailable runtime before composition. Durable history remains readab
 Workflow detail pages children, frozen script and result from one Kernel snapshot
 of the requested run revision. CAS buffers retain their actual input admission
 under the shared Program byte budget. Neither read executes code.
+
+Opaque Session IDs do not provide existence secrecy: explicit refusals distinguish
+Unauthorized protected Sessions from NotFound IDs. Preserving these categories
+lets known callers distinguish revocation from absent durable state.
+
+Protected Sessions retain the Header's immutable product scope. Their public
+handles are read-only, including Local handles.
+Workflow cancellation uses the same mutation admission as every other control.
+The private frozen ingress is a trusted composition capability: its Local issuer
+validates the exact catalog, Tools, Domains and standing authority before passing
+the pin. Session validates the Header/preset binding, not the issuer's product
+policy; possession of this in-process port is not granted by serialized callers.
+Recent listing scans at most 128
+source pages per request and returns an opaque continuation for the last scanned
+row, including an empty visible page. Cursor ownership and bounds belong to the
+[Session protocol](../session-protocol/README.md).
+The optional protection policy
+checks actual callers and cancels reading leases on revocation; absent policy
+rejects protected reads without affecting ordinary Sessions. A Local frozen
+draft entry accepts exact Header/composition inputs and retains a private owner
+handle for Goal control; it is never exposed through serialized API arguments.
+
+Activity visibility omits absent or unauthorized Headers; other Store or policy
+failures propagate, rather than silently removing Sessions from the projection.
+Activity retains reading leases throughout collection and rechecks them and the
+caller before publishing a page; revocation during collection refuses delivery.

@@ -12,9 +12,12 @@ starts a peer. The Host retains at most 4,096 read positions within 1 MiB.
 The authenticated navigation API reads durable Session truth and edits only
 Host-owned title/archive metadata. It never stops or deletes a Session. Titles
 are at most 256 UTF-8 bytes and queries at most 128 bytes. A query scans at most
-256 indexed activity rows and returns at most 64 matches. Its continuation names the last
-scanned Session, the exact query, archive/workspace filter, Host generation and
-metadata revision. Empty pages can have a continuation. Activity changes never invalidate a continuation. Rows that move ahead of the
+256 indexed activity rows and returns at most 64 matches. Its continuation carries an opaque process-local scan token, the exact query,
+archive/workspace filter, Host generation and metadata revision. The owner keeps
+at most 128 caller-bound cuts; an evicted, altered or foreign cursor requires an
+explicit refresh. Tokens do not disclose skipped protected Session identities. A separate optional
+last-visible activity key preserves client-side ordering checks; an empty filtered
+page carries only the previous visible key. A protected newest key is omitted. Empty pages can have a continuation. Activity changes never invalidate a continuation. Rows that move ahead of the
 cursor appear after refresh; a query is not a Store-wide snapshot. Each page
 returns the newest activity key from the same read snapshot.
 
@@ -23,16 +26,20 @@ an exact registry lookup; equal paths on different machines remain distinct. Mis
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
 
-Navigation wire version 3 exposes immutable execution location and activity time.
+Navigation wire version 4 exposes immutable execution location and activity time.
 Query, pinned and metadata replacement requests have a 4 KiB envelope bound;
 summary batches have 32 KiB and coordinate-bearing order-seed requests 128 KiB.
 The version-1 durable metadata document accepts a missing `pinned` field as false;
 new records always write it. At most 64 records may be pinned. Archiving clears
 pinning in the same revision CAS. Dedicated pinned discovery reads one Store
 snapshot of all selected identities independently of ordinary continuation.
-Neither listing decodes Headers or transcript bodies. Pins apply the same
+Listings authorize immutable Headers before exposing summaries, coordinates or
+continuations. They do not decode transcript bodies. Unknown protected scopes
+are omitted; exact protected summaries are null without View authority. Pins apply the same
 query/archive/workspace filter and sort by activity then SessionId descending.
-Missing identities remain disabled entries that may be explicitly unpinned;
+Missing activity remains disabled only when the retained Header authorizes the
+read. Missing-Header metadata stays durable but is omitted from listings; it may
+be explicitly cleared under revision CAS.
 other read failures remain errors. Queries never clean up metadata. Ordinary
 pages exclude pins. External rows must contain valid machine/path coordinates,
 canonical nonzero decimal timestamps and strict descending activity keys.

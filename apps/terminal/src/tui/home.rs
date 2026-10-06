@@ -187,7 +187,7 @@ pub(super) async fn run(
                 history = None; dirty = true;
                 match result {
                     Ok(page) => {
-                        recent = page.sessions.last().map(rsi_session_protocol::SessionSummary::cursor);
+                        recent = page.next;
                         let mut items = page.sessions.into_iter().map(|summary| (format!("{} · {}", summary.header.session_id(), summary.header.canonical_cwd()), Some(summary.header.session_id().clone()))).collect::<Vec<_>>();
                         if page.has_more { items.push(("More sessions…".into(), None)); }
                         selected = 0; menu = Some(Menu { title: "Recent sessions", hint: "Enter opens · Ctrl+Y copy ID · Esc back", items }); status.clear();

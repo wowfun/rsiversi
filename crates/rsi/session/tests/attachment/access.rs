@@ -473,7 +473,9 @@ pub(super) struct WorkflowGate {
     pub release: Semaphore,
     pub panic: std::sync::atomic::AtomicBool,
 }
-async fn workflow_cancel_fixture() -> (
+async fn workflow_cancel_fixture(
+    protected: bool,
+) -> (
     tempfile::TempDir,
     LocalSessionService,
     Arc<WorkflowGate>,
@@ -492,6 +494,16 @@ async fn workflow_cancel_fixture() -> (
         test_settings(),
     )
     .unwrap();
+    let header = if protected {
+        header
+            .with_protection(
+                rsi_agent_session_protocol::SessionProtectionScope::new("fixture", "workflow")
+                    .unwrap(),
+            )
+            .unwrap()
+    } else {
+        header
+    };
     store
         .append(AppendBatch {
             session_id: header.session_id().clone(),
@@ -540,6 +552,7 @@ async fn workflow_cancel_fixture() -> (
         Arc::new(UnavailableMedia),
         Arc::new(NoApprovalControl),
     )
+    .with_protection(Arc::new(WorkflowView))
     .with_execution(Arc::new(Access {
         slots: Some(slots.clone()),
         ..Default::default()
@@ -549,7 +562,7 @@ async fn workflow_cancel_fixture() -> (
 }
 #[tokio::test]
 async fn dropped_workflow_cancel_waiter_keeps_execution_admission_until_owned_completion() {
-    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture(false).await;
     let waiter = tokio::spawn(async move {
         handle
             .cancel_workflow(
@@ -577,7 +590,7 @@ async fn dropped_workflow_cancel_waiter_keeps_execution_admission_until_owned_co
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_reports_incomplete_cancel_without_abandoning_its_admission() {
-    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    let (_dir, service, gate, slots, handle) = workflow_cancel_fixture(false).await;
     let waiter = tokio::spawn(async move {
         handle
             .cancel_workflow(
@@ -607,7 +620,7 @@ async fn shutdown_reports_incomplete_cancel_without_abandoning_its_admission() {
 
 #[tokio::test]
 async fn workflow_cancel_panic_preserves_unknown_identity_and_releases_settled_admission() {
-    let (_temp, service, gate, slots, handle) = workflow_cancel_fixture().await;
+    let (_temp, service, gate, slots, handle) = workflow_cancel_fixture(false).await;
     gate.panic.store(true, Ordering::SeqCst);
     let run = rsi_agent_session_protocol::ProgramRunId::new("program-panic").unwrap();
     let requested = run.clone();
@@ -623,4 +636,76 @@ async fn workflow_cancel_panic_preserves_unknown_identity_and_releases_settled_a
     }
     service.stop().await.unwrap();
     assert_eq!(slots.available_permits(), 1);
+}
+
+#[derive(Debug)]
+struct WorkflowView;
+impl rsi_session_protocol::SessionProtection for WorkflowView {
+    fn view(
+        &self,
+        _: &rsi_agent_session_protocol::SessionProtectionScope,
+        _: &rsi_api_protocol::CallOrigin,
+    ) -> rsi_session_protocol::Result<CancellationToken> {
+        Ok(CancellationToken::new())
+    }
+}
+
+#[derive(Debug)]
+struct UnavailableProtection(ApiError);
+impl rsi_session_protocol::SessionProtection for UnavailableProtection {
+    fn view(
+        &self,
+        _: &rsi_agent_session_protocol::SessionProtectionScope,
+        _: &CallOrigin,
+    ) -> rsi_session_protocol::Result<CancellationToken> {
+        Err(SessionError::Api(self.0.clone()))
+    }
+}
+#[tokio::test]
+async fn recent_protection_infrastructure_errors_are_unavailable() {
+    for error in [
+        ApiError::Backend("policy read failed".into()),
+        ApiError::Capacity,
+        ApiError::Unavailable,
+    ] {
+        let (_dir, service, _gate, _slots, _handle) = workflow_cancel_fixture(true).await;
+        let service = service.with_protection(Arc::new(UnavailableProtection(error)));
+        assert!(matches!(
+            service.list_recent(None, 1).await,
+            Err(SessionError::Api(ApiError::Unavailable))
+        ));
+        service.stop().await.unwrap();
+    }
+}
+#[tokio::test]
+async fn protected_target_reference_capture_refuses_before_accessing_a_source() {
+    let (_dir, service, _gate, _slots, handle) = workflow_cancel_fixture(true).await;
+    assert!(matches!(
+        handle
+            .capture_reference(SessionId::new("missing-source").unwrap())
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    service.stop().await.unwrap();
+}
+#[tokio::test]
+async fn public_protected_handle_cannot_admit_workflow_cancellation() {
+    let (_dir, service, gate, _slots, handle) = workflow_cancel_fixture(true).await;
+    gate.release.add_permits(1);
+    let result = handle
+        .cancel_workflow(&rsi_agent_session_protocol::ProgramRunId::new("protected-run").unwrap())
+        .await;
+    let entered = gate.entered.available_permits();
+    service.stop().await.unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        entered, 0,
+        "public View authority reached the Kernel mutation"
+    );
 }

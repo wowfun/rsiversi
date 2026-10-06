@@ -1,7 +1,7 @@
 use super::{
     ActivityCursor, ApiError, HostEpoch, NavigationCursor, NavigationEntry, NavigationFilter,
-    NavigationPage, PinnedEntry, PinnedPage, Result, WorkspaceFilter, WorkspaceId, cursor_advances,
-    matches_query, revision,
+    NavigationPage, PinnedEntry, PinnedPage, Result, WorkspaceFilter, WorkspaceId, matches_query,
+    revision,
 };
 use rsi_agent_session_protocol::ExecutionCoordinates;
 use std::collections::BTreeSet;
@@ -49,12 +49,15 @@ pub(super) fn page(
             .newest
             .as_ref()
             .is_some_and(|key| key.last_activity_ms == 0)
-        || page.scanned > 0 && page.newest.is_none()
         || after.is_some_and(|cursor| {
             cursor.filter != *filter
                 || cursor.host_epoch != *epoch
                 || cursor.metadata_revision != page.metadata_revision
-                || cursor.after.last_activity_ms == 0
+                || !token(&cursor.token)
+                || cursor
+                    .after
+                    .as_ref()
+                    .is_some_and(|key| key.last_activity_ms == 0)
         })
     {
         return Err(ApiError::Invalid(
@@ -62,13 +65,13 @@ pub(super) fn page(
         ));
     }
     let mut seen = BTreeSet::new();
-    let mut previous = after.map(|cursor| cursor.after.clone());
+    let mut previous = after.and_then(|cursor| cursor.after.clone());
     for value in &page.entries {
         let key = entry(value, filter)?;
         if !seen.insert(&value.session)
             || value.metadata.pinned
             || previous.as_ref().is_some_and(|previous| &key >= previous)
-            || page.newest.as_ref().is_none_or(|newest| &key > newest)
+            || page.newest.as_ref().is_some_and(|newest| &key > newest)
         {
             return Err(ApiError::Invalid("invalid navigation ordering".into()));
         }
@@ -79,10 +82,9 @@ pub(super) fn page(
             || next.host_epoch != *epoch
             || next.metadata_revision != page.metadata_revision
             || page.scanned == 0
-            || next.after.last_activity_ms == 0
-            || after.is_some_and(|cursor| !cursor_advances(&cursor.after, &next.after))
-            || previous.as_ref().is_some_and(|key| &next.after > key)
-            || page.newest.as_ref().is_none_or(|key| &next.after > key))
+            || !token(&next.token)
+            || after.is_some_and(|cursor| cursor.token == next.token)
+            || next.after != previous)
     {
         return Err(ApiError::Invalid("invalid navigation continuation".into()));
     }
@@ -124,4 +126,11 @@ pub(super) fn pins(page: &PinnedPage, filter: &NavigationFilter) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn token(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }

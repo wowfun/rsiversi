@@ -224,6 +224,21 @@ export async function verifyDom(browser, root, report, name) {
     assert(approvals.text.includes("child-session") && !approvals.text.includes("parent-session"));
     assert.equal(approvals.sent.length, 1);
     assert.equal(approvals.sent[0].owner, "child-session");
+    await page.evaluate(() => {$("detail").close();dialogKey=undefined;});
+    const protection = await page.evaluate(async () => {
+      const pane=panes.get("main");
+      pane.render({generation:"protected-projection",session:"protected-session",path:"/workspace",protected:true,
+        model:{deployment:"test",model:"model"},capabilities:{terminal:false,goal:false,preset:false,submit:false},
+        transcript:{blocks:[],status:"Completed",omitted:false},pending:[],notice:""},[]);
+      await pane.binding;
+      return {composerHidden:pane.composer.hidden,noticeVisible:!pane.protectedNotice.hidden,
+        commandsDisabled:pane.commands.disabled,notice:pane.protectedNotice.textContent};
+    });
+    assert.equal(protection.composerHidden,true);
+    assert.equal(protection.noticeVisible,true);
+    assert.equal(protection.commandsDisabled,true);
+    assert.match(protection.notice,/Protected investigation/);
+    await page.screenshot({path:join(report,`${name}-protected-investigation.png`)});
     const draftEcho = await page.evaluate(async () => {
       const pane = panes.get("main"), originalCall = call;
       const data = { generation: "draft-echo", session: "retained-session", path: "/workspace",

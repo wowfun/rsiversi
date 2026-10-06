@@ -89,7 +89,27 @@ impl LocalSessionService {
         &self,
         selected: &mut BTreeMap<SessionId, bool>,
         locations: &rsi_execution::ExecutionLocations,
-    ) -> Result<()> {
+    ) -> Result<Vec<tokio_util::sync::CancellationToken>> {
+        let mut leases = Vec::new();
+        for id in selected.keys().cloned().collect::<Vec<_>>() {
+            let allowed = match self.store.header(&id).await {
+                Ok(header) => match self.protect_header(&header) {
+                    Ok(lease) => {
+                        leases.push(lease);
+                        true
+                    }
+                    Err(rsi_session_protocol::SessionError::Api(
+                        rsi_api_protocol::ApiError::Unauthorized,
+                    )) => false,
+                    Err(error) => return Err(error),
+                },
+                Err(rsi_agent_store_protocol::StoreError::NotFound(_)) => false,
+                Err(error) => return Err(super::map_store_error(error)),
+            };
+            if !allowed {
+                selected.remove(&id);
+            }
+        }
         let ids: Vec<_> = selected.keys().cloned().collect();
         for batch in ids.chunks(64) {
             let rows = self
@@ -103,7 +123,7 @@ impl LocalSessionService {
                 }
             }
         }
-        Ok(())
+        Ok(leases)
     }
     async fn activity_snapshot(&self) -> Result<SessionActivityPage> {
         let residents = self
@@ -123,7 +143,8 @@ impl LocalSessionService {
             selected.insert(row.session, row.running);
         }
         let visibility = self.visibility()?;
-        self.retain_visible_activity(&mut selected, visibility.locations())
+        let leases = self
+            .retain_visible_activity(&mut selected, visibility.locations())
             .await?;
         let ids: Vec<_> = selected.keys().cloned().collect();
         let reservation = self.interaction_retention.reserve_collection()?;
@@ -187,6 +208,13 @@ impl LocalSessionService {
                 requests: requests.into_iter().take(32).collect(),
                 truncated,
             });
+        }
+        self.check_origin()?;
+        if leases
+            .iter()
+            .any(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
         Ok(SessionActivityPage {
             truncated: residents.has_more || entries.iter().any(|row| row.truncated),

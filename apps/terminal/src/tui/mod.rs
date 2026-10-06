@@ -637,6 +637,12 @@ impl Client {
 
     #[allow(clippy::too_many_lines)] // Application grammar precedes the existing durable submission state machine.
     fn submit(&mut self, delivery: MessageDelivery, retry: bool) {
+        if self.state.header.protection().is_some() {
+            self.state.notice(
+                "Protected investigation. Use /automation to cancel or create a new attempt.",
+            );
+            return;
+        }
         if !retry
             && !slash::literal(self.state.editor.text())
             && self.state.editor.text().split_whitespace().next() == Some("/model-selection")
@@ -785,6 +791,11 @@ impl Client {
     }
 
     fn cancel(&mut self, displayed_turn: Option<TurnId>) {
+        if self.state.header.protection().is_some() {
+            self.state
+                .notice("Protected investigation. Use /automation to cancel the attempt.");
+            return;
+        }
         if self.cancelling {
             return;
         }
@@ -971,6 +982,20 @@ impl Client {
         let application = self.application.clone();
         self.state.invalidate_detail();
         self.extension_view = None;
+        if self.state.header.protection().is_some()
+            && matches!(
+                action,
+                Action::Questions
+                    | Action::Approvals
+                    | Action::Question(_)
+                    | Action::Approval(_)
+                    | Action::Decide(..)
+            )
+        {
+            self.state
+                .notice("Protected investigation is read-only; use Deployment checks for controls");
+            return false;
+        }
         match action {
             action @ (Action::References
             | Action::ReferenceSources(_)
@@ -1591,6 +1616,11 @@ impl Client {
     }
 
     fn answer(&mut self) {
+        if self.state.header.protection().is_some() {
+            self.state
+                .notice("Protected investigation is read-only; answer was not sent");
+            return;
+        }
         if self.pending_requests() >= 8 {
             self.state
                 .notice("Client requests are busy; answer draft retained");
@@ -2048,7 +2078,7 @@ async fn run_inner(
                         Ok(Update::Reference(page)) => client.state.show_reference(page),
                         Ok(Update::FilePicker(page)) => client.state.show_file_picker(page),
                         Ok(Update::Recent(page)) => {
-                            client.recent = page.sessions.last().map(rsi_session_protocol::SessionSummary::cursor);
+                            client.recent = page.next;
                             let mut items = page.sessions.into_iter().map(|summary| (format!("{} · {}", summary.header.session_id(), summary.header.canonical_cwd()), Action::Attach(summary.header.session_id().clone()))).collect::<Vec<_>>();
                             if page.has_more { items.push(("More sessions…".into(), Action::MoreRecent)); }
                             client.state.menu = Some(Menu { title: "Recent sessions".into(), selected: 0, items });

@@ -41,10 +41,7 @@ impl GuiApplication {
             .map_err(error)?;
             let mut catalog = self.catalog.lock().expect("Web catalog poisoned");
             catalog.sessions_more = page.has_more;
-            catalog.session_cursor = page
-                .sessions
-                .last()
-                .map(rsi_session_protocol::SessionSummary::cursor);
+            catalog.session_cursor.clone_from(&page.next);
             catalog.sessions = page
                 .sessions
                 .iter()

@@ -33,10 +33,17 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
         if self.projection_stopped.is_cancelled() {
             return Err(SessionError::ShuttingDown);
         }
+        let protected = handle.protection_lease_for(&scoped.origin)?;
+        // Scope revocation propagates synchronously to the published read token.
+        let retiring = protected.child_token();
+        let owner_retiring = self.projection_stopped.clone();
+        let retiring_task = retiring.clone();
+        let guard = retiring.clone().drop_guard();
+        drop(self.execution.spawn(async move {tokio::select!{()=retiring_task.cancelled()=>{},()=owner_retiring.cancelled()=>retiring_task.cancel()}}));
         Ok(rsi_session_protocol::SessionReadLease::new(
             (*header).clone(),
-            self.projection_stopped.clone(),
-            (activity, admission),
+            retiring,
+            (activity, admission, guard),
         ))
     }
 }

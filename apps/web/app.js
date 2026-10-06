@@ -186,9 +186,9 @@ async function presentFrame(frame, assets, current = connection) {
   frameId = frame.frame_id;
   for (const [key, pane] of panes) if (pane.kind !== "external") {
     const data = next.surfaces[key];
-    pane.stopBinding = data?.active ? {generation:data.generation,turn_id:data.active} : undefined;
+    pane.stopBinding = data?.active && !data?.protected ? {generation:data.generation,turn_id:data.active} : undefined;
     pane.cancel.disabled = !pane.stopBinding; pane.cancel.hidden = !pane.stopBinding;
-    pane.queueBinding = data ? {generation:data.generation,items:data.queue ?? []} : undefined;
+    pane.queueBinding = data && !data.protected ? {generation:data.generation,items:data.queue ?? []} : undefined;
     pane.queueList?.querySelectorAll("button").forEach(button => {button.disabled = !pane.queueBinding;});
   }
   return { accepted: true, renderer };
@@ -459,8 +459,11 @@ class Pane {
     actions.append(this.cancel, this.deliveryMenu, this.send); bar.append(extras,this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
     this.composer.append(this.resourcePreview, this.completionPanel, this.referenceList, this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
+    this.protectedNotice = element("div", "pane-notice");
+    this.protectedNotice.append(element("p", "", "Protected investigation. Use Deployment checks to cancel or create a new attempt."),button("Export investigation",()=>this.exportSession(""),"quiet"));
+    this.protectedNotice.hidden=true;
     this.queueList = element("section", "queue-list"); this.queueList.setAttribute("aria-label", "Pending inputs");
-    this.node.append(header, tools, this.commandView, this.recovery, this.welcome, this.transcript, this.bottom, this.queueList, this.waiting, this.notice, this.composer);
+    this.node.append(header, tools, this.commandView, this.recovery, this.welcome, this.transcript, this.bottom, this.queueList, this.waiting, this.notice, this.protectedNotice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
   }
@@ -528,7 +531,7 @@ class Pane {
   async bindDraft(data) {
     const generation = this.generation, current = connection;
     this.editor = undefined;
-    if (!data || !current?.drafts) return;
+    if (!data || data.protected || !current?.drafts) return;
     const store = current.drafts, key = JSON.stringify(store.key(this.index, data.session));
     let editor = this.editors.get(key);
     if (!editor?.dirty && !editor?.failure) {
@@ -730,7 +733,11 @@ class Pane {
   }
   renderQueue(data) {
     const items = data?.queue ?? [];
-    this.queueList.hidden = !items.length;
+    this.queueList.hidden = !items.length || !!data?.protected;
+    if (data?.protected) {
+      this.queueItems = undefined; this.queueBinding = undefined;
+      this.queueList.replaceChildren(); this.queueDialog?.close(); return;
+    }
     if (items === this.queueItems && data?.generation === this.queueGeneration) return;
     this.queueItems = items; this.queueGeneration = data?.generation; this.queueList.replaceChildren();
     if (!items.length) return;
@@ -1038,7 +1045,7 @@ class Pane {
   renderCommands(data) {
     this.renderCompletions(data);
     this.renderResourcePreview(data);
-    this.commands.disabled = !data || this.switching;
+    this.commands.disabled = !data || !!data.protected || this.switching;
     const key = JSON.stringify([data?.generation, data?.commands, data?.command_receipt]);
     if (key === this.commandKey) return;
     this.commandKey = key;
@@ -1078,6 +1085,8 @@ class Pane {
     if (snapshot && !snapshot.entries.length) this.extensionView.append(element("p", "", "No extension views in this preset"));
   }
   render(data, models) {
+    this.composer.hidden=!!data?.protected;
+    this.protectedNotice.hidden=!data?.protected;
     this.historyContext = data ? {session:data.session,workspace:data.workspace} : undefined;
     const changed = this.generation !== data?.generation;
     if (this.selection !== data?.selection) { this.selection = data?.selection; this.switching = false; }
@@ -1155,13 +1164,17 @@ class Pane {
     this.renderTranscript(data.transcript, changed);
     this.renderInline(data.inline);
     this.scheduleVisible();
-    const pendingKey = JSON.stringify(data.pending);
+    this.renderPending(data);
+    this.notice.textContent = data.notice;
+  }
+  renderPending(data) {
+    const pending = data.protected ? [] : data.pending;
+    const pendingKey = JSON.stringify(pending);
     if (pendingKey !== this.pendingKey) {
       this.pendingKey = pendingKey;
-      this.waiting.replaceChildren(...data.pending.map(item => button(`${item.kind === "approval" ? "Review" : "Answer"}: ${item.title}`,
+      this.waiting.replaceChildren(...pending.map(item => button(`${item.kind === "approval" ? "Review" : "Answer"}: ${item.title}`,
         () => this.action("inspect_interaction", { owner: item.owner, id: item.id }))));
     }
-    this.notice.textContent = data.notice;
   }
   renderTranscript(transcript, changed) {
     this.lastTranscript=transcript;

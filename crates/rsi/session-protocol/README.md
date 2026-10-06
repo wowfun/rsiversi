@@ -1,5 +1,18 @@
 # rsi-session-protocol
 
+Recent listing returns descending visible Headers and an optional opaque `next`
+cursor. `has_more` means more scanning work exists, including hidden rows; clients
+continue with `next` even when a page is empty. Cursors never expose skipped
+identities. They belong to the actual principal and service generation, expire
+after five minutes, and retain at most 128 cuts globally and eight per principal.
+A continuation replaces its predecessor; exhaustion releases it. Capacity never
+evicts another principal's cuts. Expired or foreign cursors require an explicit
+refresh. Protection infrastructure errors propagate as unavailable; only known
+authorization refusals hide rows.
+`RecentSessionPage::validate` checks a decoded page against its requested cursor
+and limit: strict descending visible order, exact continuation presence and
+visible position, and a fresh successor token. Empty scan pages may continue.
+
 `SessionHandle::export` returns a finite read-only export stream. Its options,
 bounded UTF-8 chunks and completion validation are shared by every application;
 the [export contract](../session-export/README.md) owns artifact semantics.
@@ -327,3 +340,10 @@ DTO, borrowing the fragment during measurement and owning it only after admissio
 Workflow Runtime sources provide a cheap applied-supply check for preset admission.
 Only readiness queries and refused admission collect the complete desired/applied
 Profile observations; admission does not cache readiness across Profile changes.
+
+Recent cursor positions require a nonzero creation timestamp and a canonical
+Session ID before any client dispatch.
+
+Recent continuations expire before further reads. Retiring a completed final
+page removes its admitted cut without rechecking TTL; a cleanup step cannot
+discard an otherwise authorized result merely because the scan crossed expiry.

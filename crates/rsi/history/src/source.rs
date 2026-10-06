@@ -12,6 +12,8 @@ pub(super) struct Source {
     pub identity: ReferenceSource,
     pub coordinates: rsi_workspace_protocol::ExecutionCoordinates,
     _admission: rsi_execution::ExecutionOperation,
+    pub protection: CancellationToken,
+    pub protected: bool,
 }
 pub(super) struct Original {
     pub text: String,
@@ -172,6 +174,16 @@ impl ProductHistorySearch {
         let source = match &scope.conversation {
             ConversationIdentity::Native(id) => {
                 let header = self.store.header(id).await.map_err(invalid)?;
+                let protection = match (header.protection(), authority) {
+                    (None, _) => CancellationToken::new(),
+                    (Some(scope), super::HistoryAuthority::Caller(origin)) => self
+                        .protection
+                        .as_ref()
+                        .ok_or(rsi_api_protocol::ApiError::Unauthorized)?
+                        .view(scope, origin)
+                        .map_err(|_| rsi_api_protocol::ApiError::Unauthorized)?,
+                    _ => return Err(rsi_api_protocol::ApiError::Unauthorized),
+                };
                 Source {
                     identity: ReferenceSource::Native {
                         binding: ReferenceBinding {
@@ -181,6 +193,8 @@ impl ProductHistorySearch {
                     },
                     coordinates: header.coordinates().clone(),
                     _admission: admission,
+                    protection,
+                    protected: header.protection().is_some(),
                 }
             }
             ConversationIdentity::External(id) => {
@@ -197,6 +211,8 @@ impl ProductHistorySearch {
                     )
                     .map_err(invalid)?,
                     _admission: admission,
+                    protection: CancellationToken::new(),
+                    protected: false,
                 }
             }
         };

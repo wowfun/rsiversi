@@ -1548,6 +1548,8 @@ impl StandardComposition {
             self.user_home.as_deref(),
         ))?;
         builder.register_local_contract::<rsi_session_protocol::WorkflowReadinessContract>()?;
+        builder.register_local_contract::<rsi_session_protocol::SessionProtectionContract>()?;
+        builder.register_local_contract::<rsi_session_protocol::FrozenSessionOwnerContract>()?;
         register(
             &mut builder,
             "rsi.workflow.readiness",

@@ -168,9 +168,7 @@ async fn select(
                 return Err(session_error("No durable root Session in this workspace"));
             }
             let next = page
-                .sessions
-                .last()
-                .map(rsi_session_protocol::SessionSummary::cursor)
+                .next
                 .ok_or_else(|| session_error("Session listing made no progress"))?;
             if after.as_ref() == Some(&next) {
                 return Err(session_error("Session listing made no progress"));

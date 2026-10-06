@@ -18,7 +18,7 @@ the unscoped Local Session service. Handles recheck location Use for new operati
 stream frames recheck before publication without retaining draft or composition pins.
 
 The current Session format is 19. Operations negotiate their own versions:
-create and inspect v7; attach, recent, draft-snapshot, select-preset and observe v6;
+create, recent and inspect v7; attach, draft-snapshot, select-preset and observe v6;
 history and read-message v5; submit v4. Message-status is v3. Interactions, questions
 and answer-question are v2 for typed closed reviews; older closed decoders are not
 compatible. Metrics is a read-only v1 operation returning a
@@ -210,3 +210,5 @@ nonadvancing child or CAS pages. Every cancellation receipt echoes the requested
 run identity; clients authenticate it before accepting the acknowledgement. Lost cancellation acknowledgements preserve the
 exact Session/run as WorkflowOutcomeUnknown for rereading. Session-scoped plugins
 receive an explicit operation allowlist; these four user controls are excluded.
+
+Recent v7 carries the opaque continuation owned by the [Session protocol](../session-protocol/README.md). Clients authenticate visible descending ordering, the next visible cut, token bounds and forward token progress, including empty pages.

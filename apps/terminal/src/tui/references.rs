@@ -132,10 +132,7 @@ impl Client {
                 let application = self.application.clone();
                 self.spawn_detail(async move {
                     let page = read(|| application.list_recent(cursor.as_ref(), 16)).await?;
-                    let next = page
-                        .sessions
-                        .last()
-                        .map(rsi_session_protocol::SessionSummary::cursor);
+                    let next = page.next;
                     let mut items: Vec<_> = page
                         .sessions
                         .into_iter()

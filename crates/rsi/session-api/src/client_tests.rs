@@ -27,6 +27,7 @@ use rsi_api_protocol::{
     OperationClass, OperationSpec, RetainedBytes,
 };
 use rsi_session_protocol::SessionInput;
+use rsi_session_protocol::SessionSummary;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -590,7 +591,7 @@ fn session_client_requires_current_header_operation_versions() {
     let versions = [
         (Operation::Create, 7),
         (Operation::Attach, 6),
-        (Operation::Recent, 6),
+        (Operation::Recent, 7),
         (Operation::DraftSnapshot, 6),
         (Operation::SelectPreset, 6),
         (Operation::Inspect, 7),
@@ -757,4 +758,133 @@ fn workflow_failures_are_bound_to_their_actual_operations() {
             "{operation:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn recent_continuation_accepts_empty_scans_and_rejects_stale_or_foreign_visible_cuts() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone()).unwrap();
+    let cursor = RecentSessionCursor {
+        token: "1".repeat(32),
+        after: None,
+    };
+    remote.reply(&RecentSessionPage {
+        sessions: vec![],
+        has_more: true,
+        next: Some(cursor.clone()),
+    });
+    assert_eq!(
+        client.list_recent(None, 1).await.unwrap().next,
+        Some(cursor.clone())
+    );
+    for next in [
+        Some(cursor.clone()),
+        None,
+        Some(RecentSessionCursor {
+            token: "2".repeat(32),
+            after: Some(rsi_session_protocol::RecentSessionPosition {
+                created_at_ms: 1,
+                session_id: SessionId::new("hidden").unwrap(),
+            }),
+        }),
+    ] {
+        remote.reply(&RecentSessionPage {
+            sessions: vec![],
+            has_more: true,
+            next,
+        });
+        assert!(client.list_recent(Some(&cursor), 1).await.is_err());
+    }
+    let row = SessionSummary { header: header() };
+    remote.reply(&RecentSessionPage {
+        sessions: vec![row],
+        has_more: false,
+        next: None,
+    });
+    let final_page = client.list_recent(Some(&cursor), 1).await.unwrap();
+    assert!(!final_page.has_more && final_page.next.is_none());
+    let malformed = RecentSessionCursor {
+        token: "wrong".into(),
+        after: None,
+    };
+    let before = remote.calls.load(Ordering::SeqCst);
+    assert!(client.list_recent(Some(&malformed), 1).await.is_err());
+    assert_eq!(remote.calls.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
+async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() {
+    fn row(id: &str, time: u64) -> SessionSummary {
+        SessionSummary {
+            header: SessionHeader::new_local(
+                SessionId::new(id).unwrap(),
+                time,
+                "/workspace",
+                AgentPresetId::new("standard").unwrap(),
+                header().settings().clone(),
+            )
+            .unwrap(),
+        }
+    }
+    let newer = row("newer", 2);
+    let older = row("older", 1);
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone()).unwrap();
+    let after = RecentSessionCursor {
+        token: "1".repeat(32),
+        after: Some(newer.position()),
+    };
+    let valid = RecentSessionPage {
+        sessions: vec![older.clone()],
+        has_more: true,
+        next: Some(RecentSessionCursor {
+            token: "2".repeat(32),
+            after: Some(older.position()),
+        }),
+    };
+    remote.reply(&valid);
+    assert_eq!(client.list_recent(Some(&after), 1).await.unwrap(), valid);
+    let mut ascending = valid.clone();
+    ascending.sessions = vec![older.clone(), newer.clone()];
+    let mut duplicate = valid.clone();
+    duplicate.sessions = vec![older.clone(), older.clone()];
+    let mut foreign = valid.clone();
+    foreign.next.as_mut().unwrap().after = Some(newer.position());
+    let mut malformed = valid.clone();
+    malformed.next.as_mut().unwrap().token = "Z".repeat(32);
+    let mut missing = valid.clone();
+    missing.next = None;
+    let mut unexpected = valid.clone();
+    unexpected.has_more = false;
+    let mut too_many = valid.clone();
+    too_many.sessions = vec![newer.clone(), older];
+    for (page, cursor, limit) in [
+        (ascending, None, 2),
+        (duplicate, None, 2),
+        (foreign, Some(&after), 1),
+        (malformed, Some(&after), 1),
+        (missing, Some(&after), 1),
+        (unexpected, Some(&after), 1),
+        (too_many, None, 1),
+        (valid.clone(), valid.next.as_ref(), 1),
+    ] {
+        remote.reply(&page);
+        assert!(client.list_recent(cursor, limit).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn recent_cursor_rejects_zero_creation_before_dispatch() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone()).unwrap();
+    let cursor = RecentSessionCursor {
+        token: "1".repeat(32),
+        after: Some(rsi_session_protocol::RecentSessionPosition {
+            created_at_ms: 0,
+            session_id: SessionId::new("invalid-time").unwrap(),
+        }),
+    };
+    let before = remote.calls.load(Ordering::SeqCst);
+    assert!(client.list_recent(Some(&cursor), 1).await.is_err());
+    assert_eq!(remote.calls.load(Ordering::SeqCst), before);
 }

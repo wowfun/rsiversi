@@ -54,6 +54,12 @@ use rsi_session_protocol::{
 #[derive(Clone)]
 pub struct LocalSessionService {
     origin: rsi_api_protocol::CallOrigin,
+    recent_cursors: Arc<std::sync::Mutex<access::RecentCursors>>,
+    protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
+    frozen: Option<(
+        SessionHeader,
+        rsi_agent_composition_protocol::AgentCompositionPin,
+    )>,
     workflow: Option<Arc<dyn rsi_session_protocol::WorkflowReadinessSource>>,
     resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
     activity: Arc<activity::Managed>,
@@ -98,6 +104,49 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Installs the product source policy; ordinary Sessions remain independent.
+    #[must_use]
+    pub fn with_protection(
+        mut self,
+        policy: Arc<dyn rsi_session_protocol::SessionProtection>,
+    ) -> Self {
+        self.protection = Some(policy);
+        self
+    }
+    /// Creates a private frozen draft. The exact pin and Header remain bound to its owner.
+    pub async fn create_frozen(
+        &self,
+        header: SessionHeader,
+        pin: rsi_agent_composition_protocol::AgentCompositionPin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        if !matches!(self.origin, rsi_api_protocol::CallOrigin::Local)
+            || header.protection().is_none()
+            || header.agent_preset_id() != pin.preset_id()
+        {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
+        header
+            .validate()
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let workspace_id =
+            rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates());
+        let service = Self {
+            frozen: Some((header.clone(), pin)),
+            ..self.clone()
+        };
+        let request = CreateSession {
+            workspace_id,
+            session_id: header.session_id().clone(),
+            agent_preset_id: Some(header.agent_preset_id().clone()),
+        };
+        let handle = self.drafts.create(service, request, None).await?;
+        if handle.header_snapshot().await?.as_ref() != &header || !handle.private_owner {
+            return Err(SessionError::DraftConflict {
+                session: header.session_id().to_string(),
+            });
+        }
+        Ok(handle)
+    }
     /// Supplies optional product-owned Workflow requirements; absence never blocks standard Sessions.
     #[must_use]
     pub fn with_workflow(
@@ -157,6 +206,9 @@ impl LocalSessionService {
     ) -> Self {
         Self {
             origin: rsi_api_protocol::CallOrigin::Local,
+            recent_cursors: Arc::default(),
+            protection: None,
+            frozen: None,
             workflow: None,
             resolver: None,
             activity: Arc::new(activity::Managed::default()),
@@ -235,6 +287,9 @@ impl LocalSessionService {
         );
         Arc::new(LocalSessionHandle {
             origin: self.origin.clone(),
+            protection: self.protection.clone(),
+            scope: state.header().expect("new handle").protection().cloned(),
+            private_owner: self.frozen.is_some(),
             workflow: self.workflow.clone(),
             resolver: self.resolver.clone(),
             coordinates: state
@@ -301,6 +356,7 @@ impl LocalSessionService {
             .header(session_id)
             .await
             .map_err(map_store_error)?;
+        self.protect_header(&header)?;
         self.admit(header.coordinates().location())?;
         Ok(self.handle_from_state(HandleState::Attached(Arc::new(header)), None))
     }
@@ -337,7 +393,10 @@ impl LocalSessionService {
                 .map_err(|error| SessionError::Backend(error.to_string()))?,
         };
         workflow::require_preset(self.workflow.as_deref(), &agent_preset_id)?;
-        let settings = self.settings.current()?;
+        let settings = match &self.frozen {
+            Some((header, _)) => header.settings().clone(),
+            None => self.settings.current()?,
+        };
         settings
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
@@ -359,7 +418,24 @@ impl LocalSessionService {
             settings,
         )
         .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        let draft = AgentSessionDraft::new(header, Arc::clone(&self.composition))
+        let (header, composition) = match &self.frozen {
+            Some((frozen, pin))
+                if frozen.session_id() == header.session_id()
+                    && frozen.coordinates() == header.coordinates() =>
+            {
+                (
+                    frozen.clone(),
+                    Arc::new(FixedComposition(pin.clone())) as Arc<dyn AgentComposition>,
+                )
+            }
+            Some(_) => {
+                return Err(SessionError::Invalid(
+                    "frozen draft binding mismatch".into(),
+                ));
+            }
+            None => (header, Arc::clone(&self.composition)),
+        };
+        let draft = AgentSessionDraft::new(header, composition)
             .await
             .map_err(|error| SessionError::Backend(error.to_string()))?;
         Ok(self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease)))
@@ -381,6 +457,7 @@ impl SessionService for LocalSessionService {
             .header(session_id)
             .await
             .map_err(map_store_error)?;
+        let _protection = self.protect_header(&header)?;
         let _admission = self.admit(header.coordinates().location())?;
         Ok(header)
     }
@@ -460,6 +537,9 @@ impl HandleState {
 #[derive(Clone)]
 struct LocalSessionHandle {
     origin: rsi_api_protocol::CallOrigin,
+    protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
+    scope: Option<rsi_agent_session_protocol::SessionProtectionScope>,
+    private_owner: bool,
     workflow: Option<Arc<dyn rsi_session_protocol::WorkflowReadinessSource>>,
     resolver: Option<Arc<dyn rsi_execution::ExecutionResolver>>,
     coordinates: rsi_workspace_protocol::ExecutionCoordinates,
@@ -704,7 +784,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::terminal::Request,
     ) -> Result<rsi_session_protocol::terminal::Reply> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         self.terminal_request(request).await
     }
     async fn read_recorded_reference(
@@ -724,10 +804,14 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         source: SessionId,
     ) -> Result<rsi_agent_session_protocol::FrozenReference> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
+        let source_header = self.store.header(&source).await.map_err(map_store_error)?;
+        if source_header.protection().is_some() {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
         self.reference_owner()?
             .capture(source, (*header).clone(), self.projection_stopped.clone())
             .await
@@ -840,7 +924,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         let request_id = request.request_id.clone();
         self.goals
@@ -884,7 +968,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::SelectDraftPreset,
     ) -> Result<rsi_session_protocol::SessionDraftView> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         self.draft_commands
             .select_preset(self.clone(), request)
             .await
@@ -897,7 +981,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         self.dispatch_command(invocation).await
     }
     async fn command_status(
@@ -944,7 +1028,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         validate_session_input(&request.content)?;
         let delivery = request.delivery;
@@ -1021,7 +1105,7 @@ impl SessionHandle for LocalSessionHandle {
         mut request: rsi_agent_session_protocol::QueueMutationRequest,
     ) -> Result<rsi_agent_session_protocol::QueueMutationReceipt> {
         use rsi_agent_session_protocol::QueueMutation;
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         request
             .validate()
@@ -1078,7 +1162,7 @@ impl SessionHandle for LocalSessionHandle {
             .map_err(map_turn_error)
     }
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         self.image
             .describe(&request.model)
@@ -1124,7 +1208,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         self.turns
             .cancel_target(self.session_id(), target, reason)
@@ -1317,7 +1401,7 @@ impl SessionHandle for LocalSessionHandle {
         id: &str,
         answer: rsi_user_questions_protocol::QuestionAnswer,
     ) -> Result<bool> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         let questions = self.questions.as_ref().ok_or_else(|| {
             SessionError::Invalid("human questions are unavailable in this Host".into())
@@ -1345,7 +1429,7 @@ impl SessionHandle for LocalSessionHandle {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool> {
-        let _admission = self.admit()?;
+        let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         let sessions = self
             .turns
@@ -1541,3 +1625,39 @@ mod publication_admission_tests {
 mod evidence;
 mod metrics;
 mod model_selection;
+
+#[derive(Debug)]
+struct FixedComposition(rsi_agent_composition_protocol::AgentCompositionPin);
+#[async_trait]
+impl rsi_session_protocol::FrozenSessionOwner for LocalSessionService {
+    async fn create_frozen(
+        &self,
+        header: SessionHeader,
+        pin: rsi_agent_composition_protocol::AgentCompositionPin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        LocalSessionService::create_frozen(self, header, pin).await
+    }
+}
+#[async_trait]
+impl AgentComposition for FixedComposition {
+    async fn default_preset_id(
+        &self,
+    ) -> rsi_agent_composition_protocol::Result<rsi_agent_session_protocol::AgentPresetId> {
+        Ok(self.0.preset_id().clone())
+    }
+    async fn pin(
+        &self,
+        id: &rsi_agent_session_protocol::AgentPresetId,
+        _seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<rsi_agent_composition_protocol::AgentCompositionPin>
+    {
+        if id != self.0.preset_id() {
+            return Err(
+                rsi_agent_composition_protocol::AgentCompositionError::InvalidInput(
+                    "frozen preset mismatch".into(),
+                ),
+            );
+        }
+        Ok(self.0.clone())
+    }
+}

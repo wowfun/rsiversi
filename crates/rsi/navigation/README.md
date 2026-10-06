@@ -28,8 +28,8 @@ Unpublished drafts cannot acquire Host navigation metadata.
 Every endpoint forwards its actual origin. Each finite request captures admitted
 location visibility and retains the grant gates until settlement. Store queries
 apply this selection before pagination and ordering budgets. Exact summaries
-return null for inaccessible identities; pins omit inaccessible and, for Device
-callers, missing identities whose location cannot be established. Metadata edits
+return null for inaccessible identities; pins omit inaccessible identities and rows whose missing Header prevents
+authorizing their location or product protection, including Local callers. Metadata edits
 admit the selected Header location; configuration grants confer no SSH Use.
 
 Queries select at most 256 indexed activity rows and return at most 64 matches.
@@ -39,6 +39,8 @@ content. Continuation uses the last scanned row, even when there are no matches;
 changing metadata, Host generation or query parameters invalidates the cursor.
 Activity changes do not invalidate continuation. The page carries the newest
 activity key from the same Store snapshot so clients can offer an explicit refresh.
+It is absent when the newest indexed identity cannot be authorized, even on a
+nonempty page; omission never exposes that hidden identity.
 Workspace grouping resolves exact registered identities without filesystem access
 or registration side effects. Each page, pin list or exact-summary request shares
 one lookup per distinct coordinate, with at most four lookups in flight. Results
@@ -71,8 +73,8 @@ closed external conversations retain unread observations according to their epoc
 and sequence, including history loaded from a remote peer.
 
 The version-1 metadata document retains the pinned field and bounds owned by the
-[wire contract](../navigation-api/README.md). Missing identities remain explicit
-entries; queries never clean up metadata. Missing-Header records may also be explicitly
+[wire contract](../navigation-api/README.md). Missing activity may remain explicit when the Header still authorizes the read;
+queries never clean up metadata. Missing-Header records may also be explicitly
 cleared by replacing them with default metadata, whether pinned or not, under
 the same revision CAS. This cannot create metadata for an unpublished Session.
 Ordinary pages exclude pinned entries.
@@ -81,9 +83,9 @@ Workspace filters explicitly select all, one registered identity, or unregistere
 Headers. No matching row is not proof of exhaustion when a cursor remains.
 
 Pinned summaries use one bounded Store snapshot for at most 64 exact identities.
-Neither ordinary nor pinned listing decodes Headers or transcript bodies. Pins sort
-by activity and identity descending; absent durable identities retain explicit
-missing entries. Metadata edits continue to check durable existence separately.
+Ordinary and pinned listing authorize immutable Headers and do not decode transcript bodies. Pins sort
+by activity and identity descending; absent activity retains explicit missing entries only when its immutable Header
+authorizes the caller. Metadata edits continue to check durable existence separately.
 
 Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
 
@@ -91,3 +93,23 @@ Manual membership reads the Store's complete bounded identity snapshot and joins
 one immutable metadata revision. A seed includes both pin and archive partitions,
 so filtering a view cannot silently remove a device's saved members. Exact summary
 reads preserve the requested order and metadata revision; missing rows stay null.
+
+Protected Session scope is read from its immutable Header before navigation,
+pinned summaries, complete manual membership or exact summaries are published.
+The actual caller must hold the product scope's View grant. Unknown scopes are
+hidden; revocation ends the finite read lease. Candidate indexes remain bounded
+and no transcript is read. This adds bounded Header authorization reads to the
+metadata query path; identities and stored titles alone never authorize a row.
+
+Public scan cursors use an opaque process-local token instead of publishing a
+skipped protected Session identity. The owner retains at most 128 cursor cuts,
+with at most eight per principal and a five-minute lifetime. A successful
+continuation replaces its predecessor; completion releases it. New scans may
+evict only that principal's oldest token. A full book rejects another principal
+with Capacity rather than evicting somebody else's continuation. Expired tokens
+require an explicit refresh. Cuts bind the caller, query and metadata revision.
+A token locates a scan cut and grants no source
+access; every new page applies current Header scope policy again.
+
+Header lookup failure propagates as unavailable; an absent Header or denied
+protection scope is omitted. Storage failure cannot be presented as a hidden row.

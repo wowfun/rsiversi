@@ -141,6 +141,9 @@ impl GuiApplication {
             .iter()
             .filter_map(|(key, pane)| {
                 let attached = pane.current.lock().expect("GUI pane poisoned").clone()?;
+                if attached.protected {
+                    return None;
+                }
                 let active = attached
                     .renderer
                     .state

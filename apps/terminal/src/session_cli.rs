@@ -321,16 +321,7 @@ async fn sessions(
         .list_recent(after, 20)
         .await
         .map_err(session_error)?;
-    let next = if page.has_more {
-        page.sessions
-            .last()
-            .map(|session| rsi_session_protocol::RecentSessionCursor {
-                created_at_ms: session.header.created_at_ms(),
-                session_id: session.header.session_id().clone(),
-            })
-    } else {
-        None
-    };
+    let next = page.next;
     notice(renderer, "sessions", json!({"sessions":page.sessions.iter().map(|session| &session.header).collect::<Vec<_>>(),"has_more":page.has_more})).await?;
     Ok(next)
 }

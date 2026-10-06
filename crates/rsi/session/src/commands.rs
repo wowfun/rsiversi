@@ -36,7 +36,7 @@ impl DraftCommands {
         run: rsi_agent_session_protocol::ProgramRunId,
     ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
         let activity = handle.begin_activity()?;
-        let admission = handle.admit()?;
+        let admission = handle.admit_mutation()?;
         let session_id = handle.session_id().clone();
         let run_id = run.clone();
         let turns = handle.turns.clone();

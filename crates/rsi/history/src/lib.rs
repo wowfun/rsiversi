@@ -26,6 +26,14 @@ pub use tools::HistoryToolsFactory;
 fn invalid(e: impl std::fmt::Display) -> ApiError {
     ApiError::Invalid(e.to_string())
 }
+fn session_error(error: rsi_session_protocol::SessionError) -> ApiError {
+    match error {
+        rsi_session_protocol::SessionError::Api(error) => error,
+        rsi_session_protocol::SessionError::ShuttingDown => ApiError::ShuttingDown,
+        rsi_session_protocol::SessionError::Capacity => ApiError::Capacity,
+        _ => ApiError::Unavailable,
+    }
+}
 fn check(stop: &CancellationToken) -> Result<()> {
     if stop.is_cancelled() {
         Err(ApiError::ShuttingDown)
@@ -50,6 +58,7 @@ pub struct ProductHistorySearch {
     writer: Arc<Semaphore>,
     stop: CancellationToken,
     admission: Mutex<()>,
+    protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
 }
 /// Exact source and authorization providers retained by one history owner.
 #[derive(Debug)]
@@ -66,6 +75,8 @@ pub struct HistorySources {
     pub references: Arc<References>,
     /// Current execution-location admission, including offline metadata access.
     pub resolver: Arc<dyn rsi_execution::ExecutionResolver>,
+    /// Product protection policy; absent policies fail closed for protected sources.
+    pub protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
 }
 impl ProductHistorySearch {
     /// Opens the independently leased, rebuildable cache before publishing a service.
@@ -89,6 +100,7 @@ impl ProductHistorySearch {
             writer: Arc::new(Semaphore::new(1)),
             stop: CancellationToken::new(),
             admission: Mutex::new(()),
+            protection: sources.protection,
         }))
     }
     /// Executes one finite request. A dropped waiter never releases a dispatched worker.
@@ -149,6 +161,10 @@ impl ProductHistorySearch {
     ) -> Result<Reply> {
         let scope = request.scope().clone();
         let source = self.authorize(&authority, &scope, stop).await?;
+        let protection = source.protection.clone();
+        if protection.is_cancelled() {
+            return Err(ApiError::Unauthorized);
+        }
         let key = cache::key(&scope);
         let reply = match &request {
             Request::Advance { .. } => {
@@ -221,6 +237,9 @@ impl ProductHistorySearch {
                 ..
             } => self.freeze(source, hit, target, *start, *end, stop).await?,
         };
+        if protection.is_cancelled() {
+            return Err(ApiError::Unauthorized);
+        }
         rsi_history_api::validate_reply(&request, &reply)?;
         Ok(reply)
     }
@@ -233,10 +252,14 @@ impl ProductHistorySearch {
         end: usize,
         stop: &CancellationToken,
     ) -> Result<Reply> {
-        // Authorize the target independently; a hit never grants a receiving Header.
-        let target_handle = self.sessions.attach(target).await.map_err(invalid)?;
+        // The history location permit covers ordinary Sessions at these coordinates.
+        // A hit never authorizes a protected receiving Header.
+        let target_handle = self.sessions.attach(target).await.map_err(session_error)?;
         check(stop)?;
-        let target = target_handle.header().await.map_err(invalid)?;
+        let target = target_handle.header().await.map_err(session_error)?;
+        if source.protected || target.protection().is_some() {
+            return Err(ApiError::Unauthorized);
+        }
         check(stop)?;
         if target.coordinates() != &source.coordinates {
             return Err(invalid(
@@ -270,5 +293,27 @@ impl ProductHistorySearch {
         }
         .map_err(invalid)?;
         Ok(Reply::Frozen { reference })
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    #[test]
+    fn freeze_session_refusals_preserve_the_history_api_categories() {
+        use rsi_session_protocol::SessionError;
+        assert_eq!(
+            session_error(SessionError::Api(ApiError::Unauthorized)),
+            ApiError::Unauthorized
+        );
+        assert_eq!(
+            session_error(SessionError::NotFound("target".into())),
+            ApiError::Unavailable
+        );
+        assert_eq!(
+            session_error(SessionError::Backend("read failed".into())),
+            ApiError::Unavailable
+        );
+        assert_eq!(session_error(SessionError::Capacity), ApiError::Capacity);
     }
 }

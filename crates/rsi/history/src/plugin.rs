@@ -50,6 +50,12 @@ impl PluginFactory for HistoryFactory {
                     .local::<rsi_acp_protocol::service::ExternalConversationsContract>()?,
                 workspaces: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
                 references: plan.local::<rsi_agent_references::ReferencesContract>()?,
+                protection: Some(std::sync::Arc::new({
+                    let context = plan.context().clone();
+                    rsi_session_protocol::SessionProtectionLookup::new(move || {
+                        context.lookup_local::<rsi_session_protocol::SessionProtectionContract>()
+                    })
+                })),
                 resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
             },
             plan.context().runtime().execution().clone(),
@@ -71,6 +77,7 @@ impl PluginFactory for HistoryFactory {
         )
     }
 }
+
 /// API adapter; authority and cache ownership remain with the source owner.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryApiFactory;

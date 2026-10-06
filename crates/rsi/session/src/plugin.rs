@@ -70,6 +70,12 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_protection(Arc::new({
+            let context = plan.context().clone();
+            rsi_session_protocol::SessionProtectionLookup::new(move || {
+                context.lookup_local::<rsi_session_protocol::SessionProtectionContract>()
+            })
+        }))
         .with_workflow(
             plan.context()
                 .lookup_local::<rsi_session_protocol::WorkflowReadinessContract>(),
@@ -88,6 +94,18 @@ impl PluginFactory for SessionFactory {
             plan.local::<rsi_agent_turn_protocol::SessionContinuationsContract>()?,
         );
         let service = Arc::new(service);
+        let frozen_supply = plan
+            .context()
+            .provide_local::<rsi_session_protocol::FrozenSessionOwnerContract>(service.clone())?;
+        plan.defer(
+            "withdraw frozen Session owner",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(frozen_supply);
+                    Ok(())
+                })
+            }),
+        )?;
         let cleanup = service.clone();
         plan.defer(
             "stop Session drafts",
