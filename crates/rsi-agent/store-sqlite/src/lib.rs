@@ -423,6 +423,7 @@ impl ForkBoundaryCache {
 }
 
 struct StoreInner {
+    cas_publication: cas::Publication,
     connections: DatabaseConnections,
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
@@ -470,6 +471,7 @@ struct StoreInner {
     #[cfg(feature = "test-support")]
     reader_measurements: Arc<Mutex<Option<Vec<test_support::ReaderMeasurement>>>>,
     cas_admission: Arc<Semaphore>,
+    cas_publication_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
     cas_staging_dir: Arc<PathBuf>,
@@ -633,6 +635,7 @@ impl SqliteStore {
             .map_err(sql_error)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
+                cas_publication: cas::Publication::default(),
                 connections: DatabaseConnections {
                     reader: Mutex::new(reader_connection),
                     validation_reader: Mutex::new(validation_connection),
@@ -674,6 +677,7 @@ impl SqliteStore {
                 #[cfg(feature = "test-support")]
                 reader_measurements: Arc::new(Mutex::new(None)),
                 cas_admission: Arc::new(Semaphore::new(1)),
+                cas_publication_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
                 cas_staging_dir: Arc::new(cas_staging_dir),
@@ -878,7 +882,15 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
-        let permit = Arc::clone(&self.inner.cas_admission)
+        self.with_cas_lane(self.inner.cas_admission.clone(), operation)
+            .await
+    }
+    async fn with_cas_lane<T, F>(&self, admission: Arc<Semaphore>, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let permit = admission
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io("CAS file admission closed".into()))?;
@@ -890,6 +902,15 @@ impl SqliteStore {
         })
         .await
         .map_err(|error| StoreError::Io(format!("CAS worker failed: {error}")))?
+    }
+
+    async fn with_cas_publication<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        self.with_cas_lane(self.inner.cas_publication_admission.clone(), operation)
+            .await
     }
 }
 

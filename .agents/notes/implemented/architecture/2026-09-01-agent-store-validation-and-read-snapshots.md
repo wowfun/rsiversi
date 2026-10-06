@@ -103,3 +103,20 @@ and before its metadata insert commits can leave an unreachable complete file.
 Eliminating that residue requires a recoverable filesystem/SQLite publication
 protocol or an explicit bounded maintenance operation, not eager whole-CAS
 validation in ordinary open.
+
+CAS publication cannot recover a failed synchronization from visible readback.
+An existing target is verified and synchronized through the same handle before
+its namespace is synchronized. Filesystem publication and metadata commit remain
+separate: process failure can retain a complete unregistered object, and a retry
+must re-establish durability before admitting metadata. Unix directory sync and
+Windows file flushing have different guarantees; Windows does not claim namespace
+power-loss durability. These platform limits do not weaken error reporting for
+operations that are actually required.
+
+A digest-only process-local publication set is not a durability proof for a
+later filesystem observation: the name can refer to another inode after the
+recorded success. A committed metadata row has the same limitation. Repeated
+puts therefore retain verification and synchronization under the CAS permit.
+Avoiding those barriers would require bounded file-identity and invalidation
+ownership, whose latency benefit must justify its retained resources and trust
+contract.

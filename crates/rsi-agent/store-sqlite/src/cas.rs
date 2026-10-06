@@ -1,22 +1,143 @@
 use super::bounded_text;
 use super::*;
 
+/// One filesystem operation in immutable CAS publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationStep {
+    /// Writes the staging body.
+    Write,
+    /// Flushes the new staging file.
+    FileSync,
+    /// Publishes the immutable name without replacing it.
+    Link,
+    /// Removes the temporary name.
+    TemporaryRemoval,
+    /// Flushes the staging directory on Unix.
+    StagingSync,
+    /// Flushes the CAS directory on Unix.
+    NamespaceSync,
+    /// Flushes the same verified existing file.
+    ExistingFileSync,
+}
+
+/// Whether a reported failure precedes or follows the real operation.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationPhase {
+    /// The operation has not run.
+    Before,
+    /// The operation succeeded but its acknowledgement is lost.
+    After,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Publication {
+    #[cfg(test)]
+    crash: Mutex<Option<(PublicationStep, PublicationPhase)>>,
+    #[cfg(any(test, feature = "test-support"))]
+    fault: Mutex<Option<(PublicationStep, PublicationPhase)>>,
+}
+
+impl Publication {
+    fn run<T>(
+        &self,
+        step: PublicationStep,
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = (self, step);
+        #[cfg(any(test, feature = "test-support"))]
+        self.check(step, PublicationPhase::Before)?;
+        let result = operation()?;
+        #[cfg(any(test, feature = "test-support"))]
+        self.check(step, PublicationPhase::After)?;
+        Ok(result)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn check(&self, step: PublicationStep, phase: PublicationPhase) -> std::io::Result<()> {
+        #[cfg(test)]
+        if *self.crash.lock().unwrap() == Some((step, phase)) {
+            crash_child_exit(&format!("{step:?}/{phase:?}"));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut fault = self.fault.lock().unwrap();
+            if *fault == Some((step, phase)) {
+                fault.take();
+                return Err(std::io::Error::other("injected CAS publication failure"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn inject(&self, step: PublicationStep, phase: PublicationPhase) {
+        assert!(self.fault.lock().unwrap().replace((step, phase)).is_none());
+    }
+
+    #[cfg(test)]
+    pub(super) fn crash_after(&self, step: PublicationStep) {
+        require_crash_child();
+        assert!(
+            self.crash
+                .lock()
+                .unwrap()
+                .replace((step, PublicationPhase::After))
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+pub(super) const CRASH_CHILD_EXIT_CODE: i32 = 86;
+
+#[cfg(test)]
+pub(super) fn require_crash_child() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    assert!(
+        args.iter().any(|arg| arg == "--exact")
+            && args.iter().any(|arg| arg == "tests::cas_crash_child")
+            && std::env::var_os("RSI_CAS_CRASH_TEST_ROOT").is_some()
+            && std::env::var_os("RSI_CAS_CRASH_TEST_POINT").is_some(),
+        "CAS crash injection requires --exact tests::cas_crash_child and its fixture environment"
+    );
+}
+
+#[cfg(test)]
+pub(super) fn crash_child_exit(boundary: &str) -> ! {
+    require_crash_child();
+    eprintln!("intentional CAS crash child at {boundary}");
+    std::process::exit(CRASH_CHILD_EXIT_CODE)
+}
+
 pub(super) fn install_cas(
     cas_dir: &Path,
     cas_staging_dir: &Path,
-    sha256: &str,
     bytes: &[u8],
-) -> Result<()> {
-    validate_digest(sha256, bytes)?;
+    publication: &Publication,
+) -> Result<CasObjectRef> {
+    let reference = CasObjectRef {
+        sha256: hex::encode(Sha256::digest(bytes)),
+        byte_len: u64::try_from(bytes.len())
+            .map_err(|_| StoreError::Invalid("CAS length exceeds u64".into()))?,
+    };
+    reference.validate()?;
+    let sha256 = &reference.sha256;
     let target = cas_dir.join(sha256);
-    if target.exists() {
-        let existing = read_cas_file(cas_dir, sha256)?;
-        if existing != bytes {
-            return Err(StoreError::Corrupt(
-                "existing CAS body conflicts with its digest name".into(),
-            ));
+    match open_cas_file_for_sync(&target) {
+        Ok((file, metadata)) => {
+            sync_verified_existing(file, &metadata, bytes, publication)
+                .map_err(|error| cas_read_error(sha256, error))?;
+            publication
+                .run(PublicationStep::NamespaceSync, || {
+                    sync_directory_io(cas_dir)
+                })
+                .map_err(io_error)?;
+            return Ok(reference);
         }
-        return Ok(());
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(cas_read_error(sha256, error)),
     }
     let temporary = cas_staging_dir.join(format!(
         ".{sha256}.{}.{}.tmp",
@@ -29,33 +150,85 @@ pub(super) fn install_cas(
         .open(&temporary)
         .map_err(io_error)?;
     let publish = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        publication.run(PublicationStep::Write, || file.write_all(bytes))?;
+        publication.run(PublicationStep::FileSync, || file.sync_all())?;
         drop(file);
-        match fs::hard_link(&temporary, &target) {
+        match publication.run(PublicationStep::Link, || fs::hard_link(&temporary, &target)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if read_regular_file_bounded(&target, MAXIMUM_STORE_CAS_BYTES)? != bytes {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "existing CAS body differs from candidate",
-                    ));
-                }
+                verify_existing_publication(&target, bytes, publication)?;
             }
             Err(error) => return Err(error),
         }
-        fs::remove_file(&temporary)?;
-        sync_directory_io(cas_staging_dir)?;
-        sync_directory_io(cas_dir)
+        publication.run(PublicationStep::TemporaryRemoval, || {
+            fs::remove_file(&temporary)
+        })?;
+        publication.run(PublicationStep::StagingSync, || {
+            sync_directory_io(cas_staging_dir)
+        })?;
+        publication.run(PublicationStep::NamespaceSync, || {
+            sync_directory_io(cas_dir)
+        })
     })();
     if let Err(error) = publish {
         let _ignored = fs::remove_file(&temporary);
-        if target.exists() && read_cas_file(cas_dir, sha256)? == bytes {
-            return Ok(());
-        }
         return Err(io_error(error));
     }
-    Ok(())
+    Ok(reference)
+}
+
+fn verify_existing_publication(
+    target: &Path,
+    bytes: &[u8],
+    publication: &Publication,
+) -> std::io::Result<()> {
+    let (file, metadata) = open_cas_file_for_sync(target)?;
+    sync_verified_existing(file, &metadata, bytes, publication)
+}
+
+fn sync_verified_existing(
+    mut file: File,
+    metadata: &fs::Metadata,
+    bytes: &[u8],
+    publication: &Publication,
+) -> std::io::Result<()> {
+    if metadata.len() != bytes.len() as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "existing CAS body conflicts with its digest name",
+        ));
+    }
+    // Keep the verified handle through sync: reopening would validate one inode
+    // and acknowledge durability of a possibly replaced one.
+    let mut remaining = bytes;
+    let mut buffer = [0; 16 * 1024];
+    while !remaining.is_empty() {
+        let length = remaining.len().min(buffer.len());
+        file.read_exact(&mut buffer[..length]).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "existing CAS body shrank during verification",
+                )
+            } else {
+                error
+            }
+        })?;
+        if buffer[..length] != remaining[..length] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "existing CAS body conflicts with its digest name",
+            ));
+        }
+        remaining = &remaining[length..];
+    }
+    if super::filesystem::read_retry(&mut file, &mut buffer[..1])? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "existing CAS body grew during verification",
+        ));
+    }
+    publication.run(PublicationStep::ExistingFileSync, || file.sync_all())
 }
 
 #[cfg(unix)]
@@ -78,51 +251,6 @@ pub(super) fn sync_directory_io(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub(super) fn sync_directory_io(_path: &Path) -> std::io::Result<()> {
     Ok(())
-}
-
-pub(super) fn read_cas_file(cas_dir: &Path, sha256: &str) -> Result<Vec<u8>> {
-    read_cas_file_bounded(cas_dir, sha256, MAXIMUM_STORE_CAS_BYTES)
-}
-
-pub(super) fn read_cas_file_bounded(
-    cas_dir: &Path,
-    sha256: &str,
-    maximum_bytes: usize,
-) -> Result<Vec<u8>> {
-    validate_sha256("CAS identity", sha256)?;
-    let path = cas_dir.join(sha256);
-    let bytes = read_regular_file_bounded(&path, maximum_bytes).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::InvalidData {
-            StoreError::Corrupt(error.to_string())
-        } else {
-            cas_read_error(sha256, error)
-        }
-    })?;
-    validate_digest(sha256, &bytes)?;
-    Ok(bytes)
-}
-
-pub(super) fn read_regular_file_bounded(
-    path: &Path,
-    maximum_bytes: usize,
-) -> std::io::Result<Vec<u8>> {
-    let (file, metadata) = open_cas_file(path)?;
-    if metadata.len() > maximum_bytes as u64 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("CAS entry exceeds {maximum_bytes} bytes"),
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(maximum_bytes as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > maximum_bytes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("CAS entry exceeds {maximum_bytes} bytes"),
-        ));
-    }
-    Ok(bytes)
 }
 
 pub(super) struct ContextCheckpointProjection {
@@ -378,7 +506,7 @@ fn read_admitted_cas_body(file: &mut impl std::io::Read, length: usize) -> Resul
         }
     })?;
     let mut extra = [0];
-    if file.read(&mut extra).map_err(io_error)? != 0 {
+    if super::filesystem::read_retry(file, &mut extra).map_err(io_error)? != 0 {
         return Err(StoreError::Corrupt(
             "CAS entry grew beyond admitted length".into(),
         ));
@@ -387,7 +515,21 @@ fn read_admitted_cas_body(file: &mut impl std::io::Read, length: usize) -> Resul
 }
 
 // Both bounded verification and admitted payload reads open the same regular-file boundary.
-fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+pub(super) fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    open_cas_file_with_access(path, false)
+}
+
+fn open_cas_file_for_sync(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    open_cas_file_with_access(path, true)
+}
+
+fn open_cas_file_with_access(
+    path: &Path,
+    sync_access: bool,
+) -> std::io::Result<(File, fs::Metadata)> {
+    // Windows FlushFileBuffers requires write access; Unix fsync accepts read-only handles.
+    #[cfg(not(windows))]
+    let _ = sync_access;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err(std::io::Error::new(
@@ -415,38 +557,10 @@ fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
         let parent = path
             .parent()
             .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
-        let mut prefix = PathBuf::new();
-        let mut parents = Vec::new();
-        for component in parent.components() {
-            prefix.push(component);
-            if matches!(component, std::path::Component::Prefix(_)) {
-                continue;
-            }
-            if !matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            ) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "CAS parent is not normalized",
-                ));
-            }
-            let directory = OpenOptions::new()
-                .read(true)
-                .share_mode(0x0000_0003)
-                .custom_flags(0x0220_0000)
-                .open(&prefix)?;
-            let metadata = directory.metadata()?;
-            if !metadata.is_dir() || metadata.file_attributes() & 0x0000_0400 != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "CAS parent is a reparse point or not a directory",
-                ));
-            }
-            parents.push(directory);
-        }
+        let parents = pin_windows_directories(parent)?;
         let file = OpenOptions::new()
             .read(true)
+            .write(sync_access)
             .custom_flags(0x0020_0000)
             .open(path)?;
         if file.metadata()?.file_attributes() & 0x0000_0400 != 0 {
@@ -468,6 +582,42 @@ fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
         ));
     }
     Ok((file, actual))
+}
+
+#[cfg(windows)]
+pub(super) fn pin_windows_directories(parent: &Path) -> std::io::Result<Vec<File>> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let mut prefix = PathBuf::new();
+    let mut parents = Vec::new();
+    for component in parent.components() {
+        prefix.push(component);
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
+        if !matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        ) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CAS parent is not normalized",
+            ));
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .share_mode(0x0000_0003)
+            .custom_flags(0x0220_0000)
+            .open(&prefix)?;
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() || metadata.file_attributes() & 0x0000_0400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CAS parent is a reparse point or not a directory",
+            ));
+        }
+        parents.push(directory);
+    }
+    Ok(parents)
 }
 
 fn cas_read_error(digest: &str, error: std::io::Error) -> StoreError {

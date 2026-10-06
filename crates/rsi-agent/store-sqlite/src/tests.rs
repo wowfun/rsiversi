@@ -1,6 +1,125 @@
 use super::*;
 
 #[tokio::test]
+async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() {
+    use cas::{PublicationPhase as Phase, PublicationStep as Step};
+    for step in [
+        Step::Write,
+        Step::FileSync,
+        Step::Link,
+        Step::TemporaryRemoval,
+        Step::StagingSync,
+        Step::NamespaceSync,
+    ] {
+        for phase in [Phase::Before, Phase::After] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SqliteStore::open(root.path()).unwrap();
+            let bytes: Arc<[u8]> = Arc::from(b"immutable publication body".as_slice());
+            let digest = hex::encode(Sha256::digest(&bytes));
+            store.inner.cas_publication.inject(step, phase);
+            assert!(
+                matches!(store.put_cas(bytes.clone()).await, Err(StoreError::Io(_))),
+                "{step:?} {phase:?}"
+            );
+            let count: i64 = store
+                .inner
+                .connections
+                .reader
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM cas_objects", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{step:?} {phase:?}");
+            if root.path().join("cas").join(&digest).exists() {
+                for retry_step in [Step::ExistingFileSync, Step::NamespaceSync] {
+                    store
+                        .inner
+                        .cas_publication
+                        .inject(retry_step, Phase::Before);
+                    assert!(matches!(
+                        store.put_cas(bytes.clone()).await,
+                        Err(StoreError::Io(_))
+                    ));
+                }
+            }
+            let reference = store.put_cas(bytes.clone()).await.unwrap();
+            assert_eq!(
+                store
+                    .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                bytes.as_ref()
+            );
+            assert_eq!(store.put_cas(bytes).await.unwrap(), reference);
+            let count: i64 = store
+                .inner
+                .connections
+                .reader
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM cas_objects", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let bytes: Arc<[u8]> = Arc::from(b"right".as_slice());
+    let target = root
+        .path()
+        .join("cas")
+        .join(hex::encode(Sha256::digest(&bytes)));
+    fs::write(&target, b"wrong").unwrap();
+    assert!(matches!(
+        store.put_cas(bytes.clone()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(fs::read(&target).unwrap(), b"wrong");
+    fs::remove_file(&target).unwrap();
+    store.put_cas(bytes.clone()).await.unwrap();
+    // A successful local put does not authorize trusting a later file incarnation.
+    fs::remove_file(&target).unwrap();
+    fs::write(&target, b"wrong").unwrap();
+    assert!(matches!(
+        store.put_cas(bytes.clone()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    fs::remove_file(&target).unwrap();
+    fs::write(&target, &bytes).unwrap();
+    for step in [
+        cas::PublicationStep::ExistingFileSync,
+        cas::PublicationStep::NamespaceSync,
+    ] {
+        store
+            .inner
+            .cas_publication
+            .inject(step, cas::PublicationPhase::Before);
+        assert!(matches!(
+            store.put_cas(bytes.clone()).await,
+            Err(StoreError::Io(_))
+        ));
+    }
+    #[cfg(unix)]
+    {
+        fs::remove_file(&target).unwrap();
+        let outside = root.path().join("outside");
+        fs::write(&outside, &bytes).unwrap();
+        std::os::unix::fs::symlink(&outside, &target).unwrap();
+        assert!(matches!(
+            store.put_cas(bytes).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(fs::read(outside).unwrap(), b"right");
+    }
+}
+
+#[tokio::test]
 async fn previous_session_format_is_rejected_without_rewriting_database_bytes() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -771,7 +890,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
 
 #[tokio::test]
 async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
-    for kind in ["reader", "validation", "writer", "cas"] {
+    for kind in ["reader", "validation", "writer", "cas", "publication"] {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
         let owner = Arc::downgrade(&store.inner);
@@ -787,6 +906,7 @@ async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
                 "reader" => store.with_reader(move |_| operation()).await,
                 "validation" => store.with_validation(move |_| operation()).await,
                 "writer" => store.with_writer(move |_| operation()).await,
+                "publication" => store.with_cas_publication(operation).await,
                 _ => store.with_cas(operation).await,
             }
         });
@@ -821,6 +941,48 @@ async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
         .unwrap();
         SqliteStore::verify(root.path()).unwrap();
     }
+}
+
+#[tokio::test]
+async fn cas_publication_does_not_occupy_the_payload_read_lane() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let reference = store
+        .put_cas(Arc::from(b"independent payload".as_slice()))
+        .await
+        .unwrap();
+    let publisher = store.clone();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let task = tokio::spawn(async move {
+        publisher
+            .with_cas_publication(move || {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    entering.await.unwrap();
+    let admission = store.inner.cas_admission.clone().try_acquire_owned();
+    let independent = admission.is_ok();
+    drop(admission);
+    let read = if independent {
+        Some(
+            store
+                .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+                .await,
+        )
+    } else {
+        None
+    };
+    release.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    assert!(
+        independent,
+        "publication must leave the payload lane available"
+    );
+    assert_eq!(read.unwrap().unwrap().as_ref(), b"independent payload");
 }
 
 #[test]
@@ -2666,4 +2828,135 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
     assert!(
         matches!(store.read_context_checkpoint(&id, refuse).await, Err(StoreError::Corrupt(reason)) if reason.contains("empty"))
     );
+}
+
+#[test]
+fn cas_process_crash_refuses_unrestricted_child_selector() {
+    let root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["tests::cas_crash_child", "--nocapture", "--ignored"])
+        .env("RSI_CAS_CRASH_TEST_ROOT", root.path())
+        .env("RSI_CAS_CRASH_TEST_POINT", "file")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_ne!(
+        output.status.code(),
+        Some(cas::CRASH_CHILD_EXIT_CODE),
+        "unrestricted child exited abruptly"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires --exact tests::cas_crash_child")
+    );
+    assert!(!root.path().join("sessions.sqlite3").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_reuse_flushes_an_existing_read_only_file_on_unix() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let bytes: Arc<[u8]> = Arc::from(b"read-only existing CAS body".as_slice());
+    let object = store.put_cas(bytes.clone()).await.unwrap();
+    fs::set_permissions(
+        root.path().join("cas").join(&object.sha256),
+        fs::Permissions::from_mode(0o444),
+    )
+    .unwrap();
+    assert_eq!(store.put_cas(bytes.clone()).await.unwrap(), object);
+    assert_eq!(
+        store
+            .read_cas(&object, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes.as_ref()
+    );
+}
+
+#[test]
+#[ignore = "child-only entrypoint driven by CAS subprocess tests"]
+fn cas_crash_child() {
+    let Some(root) = std::env::var_os("RSI_CAS_CRASH_TEST_ROOT") else {
+        return;
+    };
+    cas::require_crash_child();
+    let point = std::env::var("RSI_CAS_CRASH_TEST_POINT").unwrap();
+    let store = SqliteStore::open(root).unwrap();
+    let step = match point.as_str() {
+        "file" => Some(cas::PublicationStep::FileSync),
+        "link" => Some(cas::PublicationStep::Link),
+        "namespace" => Some(cas::PublicationStep::NamespaceSync),
+        "metadata" => None,
+        _ => panic!("unknown crash test point"),
+    };
+    if let Some(step) = step {
+        store.inner.cas_publication.crash_after(step);
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            store
+                .put_cas(Arc::from(b"crash boundary body".as_slice()))
+                .await
+                .unwrap();
+        });
+    assert!(step.is_none(), "armed CAS crash boundary did not exit");
+    cas::crash_child_exit("metadata");
+}
+
+#[tokio::test]
+async fn cas_process_crash_reopens_without_admitting_unconfirmed_metadata() {
+    let bytes: Arc<[u8]> = Arc::from(b"crash boundary body".as_slice());
+    let digest = hex::encode(Sha256::digest(&bytes));
+    for point in ["file", "link", "namespace", "metadata"] {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "tests::cas_crash_child",
+                "--exact",
+                "--nocapture",
+                "--ignored",
+            ])
+            .env("RSI_CAS_CRASH_TEST_ROOT", root.path())
+            .env("RSI_CAS_CRASH_TEST_POINT", point)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(cas::CRASH_CHILD_EXIT_CODE),
+            "{point}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("intentional CAS crash child at"));
+        let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cas_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, i64::from(point == "metadata"));
+        drop(connection);
+        assert_eq!(
+            root.path().join("cas").join(&digest).exists(),
+            point != "file"
+        );
+        let store = SqliteStore::open(root.path()).unwrap();
+        let reference = store.put_cas(bytes.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+                .await
+                .unwrap()
+                .as_ref(),
+            bytes.as_ref()
+        );
+        assert!(
+            fs::read_dir(root.path().join("cas/staging"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
 }

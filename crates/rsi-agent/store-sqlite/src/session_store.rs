@@ -2153,18 +2153,15 @@ impl SessionStore for SqliteStore {
                 "CAS bytes must be nonempty and bounded".into(),
             ));
         }
-        let cas_dir = Arc::clone(&self.inner.cas_dir);
-        let cas_staging_dir = Arc::clone(&self.inner.cas_staging_dir);
+        let owner = Arc::clone(&self.inner);
         let reference = self
-            .with_cas(move || {
-                let reference = CasObjectRef {
-                    sha256: hex::encode(Sha256::digest(&bytes)),
-                    byte_len: u64::try_from(bytes.len())
-                        .map_err(|_| StoreError::Invalid("CAS length exceeds u64".into()))?,
-                };
-                reference.validate()?;
-                install_cas(&cas_dir, &cas_staging_dir, &reference.sha256, &bytes)?;
-                Ok(reference)
+            .with_cas_publication(move || {
+                install_cas(
+                    &owner.cas_dir,
+                    &owner.cas_staging_dir,
+                    &bytes,
+                    &owner.cas_publication,
+                )
             })
             .await?;
         self.with_writer(move |connection| {

@@ -57,6 +57,12 @@ Separate operational matrices traverse every member of 257- and 512-session
 working sets over repeated cycles and read a fixed one-Fact page against long
 control histories. Report latency distributions and actual API call counts;
 unit tests own exact decode counts and deterministic lane-blocking assertions.
+CAS publication tests inject failures before and after required operations and
+crash a subprocess at file, link, namespace and metadata boundaries. Crash injection
+requires the exact child-test selector and explicit fixture environment; each
+intentional exit reports its boundary. The child entrypoint is ignored in ordinary
+test runs and selected explicitly by its parent subprocess tests. These tests
+establish process-crash ordering and refusal, not physical power-loss durability.
 Concurrent warm reads are sampled during cold validation without a pass/fail
 timing threshold or a claim that process memory is OS-cold.
 

@@ -1,5 +1,17 @@
 use super::*;
 
+pub(super) fn read_retry(
+    reader: &mut impl std::io::Read,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    loop {
+        match reader.read(buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
 pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
     let normalized = normalized_root_path(path)?;
     let path = normalized.as_path();
@@ -267,6 +279,30 @@ impl Drop for WriterLease {
 #[cfg(all(test, unix))]
 mod lease_tests {
     use super::*;
+    #[test]
+    fn interrupted_trailing_probes_retry_eof_and_detect_growth() {
+        struct InterruptedOnce {
+            interrupted: bool,
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+        impl std::io::Read for InterruptedOnce {
+            fn read(&mut self, target: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.read(target)
+            }
+        }
+        for bytes in [vec![], vec![1]] {
+            let expected = bytes.len();
+            let mut reader = InterruptedOnce {
+                interrupted: false,
+                bytes: std::io::Cursor::new(bytes),
+            };
+            assert_eq!(read_retry(&mut reader, &mut [0]).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn last_owner_explicitly_unlocks_a_duplicated_open_file_description() {

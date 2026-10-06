@@ -38,6 +38,26 @@ exact length as the physical file-read ceiling before allocating file contents.
 A replaced or oversized file cannot consume the Store-wide CAS maximum through
 a smaller reference. Digest verification still follows the bounded read.
 
+CAS publication acknowledges success only after its required filesystem
+operations succeed. New objects synchronize their file before publishing its
+name, then remove the temporary name and synchronize staging and CAS directories
+on Unix. Reusing an existing object verifies and synchronizes the same open file
+and the CAS directory; readable matching bytes alone do not establish durability.
+This includes repeated puts within one open Store: a digest's publication history
+does not prove durability of the currently opened filesystem object.
+Each reuse compares the entire bounded body and performs the required syncs in
+one publication lane. Payload reads have a separate single-slot lane, so a slow
+publication does not occupy their admission permit. Both dispatched lanes retain
+the root writer lease until the actual file operation completes, even if its
+waiter disappears. Publication computes the candidate digest once internally;
+callers cannot supply an unrelated digest name.
+Any failed publication step prevents new metadata publication. An unregistered
+complete object may remain and can be reused only after successful synchronization.
+Windows requires write access to flush an existing file, so a read-only restored
+object can be read but cannot acknowledge a repeated publication. Windows flushes
+file contents but does not promise power-loss durability for CAS directory
+entries. Staging cleanup is separate from existing-object publication.
+
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the

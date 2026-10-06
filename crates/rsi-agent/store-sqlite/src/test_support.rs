@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub use crate::cas::{
+    PublicationPhase as CasPublicationPhase, PublicationStep as CasPublicationStep,
+};
+
 /// Releases the paused Store worker on explicit or unwinding drop.
 #[derive(Debug)]
 pub struct WorkerPause(Option<std::sync::mpsc::Sender<()>>);
@@ -15,6 +19,13 @@ impl Drop for WorkerPause {
 }
 
 impl SqliteStore {
+    /// Fails one CAS operation before execution or after successful execution.
+    ///
+    /// # Panics
+    /// Panics if another unconsumed fault is installed.
+    pub fn fail_next_cas_publication(&self, step: CasPublicationStep, phase: CasPublicationPhase) {
+        self.inner.cas_publication.inject(step, phase);
+    }
     /// Pauses the next cold validation after dispatch; dropping the guard releases it.
     ///
     /// # Panics
