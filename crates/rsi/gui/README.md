@@ -1,5 +1,18 @@
 # rsi-gui
 
+The Automation panel consumes negotiated, caller-scoped Automation API operations
+through the same client connection as Session UI. It keeps a bounded page and one
+selected attempt. Screenshots use a finite `automation_artifact` response outside
+incremental frames and their retained baseline; only the open document panel
+retains the returned PNG. Check verdicts and exploration claims are displayed
+separately. Screenshot presentation uses a bounded PNG Blob URL, released on
+replacement or panel closure, under the existing document CSP.
+Cancel/Resume use fresh explicit request identities and never retry
+an uncertain mutation; Resume sends the current rule revision. Session opening
+uses the ordinary read-authorized attachment path; opening failures are displayed
+in the panel, including when no conversation surface is available. The shared Web document also
+renders this panel in Linux Desktop.
+
 ## Turn presentation
 
 Each loaded transcript window owns a separate, bounded Turn index. Its revision

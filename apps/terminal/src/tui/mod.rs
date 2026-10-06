@@ -9,6 +9,7 @@ mod setup;
 mod slash;
 mod terminals;
 use rsi_terminal_ui::editor;
+mod automation;
 mod files;
 mod history_search;
 mod input;
@@ -172,6 +173,10 @@ fn live_window(page: rsi_session_protocol::SessionHistoryPage) -> transcript::Tr
 }
 
 enum Update {
+    Automation(
+        tokio_util::sync::CancellationToken,
+        Result<serde_json::Value>,
+    ),
     QueueContent(
         rsi_agent_store_protocol::StorePendingMessage,
         rsi_agent_session_protocol::AgentMessage,
@@ -218,6 +223,7 @@ enum WorkKind {
     Submit,
     Queue,
     Cancel,
+    Automation,
 }
 struct ExportCharge(Arc<std::sync::atomic::AtomicUsize>);
 impl ExportCharge {
@@ -240,7 +246,7 @@ struct Work {
 }
 impl Work {
     fn superseded(&self, client: &Client) -> bool {
-        self.generation != client.generation
+        self.generation != client.generation && !matches!(self.kind, WorkKind::Automation)
             || matches!(self.kind, WorkKind::History)
                 && self.history_revision != client.history.revision
             || matches!(self.kind, WorkKind::Detail)
@@ -257,7 +263,19 @@ type RenderJob = std::pin::Pin<
             > + Send,
     >,
 >;
-type Task = std::pin::Pin<Box<dyn std::future::Future<Output = Work> + Send>>;
+struct Task {
+    kind: WorkKind,
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = Work> + Send>>,
+}
+impl std::future::Future for Task {
+    type Output = Work;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Work> {
+        self.future.as_mut().poll(cx)
+    }
+}
 
 #[derive(Default)]
 struct Submission {
@@ -296,6 +314,8 @@ enum Durability {
 
 #[allow(clippy::struct_excessive_bools)] // Independent asynchronous request lanes have separate pending flags.
 struct Client {
+    automation: Option<rsi_automation_api::Client>,
+    automation_pending: bool,
     text_history: Option<rsi_history_api::Client>,
     history_query: Option<rsi_history_api::Request>,
     plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
@@ -424,6 +444,8 @@ impl Client {
         let mut client = Self {
             files: None,
             plugins: None,
+            automation: None,
+            automation_pending: false,
             text_history: None,
             history_query: None,
             setup_command: None,
@@ -488,6 +510,13 @@ impl Client {
     fn pending_requests(&self) -> usize {
         self.tasks.len() + self.exports.load(std::sync::atomic::Ordering::Acquire)
     }
+    fn reset_attachment_tasks(&mut self) {
+        self.tasks = std::mem::take(&mut self.tasks)
+            .into_iter()
+            .filter(|task| matches!(task.kind, WorkKind::Automation))
+            .collect();
+        self.generation += 1;
+    }
     fn spawn(&mut self, task: impl std::future::Future<Output = Result<Update>> + Send + 'static) {
         self.spawn_as(WorkKind::Read, task);
     }
@@ -513,7 +542,7 @@ impl Client {
     ) -> bool {
         let limit = match kind {
             WorkKind::Cancel => 12,
-            WorkKind::Submit | WorkKind::Queue => 10,
+            WorkKind::Submit | WorkKind::Queue | WorkKind::Automation => 10,
             WorkKind::Read | WorkKind::Detail | WorkKind::Inspect | WorkKind::History => 8,
         };
         if self.pending_requests() >= limit {
@@ -524,15 +553,18 @@ impl Client {
         let generation = self.generation;
         let view_revision = self.state.view_revision;
         let history_revision = self.history.revision;
-        self.tasks.push(Box::pin(async move {
-            Work {
-                generation,
-                view_revision,
-                history_revision,
-                kind,
-                result: task.await,
-            }
-        }));
+        self.tasks.push(Task {
+            kind,
+            future: Box::pin(async move {
+                Work {
+                    generation,
+                    view_revision,
+                    history_revision,
+                    kind,
+                    result: task.await,
+                }
+            }),
+        });
         true
     }
 
@@ -1003,6 +1035,7 @@ impl Client {
             | Action::PreviewReference(..)
             | Action::AddReference(_)
             | Action::RemoveReference(_)) => self.reference_action(action),
+            Action::Automation(request) => self.automation_request(*request),
             Action::HistoryRequest(request) => self.history_request(*request),
             Action::FilePicker(request) => self.file_picker(request),
             Action::InsertFile(locator) => self.insert_file(&locator),
@@ -1817,6 +1850,9 @@ async fn run_inner(
     client.text_history = context
         .lookup_local::<rsi_api_protocol::ApiClientContract>()
         .and_then(|api| rsi_history_api::Client::new(api).ok());
+    client.automation = context
+        .lookup_local::<rsi_api_protocol::ApiClientContract>()
+        .and_then(|api| rsi_automation_api::Client::new(api).ok());
     client.plugins = context.lookup_local::<rsi_workbench_ui::PluginsFeatureContract>();
     client.files = observer.as_ref().expect("initial surface").files.clone();
     let mut ui_changes = client.ui.registry.membership_changes();
@@ -1875,7 +1911,7 @@ async fn run_inner(
                         let save = crate::export::start(&application_work, handle, options, stopped.child_token(), ExportCharge::new(&client.exports));
                         exports.push(async move { (session, save.await) });
                     }
-                }, setup::Command::History(conversation,query) => client.search_history(conversation,query), setup::Command::Profiles => profiles.open(), setup::Command::ExternalOpen(id) => external.open_conversation(id), setup::Command::Attention => external.open_attention(), setup::Command::External => external.open(), setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Workflows => {
+                }, setup::Command::Automation => client.automation_request(rsi_automation_api::Request::List{after:"0".into(),watermark:None,limit:50}), setup::Command::History(conversation,query) => client.search_history(conversation,query), setup::Command::Profiles => profiles.open(), setup::Command::ExternalOpen(id) => external.open_conversation(id), setup::Command::Attention => external.open_attention(), setup::Command::External => external.open(), setup::Command::Markdown(mode) => { client.state.markdown = mode.unwrap_or(!client.state.markdown); client.state.info(markdown_status(client.state.markdown)); }, setup::Command::Plugins => client.plugins(rsi_workbench_ui::PluginsCommand::Refresh), setup::Command::Workflows => {
                     match client.ui.registry.surfaces(&client.ui.surface).ok().and_then(|surfaces| surfaces.into_iter().find(|surface| surface.reference.name == "workflow")) {
                         Some(surface) => client.ui_surface(&surface.reference), None => client.state.info("Workflow workbench is unavailable"),
                     }
@@ -2049,6 +2085,7 @@ async fn run_inner(
                         WorkKind::Inspect => client.inspecting = false,
                         WorkKind::History => client.history.loading = false,
                         WorkKind::Cancel => client.cancelling = false,
+                        WorkKind::Automation => client.automation_pending = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit | WorkKind::Queue => {},
                     }
                     if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
@@ -2074,6 +2111,12 @@ async fn run_inner(
                         },
                         Ok(Update::Menu(menu)) => client.state.menu = Some(menu),
                         Ok(Update::Plugins(view)) => client.state.show_plugins(*view),
+                        Ok(Update::Automation(stop,result))=>match result {
+                            Ok(value) if !stop.is_cancelled() => client.show_automation(&value),
+                            Ok(value) if !value.is_null() => client.state.info(format!("Deployment operation settled: {}",transcript::json_window(&value))),
+                            Ok(_) => {},
+                            Err(problem) => client.state.notice(problem.to_string()),
+                        },
                         Ok(Update::HistorySearch(request,reply)) => client.show_history(&request,*reply),
                         Ok(Update::Reference(page)) => client.state.show_reference(page),
                         Ok(Update::FilePicker(page)) => client.state.show_file_picker(page),
@@ -2158,7 +2201,7 @@ async fn run_inner(
                             client.ui.surface = next.ui_target.clone().ok_or_else(|| error("TUI surface target is unavailable"))?;
                             client.projections = None; client.projection_notice.clear(); client.extension_view = None;
                             observer = Some(next);
-                            client.tasks.clear(); client.generation += 1;
+                            client.reset_attachment_tasks();
                             client.handle = attached.handle;
                             client.switch_session_draft(attached.header);
                             if setup_was_active {client.state.notice(format!("Session changed. {}",setup.notice()));}

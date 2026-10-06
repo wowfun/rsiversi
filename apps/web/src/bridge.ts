@@ -1,6 +1,7 @@
 import type { SshView } from "./ssh-targets.tsx"
 import { bindSnapshotSelector } from '../vendor/dsh/renderer/bind.ts'
 import type { LeafView } from './profile-leaves.tsx'
+import type {AutomationView} from './automation.tsx'
 
 export interface Model { deployment: string; model: string }
 export type ExecutionLocation = {kind:'local'} | {kind:'ssh';target:string}
@@ -18,12 +19,12 @@ export interface Provider { provider: 'deepseek' | 'openai' | 'openai-compatible
 export interface Setup { ticket: string; allowed: boolean; agent: {default_model?: Model} | null; presets: {default?: string} | null; providers: {desired_revision: string; applied_revision: string; applying: boolean; diagnostic: string | null; deployments: Provider[]} | null; credential?: {provider: string; slot: string; status: {editable: boolean; availability: {kind: string; source?: string}}}; diagnostic: string | null; receipts: {operation: string; outcome: string; message: string}[] }
 export interface ExternalSnapshot {id:string;endpoint:string;cwd:string;status:string;completion:string|null;generation:string;epoch:string}
 export interface ExternalView {conversation:{kind:'external';id:string};following:boolean;more:boolean;busy:boolean;observed:{snapshot:ExternalSnapshot;connected:boolean;permissions:unknown[]};blocks:unknown[];capabilities:{goal:boolean;preset:boolean;submit:boolean;load:boolean;resume:boolean};diagnostic:string|null}
-export interface Surface { kind?:'native'|'external';external?:ExternalView;header:string;agent_preset:string;generation: string; session: string; path: string; workspace:string; transcript: {status: string; blocks: unknown[]}; ui_surfaces: {bundle:string;title: string; reference: {name:string;[key:string]:unknown}}[] }
+export interface Surface { kind?:'native'|'external';protected?:boolean;external?:ExternalView;header:string;agent_preset:string;generation: string; session: string; path: string; workspace:string; transcript: {status: string; blocks: unknown[]}; ui_surfaces: {bundle:string;title: string; reference: {name:string;[key:string]:unknown}}[] }
 export interface McpCredentialTarget {server:string;reference:{owner:string;slot:string}}
 export interface McpServer {id:string;enabled:boolean;transport:'http'|'stdio'|'ssh_stdio';credential:{owner:string;slot:string}|null;epoch:string;last_verified_sha256:string|null;ready:boolean;error:string|null;tools:{name:string;selected:boolean}[]}
 export interface McpStatus {settings_pending:boolean;fresh_ready:boolean;fresh_error:string|null;servers:McpServer[]}
 export interface PluginsView {mcp_ssh?:import('./mcp-ssh.tsx').McpSshView;leaves?:LeafView;ssh?:SshView;target:{kind:string};guidance:string[];exa_available:boolean;exa_credential:{availability:{kind:string};editable:boolean}|null;exa_notice:string|null;mcp_available:boolean;mcp:McpStatus|null;mcp_notice:string|null;mcp_credential:{target:McpCredentialTarget;availability:{kind:string};editable:boolean}|null;ticket:string;diagnostic:string|null;page:{context:{target:{kind:string};availability:string;source_digest:string|null;preset_source:string|null};desired_revision:string;observed_revision:string;health:string|null;watcher:string|null;offset:number;total:number;next_offset:number|null;plugins:{instance:string;desired_plugin:string|null;enabled:boolean;origin:string;diagnostics:string[];observed:{plugin:string;state:string}|null}[]}|null}
-export interface View { appearance?:{theme:"system"|"light"|"dark";content_font_size:number};preference_error?:string; external_catalog?:{endpoints:{id:string;enabled:boolean}[];conversations:ExternalSnapshot[];more:boolean};plugins?: PluginsView; application_surfaces: {bundle:string;title:string;reference:{name:string;[key:string]:unknown}}[]; surfaces: Record<string, Surface | null>; catalog: {workspaces: {id: string; coordinates: Coordinates}[]; workspaces_more: boolean; workspace_order_seed:{kind:'available';records:{id:string;coordinates:Coordinates}[]}|{kind:'too_large'}|null; models: Model[]; models_more: boolean}; navigation?: Navigation; setup?: Setup; has_remote_ui: boolean }
+export interface View { automation?:AutomationView|null; appearance?:{theme:"system"|"light"|"dark";content_font_size:number};preference_error?:string; external_catalog?:{endpoints:{id:string;enabled:boolean}[];conversations:ExternalSnapshot[];more:boolean};plugins?: PluginsView; application_surfaces: {bundle:string;title:string;reference:{name:string;[key:string]:unknown}}[]; surfaces: Record<string, Surface | null>; catalog: {workspaces: {id: string; coordinates: Coordinates}[]; workspaces_more: boolean; workspace_order_seed:{kind:'available';records:{id:string;coordinates:Coordinates}[]}|{kind:'too_large'}|null; models: Model[]; models_more: boolean}; navigation?: Navigation; setup?: Setup; has_remote_ui: boolean }
 export function observable<T>(initial: T) {
   let value = initial
   const listeners = new Set<() => void>()
@@ -40,6 +41,7 @@ interface Actions { command(command: Command): Promise<unknown>; open(command: C
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
+  automationArtifact(value: unknown): Promise<string> { return actions ? actions.call("automation_artifact",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   directory(value: unknown): Promise<string> { return actions ? actions.call("directory_input",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   terminal(value: unknown): Promise<string> { return actions ? actions.call("terminal", JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   command(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.command(value) },

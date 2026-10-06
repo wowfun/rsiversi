@@ -7,6 +7,7 @@ use rsi_ai_protocol::ModelRef;
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
+    Automation(Box<rsi_automation_api::Request>),
     Login,
     External,
     ExternalOpen(rsi_acp_protocol::observation::ConversationId),
@@ -248,6 +249,8 @@ impl State {
         self.detail_stop = tokio_util::sync::CancellationToken::new();
     }
     pub(super) fn open_detail(&mut self, text: String) {
+        self.detail_stop.cancel();
+        self.detail_stop = tokio_util::sync::CancellationToken::new();
         self.ui_form = None;
         self.ui_edit = None;
         self.detail = Some(text);

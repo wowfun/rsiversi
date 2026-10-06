@@ -99,6 +99,8 @@ update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.
 Clearing a pane also invalidates the cached pending-interaction projection;
 reopening an unchanged question or approval rebuilds its actionable controls.
+Protected panes hide queue edits and pending question/approval actions. Frame
+acknowledgement keeps both queue and stop bindings absent for those panes.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 
@@ -596,6 +598,7 @@ Queue `rejected` settlements retire only the saved queue intent, without inventi
 a durable receipt or clearing composer content. Unknown outcomes remain retained;
 ordinary message submissions cannot use this terminal queue settlement.
 
+Protected panes hide queue mutation controls and close the queue editor.
 Queue rows reuse the last received array while its pane generation is unchanged.
 Unrelated transcript patches do not serialize the queue for a comparison or
 replace its controls. Layout persistence failures are visible; the current

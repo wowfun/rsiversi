@@ -11,6 +11,10 @@ const BUILTINS: &[(&str, &str)] = &[
         "Export session: /export [PATH] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]",
     ),
     (
+        "automation",
+        "Inspect deployment checks, cancel or create a new attempt",
+    ),
+    (
         "history",
         "Search conversation text: /history <session-id|external:id> <query>",
     ),

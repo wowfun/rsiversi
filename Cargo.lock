@@ -6454,6 +6454,7 @@ version = "0.0.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "image",
@@ -6467,6 +6468,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-application",
  "rsi-approval-protocol",
+ "rsi-automation-api",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
@@ -7791,6 +7793,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-application",
  "rsi-approval-protocol",
+ "rsi-automation-api",
  "rsi-client",
  "rsi-configuration-api",
  "rsi-conversation",

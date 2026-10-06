@@ -645,6 +645,15 @@ pub async fn directory_input(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Reads one caller-scoped screenshot outside the shared frame stream.
+#[wasm_bindgen]
+pub async fn automation_artifact(source: String) -> Result<String, JsValue> {
+    application()?
+        .automation_artifact(&source)
+        .await
+        .map_err(failure)
+}
+
 /// Settles a renderer generation only after the document finishes its DOM lifecycle.
 #[wasm_bindgen]
 pub async fn commit_renderer(revision: String, accept: bool) -> Result<(), JsValue> {

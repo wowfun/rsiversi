@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 
+mod automation;
 mod queue;
 mod references;
 mod ui;

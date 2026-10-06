@@ -14,6 +14,7 @@ import { slots, host, renderer } from './slots.tsx'
 import { input, run, useView, useSelected } from './bridge.ts'
 import { Navigation } from './navigation.tsx'
 import { Setup } from './setup.tsx'
+import {Automation} from './automation.tsx'
 import {ResourceDocks,openTerminals} from './resource-dock.tsx'
 import './workbench.css'
 import '../vendor/dsh/dockkit-tokens.css'
@@ -27,6 +28,7 @@ declare module '@rsi/dsh-slots' {
   }
 }
 function Shell({renderSlot}: PropsRenderSlots<'rsi.navigation' | 'rsi.main' | 'rsi.resources'>) {
+  const [automation,setAutomation]=useState(false)
   const [settings,setSettings] = useState(false), [licenses,setLicenses] = useState(false)
   const {layout:desktopLayout,update:updateDesktop,expand,storageNotice} = usePresentation(), narrow=useNarrow(), compact=useNarrow('(max-width: 1023px)')
   const {layout,update}=useResourceVisibility(desktopLayout,updateDesktop,narrow)
@@ -36,6 +38,7 @@ function Shell({renderSlot}: PropsRenderSlots<'rsi.navigation' | 'rsi.main' | 'r
   const selected=useSelected(value=>value)
   const currentWorkspace=useView(view=>view?.catalog.workspaces.find(workspace=>workspace.id===view?.surfaces[selected]?.workspace)?.id)
   const newConversation=()=>currentWorkspace?void run(()=>input.open({action:'create',workspace:currentWorkspace})):chooseWorkspace()
+  const hasAutomation=useView(view=>!!view?.automation)
   const connected=useView(view=>!!view), preferenceError=useView(view=>view?.preference_error)
   const workbench=useRef<HTMLElement>(null),header=useRef<HTMLElement>(null)
   useLayoutEffect(()=>{workbench.current?.style.setProperty('--navigation-width',`${layout.navigationWidth}px`);workbench.current?.style.setProperty('--resources-width',`${layout.resourcesWidth*100}vw`)},[layout])
@@ -51,9 +54,10 @@ function Shell({renderSlot}: PropsRenderSlots<'rsi.navigation' | 'rsi.main' | 'r
   const navigation=()=>narrow?setDrawer(value=>!value):update({navigation:layout.navigation==='expanded'?'rail':'expanded'})
   const resources=()=>update({resourcesClosed:!layout.resourcesClosed})
   const appearance=()=>void run(()=>input.command({action:'settings_read',namespace:'rsi.client'}))
-  const sidebar=<><div className="sidebar-brand"><a className="wordmark" href="/" aria-label="RSI home">rsi<span className="wordmark-dot">.</span></a><span>Workspace</span><Button size="sm" aria-label="Collapse navigation" onClick={navigation}>◧</Button></div><Button className="new-conversation" data-testid="new-conversation" variant="outline" onClick={newConversation}>⊕ New conversation</Button>{renderSlot('rsi.navigation',{})}<div className="sidebar-footer"><Button id="settings-open" size="sm" variant={settings?'toolbar':'ghost'} onClick={()=>{setSettings(!settings);setDrawer(false)}}>Settings</Button><Button size="sm" onClick={appearance}>Appearance</Button><Button size="sm" onClick={()=>setLicenses(true)}>Licenses</Button></div></>
+  const sidebar=<><div className="sidebar-brand"><a className="wordmark" href="/" aria-label="RSI home">rsi<span className="wordmark-dot">.</span></a><span>Workspace</span><Button size="sm" aria-label="Collapse navigation" onClick={navigation}>◧</Button></div><Button className="new-conversation" data-testid="new-conversation" variant="outline" onClick={newConversation}>⊕ New conversation</Button>{renderSlot('rsi.navigation',{})}<div className="sidebar-footer">{hasAutomation&&<Button size="sm" onClick={()=>setAutomation(true)}>Deployment checks</Button>}<Button id="settings-open" size="sm" variant={settings?'toolbar':'ghost'} onClick={()=>{setSettings(!settings);setDrawer(false)}}>Settings</Button><Button size="sm" onClick={appearance}>Appearance</Button><Button size="sm" onClick={()=>setLicenses(true)}>Licenses</Button></div></>
   return <LayoutContext.Provider value={{layout,update,expand}}>
     <DirectoryPickerHost/>
+    {automation&&<Modal label="Deployment checks" close={()=>setAutomation(false)} className="automation-modal"><Automation close={()=>setAutomation(false)}/></Modal>}
     <header ref={header} className={`app-header${connected?' connected-header':''}`}><a className="wordmark" href="/" aria-label="RSI home">rsi<span className="wordmark-dot">.</span></a><span className="app-purpose">Workspace</span>{connected&&<div className="shell-actions"><Button size="sm" aria-label="Toggle navigation" aria-expanded={narrow?drawer:navigationMode==='expanded'} onClick={navigation}>☰</Button><Button size="sm" onClick={()=>setPalette(true)}>Commands</Button><Button size="sm" aria-label="Toggle resources" aria-expanded={!layout.resourcesClosed} onClick={resources}>Resources</Button></div>}<span id="connection-state" className="connection-state" role="status">Disconnected</span><button id="sign-out" className="quiet" hidden>Sign out</button></header>
     <div id="notice" className="notice" role="alert" hidden/>
     <main id="login" className="login"><div className="login-heading"><span className="eyebrow">Connect your service</span><h1>Open your workspace.</h1><p>Use a device receipt to connect this browser to your RSI service.</p></div><form id="login-form" className="login-form"><label htmlFor="receipt">Device registration receipt</label><textarea id="receipt" rows={6} spellCheck={false} autoComplete="off" placeholder="Paste your device receipt"/><p className="hint">On the service computer, run <code>rsi --profile devices -- register browser</code>.</p><label id="dev-http-label" className="check" hidden><input id="dev-http" type="checkbox"/>Allow local HTTP for development</label><div className="actions"><button id="connect" className="primary" type="submit">Connect</button><button id="reconnect" type="button" hidden>Reconnect with this browser</button></div><p className="hint">The receipt is used once. Device tokens are not saved in browser storage.</p></form></main>

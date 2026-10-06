@@ -1,5 +1,16 @@
 # Terminal interaction design
 
+`/automation` opens caller-authorized deployment summaries and readiness from the
+negotiated Automation API. Detail actions read deterministic check evidence,
+inspect the protected investigation Session, cancel, or create a new attempt
+with the current rule revision. Pages and reports remain bounded. Mutation
+identities are allocated once per explicit action; uncertain results are shown
+without an automatic retry.
+Only one Automation request is in flight on each surface. Closing a read cancels
+its presentation; an admitted mutation keeps its waiter through settlement and
+does not reopen a dismissed menu. Successful controls refresh the exact resulting
+Attempt so its available actions remain accessible.
+
 The [product design system](../../../crates/rsi/docs/design-system.md) owns shared information
 and feedback principles. This reference owns their terminal expression: layout,
 key bindings, focus, reading and copying. Keyboard controls belong in the focused
@@ -23,6 +34,7 @@ Escape closes the focused layer or selection; Ctrl+D exits from an empty editor.
 Alt+Enter belongs to the terminal. Application commands and masked setup input
 follow the [terminal contract](../README.md).
 
+An empty slash query selects Help first, independent of newly added commands.
 Tab completes a slash-name prefix from current Session descriptors; ambiguous
 matches open choices. Reads never execute a command, and changed drafts or
 attachments reject stale results. Outside completion, Tab selects the next block
@@ -329,3 +341,11 @@ the Turn in the acknowledged frame. Editing a text block retains the complete
 ordered message, including other text blocks, images and references, and restores
 the ordinary composer draft when the edit finishes or is abandoned. An unknown
 mutation retains its frozen envelope until lookup or identical retry resolves it.
+
+The model-free Home `/automation` view reads coarse Browser readiness after its
+finite request and includes it in the details. Tab switches between bounded
+JSON evidence and explicit operation choices; PgUp/PgDn scroll the evidence.
+Both Home and attached views retain one Automation control waiter through menu
+dismissal and attachment changes. A busy slot reports that no new request began;
+late control receipts remain visible without reopening a closed detail. Protected
+investigations retain reading affordances and reject question/approval answers.

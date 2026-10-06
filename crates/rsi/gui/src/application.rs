@@ -25,6 +25,9 @@ pub(crate) use display_error as error;
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
+    Automation {
+        request: rsi_automation_api::Request,
+    },
     DelegationOpen {
         pane: crate::SurfaceId,
         generation: String,
@@ -267,7 +270,8 @@ impl Command {
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
             Self::RegisterWorkspace { pane, .. } => *pane,
-            Self::ApplicationUiSurface { .. }
+            Self::Automation { .. }
+            | Self::ApplicationUiSurface { .. }
             | Self::ExternalCatalog { .. }
             | Self::UiSurface { .. }
             | Self::ReopenRemoteSurface { .. }
@@ -335,6 +339,9 @@ pub(crate) struct SettingsEditor {
 /// Ordinary shared GUI application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
 pub struct GuiApplication {
+    pub(crate) automation: Option<rsi_automation_api::Client>,
+    pub(crate) automation_view: Mutex<serde_json::Value>,
+    pub(crate) automation_work: tokio::sync::Mutex<()>,
     pub(crate) external: Option<Arc<dyn rsi_acp_protocol::service::ExternalConversations>>,
     pub(crate) external_catalog: Mutex<crate::panes::ExternalCatalog>,
     pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
@@ -374,6 +381,38 @@ pub struct GuiApplication {
     admission: Mutex<()>,
 }
 impl GuiApplication {
+    /// Reads one bounded screenshot through the negotiated caller-scoped API.
+    /// The response is not retained in the incremental presentation baseline.
+    pub fn automation_artifact(
+        self: &Arc<Self>,
+        source: &str,
+    ) -> BoxFuture<'static, Result<String>> {
+        let request = (|| {
+            if source.len() > 4096 {
+                return Err("Automation artifact request exceeds its bound".into());
+            }
+            let request: rsi_automation_api::Request = serde_json::from_str(source)
+                .map_err(|_| "Invalid Automation artifact request".to_owned())?;
+            if !matches!(request, rsi_automation_api::Request::Artifact { .. }) {
+                return Err("Only artifact reads use this response lane".into());
+            }
+            request.validate().map_err(display_error)?;
+            Ok(request)
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        self.admit(false, None, move |app| async move {
+            let _gate = app.automation_work.lock().await;
+            let client = app
+                .automation
+                .as_ref()
+                .ok_or("Automation is unavailable on this connection")?;
+            let reply = client.call(request).await.map_err(display_error)?;
+            serde_json::to_string(&reply).map_err(display_error)
+        })
+    }
     /// Admits a bounded closed command before returning its response waiter.
     /// Dropping that waiter cannot replay a mutation or detach command ownership.
     ///
@@ -515,6 +554,7 @@ impl GuiApplication {
             "preference_error": preferences.1,
             "panels": details.snapshot(),
             "has_remote_ui": self.remote_ui.is_some(),
+            "automation": self.automation.as_ref().map(|_|self.automation_view.lock().expect("Automation view").clone()),
                         "media_limits": crate::panes::images::limits(),
             "has_media": self.media.is_some(),
             "settings": details.settings.editor,
@@ -571,6 +611,31 @@ impl GuiApplication {
     )]
     async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
         match command {
+            Command::Automation { request } => {
+                if matches!(request, rsi_automation_api::Request::Artifact { .. }) {
+                    return Err("Artifact reads use the finite response lane".into());
+                }
+                let _gate = self.automation_work.lock().await;
+                let client = self
+                    .automation
+                    .as_ref()
+                    .ok_or("Automation is unavailable on this connection")?;
+                let name = request.name();
+                let reply = client.call(request).await.map_err(error)?;
+                let mut view = self.automation_view.lock().expect("Automation view");
+                let key = match name {
+                    "list" => "page",
+                    "get" => "attempt",
+                    "cancel" | "resume" => "mutation",
+                    "status" => "status",
+                    "policy" | "set_policy" => "policy",
+                    _ => "diagnostics",
+                };
+                view[key] = reply;
+                drop(view);
+                self.changed();
+                Ok(())
+            }
             Command::DelegationOpen {
                 pane,
                 generation,
@@ -757,6 +822,11 @@ impl PluginFactory for GuiApplicationFactory {
             .context()
             .lookup_local::<rsi_api_protocol::ApiClientContract>();
         let app = Arc::new(GuiApplication {
+            automation: api
+                .clone()
+                .and_then(|api| rsi_automation_api::Client::new(api).ok()),
+            automation_view: Mutex::new(serde_json::json!({})),
+            automation_work: tokio::sync::Mutex::new(()),
             external: plan
                 .context()
                 .lookup_local::<rsi_acp_protocol::service::ExternalConversationsContract>(),

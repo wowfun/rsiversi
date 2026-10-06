@@ -42,6 +42,9 @@ struct Menu {
     title: &'static str,
     hint: &'static str,
     items: Vec<(String, Option<SessionId>)>,
+    detail: Option<String>,
+    detail_open: bool,
+    detail_offset: usize,
 }
 
 async fn startup(
@@ -99,10 +102,16 @@ pub(super) async fn run(
     let mut menu: Option<Menu> = None;
     let mut selected: usize = 0;
     let mut recent = None;
+    let automation = context
+        .lookup_local::<rsi_api_protocol::ApiClientContract>()
+        .and_then(|api| rsi_automation_api::Client::new(api).ok());
+    let mut automation_work: Option<super::automation::Pending> = None;
+    let mut automation_actions = std::collections::BTreeMap::new();
     let mut history: Option<
         futures_util::future::BoxFuture<'static, Result<rsi_session_protocol::RecentSessionPage>>,
     > = None;
     let mut attaching: Option<futures_util::future::BoxFuture<'static, Result<Attachment>>> = None;
+    let mut ready_attachment = None;
     let mut copying: Option<futures_util::future::BoxFuture<'static, clipboard::Delivery>> = None;
     let mut changes = presentation.changes();
     let mut tick = tokio::time::interval(Duration::from_millis(33));
@@ -116,6 +125,11 @@ pub(super) async fn run(
     let mut dimensions = terminal::size();
     let mut navigation_active = (external.active, profiles.active);
     let outcome = loop {
+        if automation_work.is_none()
+            && let Some(attached) = ready_attachment.take()
+        {
+            break Ok(Some((attached, editor)));
+        }
         if let Some(session_id) = external.native.take() {
             let application = application.clone();
             let workspace = workspace.clone();
@@ -180,8 +194,24 @@ pub(super) async fn run(
             },
             result = async { match &mut attaching { Some(work) => work.await, None => std::future::pending().await } } => {
                 attaching = None;
-                match result { Ok(attached) => break Ok(Some((attached, editor))), Err(problem) => status = problem.to_string() }
+                match result {
+                    Ok(attached) if super::automation::Pending::retaining(automation_work.as_ref()) => {
+                        super::automation::Pending::dismiss(&mut automation_work);
+                        ready_attachment = Some(attached);
+                        status = "Waiting for deployment operation before opening Session…".into();
+                    },
+                    Ok(attached) => break Ok(Some((attached, editor))), Err(problem) => status = problem.to_string()
+                }
                 dirty = true;
+            },
+            (visible,result) = super::automation::Pending::next(&mut automation_work)=>{
+                automation_work=None;dirty=true;
+                if !visible { status = match result { Ok(value)=>format!("Deployment operation settled: {}",super::transcript::json_window(&value)), Err(problem)=>problem.to_string() }; continue; }
+                match result{Ok(value)=>{
+                    let mut items=Vec::new();automation_actions.clear();
+                    for(label,action)in super::automation::actions(&value){match action{Action::Automation(request)=>{automation_actions.insert(items.len(),*request);items.push((label,None));},Action::Attach(id)=>items.push((label,Some(id))),_=>{}}}
+                    selected=0;menu=Some(Menu{title:"Deployment checks",hint:"Enter operation · Tab details · PgUp/Dn scroll · Esc back",items,detail:Some(super::transcript::json_window(&value)),detail_open:false,detail_offset:0});status=value.get("mutation_receipt").map_or_else(String::new,|receipt|format!("Control receipt · Attempt {}: {}",receipt["id"].as_str().unwrap_or("?"),receipt["state"].as_str().unwrap_or("unknown")));
+                },Err(problem)=>status=problem.to_string()}
             },
             result = async { match &mut history { Some(work) => work.await, None => std::future::pending().await } } => {
                 history = None; dirty = true;
@@ -190,7 +220,7 @@ pub(super) async fn run(
                         recent = page.next;
                         let mut items = page.sessions.into_iter().map(|summary| (format!("{} · {}", summary.header.session_id(), summary.header.canonical_cwd()), Some(summary.header.session_id().clone()))).collect::<Vec<_>>();
                         if page.has_more { items.push(("More sessions…".into(), None)); }
-                        selected = 0; menu = Some(Menu { title: "Recent sessions", hint: "Enter opens · Ctrl+Y copy ID · Esc back", items }); status.clear();
+                        selected = 0; menu = Some(Menu { title: "Recent sessions", hint: "Enter opens · Ctrl+Y copy ID · Esc back", items,detail:None,detail_open:false,detail_offset:0 }); status.clear();
                     }
                     Err(problem) => status = problem.to_string(),
                 }
@@ -219,7 +249,7 @@ pub(super) async fn run(
                         if setup.active { setup.key(key); if !setup.active { status = setup.notice(); } continue; }
                         let control = key.modifiers.contains(Modifiers::CONTROL);
                         if slash.help { slash.key(key, &mut editor); continue; }
-                        if menu.is_some() && control && key.code == KeyCode::Char('c') { menu = None; continue; }
+                        if menu.is_some() && control && key.code == KeyCode::Char('c') { menu = None; super::automation::Pending::dismiss(&mut automation_work); continue; }
                         if control && key.code == KeyCode::Char('d') && editor.text().is_empty() { break Ok(None); }
                         if control && key.code == KeyCode::Char('c') { break Ok(None); }
                         if menu.is_none() && slash.key(key, &mut editor) {continue;}
@@ -227,12 +257,16 @@ pub(super) async fn run(
                             if copying.is_none() { copying = Some(Box::pin(clipboard::copy(id.to_string()))); status = "Copying session ID…".into(); }
                             continue;
                         }
-                        if key.code == KeyCode::Escape { menu = None; continue; }
-                        if let Some(active) = &menu {
+                        if key.code == KeyCode::Escape { menu = None; super::automation::Pending::dismiss(&mut automation_work); continue; }
+                        if let Some(active) = &mut menu {
                             let items = &active.items;
                             match key.code {
+                                KeyCode::Tab if active.detail.is_some()=>active.detail_open = !active.detail_open,
+                                KeyCode::PageUp if active.detail_open=>active.detail_offset=active.detail_offset.saturating_sub(10),
+                                KeyCode::PageDown if active.detail_open=>active.detail_offset=active.detail_offset.saturating_add(10).min(view.0.scroll_max),
                                 KeyCode::Up => selected = selected.saturating_sub(1),
                                 KeyCode::Down => selected = (selected + 1).min(items.len().saturating_sub(1)),
+                                KeyCode::Enter if active.title=="Deployment checks"&&automation_actions.contains_key(&selected)=>{if let Some(client)=automation.clone(){let request=automation_actions[&selected].clone();status=if super::automation::Pending::start(&mut automation_work,client,request){"Reading deployment owner…"}else{"Deployment operation is still awaiting its result"}.into();}},
                                 KeyCode::Enter => if let Some((label, session)) = items.get(selected).cloned() {
                                     menu = None;
                                     if let Some(session_id) = session {
@@ -244,18 +278,20 @@ pub(super) async fn run(
                                     else if label == "/external" {external.open();}
                                     else if label == "/profiles" {profiles.open();}
                                     else if label == "/attention" {external.open_attention();}
+                                    else if label == "/automation" {if let Some(client)=automation.clone(){super::automation::Pending::start(&mut automation_work,client,super::automation::list());}else{status="Automation is unavailable on this connection".into();}}
                                     else if label == "/model" { setup.open(setup::Command::Models, false); }
                                     else { let application = application.clone(); let cursor = if label == "More sessions…" { recent.clone() } else { None }; history = Some(Box::pin(async move { application.list_recent(cursor.as_ref(), 128).await.map_err(error) })); }
                                 },
                                 _ => {},
                             }
                         } else if control && key.code == KeyCode::Char('p') {
-                            selected = 0; status.clear(); menu = Some(Menu { title: "Actions", hint: "Enter select · Esc back", items: vec![("/login".into(), None), ("/model".into(), None), ("Recent sessions".into(), None), ("/external".into(),None), ("/profiles".into(),None), ("/attention".into(),None), ("Exit".into(), None), ("/help".into(), None)] });
+                            selected = 0; status.clear(); menu = Some(Menu { title: "Actions", hint: "Enter select · Esc back", detail:None,detail_open:false,detail_offset:0,items: vec![("/login".into(), None), ("/model".into(), None), ("Recent sessions".into(), None), ("/external".into(),None), ("/profiles".into(),None), ("/attention".into(),None), ("/automation".into(),None), ("Exit".into(), None), ("/help".into(), None)] });
                         } else if (key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT)) || (control && key.code == KeyCode::Char('s')) {
                             if let Some(command) = setup::command(editor.text()) {
                                 if editor.cursor()!=editor.text().len() || matches!(command,setup::Command::Invalid) {status="Invalid command or cursor not at end. Draft retained; /help lists usage.".into();continue;}
                                 editor.take();
                                 match command {
+                                    setup::Command::Automation=>{if let Some(client)=automation.clone(){status=if super::automation::Pending::start(&mut automation_work,client,super::automation::list()){"Reading deployment owner…"}else{"Deployment operation is still awaiting its result"}.into();}else{status="Automation is unavailable on this connection".into();}},
                                     setup::Command::Attention => external.open_attention(),
                                     setup::Command::ExternalOpen(id) => external.open_conversation(id),
                                     setup::Command::External => external.open(),
@@ -281,7 +317,7 @@ pub(super) async fn run(
                 if dimensions != (width, height) { dimensions = (width, height); dirty = true; }
                 if !dirty || rendering.is_some() { continue; }
                 let base = Scene::from(ApplicationScene { title: "RSI · No session attached".into(), explanation: "Connect a provider with /login, or choose a saved model with /model.".into(), input: rsi_terminal_ui::scene::Draft::capture(&editor).map_err(error)?, status: if menu.is_some() { String::new() } else { status.clone() }, field: Some(String::new()), hint: if slash.popup.is_some() {"↑/↓ select · Tab fill · Esc hide"} else {"Enter send · Ctrl+J line · /help"}.into(), completion: if setup.active || slash.help || menu.is_some() { None } else { slash.popup.clone() }, ..ApplicationScene::default() });
-                let scene = if profiles.active {profiles.scene()} else if external.active {external.scene()} else if setup.active { base.with_dialog(setup.scene().map_err(error)?) } else if slash.help { base.with_dialog(slash.scene().map_err(error)?) } else if let Some(menu) = &menu { base.with_dialog(Scene::from(ApplicationScene { title: menu.title.into(), items: menu.items.iter().map(|(label, _)| label.clone()).collect(), selected, hint: menu.hint.into(), status: status.clone(), ..ApplicationScene::default() })) } else { Ok(base) }.map_err(error)?;
+                let scene = if profiles.active {profiles.scene()} else if external.active {external.scene()} else if setup.active { base.with_dialog(setup.scene().map_err(error)?) } else if slash.help { base.with_dialog(slash.scene().map_err(error)?) } else if let Some(menu) = &menu { base.with_dialog(Scene::from(ApplicationScene { title: menu.title.into(), detail:if menu.detail_open{menu.detail.clone()}else{None},detail_offset:menu.detail_offset,items: menu.items.iter().map(|(label, _)| label.clone()).collect(), selected, hint: menu.hint.into(), status: status.clone(), ..ApplicationScene::default() })) } else { Ok(base) }.map_err(error)?;
                 revision += 1;
                 let request = rsi_terminal_ui::wire::Request { identity: rsi_terminal_ui::wire::Identity { attachment: 0, presentation: epoch, revision }, width, height, bytes: 0 };
                 rendering = Some(presentation.render(request, scene, render_stop.clone())); dirty = false;

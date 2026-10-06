@@ -34,6 +34,7 @@ pub(super) async fn configured_models(
 }
 #[derive(Clone, Debug)]
 pub(super) enum Command {
+    Automation,
     Login(Option<ProviderKind>),
     Models,
     Effort,
@@ -66,6 +67,7 @@ pub(super) fn command(text: &str) -> Option<Command> {
     }
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
+        ["/automation"] => Some(Command::Automation),
         ["/workflows"] => Some(Command::Workflows),
         ["/plugins"] => Some(Command::Plugins),
         ["/profiles"] => Some(Command::Profiles),
@@ -109,7 +111,7 @@ pub(super) fn command(text: &str) -> Option<Command> {
         [
             "/effort" | "/model" | "/login" | "/help" | "/new" | "/quit" | "/exit" | "/resume"
             | "/reference" | "/history" | "/plugins" | "/profiles" | "/markdown" | "/external"
-            | "/attention" | "/workflows",
+            | "/attention" | "/workflows" | "/automation",
             ..,
         ] => Some(Command::Invalid),
         _ => None,
