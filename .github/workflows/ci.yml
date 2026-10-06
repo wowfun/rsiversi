@@ -225,8 +225,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config ripgrep musl-tools openssh-server
           sudo install -d -m 0755 /run/sshd
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$(id -u).service"
+          python3 "$GITHUB_WORKSPACE/fixtures/rsi/browser-runtime/user_manager.py" prepare "$RUNNER_TEMP/rsi-user-manager.json"
           install -d -m 0700 "$HOME/rsi-ssh-ci"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
@@ -475,6 +474,10 @@ jobs:
             !${{ runner.temp }}/rsi-web-evidence/chromium-plan-review/rsi
             !${{ runner.temp }}/rsi-web-evidence/firefox-plan-review/rsi
           if-no-files-found: error
+      - name: Restore owned Linux user manager state
+        if: ${{ always() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: python3 fixtures/rsi/browser-runtime/user_manager.py restore "$RUNNER_TEMP/rsi-user-manager.json"
 
   rsi-base:
     strategy:
@@ -700,7 +703,7 @@ jobs:
         timeout-minutes: 10
       - name: Lint standard rsi
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
@@ -719,7 +722,7 @@ jobs:
       - name: Compile standard rsi tests
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         id: standard_build
-        run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'Linux' }}
@@ -742,10 +745,56 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
+      - id: browser_node_setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native_setup.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
+      - name: Prepare isolated native Browser acceptance runtime
+        id: browser_runtime_setup
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.browser_node_setup.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          cd crates/rsi/browser/runtime
+          npm ci --ignore-scripts
+          npx --no-install playwright install --with-deps chromium
+          browser_chromium=$(node --input-type=module -e 'import {chromium} from "playwright"; import path from "node:path"; console.log(path.dirname(chromium.executablePath()))')
+          browser_node=$(readlink -f "$(command -v node)")
+          browser_uid=$(id -u)
+          python3 "$GITHUB_WORKSPACE/fixtures/rsi/browser-runtime/user_manager.py" prepare "$RUNNER_TEMP/rsi-user-manager.json"
+          browser_runtime="/run/user/$browser_uid"
+          browser_cgroup=$(XDG_RUNTIME_DIR="$browser_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$browser_runtime/bus" systemctl --user show --property=ControlGroup --value)
+          test -n "$browser_cgroup"
+          test -S "$browser_runtime/bus"
+          printf 'RSI_TEST_BROWSER_NODE=%s\nRSI_TEST_BROWSER_CHROMIUM=%s\nRSI_TEST_BROWSER_USER_RUNTIME=%s\nXDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$browser_node" "$browser_chromium" "$browser_runtime" "$browser_runtime" "$browser_runtime" >> "$GITHUB_ENV"
+      - name: Prove native Browser confinement and abrupt-owner retirement
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' && steps.browser_runtime_setup.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          declare -A browser_previous_policy
+          restore_browser_policy() {
+            for key in "${!browser_previous_policy[@]}"; do
+              sudo sysctl -w "$key=${browser_previous_policy[$key]}"
+            done
+          }
+          trap restore_browser_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              browser_previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
+          mkdir -p "$RUNNER_TEMP/rsi-browser-evidence"
+          cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
+          RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-browser-evidence/native.png" cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/native.log"
+          cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --list | rg --fixed-strings --line-regexp 'native_abrupt_owner_death_reaps_the_entire_cgroup: test'
+          cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/retirement.log"
       - name: Exercise development TUI smoke
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}
         timeout-minutes: 20
@@ -815,7 +864,7 @@ jobs:
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'macOS' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
-        run: cargo test --locked -p rsi -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
+        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
 
       - name: Preserve source addon acceptance evidence
@@ -826,6 +875,7 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-linked-template-evidence
             ${{ runner.temp }}/rsi-language-addon-evidence
+            ${{ runner.temp }}/rsi-browser-evidence
             ${{ runner.temp }}/rsi-dev-smoke/logs
           if-no-files-found: warn
       - name: Preserve PTY evidence
@@ -835,6 +885,10 @@ jobs:
           name: rsi-pty-${{ runner.os }}
           path: ${{ runner.temp }}/rsi-pty-evidence
           if-no-files-found: warn
+      - name: Restore owned Linux user manager state
+        if: ${{ always() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: python3 fixtures/rsi/browser-runtime/user_manager.py restore "$RUNNER_TEMP/rsi-user-manager.json"
 
   repository-tools:
     runs-on: ubuntu-24.04
@@ -857,6 +911,11 @@ jobs:
       - name: Exercise repository tools
         run: cargo test --locked -p rsi-xtask --all-targets --no-fail-fast
         timeout-minutes: 15
+      - name: Verify Browser fixture lifecycle and native gate failure propagation
+        run: |
+          python3 fixtures/tools/python-tests.py fixtures/rsi/browser-runtime
+          node --test crates/rsi/browser/runtime/*.test.mjs
+        timeout-minutes: 5
 
   dependency-audit:
     runs-on: ubuntu-24.04
@@ -920,8 +979,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes openssh-server bubblewrap musl-tools libdbus-1-dev pkg-config
           sudo install -d -m 0755 /run/sshd
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$(id -u).service"
+          python3 "$GITHUB_WORKSPACE/fixtures/rsi/browser-runtime/user_manager.py" prepare "$RUNNER_TEMP/rsi-user-manager.json"
           install -d -m 0700 "$HOME/rsi-ssh-ci"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
@@ -1031,6 +1089,10 @@ jobs:
           trap 'sudo sysctl -w "$setting=$previous"' EXIT
           sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-ssh-helper-app --test ssh -- --ignored --nocapture
+      - name: Restore owned Linux user manager state
+        if: ${{ always() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: python3 fixtures/rsi/browser-runtime/user_manager.py restore "$RUNNER_TEMP/rsi-user-manager.json"
 
   ci-required:
     if: always()
@@ -1123,6 +1185,36 @@ jobs:
         timeout-minutes: 110
         run: |
           RUSTFLAGS="-Cdebug-assertions=no" cargo run --locked -p rsi-app-tools -- dist desktop "$RUNNER_TEMP/rsi-desktop-foreign" --debug
+      - name: Prepare Automation product runtime
+        id: automation_runtime
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          npm ci --ignore-scripts --prefix crates/rsi/browser/runtime
+          npm ci --ignore-scripts --prefix fixtures/rsi/web-product
+          (cd crates/rsi/browser/runtime && npx --no-install playwright install --with-deps chromium)
+          browser_chromium=$(cd crates/rsi/browser/runtime && node --input-type=module -e 'import {chromium} from "playwright"; import path from "node:path"; console.log(path.dirname(chromium.executablePath()))')
+          browser_node=$(readlink -f "$(command -v node)")
+          browser_runtime="/run/user/$(id -u)"
+          python3 fixtures/rsi/browser-runtime/user_manager.py prepare "$RUNNER_TEMP/rsi-user-manager.json"
+          printf 'RSI_TEST_BROWSER_NODE=%s\nRSI_TEST_BROWSER_CHROMIUM=%s\nRSI_TEST_BROWSER_USER_RUNTIME=%s\n' "$browser_node" "$browser_chromium" "$browser_runtime" >> "$GITHUB_ENV"
+      - name: Verify Automation through paired Web Desktop and TUI
+        if: ${{ !cancelled() && steps.automation_runtime.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/rsi-desktop-automation-evidence"
+          export RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-desktop-automation-evidence/native.png"
+          cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
+          cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-desktop-automation-evidence/native.log"
+          cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture --list | rg --fixed-strings --line-regexp 'automation::prepare_visual_fixture: test'
+          for surface in web desktop tui; do
+            RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture
+          done
+          RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1000x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-automation-evidence/desktop" --daemon --automation-fixture "$RUNNER_TEMP/rsi-automation-desktop-seed"
+          cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness --list | rg --fixed-strings --line-regexp 'tui::automation::model_free_home_reads_automation_and_current_readiness: test'
+          RSI_TEST_AUTOMATION_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_TEST_AUTOMATION_SEED="$RUNNER_TEMP/rsi-automation-tui-seed" RSI_TUI_PTY_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/tui.json" cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness
       - name: Exercise actual WebKitGTK first conversation
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.foreign.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 5
@@ -1152,6 +1244,10 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
         run: dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-close-evidence" --daemon --close-timeout
+      - name: Restore owned Linux user manager state
+        if: always()
+        timeout-minutes: 5
+        run: python3 fixtures/rsi/browser-runtime/user_manager.py restore "$RUNNER_TEMP/rsi-user-manager.json"
       - name: Restore native sandbox runner policy
         if: always()
         run: |
