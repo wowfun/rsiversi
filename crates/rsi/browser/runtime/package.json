@@ -1,0 +1,11 @@
+{
+  "name": "rsi-browser-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.18"},
+  "dependencies": {
+    "playwright": "1.63.0",
+    "@playwright/mcp": "0.0.80",
+    "ws": "8.18.3"
+  }
+}

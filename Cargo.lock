@@ -5918,6 +5918,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-browser"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-mcp",
+ "rsi-media",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-retrieval",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "rsi-build-info"
 version = "0.0.1"
 dependencies = [
