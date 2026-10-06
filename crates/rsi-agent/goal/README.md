@@ -32,6 +32,9 @@ Completed. Failed, PartialFailed, Interrupted and BudgetExceeded take precedence
 and block; Cancelled pauses. A failed Turn retains its unverified completion
 claim. Pause stops future scheduling; an already committed completion report
 can still settle Completed when its in-flight Turn completes successfully.
+`Goal::verified_report` returns any report disposition only when its exact source
+Turn has a matching successful reservation settlement; report presence or a
+Blocked phase alone does not establish verification.
 Every ordinary model call receives current Goal constraints and remaining
 allocated rounds through the existing context contribution.
 

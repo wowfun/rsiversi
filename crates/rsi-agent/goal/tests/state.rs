@@ -172,6 +172,55 @@ fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
 }
 
 #[test]
+fn report_verification_checks_source_settlement_for_every_disposition() {
+    for kind in [
+        GoalReportKind::Complete,
+        GoalReportKind::Blocked,
+        GoalReportKind::Pause,
+    ] {
+        for outcome in [
+            RoundOutcome::Completed,
+            RoundOutcome::Cancelled,
+            RoundOutcome::Failed,
+            RoundOutcome::PartialFailed,
+            RoundOutcome::Interrupted,
+            RoundOutcome::BudgetExceeded,
+        ] {
+            for matching in [true, false] {
+                let mut state = reserved(2);
+                report(&mut state, kind);
+                let goal = state.goal.as_mut().unwrap();
+                assert!(
+                    goal.verified_report().is_none(),
+                    "an unsettled report is only a claim"
+                );
+                let message = goal.reservation.as_ref().unwrap().message_id.clone();
+                let turn_id = TurnId::new(if matching { "source" } else { "foreign" }).unwrap();
+                goal.settle(&message, RoundSettlement::Turn { turn_id, outcome })
+                    .unwrap();
+                assert_eq!(
+                    goal.verified_report().is_some(),
+                    matching && outcome == RoundOutcome::Completed
+                );
+                assert!(
+                    goal.report.is_some(),
+                    "unverified claims remain diagnostic evidence"
+                );
+                state.validate().unwrap();
+            }
+        }
+        for settlement in [RoundSettlement::Abandoned, RoundSettlement::Discarded] {
+            let mut state = reserved(2);
+            report(&mut state, kind);
+            let goal = state.goal.as_mut().unwrap();
+            let message = goal.reservation.as_ref().unwrap().message_id.clone();
+            goal.settle(&message, settlement).unwrap();
+            assert!(goal.verified_report().is_none());
+        }
+    }
+}
+
+#[test]
 fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
     let mut state = reserved(2);
     report(&mut state, GoalReportKind::Complete);

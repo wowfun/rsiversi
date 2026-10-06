@@ -491,10 +491,22 @@ impl Goal {
         self.validate()
     }
 
+    /// Returns the model report only after its exact source Turn canonically completed.
+    /// All report dispositions require successful settlement; failed claims remain in `report`.
+    pub fn verified_report(&self) -> Option<&GoalReport> {
+        let report = self.report.as_ref()?;
+        match self.reservation.as_ref()?.settlement.as_ref()? {
+            RoundSettlement::Turn {
+                turn_id,
+                outcome: RoundOutcome::Completed,
+            } if turn_id == &report.source_turn => Some(report),
+            _ => None,
+        }
+    }
+
     fn verified_completion(&self) -> bool {
-        matches!((&self.report, self.reservation.as_ref().and_then(|reservation| reservation.settlement.as_ref())),
-            (Some(GoalReport { kind: GoalReportKind::Complete, source_turn, .. }),
-             Some(RoundSettlement::Turn { turn_id, outcome: RoundOutcome::Completed })) if source_turn == turn_id)
+        self.verified_report()
+            .is_some_and(|report| report.kind == GoalReportKind::Complete)
     }
 }
 
