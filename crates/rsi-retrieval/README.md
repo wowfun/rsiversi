@@ -14,6 +14,9 @@ execution. ToolPolicy remains the authority for Tool calls.
 Model-supplied fetch URLs must be HTTP/S on ports 80 or 443, at most 2 KiB,
 without user information. Attributed search links are not network requests and
 retain the separate syntactic HTTP/S link contract.
+The public-destination broker accepts canonical IP text or lowercase DNS names
+with nonempty labels of at most 63 bytes, alphanumeric label edges and no trailing
+dot. Its 80/443 port contract is independent of Browser's narrower HTTPS policy.
 Every DNS answer must be public unicast. IPv4 special-use ranges, IPv6 local,
 documentation and transition ranges, and discovered DNS64 translations to
 non-public IPv4 are refused. A private per-hop client pins the checked addresses
@@ -61,3 +64,12 @@ Default tests use injected DNS/transport and isolated HTTP servers. Production
 has no private-address override. Test the public-address policy independently
 from the actual pinned HTTP connection, then test their composition. External
 fetch, Exa and model integrations are opt-in and are separate evidence classes.
+
+`resolve_public_destination` is the browser broker's narrow public-address port.
+It validates a canonical host and port, rejects private/transition destinations,
+checks complete DNS answers including discovered NAT64 prefixes, and returns
+actual pinned socket addresses. The broker must connect to those addresses;
+re-resolving the hostname would discard the security decision.
+
+Broker destinations accept only canonical lowercase ASCII DNS names or canonical
+unbracketed IP literals and ports 80/443. URL syntax is rejected before DNS.

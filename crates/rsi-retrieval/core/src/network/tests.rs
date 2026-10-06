@@ -409,3 +409,54 @@ fn model_fetches_reject_non_web_tcp_ports_before_resolution() {
         assert!(parse_url(url).is_ok());
     }
 }
+
+#[tokio::test]
+async fn public_broker_port_rejects_local_addresses_and_noncanonical_hosts() {
+    for host in [
+        "127.0.0.1",
+        "169.254.169.254",
+        "[::1]",
+        "localhost",
+        "public.example/path",
+        "user@public.example",
+    ] {
+        assert!(
+            crate::resolve_public_destination(host, 443).await.is_err(),
+            "{host}"
+        );
+    }
+    assert!(
+        crate::resolve_public_destination("example.com", 0)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn broker_destination_requires_a_canonical_host_without_url_syntax() {
+    for host in [
+        "example.com/evil",
+        "example.com?evil",
+        "example.com#evil",
+        "user@example.com",
+        "example.com%2f",
+        " example.com",
+        "EXAMPLE.com",
+        "[2606:4700::1111]",
+        "127.1",
+        "example..com",
+        ".example.com",
+        "example.com.",
+        "-example.com",
+        "example-.com",
+    ] {
+        assert_eq!(destination_url(host, 443), Err(Error::BlockedUrl), "{host}");
+    }
+    assert_eq!(
+        destination_url(&format!("{}.com", "a".repeat(64)), 443),
+        Err(Error::BlockedUrl)
+    );
+    for host in ["example.com", "8.8.8.8", "2606:4700:4700::1111"] {
+        assert!(destination_url(host, 443).is_ok(), "{host}");
+    }
+}
