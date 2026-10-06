@@ -115,6 +115,120 @@ async fn explicit_private_discovery_selects_tools_without_changing_configured_na
         assert!(runtime.shutdown().await.is_clean());
     }
 }
+
+async fn private_process(
+    directory: &Path,
+    mode: &str,
+) -> (Runtime, rsi_process::ManagedDuplexProcess) {
+    use rsi_sandbox::Sandbox as _;
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.process.local",
+                "fixture",
+                UpdateMode::Replayable,
+                Arc::new(rsi_process_local::ProcessLocalFactory),
+            ),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let processes = runtime
+        .root()
+        .lookup_local::<DuplexProcessContract>()
+        .unwrap();
+    let plan = TestSandbox
+        .confine(rsi_sandbox::ProcessRequest {
+            mode: rsi_sandbox::SandboxMode::DangerFullAccess,
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            program: "/usr/bin/python3".into(),
+            arguments: vec![
+                "-u".into(),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/support/stdio.py")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                mode.into(),
+                directory.join("started").to_str().unwrap().into(),
+            ],
+            cwd: directory.into(),
+            workspace: directory.into(),
+        })
+        .await
+        .unwrap();
+    let process = processes
+        .spawn(rsi_process::DuplexProcessSpec {
+            process: plan,
+            environment: vec![],
+            stdout_buffer_bytes: 65536,
+            stderr_max_bytes: 16384,
+            termination_grace_ms: 100,
+        })
+        .await
+        .unwrap();
+    (runtime, process)
+}
+
+#[tokio::test]
+async fn private_mcp_selection_and_drop_reap_the_supplied_process() {
+    for selected in [vec!["echo".into()], vec![]] {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, process) = private_process(directory.path(), "private").await;
+        let private = rsi_mcp::PrivateMcp::attach(process.clone(), "private", selected.clone())
+            .await
+            .unwrap();
+        assert_eq!(private.catalog().tools.len(), 1);
+        assert_eq!(private.catalog().tools[0].selected, !selected.is_empty());
+        assert_eq!(
+            private.call("unselected", json!({})).await.unwrap_err(),
+            McpError::NotFound
+        );
+        let reply = private
+            .call("echo", json!({"message":"private evidence"}))
+            .await;
+        if selected.is_empty() {
+            assert_eq!(reply.unwrap_err(), McpError::NotFound);
+        } else {
+            assert_eq!(reply.unwrap()["content"][0]["text"], "private evidence");
+        }
+        let requests = std::fs::read_to_string(directory.path().join("started.requests")).unwrap();
+        assert!(!requests.contains("unselected"));
+        if selected.is_empty() {
+            assert!(!requests.contains("tools/call"));
+            private.close().await.unwrap();
+        }
+        drop(private);
+        tokio::time::timeout(std::time::Duration::from_secs(5), process.wait_settlement())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
+async fn private_mcp_rejects_incomplete_selection_and_malformed_catalog_then_reaps() {
+    for (mode, selected) in [
+        ("private", vec!["missing".into()]),
+        ("private-bad", vec!["echo".into()]),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, process) = private_process(directory.path(), mode).await;
+        assert!(
+            rsi_mcp::PrivateMcp::attach(process.clone(), "private", selected)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), process.wait_settlement())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
 #[tokio::test]
 async fn idle_stdout_half_close_invalidates_readiness_and_reaps_without_another_rpc() {
     let directory = tempfile::tempdir().unwrap();

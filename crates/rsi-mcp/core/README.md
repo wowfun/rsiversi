@@ -1,5 +1,11 @@
 # rsi-mcp
 
+`PrivateMcp` attaches only an already caller-confined managed process, freezes a
+complete bounded catalog and permits only selected tool names. It resolves no
+credentials and publishes nothing to the shared manifest. Failed discovery
+closes the process; explicit close awaits settlement and Drop starts retained
+transport teardown. Deterministic stdio fixtures cover these boundaries.
+
 A private protocol owner may explicitly construct a service with
 `new_with_all_discovered_tools`. This constructor policy selects every discovered
 Tool in that service's frozen manifest, within the same aggregate limits. It

@@ -6,6 +6,9 @@ import signal
 
 # An explicit child with no shell, ambient environment or external services.
 mode = sys.argv[1]
+if mode.startswith('private'):
+    with open(sys.argv[2], 'w') as marker:
+        marker.write(str(os.getpid()))
 modern = mode.startswith('modern')
 subscription = None
 
@@ -17,6 +20,9 @@ def send(value):
 for raw in sys.stdin.buffer:
     request = json.loads(raw)
     method = request.get('method')
+    if mode.startswith('private'):
+        with open(sys.argv[2] + '.requests', 'a') as marker:
+            marker.write(json.dumps(request) + '\n')
     if method is None:
         continue  # reply to the fixture's own ping
     if modern:
@@ -55,6 +61,8 @@ for raw in sys.stdin.buffer:
             time.sleep(60)
             continue
         result = {'tools': [{'name': 'echo', 'inputSchema': {'type': 'object', 'properties': {'message': {'type': 'string'}}, 'required': ['message'], 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}}]}
+        if mode == 'private-bad':
+            result['tools'].append(result['tools'][0])
     elif method == 'tools/call':
         os.write(2, b'stderr noise\n' * 20000)
         if mode == 'cancel-write':

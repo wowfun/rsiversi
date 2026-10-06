@@ -6,6 +6,12 @@ own Agent state transitions or grant Tool execution permission. The protocol
 package owns typed configuration and complete frozen manifests. The ordinary
 core plugin owns connection epochs, verification, transport work and retirement.
 
+`PrivateMcp::attach` consumes an already confined managed duplex process. It
+negotiates and bounds discovery with the same protocol implementation, freezes
+an exact raw-name selection and never publishes the shared Host manifest. The
+caller owns process confinement; MCP owns connection retirement. Cancelled or
+uncertain started exchanges invalidate this private epoch and are never replayed.
+
 New Agent generations capture the current verified manifest. Each Session retains
 its complete typed manifest in one Agent Domain before execution. Restoring that
 Domain reconstructs definitions through the generic pre-seal seed without live

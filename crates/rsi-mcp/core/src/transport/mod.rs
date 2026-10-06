@@ -86,6 +86,24 @@ impl Drop for ExchangeGuard<'_> {
     }
 }
 impl Connection {
+    // PrivateMcp validates the selected catalog and supplies an already launched,
+    // caller-confined Process owner. This port does not resolve ambient credentials
+    // or perform a second launch; discovery still owns the initialize handshake.
+    pub(crate) fn attach(process: rsi_process::ManagedDuplexProcess) -> Arc<Self> {
+        let state = State::new();
+        Arc::new(Self {
+            transport: Transport::Stdio(stdio::Stdio::attach(
+                Arc::new(process::Process::Local(process)),
+                state.clone(),
+            )),
+            state,
+            next: AtomicU64::new(1),
+            silent_probe: AtomicBool::new(false),
+            admission: Semaphore::new(1),
+            outstanding: Semaphore::new(MAXIMUM_OUTSTANDING_REQUESTS),
+            parameters: Mutex::new(std::collections::BTreeMap::new()),
+        })
+    }
     pub async fn connect(
         config: &ServerConfig,
         credentials: Arc<dyn CredentialsResolve>,
