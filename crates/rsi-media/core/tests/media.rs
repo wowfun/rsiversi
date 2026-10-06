@@ -335,3 +335,20 @@ async fn source_admission_pressure() {
     assert!(service.dispose().await.is_clean());
     assert!(backend.dispose().await.is_clean());
 }
+
+#[test]
+fn transient_png_evidence_is_canonical_and_bounded_without_backend_publication() {
+    let image = ImageBuffer::from_pixel(4, 3, Rgba([50u8, 100, 150, 255]));
+    let mut png = Cursor::new(Vec::new());
+    image.write_to(&mut png, ImageFormat::Png).unwrap();
+    let source = bytes::Bytes::from(png.into_inner());
+    let first = rsi_media::normalize_artifact_png(source.clone(), 12, 512 * 1024).unwrap();
+    let second = rsi_media::normalize_artifact_png(first.clone(), 12, 512 * 1024).unwrap();
+    assert_eq!(first, second);
+    assert!(rsi_media::normalize_artifact_png(source.clone(), 11, 512 * 1024).is_err());
+    assert!(rsi_media::normalize_artifact_png(source, 12, 8).is_err());
+    assert!(
+        rsi_media::normalize_artifact_png(bytes::Bytes::from_static(b"not a PNG"), 12, 512 * 1024)
+            .is_err()
+    );
+}

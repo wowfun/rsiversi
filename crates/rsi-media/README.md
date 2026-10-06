@@ -24,3 +24,8 @@ and canonical-reference reads. Remote upload is bounded to a 64 MiB frame,
 including import options; the canonical image bound remains 32 MiB.
 `media/import/2` carries a two-byte big-endian options length, up to 1024 bytes
 of JSON `ImageImportOptions`, followed by the source bytes. Reads remain version 1.
+
+Transient PNG evidence uses `normalize_artifact_png`: decode and bound the input,
+normalize its canonical bytes, and return bytes without any Media reference or
+backend publication. The caller owns its storage, access control and lifetime.
+This port limits source bytes to 4 MiB, pixels to 1280×720 and output to 512 KiB.

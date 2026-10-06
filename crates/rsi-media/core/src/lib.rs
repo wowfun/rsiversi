@@ -292,6 +292,28 @@ impl PluginFactory for MediaFactory {
     }
 }
 
+/// Normalizes bounded transient evidence without publishing any Media reference.
+/// The caller owns persistence and lifetime of the returned canonical PNG bytes.
+pub fn normalize_artifact_png(
+    source: bytes::Bytes,
+    maximum_pixels: u64,
+    maximum_output_bytes: u64,
+) -> Result<bytes::Bytes> {
+    if source.is_empty()
+        || source.len() > 4 * 1024 * 1024
+        || maximum_pixels == 0
+        || maximum_pixels > 1280 * 720
+        || maximum_output_bytes == 0
+        || maximum_output_bytes > 512 * 1024
+    {
+        return Err(MediaError::InvalidInput(
+            "transient screenshot exceeds bounds".into(),
+        ));
+    }
+    probe_image(&source, maximum_pixels, Some("image/png"))?;
+    normalize(source, maximum_pixels, maximum_output_bytes).map(|stored| stored.bytes)
+}
+
 fn normalize(
     source: bytes::Bytes,
     maximum_pixels: u64,
