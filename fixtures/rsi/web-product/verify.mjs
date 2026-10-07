@@ -393,7 +393,7 @@ try {
       await page.locator(".source-text").filter({ hasText: '"exit_code": 7' }).waitFor();
       assert.match(await page.locator(".source-text").innerText(), /fixture stdout/);
       assert.match(await page.locator(".source-text").innerText(), /fixture stderr/);
-      await page.waitForFunction(() => [...document.querySelectorAll(".pane-notice")].every(node => !node.textContent.trim()));
+      await page.waitForFunction(() => [...document.querySelectorAll(".pane-notice:not([hidden])")].every(node => !node.textContent.trim()));
       await page.screenshot({ path: join(report, `${name}-source-result.png`) });
       await closeDetails(page);
       await verifyPresentation(page, left, service, report, name);
