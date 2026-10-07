@@ -1,5 +1,6 @@
 import {closeDetails,details,openResource,resources} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
+import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import './paired-env.mjs';
 import { verifyPairing } from "./pairing.mjs";
 import { verifyQueue } from "./queue.mjs";
@@ -66,6 +67,7 @@ try {
       await writeFile(join(report, `${name}-worker-lifecycle.json`), JSON.stringify(await verifyWorkerLifecycle(browser, root)));
       await writeFile(join(report, `${name}-mount-admission.json`), JSON.stringify(await verifyMountAdmission(browser, root)));
       const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
+      await context.addInitScript(recordNavigationEvidence);
       await context.addInitScript(() => {
         const NativeWorker = window.Worker;
         window.frameEvidence = { snapshots: 0, patches: 0, blockUpserts: 0, noPaneChanges: 0, resyncs: 0, recovered: 0, maximumBytes: 0 };
@@ -481,11 +483,18 @@ try {
       results.at(-1).acknowledgement_deadline = await verifyAcknowledgementDeadline(page, service);
       results.at(-1).cases.push("single pending Worker frame and exact ACK deadline cleanup", "light/dark/system palettes, contrast and font size", "Profile preference refresh across two actual clients", "resizable/collapsible panels, palette, drawer focus and inline summary anchoring", "atomic queue replacement, displayed-Turn conversion, withdrawal and Stop preserving later input");
       console.log(JSON.stringify(results.at(-1)));
+      await writeFile(join(report, `${name}-navigation.json`), JSON.stringify(await page.evaluate(() => window.navigationEvidence), null, 2));
       await context.close();
     } catch (error) {
       await writeFile(join(report, `${name}-failure.txt`), `${error.stack}\nPage errors: ${JSON.stringify(errors)}`);
       const page = browser.contexts()[0]?.pages()[0];
       if (page) { await page.screenshot({ path: join(report, `${name}-failure.png`), fullPage: true }).catch(() => {}); await writeFile(join(report, `${name}-failure-dom.txt`), await page.locator("body").innerText().catch(() => "unavailable")); }
+      if(page)await writeFile(join(report, `${name}-failure-navigation.json`), JSON.stringify(await page.evaluate(() => ({
+        ...window.navigationEvidence,
+        panes:[...document.querySelectorAll('.pane')].map(node=>({label:node.getAttribute('aria-label'),session:node.dataset.sessionId,hidden:node.hidden,
+          inputDisabled:node.querySelector('textarea')?.disabled})),
+        selected:document.querySelector('[id^="pane-tab-"][aria-pressed="true"]')?.id,
+      })).catch(captureError=>({captureError:String(captureError)})), null, 2)).catch(()=>{});
       throw error;
     } finally {
       await writeFile(join(report, `${name}-exchanges.json`), JSON.stringify(exchanges, null, 2));

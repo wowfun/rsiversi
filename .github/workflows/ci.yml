@@ -832,6 +832,7 @@ jobs:
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
           RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-browser-evidence/native.png" cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/native.log"
           cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --list | rg --fixed-strings --line-regexp 'native_abrupt_owner_death_reaps_the_entire_cgroup: test'
+          cargo test --locked -p rsi-browser --features test-support --test retirement
           cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/retirement.log"
       - name: Exercise development TUI smoke
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}

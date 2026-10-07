@@ -2,8 +2,10 @@
 use rsi_browser::{BrowserPolicy, NativeRuntime, RuntimeConfig};
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use serde_json::json;
+use std::future::Future as _;
 use std::{
     collections::BTreeSet,
+    path::Path,
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
@@ -66,6 +68,94 @@ fn show(unit: &str) -> String {
     let output=Command::new("/usr/bin/systemctl").args(["--user","show",unit,"--property=ActiveState,MemoryMax,TasksMax,RuntimeMaxUSec,KillMode,ControlGroup,MainPID"]).output().unwrap();
     String::from_utf8(output.stdout).unwrap()
 }
+
+async fn wait_for_renderer_sandbox(
+    status_path: &Path,
+    deadline: tokio::time::Instant,
+) -> std::result::Result<String, String> {
+    // Command-line publication precedes Chromium's presandbox initialization.
+    // Observe both kernel flags under the caller's shared absolute deadline.
+    loop {
+        let status = std::fs::read_to_string(status_path)
+            .map_err(|error| format!("{}: {error}", status_path.display()))?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "renderer sandbox readiness deadline at {}: {status}",
+                status_path.display()
+            ));
+        }
+        if status.contains("Seccomp:\t2") && status.contains("NoNewPrivs:\t1") {
+            return Ok(status);
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn renderer_startup_waits_for_both_kernel_security_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    let status = temp.path().join("status");
+    std::fs::write(&status, "Seccomp:\t0\nNoNewPrivs:\t0\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut readiness = Box::pin(wait_for_renderer_sandbox(&status, deadline));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(readiness.as_mut().poll(&mut context).is_pending());
+    std::fs::write(&status, "Seccomp:\t2\nNoNewPrivs:\t0\n").unwrap();
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert!(readiness.as_mut().poll(&mut context).is_pending());
+    std::fs::write(&status, "Seccomp:\t2\nNoNewPrivs:\t1\n").unwrap();
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert_eq!(readiness.await.unwrap(), "Seccomp:\t2\nNoNewPrivs:\t1\n");
+}
+
+#[tokio::test(start_paused = true)]
+async fn renderer_sandbox_deadline_rejects_persistent_missing_filters() {
+    let temp = tempfile::tempdir().unwrap();
+    let status = temp.path().join("status");
+    std::fs::write(&status, "Seccomp:\t0\nNoNewPrivs:\t1\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let error = wait_for_renderer_sandbox(&status, deadline)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("renderer sandbox readiness deadline"),
+        "{error}"
+    );
+    assert!(error.contains("Seccomp:\t0"), "{error}");
+    assert!(tokio::time::Instant::now() <= deadline);
+}
+
+#[tokio::test(start_paused = true)]
+async fn renderer_security_flags_observed_after_deadline_do_not_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let status = temp.path().join("status");
+    std::fs::write(&status, "Seccomp:\t2\nNoNewPrivs:\t1\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(wait_for_renderer_sandbox(&status, deadline).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn renderer_read_failures_are_not_treated_as_startup_or_reset_the_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing");
+    let start = tokio::time::Instant::now();
+    assert!(
+        wait_for_renderer_sandbox(&missing, start + Duration::from_secs(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(tokio::time::Instant::now(), start);
+    let status = temp.path().join("status");
+    std::fs::write(&status, "Seccomp:\t0\nNoNewPrivs:\t0\n").unwrap();
+    let deadline = start + Duration::from_secs(2);
+    tokio::time::advance(Duration::from_millis(1900)).await;
+    assert!(wait_for_renderer_sandbox(&status, deadline).await.is_err());
+    assert_eq!(tokio::time::Instant::now(), deadline);
+}
 #[tokio::test]
 #[ignore = "native helper for abrupt-owner-death acceptance"]
 async fn native_death_child() {
@@ -122,6 +212,7 @@ async fn native_death_child() {
             )
             .unwrap();
             let mut sandboxed_renderers = 0;
+            let renderer_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             for pid in pids.lines() {
                 let root = PathBuf::from("/proc").join(pid);
                 let Ok(args) = std::fs::read(root.join("cmdline")) else {
@@ -131,7 +222,9 @@ async fn native_death_child() {
                     .windows(b"--type=renderer".len())
                     .any(|w| w == b"--type=renderer")
                 {
-                    let status = std::fs::read_to_string(root.join("status")).unwrap();
+                    let status = wait_for_renderer_sandbox(&root.join("status"), renderer_deadline)
+                        .await
+                        .unwrap();
                     assert!(
                         status.contains("Seccomp:\t2"),
                         "renderer has no seccomp filter"
