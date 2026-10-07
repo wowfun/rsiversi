@@ -42,8 +42,12 @@ probe accepts only Chromium or Firefox and cannot pass with no selected engine.
 Hit tests resolve and measure the current named button in one document execution,
 because a standard-view refresh can replace a button after actionability checks.
 This does not replay a control action or accept a connected but obscured button.
-Workflow controls resolve, hit-test and dispatch the current enabled button in
-one document execution within the existing 30-second deadline. A renderer refresh
+Workflow readiness polling can scroll but never invokes a control. After
+readiness, one document execution
+resolves, hit-tests and dispatches the current enabled button. If that final check
+finds it unavailable, only readiness is repeated within the same 30-second deadline.
+A delayed poll after timeout cannot dispatch, and an ambiguous final dispatch is
+never repeated. A renderer refresh
 between mouse down and mouse up can otherwise retire that gesture's handler.
 An unavailable control times out without dispatch; admitted actions are never
 repeated to obtain the expected view.
@@ -51,8 +55,9 @@ It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
 CI retains reports under `RSI_WEB_REPORT`, command logs and explicit step outcomes.
-Workflow failure reports and command logs are uploaded before later integration
-probes, so those probes cannot delay access to the first failure's evidence.
+Readiness failure logs are uploaded before the paired build. Product failure
+captures and Workflow reports are uploaded before later integration probes,
+so those probes cannot delay access to the first failure's evidence.
 A successful product step must produce `results.json` with passing Chromium and
 Firefox results; skipped steps remain visibly skipped.
 Recovery, task and Workflow probes write `binary.json` with the frozen executable's SHA-256
@@ -61,6 +66,9 @@ hashes, screenshots, action receipts, logs, assets and durable diagnostic data.
 The archive identifies the executable but does not contain it for binary replay.
 Failure metadata is written even when a crashed renderer prevents HTML or
 screenshot capture; capture diagnostics supplement the original task error.
+Renderer replacement records the scenario phase and bounded Worker start,
+authentication reply, failure and termination observations without credential
+payloads. A connecting screen alone does not identify which lifecycle stage waits.
 Service startup also retains its original failure when teardown fails; cleanup
 diagnostics cannot replace the readiness or startup error.
 Goal controls retain bounded Worker invocation/reply evidence and intermediate

@@ -1,4 +1,5 @@
 // Shared semantic entry points for product fixtures; every change uses real controls.
+import {errors} from 'playwright';
 export async function resources(page) {
   const toggle=page.getByRole('button',{name:'Toggle resources',exact:true});
   if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
@@ -6,19 +7,31 @@ export async function resources(page) {
 export const resourceSelector='.resource-dock:not([hidden]) [data-dockkit-content]:not([aria-hidden=true]) .resource-content';
 const detailSelector=`#detail[open], ${resourceSelector}`;
 export function details(page) {return page.locator(detailSelector).last();}
+function readyUiControl({rootSelector,label,dispatch=false,deadline}) {
+  if(Date.now()>=deadline)return false;
+  const root=[...document.querySelectorAll(rootSelector)].at(-1);
+  const button=root&&[...root.querySelectorAll('button')].find(button=>
+    (button.getAttribute('aria-label')??button.textContent).trim()===label&&
+    button.getBoundingClientRect().width>0&&button.getBoundingClientRect().height>0);
+  if(!button||button.matches(':disabled'))return false;
+  button.scrollIntoView({block:'center'});
+  const rect=button.getBoundingClientRect();
+  if(!button.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)))return false;
+  if(dispatch)button.click();
+  return true;
+}
 export async function clickUiControl(page, rootSelector, label, {timeout=30_000}={}) {
-  const dispatched=await page.waitForFunction(({rootSelector,label})=>{
-    const root=[...document.querySelectorAll(rootSelector)].at(-1);
-    const button=root&&[...root.querySelectorAll('button')].find(button=>
-      (button.getAttribute('aria-label')??button.textContent).trim()===label&&
-      button.getBoundingClientRect().width>0&&button.getBoundingClientRect().height>0);
-    if(!button||button.matches(':disabled'))return false;
-    button.scrollIntoView({block:'center'});
-    const rect=button.getBoundingClientRect();
-    if(!button.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)))return false;
-    button.click();return true;
-  },{rootSelector,label},{timeout});
-  await dispatched.dispose();
+  const deadline=performance.now()+timeout;
+  const input={rootSelector,label,deadline:Date.now()+timeout};
+  const expired=()=>new errors.TimeoutError(`Timeout ${timeout}ms exceeded waiting for ${label}`);
+  for(;;) {
+    const remaining=deadline-performance.now();
+    if(remaining<=0)throw expired();
+    const ready=await page.waitForFunction(readyUiControl,input,{timeout:Math.ceil(remaining)});
+    await ready.dispose();
+    if(performance.now()>=deadline)throw expired();
+    if(await page.evaluate(readyUiControl,{...input,dispatch:true}))return;
+  }
 }
 export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {

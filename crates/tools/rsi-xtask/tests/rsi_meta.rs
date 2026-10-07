@@ -931,10 +931,19 @@ fn paired_web_failures_publish_evidence_before_integration_probes() {
         .iter()
         .position(|step| step["id"] == "web_integrations")
         .unwrap();
+    let build_index = steps
+        .iter()
+        .position(|step| step["id"] == "web_build")
+        .unwrap();
     for (id, artifact, log) in [
         (
+            "web_readiness",
+            "rsi-fixture-readiness-failure-log",
+            "web_readiness.log",
+        ),
+        (
             "web_product",
-            "rsi-web-product-failure-log",
+            "rsi-web-product-failure-evidence",
             "web_product.log",
         ),
         (
@@ -948,7 +957,12 @@ fn paired_web_failures_publish_evidence_before_integration_probes() {
             .iter()
             .position(|step| step["with"]["name"] == artifact)
             .unwrap();
-        assert!(consumer_index < log_index && log_index < probes_index);
+        let next_expensive_step = if id == "web_readiness" {
+            build_index
+        } else {
+            probes_index
+        };
+        assert!(consumer_index < log_index && log_index < next_expensive_step);
         assert_eq!(
             steps[log_index]["if"].as_str().unwrap(),
             format!("${{{{ !cancelled() && steps.{id}.outcome == 'failure' }}}}")
@@ -976,6 +990,14 @@ fn paired_web_failures_publish_evidence_before_integration_probes() {
             .unwrap()
     };
     let workflow_archive = archive_path("rsi-workflow-failure-evidence");
+    let product_archive = archive_path("rsi-web-product-failure-evidence");
+    for suffix in ["**/failure*", "**/*-failure*", "**/binary.json"] {
+        assert!(
+            product_archive.lines().any(|line| {
+                line == format!("${{{{ runner.temp }}}}/rsi-web-evidence/{suffix}")
+            })
+        );
+    }
     assert!(
         workflow_archive
             .lines()

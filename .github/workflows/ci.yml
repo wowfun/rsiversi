@@ -136,7 +136,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 216
+    timeout-minutes: 221
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -252,6 +252,15 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_readiness.log") 2>&1
           node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs
 
+      - name: Preserve failed fixture readiness before the paired build
+        if: ${{ !cancelled() && steps.web_readiness.outcome == 'failure' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-fixture-readiness-failure-log
+          path: ${{ runner.temp }}/rsi-browser-logs/web_readiness.log
+          if-no-files-found: error
+
       - name: Build the paired Web application
         id: web_build
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' }}
@@ -343,12 +352,16 @@ jobs:
             !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
 
-      - name: Preserve failed Web product log before integration probes
+      - name: Preserve failed Web product captures before integration probes
         if: ${{ !cancelled() && steps.web_product.outcome == 'failure' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: rsi-web-product-failure-log
-          path: ${{ runner.temp }}/rsi-browser-logs/web_product.log
+          name: rsi-web-product-failure-evidence
+          path: |
+            ${{ runner.temp }}/rsi-browser-logs/web_product.log
+            ${{ runner.temp }}/rsi-web-evidence/**/failure*
+            ${{ runner.temp }}/rsi-web-evidence/**/*-failure*
+            ${{ runner.temp }}/rsi-web-evidence/**/binary.json
           if-no-files-found: error
 
       - name: Exercise paired Web integration probes

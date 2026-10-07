@@ -121,8 +121,9 @@ Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
 retain its distribution receipt, frozen input manifest, and build log.
-Early retention covers Web product and Workflow failures: waiting for independent
-integration probes delayed Workflow diagnosis despite a completed failing step.
+Early retention covers readiness command logs before the paired build and Web
+product failure captures and Workflow reports before independent integration probes.
+Waiting for those probes delayed diagnosis despite completed failing steps.
 The [Web fixture contract](../../../../fixtures/rsi/web-product/README.md) owns
 that evidence boundary. The final archive still retains the complete step
 outcomes and visual evidence.

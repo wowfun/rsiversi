@@ -80,6 +80,79 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       assert.equal(await page.getByRole('button',{name:'Open workflow',exact:true}).isEnabled(),false);
     } finally {await browser.close();}
   });
+  test(`${name}: a queued readiness poll cannot dispatch after timeout`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button disabled>Cancel workflow</button></main>');
+      await page.evaluate(()=>{window.invocations=0;document.querySelector('button').onclick=()=>++window.invocations;});
+      let queued;
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return (callback,arg,options)=>{
+          queued={callback,arg};return target.waitForFunction(callback,arg,options);
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await assert.rejects(clickUiControl(observedPage,'main','Cancel workflow',{timeout:100}),/Timeout/);
+      await page.evaluate(()=>{document.querySelector('button').disabled=false;});
+      // A timeout does not fence an already queued document callback.
+      await page.evaluate(queued.callback,queued.arg);
+      assert.equal(await page.evaluate(()=>window.invocations),0);
+    } finally {await browser.close();}
+  });
+  test(`${name}: final control dispatch resolves the current button and never replays a lost reply`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button>Open workflow</button></main>');
+      await page.evaluate(()=>{
+        window.invocations=[];document.querySelector('button').onclick=()=>window.invocations.push('old');
+      });
+      let polls=0,dispatches=0;
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return async (...args)=>{
+          ++polls;const ready=await target.waitForFunction(...args);
+          await target.evaluate(()=>{
+            const button=document.createElement('button');button.textContent='Open workflow';
+            button.onclick=()=>window.invocations.push('current');document.querySelector('main').replaceChildren(button);
+          });
+          return ready;
+        };
+        if(property==='evaluate')return async (...args)=>{
+          ++dispatches;await target.evaluate(...args);throw new Error('dispatch reply was lost');
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await assert.rejects(clickUiControl(observedPage,'main','Open workflow',{timeout:2000}),/dispatch reply was lost/);
+      assert.deepEqual(await page.evaluate(()=>window.invocations),['current']);
+      assert.equal(polls,1);assert.equal(dispatches,1);
+    } finally {await browser.close();}
+  });
+  test(`${name}: a refused final check returns to readiness without dispatch`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button>Open workflow</button></main>');
+      await page.evaluate(()=>{window.invocations=0;document.querySelector('button').onclick=()=>++window.invocations;});
+      const budgets=[];
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return async (callback,arg,options)=>{
+          budgets.push(options.timeout);
+          if(budgets.length===2)await target.evaluate(()=>{document.querySelector('button').disabled=false;});
+          const ready=await target.waitForFunction(callback,arg,options);
+          if(budgets.length===1)await target.evaluate(()=>{document.querySelector('button').disabled=true;});
+          return ready;
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await clickUiControl(observedPage,'main','Open workflow',{timeout:2000});
+      assert.equal(await page.evaluate(()=>window.invocations),1);
+      assert.equal(budgets.length,2);assert(budgets[1]<budgets[0]);
+    } finally {await browser.close();}
+  });
   test(`${name}: control capture waits for asynchronously mounted controls`, async () => {
     const browser = await engine.launch({ headless: true });
     try {
