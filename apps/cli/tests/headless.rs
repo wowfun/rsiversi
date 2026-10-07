@@ -1522,6 +1522,7 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
         )
         .await
         .unwrap();
+    child.wait_turn(CHILD_PROVIDER_START_TIMEOUT).await.unwrap();
     let process_id = child.id().to_string();
     assert!(
         tokio::process::Command::new("/bin/kill")
