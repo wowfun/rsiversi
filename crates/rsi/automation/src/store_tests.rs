@@ -2,9 +2,23 @@ use super::*;
 use rsi_browser::{Assertion, AssertionResult, CheckOutcome, CheckResult, CheckSpec};
 const NOW: u64 = 1_800_000_000_000;
 
+#[cfg(unix)]
+#[test]
+fn ledger_and_policy_reject_symlinked_parents_before_creating_state() {
+    let root = crate::test_directory();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    assert!(Ledger::open(&alias.join("ledger"), NOW).is_err());
+    assert!(crate::PolicyOwner::open(alias.join("policy")).is_err());
+    assert!(!real.join("ledger").exists());
+    assert!(!real.join("policy").exists());
+}
+
 #[tokio::test]
 async fn metadata_pressure_stops_new_dispatch_but_cancellation_uses_reserved_headroom() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_directory();
     let ledger = Ledger::open(&root.path().join("ledger"), NOW).unwrap();
     let running = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
     ledger.claim(NOW).unwrap();
@@ -42,7 +56,7 @@ async fn cancelled_exploration_cannot_be_overwritten_by_late_start_or_completion
         crate::ExplorationState::Starting,
         crate::ExplorationState::Running,
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_directory();
         let ledger = Ledger::open(&root.path().join("ledger"), NOW).unwrap();
         let id = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
         ledger.claim(NOW).unwrap();
@@ -77,7 +91,7 @@ async fn cancelled_exploration_cannot_be_overwritten_by_late_start_or_completion
 
 #[tokio::test]
 async fn retention_expires_queued_work_without_claiming_or_touching_running_work() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let running = admit(&ledger, 1, NOW).await.unwrap();
     ledger.claim(NOW).unwrap().unwrap();
@@ -123,7 +137,7 @@ async fn cancelling_failed_checks_preserves_verdict_and_only_stops_pending_explo
             crate::ExplorationState::Cancelled,
         ),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
         let mut selected = rule();
         selected.explore_on_failure = explore;
@@ -188,7 +202,7 @@ async fn cancelling_failed_checks_preserves_verdict_and_only_stops_pending_explo
 
 #[tokio::test]
 async fn abandoned_waiter_keeps_dispatch_bounded_and_queued_admission_can_be_cancelled() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
@@ -224,7 +238,7 @@ async fn abandoned_waiter_keeps_dispatch_bounded_and_queued_admission_can_be_can
 
 #[tokio::test]
 async fn retirement_refuses_queued_work_and_waits_for_dispatched_settlement() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
@@ -259,7 +273,7 @@ async fn retirement_refuses_queued_work_and_waits_for_dispatched_settlement() {
 
 #[tokio::test]
 async fn restart_validates_terminal_rows_without_republishing_them() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let path = directory.path().join("ledger");
     let ledger = Ledger::open(&path, NOW).unwrap();
     for id in 1..=33 {
@@ -299,7 +313,7 @@ async fn metadata_accounting_tracks_mutations_rollback_restart_and_retention() {
         assert_eq!(rows, expected_rows);
         assert_eq!(bytes, measured);
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let path = directory.path().join("ledger");
     let ledger = Ledger::open(&path, NOW).unwrap();
     check(&ledger, 0);
@@ -348,7 +362,7 @@ async fn metadata_accounting_tracks_mutations_rollback_restart_and_retention() {
 
 #[tokio::test]
 async fn admission_ack_loss_retains_the_same_interrupted_identity() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let path = directory.path().join("ledger");
     let ledger = Ledger::open(&path, NOW).unwrap();
     ledger.lose_commit_reply.store(true, Ordering::Release);
@@ -373,7 +387,7 @@ async fn admission_ack_loss_retains_the_same_interrupted_identity() {
 
 #[tokio::test]
 async fn rejected_admission_still_persists_the_floor_before_clock_rollback() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let path = directory.path().join("ledger");
     let ledger = Ledger::open(&path, NOW).unwrap();
     assert!(matches!(
@@ -400,7 +414,7 @@ async fn rejected_admission_still_persists_the_floor_before_clock_rollback() {
 
 #[tokio::test]
 async fn api_read_does_not_block_the_async_executor_behind_the_sqlite_writer() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     let policy = Arc::new(crate::PolicyOwner::open(directory.path().join("policy")).unwrap());
@@ -523,7 +537,7 @@ pub(crate) fn failed() -> CheckResult {
 }
 #[tokio::test]
 async fn concurrent_receipts_and_success_statuses_have_one_logical_task() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let mut workers = vec![];
     for _ in 0..8 {
@@ -568,7 +582,7 @@ async fn concurrent_receipts_and_success_statuses_have_one_logical_task() {
 }
 #[tokio::test]
 async fn ordering_identity_reuse_floor_and_ambiguous_time_are_explicit() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let first = admit(&ledger, 1, NOW - 10).await.unwrap();
     let newest = admit(&ledger, 2, NOW).await.unwrap();
@@ -617,7 +631,7 @@ async fn ordering_identity_reuse_floor_and_ambiguous_time_are_explicit() {
 }
 #[tokio::test]
 async fn restart_disarms_and_resume_preserves_original_and_new_rule() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     let claim = ledger.claim(NOW).unwrap().unwrap();
@@ -644,7 +658,7 @@ async fn restart_disarms_and_resume_preserves_original_and_new_rule() {
 }
 #[tokio::test]
 async fn failed_check_exploration_identity_survives_crash_and_retention() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     ledger.claim(NOW).unwrap();
@@ -671,7 +685,7 @@ async fn failed_check_exploration_identity_survives_crash_and_retention() {
 }
 #[tokio::test]
 async fn capacity_rejection_is_durable_and_unknown_commit_fences() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     for id in 1..=33 {
         let mut r = rule();
@@ -716,7 +730,7 @@ async fn capacity_rejection_is_durable_and_unknown_commit_fences() {
 
 #[tokio::test]
 async fn one_signed_delivery_admits_distinct_rules_without_hiding_changed_bodies_or_metadata() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
     let first = admit(&ledger, 1, NOW).await.unwrap();
     let mut second_rule = rule();
@@ -779,7 +793,7 @@ async fn one_signed_delivery_admits_distinct_rules_without_hiding_changed_bodies
 }
 #[tokio::test]
 async fn maximum_escaped_snapshot_and_report_remain_readable_after_restart() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
     let id = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
     ledger.claim(NOW).unwrap();
@@ -797,7 +811,7 @@ async fn maximum_escaped_snapshot_and_report_remain_readable_after_restart() {
 }
 #[test]
 fn policy_revisions_revocation_retirement_and_intake_log_are_independent() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let dir = tmp.path().join("policy");
     let owner = crate::PolicyOwner::open(dir.clone()).unwrap();
     let p = crate::Policy {
@@ -866,7 +880,7 @@ fn policy_revisions_revocation_retirement_and_intake_log_are_independent() {
 
 #[tokio::test]
 async fn corrupt_durable_payload_fences_the_owner_before_dispatch() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
     let id = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
     ledger
@@ -885,7 +899,7 @@ async fn corrupt_durable_payload_fences_the_owner_before_dispatch() {
 
 #[test]
 fn retiring_a_rule_keeps_historical_view_authority_without_execution_authority() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let owner = crate::PolicyOwner::open(tmp.path().join("policy")).unwrap();
     let device = rsi_api_protocol::DeviceId::from_bytes([3; 16]);
     let origin = rsi_api_protocol::CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
@@ -922,7 +936,7 @@ fn retiring_a_rule_keeps_historical_view_authority_without_execution_authority()
 #[tokio::test]
 async fn oversized_or_invalid_durable_png_fences_without_unbounded_blob_read() {
     for png in [vec![0; 512 * 1024 + 1], b"\x89PNG\r\n\x1a\n".to_vec()] {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
         let id = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
         ledger
@@ -948,7 +962,7 @@ async fn oversized_or_invalid_durable_png_fences_without_unbounded_blob_read() {
 
 #[tokio::test]
 async fn idle_and_full_claims_do_not_enter_commit_or_checkpoint() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
     let changes = ledger.connection.lock().unwrap().total_changes();
     ledger.lose_commit_reply.store(true, Ordering::Release);
@@ -971,7 +985,7 @@ async fn idle_and_full_claims_do_not_enter_commit_or_checkpoint() {
 }
 #[tokio::test]
 async fn claim_retires_expired_heads_before_selecting_fresh_work() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_directory();
     let ledger = Ledger::open(&tmp.path().join("ledger"), NOW).unwrap();
     let old = admit(&ledger, 1, NOW).await.unwrap().attempt_id;
     ledger
@@ -988,7 +1002,7 @@ async fn claim_retires_expired_heads_before_selecting_fresh_work() {
 
 #[tokio::test]
 async fn invalid_png_is_rejected_before_settlement_without_fencing_reads() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     ledger.claim(NOW).unwrap().unwrap();
@@ -1010,7 +1024,7 @@ async fn invalid_png_is_rejected_before_settlement_without_fencing_reads() {
 }
 #[tokio::test]
 async fn fresh_delivery_names_cannot_allocate_receipts_for_the_same_signed_body() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let first = admit(&ledger, 1, NOW).await.unwrap();
     for number in 0..16 {
@@ -1050,7 +1064,7 @@ pub(crate) fn exhaust_metadata(ledger: &Ledger) {
 }
 #[tokio::test]
 async fn a_later_rule_conflict_rolls_back_all_candidate_receipts_but_keeps_the_floor() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let mut first = rule();
     first.id = "first".into();
@@ -1110,7 +1124,7 @@ async fn a_later_rule_conflict_rolls_back_all_candidate_receipts_but_keeps_the_f
 }
 #[tokio::test]
 async fn invalid_clock_values_neither_advance_the_floor_nor_delete_history() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     for bad in [0, u64::MAX, i64::MAX.cast_unsigned()] {
@@ -1151,7 +1165,7 @@ async fn invalid_clock_values_neither_advance_the_floor_nor_delete_history() {
 
 #[tokio::test]
 async fn valid_noncanonical_png_is_normalized_before_commit_and_survives_readback() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), NOW).unwrap();
     let receipt = admit(&ledger, 1, NOW).await.unwrap();
     ledger.claim(NOW).unwrap().unwrap();
@@ -1169,7 +1183,7 @@ async fn valid_noncanonical_png_is_normalized_before_commit_and_survives_readbac
 }
 #[tokio::test]
 async fn corrupted_durable_clock_floor_cannot_be_reopened() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_directory();
     let path = directory.path().join("ledger");
     let ledger = Ledger::open(&path, NOW).unwrap();
     admit(&ledger, 1, NOW).await.unwrap();

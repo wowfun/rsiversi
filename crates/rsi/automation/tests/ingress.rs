@@ -4,6 +4,9 @@ use rsi_browser::{Assertion, CheckSpec};
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
+fn test_directory() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
 fn rule() -> AutomationRule {
     AutomationRule {
         id: "preview".into(),
@@ -49,7 +52,7 @@ fn now() -> u64 {
     reason = "Keep signature admission, scoped controls and revocation in one authority scenario"
 )]
 async fn signed_admission_scoped_reads_distinct_controls_and_revocation() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
     let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
     let p = Policy {
@@ -160,7 +163,7 @@ async fn signed_admission_scoped_reads_distinct_controls_and_revocation() {
 
 #[tokio::test(start_paused = true)]
 async fn expired_evidence_is_retired_even_when_browser_execution_is_disabled() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let old = now() - 31 * 86_400_000;
     let ledger = Ledger::open(&directory.path().join("ledger"), old).unwrap();
     let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
@@ -224,7 +227,7 @@ async fn expired_evidence_is_retired_even_when_browser_execution_is_disabled() {
 
 #[tokio::test]
 async fn mutation_ids_are_independent_for_two_authorized_principals() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
     let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
     policy

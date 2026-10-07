@@ -425,7 +425,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn permission_reads_keep_the_previous_lease_while_publication_waits_on_disk() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_directory();
         let owner =
             std::sync::Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
         let policy = Policy {
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn snapshots_share_a_generation_and_unavailability_is_not_denial() {
         use rsi_session_protocol::SessionProtection;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let owner = PolicyOwner::open(tmp.path().join("policy")).unwrap();
         let first = owner.snapshot().unwrap();
         assert!(Arc::ptr_eq(&first, &owner.snapshot().unwrap()));
@@ -498,7 +498,7 @@ mod tests {
     }
     #[tokio::test]
     async fn unavailable_policy_is_not_an_empty_authorized_list() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let instant = crate::now();
         let ledger = crate::Ledger::open(&tmp.path().join("ledger"), instant).unwrap();
         let policy = Arc::new(PolicyOwner::open(tmp.path().join("policy")).unwrap());
@@ -561,7 +561,7 @@ mod tests {
     }
     #[tokio::test]
     async fn publication_fence_rejects_a_reader_already_waiting_for_the_generation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let owner = Arc::new(PolicyOwner::open(tmp.path().join("policy")).unwrap());
         let reader = owner.clone();
         let (entered, entering) = tokio::sync::oneshot::channel();

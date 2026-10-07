@@ -834,10 +834,11 @@ mod group_tests {
                     self.other_reads
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-                let before = request["after"]["after"]["last_activity_ms"]
-                    .as_u64()
+                let before = request["after"]["token"]
+                    .as_str()
+                    .and_then(|token| u64::from_str_radix(token, 16).ok())
                     .unwrap_or(10000);
-                let next=(group&&before>5904).then(||json!({"filter":filter,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"after":{"last_activity_ms":before-256,"session_id":format!("row-{}",before-256)}}));
+                let next=(group&&before>5904).then(||json!({"filter":filter,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"after":request["after"]["after"],"token":format!("{:032x}",before-256)}));
                 json!({"metadata_revision":revision,"newest":if group {Some(json!({"last_activity_ms":10000,"session_id":"row-10000"}))} else {None},"entries":[],"scanned":if group {256}else{0},"next":next})
             };
             Ok(ApiOutput::Reply(ApiMessage {

@@ -84,6 +84,45 @@ fn service_catalog_lists_and_protects_explicit_builtins() {
     assert!(catalog.list_applications().is_err());
 }
 
+#[tokio::test]
+async fn standard_preset_manager_preserves_the_service_launch_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = HostPaths::new(
+        root.path().join("config"),
+        root.path().join("state"),
+        root.path().join("cache"),
+    )
+    .unwrap();
+    let metadata = metadata("fixture.a", b"format = 1\n");
+    let profile = ProfileCatalog::new(paths.clone(), metadata.clone())
+        .host(&HostProfileId::new("standard").unwrap())
+        .unwrap();
+    let composition = StandardComposition::new(paths.clone(), BTreeMap::new(), None, metadata);
+    let before = composition.preview_host(&profile).unwrap();
+    let manager = rsi::AgentPresetManager::open_standard_preview(&composition)
+        .await
+        .unwrap();
+    let with_manager = composition.clone().with_agent_presets(&manager).unwrap();
+    assert_eq!(
+        with_manager.preview_host(&profile).unwrap().launch_key,
+        before.launch_key
+    );
+    let ids = manager
+        .catalog()
+        .launch_identity()
+        .roots
+        .into_iter()
+        .filter_map(|root| root.exact_id)
+        .map(|id| id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["standard", "workflow", "automation"]);
+    assert!(
+        !paths.cache().exists(),
+        "preview never materializes presets"
+    );
+    assert!(manager.shutdown().await.is_clean());
+}
+
 #[test]
 fn base_metadata_matches_registered_application_factories() {
     let root = tempfile::tempdir().unwrap();

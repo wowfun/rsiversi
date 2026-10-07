@@ -235,6 +235,8 @@ runners; Linux validation does not imply that coverage.
 Fixtures pass canonical temporary workspace authorities to production code;
 platform temporary-directory aliases must not accidentally become the symlink
 under test. Explicit malicious-link cases retain their original test paths.
+Filename-preview bounds use in-memory invalid bytes and real multibyte names;
+they do not require a filesystem to admit invalid UTF-8 names.
 
 Human-interaction tests park a real Kernel activation, advance its injected clock
 by a day, and block executor admission during resume. They fill the released

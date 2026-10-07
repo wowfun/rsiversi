@@ -1328,9 +1328,12 @@ mod tests {
         fingerprint(path, path, &mut hash, &mut 0, &mut 0)?;
         Ok(hex::encode(hash.finalize()))
     }
+    fn test_directory() -> tempfile::TempDir {
+        tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    }
     #[test]
     fn integrity_hash_includes_bin_directories() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_directory();
         std::fs::create_dir(tmp.path().join(".bin")).unwrap();
         let file = tmp.path().join(".bin/runtime");
         std::fs::write(&file, "one").unwrap();
@@ -1346,7 +1349,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn command_links_are_hashed_and_cannot_resolve_outside_the_runtime() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_directory();
         std::fs::create_dir_all(root.path().join("node_modules/.bin")).unwrap();
         std::fs::write(root.path().join("node_modules/cli"), "fixed").unwrap();
         let link = root.path().join("node_modules/.bin/cli");

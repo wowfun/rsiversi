@@ -23,6 +23,20 @@ pub const DEFAULT_AGENT_PRESET_ID: &str = "standard";
 /// Directory below the standard configuration root that owns user presets.
 pub const USER_AGENT_PRESET_DIRECTORY: &str = "agent-presets";
 
+pub(crate) fn standard_system_presets(root: &std::path::Path) -> [(AgentPresetId, PathBuf); 3] {
+    [
+        DEFAULT_AGENT_PRESET_ID,
+        rsi_session_protocol::WORKFLOW_PRESET_ID,
+        "automation",
+    ]
+    .map(|name| {
+        (
+            AgentPresetId::new(name).expect("static preset"),
+            root.join(name),
+        )
+    })
+}
+
 mod plugin;
 mod service_settings;
 pub(crate) use service_settings::ServicePresetSettingsFactory;
@@ -134,20 +148,13 @@ impl AgentPresetManager {
         composition: &crate::StandardComposition,
         system_root: PathBuf,
     ) -> Result<Self> {
-        let id = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        let path = system_root.join(id.as_str());
         Self::open_with_system_sources(
             parent,
             composition,
-            vec![
-                SystemPresetSource::Exact { id, path },
-                SystemPresetSource::Exact {
-                    id: AgentPresetId::new(rsi_session_protocol::WORKFLOW_PRESET_ID)
-                        .expect("static preset"),
-                    path: system_root.join(rsi_session_protocol::WORKFLOW_PRESET_ID),
-                },
-            ],
+            standard_system_presets(&system_root)
+                .into_iter()
+                .map(|(id, path)| SystemPresetSource::Exact { id, path })
+                .collect(),
         )
         .await
     }

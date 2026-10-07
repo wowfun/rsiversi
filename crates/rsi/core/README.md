@@ -453,7 +453,9 @@ complete native-aware preflight follows staging. Actual Service activation
 preflights linked configuration before opening the application preset Profile,
 even when reusing an existing staging owner, then
 materializes builtin preset assets before starting its child; preview and catalog
-snapshots do not write them. The bootstrap owns one ordinary
+snapshots do not write them. The Service preview and Settings-backed application
+preset manager use the same frozen system-preset roots, so mounting that manager
+does not change the Service launch identity. The bootstrap owns one ordinary
 staging Profile, then constructs its Application child from the immutable role
 catalog. Embedded Service composition uses that same manager and Loader; remote
 applications acquire no local Service Owner. Each application acquires one of 64

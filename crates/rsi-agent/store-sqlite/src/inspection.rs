@@ -437,17 +437,7 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> Inspection<'_, V> {
         link: bool,
     ) -> Result<()> {
         add(&mut self.summary.directory_entries, 1)?;
-        let raw = name.as_encoded_bytes();
-        // Bound allocation before lossy conversion, then bound the encoded
-        // preview again because replacement characters can expand invalid bytes.
-        let mut preview = String::from_utf8_lossy(&raw[..raw.len().min(128)]).into_owned();
-        if preview.len() > 128 {
-            let mut end = 128;
-            while !preview.is_char_boundary(end) {
-                end -= 1;
-            }
-            preview.truncate(end);
-        }
+        let preview = file_name_preview(name);
         let mut length = None;
         let issue = if directory && !link && name == "staging" {
             None
@@ -608,6 +598,17 @@ fn add(count: &mut u64, value: u64) -> Result<()> {
         .ok_or_else(|| StoreError::Corrupt("CAS inspection count overflow".into()))?;
     Ok(())
 }
+pub(crate) fn file_name_preview(name: &std::ffi::OsStr) -> String {
+    let raw = name.as_encoded_bytes();
+    // Bound allocation before lossy conversion, then bound the encoded
+    // preview again because replacement characters can expand invalid bytes.
+    let mut preview = String::from_utf8_lossy(&raw[..raw.len().min(128)]).into_owned();
+    if preview.len() > 128 {
+        preview.truncate(preview.floor_char_boundary(128));
+    }
+    preview
+}
+
 fn file_issue(error: &std::io::Error) -> CasInspectionIssue {
     if error.kind() == std::io::ErrorKind::NotFound {
         CasInspectionIssue::Missing

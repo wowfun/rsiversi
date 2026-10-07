@@ -28,7 +28,8 @@ at 1440×900, 1024×768, 767×900 and 390×844 at DPR 1; geometry checks detect
 overflow. These are runtime/visual observations, not DSH pixel-golden acceptance.
 
 Task captures require named controls to be present, enabled and reachable after
-scrolling, and reject product notices as well as JavaScript errors.
+scrolling, and reject visible product notices as well as JavaScript errors.
+Hidden banners are not feedback; making a nonempty banner visible still fails.
 Named controls must hit directly. For incidental transcript controls beneath the
 floating Back to bottom button, geometry additionally verifies that centering the
 control by scrolling makes it hit, then restores the reading position. Other

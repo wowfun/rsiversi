@@ -26,6 +26,8 @@ for the activated owner. Startup rejects symlink traversal and unrelated Ledger
 entries; child file opens reject final symlinks and nonprivate or multiply linked
 files. SQLite/WAL and policy publication use these trusted stable pathnames, not
 retained directory-relative capabilities against concurrent host replacement.
+Test fixtures resolve trusted temporary-directory aliases before admission;
+explicit symlink-rejection inputs keep their original paths.
 
 The dedicated SQLite writer has an exclusive no-follow file lease, immediate
 transactions, FULL synchronization and bounded records, database/WAL and PNG

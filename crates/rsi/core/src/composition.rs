@@ -1406,16 +1406,11 @@ impl StandardComposition {
             let standard_id = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
                 .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
             AgentPresetCatalog::new(
-                AgentPresetCatalogConfig::new(standard_id.clone())
-                    .with_system_preset(standard_id, system_root.join(DEFAULT_AGENT_PRESET_ID))
-                    .with_system_preset(
-                        AgentPresetId::new(rsi_session_protocol::WORKFLOW_PRESET_ID)
-                            .expect("static preset"),
-                        system_root.join(rsi_session_protocol::WORKFLOW_PRESET_ID),
-                    )
-                    .with_system_preset(
-                        AgentPresetId::new("automation").expect("static preset"),
-                        system_root.join("automation"),
+                crate::agent_preset::standard_system_presets(&system_root)
+                    .into_iter()
+                    .fold(
+                        AgentPresetCatalogConfig::new(standard_id),
+                        |config, (id, path)| config.with_system_preset(id, path),
                     )
                     .with_user_root(user_agent_preset_root(&paths)),
                 compiler,

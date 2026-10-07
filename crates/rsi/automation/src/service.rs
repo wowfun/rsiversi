@@ -750,7 +750,7 @@ mod tests {
     }
     #[tokio::test]
     async fn failed_durable_failure_settlement_fences_admission_and_releases_live_entry() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
         let receipt = ledger
             .admit(
@@ -802,7 +802,7 @@ mod tests {
     }
     #[tokio::test]
     async fn precheck_failure_retains_its_specific_diagnostic() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
         let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
         let rule = crate::store::tests::rule();
@@ -848,7 +848,7 @@ mod tests {
     }
     #[tokio::test]
     async fn complete_checker_result_survives_cleanup_failure_before_execution_error() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
         let instant = now();
         let receipt = ledger
@@ -914,7 +914,7 @@ mod tests {
         reason = "Keep one complete ownership operation or acceptance scenario together"
     )]
     async fn listener_classifies_rejection_and_signed_non_work_without_execution() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let ledger = Ledger::open(&tmp.path().join("ledger"), now()).unwrap();
         let policy = Arc::new(PolicyOwner::open(tmp.path().join("policy")).unwrap());
         let owner = AutomationService::new(
@@ -1027,7 +1027,7 @@ mod tests {
     }
     #[tokio::test]
     async fn saturated_listener_returns_the_bounded_busy_json() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_directory();
         let ledger = Ledger::open(&tmp.path().join("ledger"), now()).unwrap();
         let policy = Arc::new(PolicyOwner::open(tmp.path().join("policy")).unwrap());
         let owner = AutomationService::new(ledger, policy.clone(), None, BTreeMap::new(), None);
@@ -1120,7 +1120,7 @@ mod tests {
             (true, true, false),
             (true, false, true),
         ] {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = crate::test_directory();
             let ledger = Ledger::open(&tmp.path().join("ledger"), now()).unwrap();
             let policy = Arc::new(PolicyOwner::open(tmp.path().join("policy")).unwrap());
             let rule = crate::store::tests::rule();

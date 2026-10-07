@@ -552,11 +552,10 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn inspection_bounds_non_utf8_filename_previews_after_lossy_conversion() {
-    use std::os::unix::ffi::OsStringExt;
+async fn inspection_bounds_multibyte_filename_previews() {
     let root = tempfile::tempdir().unwrap();
     drop(SqliteStore::open(root.path()).unwrap());
-    let name = std::ffi::OsString::from_vec(vec![0xff; 200]);
+    let name = "界".repeat(66);
     fs::write(root.path().join("cas").join(name), b"unowned").unwrap();
     let (_, events) = inspect(root.path(), CasInspectionMode::Metadata).await;
     assert!(
@@ -568,4 +567,14 @@ async fn inspection_bounds_non_utf8_filename_previews_after_lossy_conversion() {
         CasInspectionLocation::File { name } => name.len() <= 128,
         _ => true,
     }));
+}
+
+#[cfg(unix)]
+#[test]
+fn filename_preview_bounds_invalid_bytes_without_requiring_filesystem_support() {
+    use std::os::unix::ffi::OsStringExt;
+    let name = std::ffi::OsString::from_vec(vec![0xff; 200]);
+    let preview = crate::inspection::file_name_preview(&name);
+    assert_eq!(preview, "\u{fffd}".repeat(42));
+    assert!(preview.len() <= 128);
 }

@@ -1641,6 +1641,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",

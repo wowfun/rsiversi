@@ -2377,6 +2377,9 @@ dependencies = [
  "rsi-apply-patch",
  "rsi-approval",
  "rsi-approval-protocol",
+ "rsi-automation",
+ "rsi-automation-api",
+ "rsi-browser",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
@@ -3423,6 +3426,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-automation"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "ring",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-goal",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-automation-api",
+ "rsi-browser",
+ "rsi-credentials-protocol",
+ "rsi-files-native-fs",
+ "rsi-goal",
+ "rsi-media",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "rsi-workspace-protocol",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "rsi-automation-api"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-browser"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-mcp",
+ "rsi-media",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-retrieval",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "rsi-build-info"
 version = "0.0.1"
 dependencies = [
@@ -4142,6 +4221,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
@@ -4387,6 +4467,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
+ "getrandom 0.3.4",
+ "hex",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-goal",
@@ -4489,6 +4571,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",

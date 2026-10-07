@@ -15,6 +15,11 @@ pub use protocol::*;
 pub use service::{AutomationService, Explorer, IngressSource, Readiness};
 pub use store::{AdmissionError, Ledger};
 
+#[cfg(test)]
+fn test_directory() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
+
 pub(crate) fn now() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
