@@ -9,4 +9,6 @@ The state file lives in the runner's private temporary directory.
 Run deterministic lifecycle checks with
 `python3 fixtures/tools/python-tests.py fixtures/rsi/browser-runtime`.
 They mock system commands and use temporary state, without changing host policy.
+The native-gate script check requires Bash and ripgrep; it executes the actual
+workflow script with isolated cargo and privilege-command substitutes.
 Real manager readiness and process confinement remain the native Browser gate.
