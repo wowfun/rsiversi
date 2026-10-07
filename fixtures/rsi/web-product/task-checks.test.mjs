@@ -3,11 +3,59 @@ import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
 import { clickUiControl } from './controls.mjs';
+import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: navigation evidence preserves gestures, owner-scoped replies and bounds without private payloads`, async () => {
+    const browser = await engine.launch({headless:true});
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<button id="pane-tab-main" aria-pressed="true">Main</button><div data-session-id="target"><button data-testid="conversation-open"><span>Open target</span></button></div>');
+      await page.evaluate(() => {
+        window.sent = [];
+        window.Worker = class extends EventTarget {
+          postMessage(packet) {window.sent.push(packet);}
+        };
+      });
+      await page.evaluate(recordNavigationEvidence);
+      await page.evaluate(() => {
+        window.first = new Worker();window.second = new Worker();
+        first.postMessage({kind:'call',id:1,method:'connect',payload:'credential-sentinel'});
+        first.postMessage({kind:'call',id:2,method:'command',payload:JSON.stringify({action:'send',text:'message-sentinel'})});
+        first.postMessage({kind:'call',id:3,method:'command',payload:'invalid JSON'});
+        first.postMessage({kind:'call',id:4,method:'command',payload:JSON.stringify({action:'open',session:'target',pane:'main',extra:'private-sentinel'})});
+        second.postMessage({kind:'call',id:4,method:'command',payload:JSON.stringify({action:'refresh'})});
+        second.dispatchEvent(new MessageEvent('message',{data:{kind:'reply',id:4}}));
+      });
+      await page.getByRole('button',{name:'Open target',exact:true}).click();
+      const initial = await page.evaluate(() => ({evidence:window.navigationEvidence,sent:window.sent.length}));
+      assert.equal(initial.sent,5);
+      assert.deepEqual(initial.evidence.commands,[
+        {owner:1,id:4,action:'open',session:'target',pane:'main',replied:false},
+        {owner:2,id:4,action:'refresh',replied:true,ok:true},
+      ]);
+      assert.deepEqual(initial.evidence.gestures.map(value=>value.type),['mousedown','mouseup','click']);
+      assert(initial.evidence.gestures.every(value=>value.session==='target'&&value.connected&&value.selected==='pane-tab-main'));
+      assert(!JSON.stringify(initial.evidence).includes('sentinel'));
+      const bounded = await page.evaluate(() => {
+        first.dispatchEvent(new MessageEvent('message',{data:{kind:'reply',id:4,error:'x'.repeat(2048)}}));
+        const errorLength=window.navigationEvidence.commands[0].error.length;
+        for(let id=5;id<75;id++)first.postMessage({kind:'call',id,method:'command',payload:JSON.stringify({action:'navigate',command:{kind:'next',extra:'private-sentinel'}})});
+        for(let i=0;i<70;i++)document.querySelector('[data-testid="conversation-open"]').dispatchEvent(new MouseEvent('click',{bubbles:true}));
+        return {evidence:window.navigationEvidence,sent:window.sent.length,errorLength};
+      });
+      assert.equal(bounded.errorLength,1024);
+      assert.equal(bounded.sent,75);
+      assert.equal(bounded.evidence.commands.length,64);
+      assert.equal(bounded.evidence.gestures.length,64);
+      assert.equal(bounded.evidence.commands[0].id,11);
+      assert(bounded.evidence.commands.every(value=>value.kind==='next'));
+      assert(!JSON.stringify(bounded.evidence).includes('sentinel'));
+    } finally {await browser.close();}
+  });
   test(`${name}: unchanged Workflow controls survive refresh and current dispatch invokes once`, async () => {
     const browser=await engine.launch({headless:true});
     try {

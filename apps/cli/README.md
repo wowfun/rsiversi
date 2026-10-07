@@ -11,3 +11,9 @@ then run `RSI_PAIRED_BUNDLE="$PWD/target/rsi-app/current" cargo test --locked -p
 rsi-cli --features paired-web-tests --test service_host_cli web::`. The directory
 must contain its paired `rsi`, `assets/` and receipt. Missing inputs fail explicitly;
 these tests never fall back to an ordinary Cargo executable and arbitrary assets.
+
+Headless process tests synchronize the phase they exercise before sending a
+signal. Provider entry establishes execution readiness; the cancellation-output
+test also waits for the complete JSONL Turn record. These bounded waits retain
+captured output on failure and reap the child. The
+[terminal contract](../terminal/README.md) owns interruption and output deadlines.

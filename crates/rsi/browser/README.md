@@ -68,6 +68,11 @@ The [CI user-manager fixture](../../../fixtures/rsi/browser-runtime/README.md)
 records existing runner state and restores only job-created resources on exit.
 These tests remain opt-in locally and require the three `RSI_TEST_BROWSER_*`
 runtime paths. Real provider tests stay separate and require explicit credentials.
+The abrupt-owner proof observes renderer filter initialization within one shared
+two-second deadline: a visible renderer command line alone is not readiness.
+Every observed renderer must reach `Seccomp=2` and `NoNewPrivs=1`; namespace and
+no-sandbox-flag checks remain mandatory. A persistent missing filter fails with
+the observed status rather than being skipped.
 
 Initialization waits for the browser helper's ready acknowledgement before
 starting the CDP client. Client CDP traffic cannot precede Chromium's pipe

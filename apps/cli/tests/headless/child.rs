@@ -16,6 +16,7 @@ struct Capture {
     total: usize,
     parsed: usize,
     accepted: bool,
+    turn_presented: bool,
     error: Option<String>,
 }
 
@@ -25,16 +26,19 @@ impl Capture {
         let retained = bytes.len().min(CAPTURE_LIMIT - self.bytes.len());
         let previous = self.bytes.len();
         self.bytes.extend_from_slice(&bytes[..retained]);
-        if stdout && !self.accepted {
+        if stdout && !(self.accepted && self.turn_presented) {
             for offset in bytes[..retained]
                 .iter()
                 .enumerate()
                 .filter_map(|(offset, byte)| (*byte == b'\n').then_some(offset))
             {
                 let end = previous + offset;
-                self.accepted |=
+                if let Ok(value) =
                     serde_json::from_slice::<serde_json::Value>(&self.bytes[self.parsed..end])
-                        .is_ok_and(|value| value["type"] == "message");
+                {
+                    self.accepted |= value["type"] == "message";
+                    self.turn_presented |= value["type"] == "turn";
+                }
                 self.parsed = end + 1;
             }
         }
@@ -139,9 +143,10 @@ impl ObservedChild {
         let stdout = self.stdout.lock().unwrap();
         let stderr = self.stderr.lock().unwrap();
         format!(
-            "stage={stage} pid={:?} durable_acceptance={} provider_entered={} signal={:?}\nstdout: {}\nstderr: {}",
+            "stage={stage} pid={:?} durable_acceptance={} turn_presented={} provider_entered={} signal={:?}\nstdout: {}\nstderr: {}",
             self.child.id(),
             stdout.accepted,
+            stdout.turn_presented,
             self.provider_entered,
             self.signal,
             stdout.diagnostic(),
@@ -193,6 +198,29 @@ impl ObservedChild {
                 Err(format!("child exited before provider entry: {status:?}; output drain={readers:?}\n{}", self.diagnostic("provider entry")))
             }
             () = tokio::time::sleep(deadline) => Err(self.fail("provider entry deadline").await),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn wait_turn(&mut self, deadline: Duration) -> Result<(), String> {
+        let capture = self.stdout.clone();
+        let ready = async move {
+            let mut ticks = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                if capture.lock().unwrap().turn_presented {
+                    return;
+                }
+                ticks.tick().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            () = ready => Ok(()),
+            status = self.child.wait() => {
+                let readers = self.drain_after_exit().await;
+                Err(format!("child exited before Turn presentation: {status:?}; output drain={readers:?}\n{}", self.diagnostic("Turn presentation")))
+            }
+            () = tokio::time::sleep(deadline) => Err(self.fail("Turn presentation deadline").await),
         }
     }
 
@@ -296,4 +324,68 @@ async fn output_overflow_is_drained_but_never_reported_as_complete_success() {
     let error = command.observed_output().await.unwrap_err();
     assert!(error.contains("incomplete child output"));
     assert!(error.contains("bytes=8388609 retained=8388608"));
+}
+
+#[test]
+fn capture_recognizes_a_turn_after_acceptance_across_split_records() {
+    let mut capture = Capture::default();
+    capture.append(b"{\"type\":\"message\"}\n", true);
+    assert!(capture.accepted);
+    assert!(!capture.turn_presented);
+    capture.append(b"{\"type\":\"tu", true);
+    assert!(!capture.turn_presented);
+    capture.append(b"rn\"}\n", true);
+    assert!(capture.turn_presented);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_wait_requires_a_complete_stdout_record() {
+    use tokio::io::AsyncWriteExt as _;
+    let mut command = Command::new("/bin/sh");
+    command.stdin(Stdio::piped()).args([
+        "-c",
+        "printf '{\"type\":\"message\"}\n{\"type\":\"tu'; read -r marker; printf 'rn\"}\n'; exec sleep 30",
+    ]);
+    let mut child = ObservedChild::spawn(&mut command).unwrap();
+    let mut release = child.child.stdin.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !child.stdout.lock().unwrap().bytes.ends_with(b"tu") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("partial Turn should be captured before releasing its final bytes");
+    child.provider_entered = true;
+    let mut ready = Box::pin(child.wait_turn(Duration::from_secs(5)));
+    assert!(futures_util::poll!(&mut ready).is_pending());
+    release.write_all(b"ready\n").await.unwrap();
+    ready.await.unwrap();
+    assert!(child.stdout.lock().unwrap().turn_presented);
+    child.child.kill().await.unwrap();
+    child.drain_after_exit().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_wait_deadline_preserves_capture_and_reaps_the_child() {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "echo '{\"type\":\"message\"}'; exec sleep 30"]);
+    let mut child = ObservedChild::spawn(&mut command).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !child.stdout.lock().unwrap().accepted {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let error = child
+        .wait_turn(Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert!(error.contains("Turn presentation deadline"), "{error}");
+    assert!(error.contains("durable_acceptance=true"), "{error}");
+    assert!(error.contains("turn_presented=false"), "{error}");
+    assert!(error.contains("child killed and reaped"), "{error}");
+    assert!(child.child.try_wait().unwrap().is_some());
 }

@@ -69,6 +69,11 @@ screenshot capture; capture diagnostics supplement the original task error.
 Renderer replacement records the scenario phase and bounded Worker start,
 authentication reply, failure and termination observations without credential
 payloads. A connecting screen alone does not identify which lifecycle stage waits.
+Conversation-switch failures retain bounded navigation gesture and Worker
+command/reply metadata plus current pane identities. The trace records only
+navigation actions and IDs, never connection credentials or message contents.
+It distinguishes a missing click from a dispatched open still awaiting its reply;
+the expected Session identity and saved-draft assertions remain unchanged.
 Service startup also retains its original failure when teardown fails; cleanup
 diagnostics cannot replace the readiness or startup error.
 Goal controls retain bounded Worker invocation/reply evidence and intermediate
