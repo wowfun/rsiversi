@@ -193,6 +193,9 @@ failure does not skip ACP/LSP/addon evidence. Namespace policy is restored by
 each step that needs it. Browser consumers also name the independent shared
 fixture-package installation prerequisite; none assumes another test step
 completed its npm setup.
+Product fixture readiness regressions run independently after fixture packages
+and engines are installed. Their failure does not suppress paired-product probes;
+their outcome and log identify a fixture boundary before expensive product builds.
 
 The Web terminal fixture has its own step deadline, outcome and evidence archive.
 It reuses the main product build when present, and can still run after later main
@@ -202,7 +205,7 @@ Workflow browser acceptance has its own prerequisite-conditioned outcome and
 retains an explicit Dock scope. The full fixture keeps its inline navigation
 assertions available separately: a passing Dock run cannot stand in for that
 boundary. This gives canonical history, Node execution and cleanup an automated
-gate while the inline retirement race remains unresolved, without weakening
-snapshot authority or converting a failing assertion to an expected failure.
+gate with bounded CI scope. The full fixture also exercises inline navigation;
+local full-scope evidence does not expand what the Dock-only CI gate proves.
 Fixture unit discovery includes the Workflow configuration helpers. Desktop
 acceptance supplies Node explicitly and preserves its separate Workflow report.

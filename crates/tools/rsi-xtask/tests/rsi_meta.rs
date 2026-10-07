@@ -864,6 +864,17 @@ fn paired_web_consumers_have_independent_failure_domains() {
             .contains("pnpm -C ../../../apps/web build")
     );
     assert!(!build["run"].as_str().unwrap().contains("sudo sysctl"));
+    let readiness = step("web_readiness");
+    let condition = readiness["if"].as_str().unwrap();
+    assert!(condition.contains("!cancelled()"));
+    assert!(condition.contains("steps.browsers.outcome == 'success'"));
+    assert!(condition.contains("steps.web_harness.outcome == 'success'"));
+    assert!(!condition.contains("steps.web_build"));
+    let command = readiness["run"].as_str().unwrap();
+    assert!(
+        command.contains("node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs")
+    );
+    assert!(command.contains("tee \"$RUNNER_TEMP/rsi-browser-logs/web_readiness.log\""));
     for id in [
         "web_product",
         "web_workflow",
@@ -876,6 +887,7 @@ fn paired_web_consumers_have_independent_failure_domains() {
         assert!(condition.contains("steps.web_build.outcome == 'success'"));
         assert!(condition.contains("steps.web_harness.outcome == 'success'"));
         assert!(!condition.contains("steps.web_product.outcome"));
+        assert!(!condition.contains("steps.web_readiness.outcome"));
         assert!(!condition.contains("steps.web_integrations.outcome"));
         assert!(
             consumer["run"]

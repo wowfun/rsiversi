@@ -136,7 +136,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 211
+    timeout-minutes: 216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -241,6 +241,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_harness.log") 2>&1
           npm ci --ignore-scripts
+
+      - name: Exercise product fixture readiness
+        id: web_readiness
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' && steps.web_harness.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: fixtures/rsi/web-product
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_readiness.log") 2>&1
+          node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs
 
       - name: Build the paired Web application
         id: web_build
