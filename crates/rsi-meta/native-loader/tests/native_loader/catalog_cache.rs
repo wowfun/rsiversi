@@ -477,7 +477,7 @@ fn successful_validation_commits_cache_and_releases_live_staging_on_drop() {
     wait_for_staging_release(&catalog);
 
     drop(catalog);
-    let reopened = NativeCatalog::new(CatalogOptions::new(cache.path())).unwrap();
+    let reopened = wait_for_catalog_ownership_release(cache.path());
     assert_eq!(reopened.snapshot().cache_artifacts, 1);
     assert_eq!(reopened.snapshot().cache_bytes, artifact_bytes);
 }

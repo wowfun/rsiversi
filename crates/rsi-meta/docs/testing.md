@@ -259,6 +259,9 @@ callback completion. Dropping the test owner still releases the gate on failure.
 Callback-count assertions begin only after setup callbacks have quiesced. A
 published capability or completed application waiter does not prove that the
 foreign worker has released its callback reservation.
+Likewise, zero staging bytes does not prove that the finalizer has released its
+catalog lease. Cache reopening tests wait for actual ownership release within
+the existing bound, retrying only `CacheLocked` and retaining all other failures.
 
 Table unit evidence distinguishes a duplicate release in the still-current
 consumed epoch (`PROTOCOL_ERROR`) from an old token after slot reuse (`STALE`),
