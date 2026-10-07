@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright";
 import { startService, waitUntil } from "./service.mjs";
+import { recordTaskFailure } from './task-checks.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-product-"));
@@ -30,6 +31,7 @@ const binary = join(directory, "rsi");
 await cp(process.env.RSI_WEB_BINARY, binary);
 let service;
 let diagnosticPage;
+let phase = 'service startup';
 if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
 const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chromium).launch({ headless: true });
 try {
@@ -42,8 +44,32 @@ try {
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
   await context.addInitScript(() => {
     window.workerStarts = 0;
+    window.rendererConnections = [];
     const NativeWorker = Worker;
-    window.Worker = class extends NativeWorker { constructor(...args) { super(...args); window.workerStarts++; } };
+    window.Worker = class extends NativeWorker {
+      #record;
+      constructor(...args) {
+        super(...args);
+        this.#record = {owner: ++window.workerStarts, terminated: false};
+        window.rendererConnections.push(this.#record);
+        if(window.rendererConnections.length>8)window.rendererConnections.shift();
+        this.addEventListener('message', ({data}) => {
+          if(data?.kind==='reply' && data.id===this.#record.connect?.id) {
+            this.#record.connect.replied=true;
+            this.#record.connect.ok=!data.error;
+            if(data.error)this.#record.connect.error=String(data.error).slice(0,1024);
+          }
+          if(data?.kind==='failed')this.#record.error=String(data.error).slice(0,1024);
+        });
+      }
+      postMessage(data,...rest) {
+        if(data?.kind==='call' && data.method==='connect')this.#record.connect={id:data.id,replied:false};
+        return super.postMessage(data,...rest);
+      }
+      terminate() {
+        const result=super.terminate();this.#record.terminated=true;return result;
+      }
+    };
   });
   const page = await context.newPage();
   diagnosticPage = page;
@@ -51,6 +77,7 @@ try {
   const modules = [];
   page.on("response", response => { if (response.url().includes("/rsi-renderers/") && response.url().endsWith("standard.js")) modules.push(response.url()); });
   await page.goto(service.origin);
+  phase = 'initial connection';
   await page.locator("#receipt").fill(JSON.stringify(service.register("renderer reload")));
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await page.locator("#workbench").waitFor({ state: "visible" });
@@ -71,6 +98,7 @@ try {
   assert.equal(modules.length, 1);
   const oldLazy = modules[0].replace("standard.js", "lazy.js");
   await writeGeneration("B", true);
+  phase = 'gated candidate replacement';
   await page.waitForFunction(() => window.candidateStarted);
   assert.equal(await page.evaluate(() => window.oldLazy()), "A");
   await page.locator('[data-renderer-revision="A"]').waitFor();
@@ -94,6 +122,7 @@ try {
   // Exercise the actual WASM Assets owner: the server commits D, but the Worker
   // never receives its reply. Mutations must not be replayed on this connection.
   let lostCommitRequests = 0;
+  phase = 'lost commit reply';
   await context.route("**/api/v1/web-assets/commit/1", async route => {
     lostCommitRequests++;
     const committed = await route.fetch();
@@ -110,6 +139,7 @@ try {
   assert.equal(lostCommitRequests, 1);
   await page.screenshot({ path: join(report, "lost-commit-explicit-reconnect.png") });
   await context.unroute("**/api/v1/web-assets/commit/1");
+  phase = 'explicit reconnect';
   await page.locator("#reconnect").click();
   await page.locator("#workbench").waitFor({ state: "visible" });
   await page.locator("#workspaces [data-testid=workspace-open]").first().click();
@@ -126,6 +156,7 @@ try {
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await page.locator("#login").waitFor({ state: "visible" });
   const resources = await page.evaluate(() => window.closedResources);
+  const connections = await page.evaluate(() => window.rendererConnections);
   if (!resources) console.error(JSON.stringify({ diagnostic: await page.locator("#notice").innerText(), state: await page.locator("#connection-state").innerText(), errors }));
   assert.deepEqual(resources, { pending_timers: 0, active_alarms: 0, active_requests: 0 });
   assert.deepEqual(errors, []);
@@ -135,6 +166,7 @@ try {
   // Cold static and executable-but-broken offers have no accepted renderer.
   // Both must leave ordinary Session input and sign-out usable.
   for (const mode of ["static", "broken"]) {
+    phase = `${mode} cold renderer`;
     await mkdir(join(report, mode));
     service = await startService({ binary, assets, report: join(report, mode), configure: async ({ config }) => {
       const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
@@ -172,14 +204,16 @@ try {
     await service.close(); service = undefined;
   }
   assert.deepEqual(errors, []);
-  const result = { browser: browser.version(), status: "passed", workerStarts: 2, lostCommitRequests, modelRequests, preservedSession: session, modules, resources, cases: ["A-to-B actual imports", "old lazy import while B mounts", "old graph expires after commit", "resident draft and pending turn", "form draft survives code replacement", "failed C preserves B", "server commit with lost reply closes actual WASM owner without replay", "explicit reconnect renders D and accepts and cancels a new Session turn", "cold static catalog keeps Worker, Session actions and clean shutdown", "cold broken executable rejects first mount without losing Worker or Session input"] };
+  const result = { browser: browser.version(), status: "passed", workerStarts: 2, connections, lostCommitRequests, modelRequests, preservedSession: session, modules, resources, cases: ["A-to-B actual imports", "old lazy import while B mounts", "old graph expires after commit", "resident draft and pending turn", "form draft survives code replacement", "failed C preserves B", "server commit with lost reply closes actual WASM owner without replay", "explicit reconnect renders D and accepts and cancels a new Session turn", "cold static catalog keeps Worker, Session actions and clean shutdown", "cold broken executable rejects first mount without losing Worker or Session input"] };
   await writeFile(join(report, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } catch (error) {
-  if (diagnosticPage) {
-    await diagnosticPage.screenshot({ path: join(report, "failure.png") });
-    await writeFile(join(report, "failure.txt"), await diagnosticPage.locator("body").innerText());
-  }
+  const diagnostics = diagnosticPage ? await diagnosticPage.evaluate(() => ({
+    connections: window.rendererConnections,
+    state: document.querySelector('#connection-state')?.textContent,
+    notice: document.querySelector('#notice')?.textContent,
+  })).catch(captureError => ({diagnostic_error: String(captureError)})) : {};
+  await recordTaskFailure(diagnosticPage, report, {error: error.stack, phase, ...diagnostics});
   throw error;
 } finally {
   await cleanupAll(() => browser.close(), () => service?.close());

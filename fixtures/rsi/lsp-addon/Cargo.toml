@@ -24,5 +24,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-util = "0.7"
 [dev-dependencies]
 rsi-addon-testkit = { path = "../../../crates/rsi/addon-testkit" }
+tokio = { version = "1", features = ["test-util"] }
 [lints.rust]
 unsafe_code = "forbid"

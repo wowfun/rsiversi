@@ -30,30 +30,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query: rsi_lsp::Query = serde_json::from_str(query)?;
     let running = host()?.start_program(program(config)).await?;
     let result = match running.lookup_local::<rsi_lsp::LanguageContract>() {
-        Some(service) => {
-            let started = std::time::Instant::now();
-            loop {
-                let result = service
-                    .query(
-                        rsi_lsp::LanguageWorkspace::local(workspace.clone()).unwrap(),
-                        query.clone(),
-                        tokio_util::sync::CancellationToken::new(),
-                    )
-                    .await
-                    .map_err(|e| e.to_string());
-                let empty = match &result {
-                    Ok(output) => match &output.result {
-                        rsi_lsp::QueryResult::Locations { locations } => locations.is_empty(),
-                        rsi_lsp::QueryResult::Hover { text, .. } => text.is_empty(),
-                    },
-                    Err(_) => false,
-                };
-                if !wait || !empty || started.elapsed() >= std::time::Duration::from_secs(10) {
-                    break result;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        }
+        Some(service) => rsi_language_addon_example::read_until_ready(wait, || {
+            service.query(
+                rsi_lsp::LanguageWorkspace::local(workspace.clone()).unwrap(),
+                query.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string()),
         None => Err("language service unavailable".into()),
     };
     let cleanup = running.shutdown().await;

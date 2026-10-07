@@ -136,7 +136,7 @@ jobs:
 
   rsi-meta-browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 206
+    timeout-minutes: 221
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -242,6 +242,25 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_harness.log") 2>&1
           npm ci --ignore-scripts
 
+      - name: Exercise product fixture readiness
+        id: web_readiness
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' && steps.web_harness.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: fixtures/rsi/web-product
+        run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_readiness.log") 2>&1
+          node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs
+
+      - name: Preserve failed fixture readiness before the paired build
+        if: ${{ !cancelled() && steps.web_readiness.outcome == 'failure' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-fixture-readiness-failure-log
+          path: ${{ runner.temp }}/rsi-browser-logs/web_readiness.log
+          if-no-files-found: error
+
       - name: Build the paired Web application
         id: web_build
         if: ${{ !cancelled() && steps.bindings.outcome == 'success' && steps.browsers.outcome == 'success' && steps.web_native.outcome == 'success' }}
@@ -302,6 +321,8 @@ jobs:
         timeout-minutes: 10
         working-directory: fixtures/rsi/web-product
         run: |
+          mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
+          exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_workflow.log") 2>&1
           declare -A previous_policy
           restore_policy() {
             for key in "${!previous_policy[@]}"; do
@@ -319,12 +340,28 @@ jobs:
           export RSI_PAIRED_BUNDLE="$GITHUB_WORKSPACE/target/rsi-app/current"
           RSI_TEST_NODE="$(command -v node)" RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workflow-dock" node workflow-verify.mjs --dock-only
 
-      - name: Preserve failed Web product log before integration probes
+      - name: Preserve failed Workflow evidence before integration probes
+        if: ${{ !cancelled() && steps.web_workflow.outcome == 'failure' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: rsi-workflow-failure-evidence
+          path: |
+            ${{ runner.temp }}/rsi-browser-logs/web_workflow.log
+            ${{ runner.temp }}/rsi-web-evidence/workflow-dock
+            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
+          if-no-files-found: error
+
+      - name: Preserve failed Web product captures before integration probes
         if: ${{ !cancelled() && steps.web_product.outcome == 'failure' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: rsi-web-product-failure-log
-          path: ${{ runner.temp }}/rsi-browser-logs/web_product.log
+          name: rsi-web-product-failure-evidence
+          path: |
+            ${{ runner.temp }}/rsi-browser-logs/web_product.log
+            ${{ runner.temp }}/rsi-web-evidence/**/failure*
+            ${{ runner.temp }}/rsi-web-evidence/**/*-failure*
+            ${{ runner.temp }}/rsi-web-evidence/**/binary.json
           if-no-files-found: error
 
       - name: Exercise paired Web integration probes
@@ -473,6 +510,7 @@ jobs:
             !${{ runner.temp }}/rsi-web-evidence/firefox-tasks/rsi
             !${{ runner.temp }}/rsi-web-evidence/chromium-plan-review/rsi
             !${{ runner.temp }}/rsi-web-evidence/firefox-plan-review/rsi
+            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
       - name: Restore owned Linux user manager state
         if: ${{ always() && runner.os == 'Linux' }}

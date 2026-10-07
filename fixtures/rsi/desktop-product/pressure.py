@@ -1,5 +1,6 @@
 """Real native write saturation, with OS reads released by filesystem barriers."""
 import json
+from controls import file_has_bytes
 
 
 def verify_writes(script, terminal_keys, until, workspace, report):
@@ -58,10 +59,10 @@ Path('writer-bytes-'+index).write_bytes(data)
     assert before_release['done'] == 0, before_release
     (workspace / 'writer-release').touch()
     until(lambda: state()['done'] == 8)
-    until(lambda: (workspace / 'native-busy-result.txt').exists())
+    until(lambda: file_has_bytes(workspace / 'native-busy-result.txt', b'native-busy-once'))
     assert (workspace / 'native-busy-result.txt').read_bytes() == b'native-busy-once'
     for index in range(8):
-        until(lambda: (workspace / f'writer-bytes-{index}').exists())
+        until(lambda: file_has_bytes(workspace / f'writer-bytes-{index}', b'A' * 65536))
         assert (workspace / f'writer-bytes-{index}').read_bytes() == b'A' * 65536
     script('void window.fixtureCloseWriters().catch(error=>window.fixtureWritePressure.error=String(error));return true')
     until(lambda: state().get('cleaned'))

@@ -1,6 +1,12 @@
 # RSI desktop product fixture
 
 The Python fixtures require Python 3.11 or newer.
+`python3 -m unittest discover -s fixtures/rsi/desktop-product -p 'test_*.py'`
+checks readiness-before-input, no replay after ambiguous native input, and cleanup.
+With the Web fixture's Playwright packages and engines installed,
+`node --test fixtures/rsi/desktop-product/readiness.test.mjs` checks real DOM focus
+and loaded assets across live read-polling gaps in Chromium and Firefox. These are
+fixture readiness checks; actual native transport evidence comes from WebKit below.
 External ACP scenarios also require `npm ci --ignore-scripts --prefix fixtures/rsi/acp`
 from the checkout root before starting the native application.
 
@@ -14,6 +20,8 @@ before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
 completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
+Input readiness includes enabled ancestors, visibility, an unobstructed hit point
+and actual focus before any native keystroke. A readiness timeout dispatches none.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
@@ -29,7 +37,13 @@ disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
 The frame-admission probe holds one real document ACK before requesting a second
 frame, then releases that same ACK. It cannot assume the ordinary polling loop
-always occupies the frame lane or consume an unacknowledged frame itself. Each
+always occupies the frame lane or consume an unacknowledged frame itself. Terminal
+asset checks retain completion-time read counts and wait for loaded assets and a
+live nonzero read count in one observation; polling gaps do not imply retired reads.
+Asset errors and pressure errors fail immediately, and asset requests are not replayed.
+PTY side-effect checks wait for the exact bounded file bytes; file creation can
+precede the shell's append. Extra or duplicated bytes never satisfy readiness.
+Each
 rejection checks its exact source-defined category and message.
 The native window also reads and refreshes Plugins status, reads the separate
 Exa credential status, and opens the typed retrieval Settings controls without

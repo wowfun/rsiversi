@@ -104,6 +104,12 @@ acknowledgement keeps both queue and stop bindings absent for those panes.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 
+The standard renderer retains each button and its label node while its action,
+label and value remain unchanged. Field and readiness refreshes preserve that
+pointer target; changing an action descriptor retires its previous node and
+handler. Handlers use the current fields, and the latest busy snapshot controls
+availability even when an earlier invocation settles afterwards.
+
 Composer actions wrap within the available width so every action, including Send,
 remains reachable on narrow screens. The composer retains its complete input and
 action rows when expanded extension state or attachments consume vertical space.

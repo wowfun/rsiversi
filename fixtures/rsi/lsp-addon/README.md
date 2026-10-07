@@ -29,6 +29,8 @@ The Linux example explicitly selects `/usr/bin/bwrap`; an empty Sandbox config
 has no restricted backend. Other platforms exercise lazy generation lifecycle
 only until a platform-specific Sandbox backend is supplied.
 
-The opt-in final argument `--wait-for-result` repeats empty read queries for at
-most 10 seconds while the server indexes; errors are returned immediately. The
-ordinary invocation returns its first result, including an empty result.
+The opt-in final argument `--wait-for-result` repeats empty reads and the typed
+ContentModified server rejection (-32801) within one 10-second indexing window.
+Other errors return immediately; an in-flight read cannot extend that window.
+The ordinary invocation returns its first result, including an empty result or
+server rejection. The product provider does not replay queries.

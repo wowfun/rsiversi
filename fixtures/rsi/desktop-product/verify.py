@@ -24,6 +24,7 @@ from tasks import ProviderControl, verify as verify_tasks
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
+from controls import fill as fill_input, asset_pressure, file_has_bytes
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -233,15 +234,9 @@ try:
     def eid(value): return next(iter(value.values()))
     def click(css): call('POST', root + f'/element/{eid(element(css))}/click', {})
     def fill(css, value):
-        item = until(lambda: script(r'const selector=arguments[0], label=selector.match(/aria-label="([^"]+)"/)?.[1],e=document.querySelector(selector)||[...document.querySelectorAll("label")].find(e=>e.firstChild?.textContent.trim()===label)?.control;return e&&!e.disabled&&e.getBoundingClientRect().width>0?e:null', [css]))
-        identity = eid(item)
-        before = script('return {value:arguments[0].value,events:window.fixtureInputEvents?.length??0}', [item])
-        call('POST', root + f'/element/{identity}/value', {'text': '\ue009a\ue000\ue003'})
-        until(lambda: script('return arguments[0].value', [item]) == '')
-        if css == 'textarea[aria-label="Main message"]' and before['value']:
-            until(lambda: script('return window.fixtureInputEvents.slice(arguments[0]).some(e=>e.trusted&&e.length===0)', [before['events']]))
-        if value: call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
-        until(lambda: script('return arguments[0].value', [item]) == value)
+        def keys(item, text):
+            call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
+        fill_input(script, keys, until, css, value)
     def button(text):
         if text == 'Close details' and not script('return document.querySelector("#detail").open'):
             item=script('return document.querySelector("[data-dockkit-float-active=true] [data-dockkit-float-close], [data-dockkit-pane-active=true] [aria-selected=true] [data-dockkit-tab-close]")')
@@ -419,10 +414,10 @@ try:
         assert pressure['pending'] > 0, pressure
         # Re-evaluate one current frozen renderer URL, bypassing the module cache.
         script(r'''window.fixtureAssetPressure=null;const offer=window.fixtureAssetOffer;if(!offer?.catalog?.renderers.length)throw Error('no renderer offer');const path='/rsi-renderers/'+offer.revision+'/'+offer.catalog.renderers[0].entry;(async()=>{const response=await fetch('/app.js');if(!response.ok)throw Error('asset rejected');await response.arrayBuffer();await import(path+'?native-pressure');window.fixtureAssetPressure={status:response.status,module:path,pending:window.fixturePressure.pending}})().catch(error=>window.fixtureAssetPressure={error:String(error)});return true''')
-        assets = until(lambda: script('return window.fixtureAssetPressure'))
+        assets = asset_pressure(script, until)
         assert 'error' not in assets and assets['status'] == 200 and assets['pending'] > 0, assets
         terminal_keys("printf 'native-pty-ok' >> native-pty-result.txt; printf 'Native PTY 界\\n'")
-        until(lambda: (workspace / 'native-pty-result.txt').exists())
+        until(lambda: file_has_bytes(workspace / 'native-pty-result.txt', b'native-pty-ok'))
         assert (workspace / 'native-pty-result.txt').read_text() == 'native-pty-ok'
         until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
         script('void window.fixturePressureCleanup().catch(error=>window.fixturePressure.error=String(error));return true')

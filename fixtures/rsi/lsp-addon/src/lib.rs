@@ -3,6 +3,8 @@ use rsi::{AddonScope, StandardAddonBuilder, StandardAddonSet};
 use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
 use rsi_meta::UpdateMode;
 use std::sync::Arc;
+mod readiness;
+pub use readiness::read_until_ready;
 pub fn addons() -> rsi_host::Result<StandardAddonSet> {
     let mut builder = StandardAddonBuilder::new("example.language");
     for (id, factory) in [

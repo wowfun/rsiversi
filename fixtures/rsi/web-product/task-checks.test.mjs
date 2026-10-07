@@ -2,11 +2,157 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
+import { clickUiControl } from './controls.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: unchanged Workflow controls survive refresh and current dispatch invokes once`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();await page.setContent('<main></main>');
+      await page.evaluate(async source=>{
+        const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+        const {mount}=await import(url);URL.revokeObjectURL(url);
+        let revision=0;window.invocations=[];
+        const snapshot=(busy,value=1)=>({model:{standard_view:{elements:[
+          {kind:'text',text:`revision ${++revision}`},
+          {kind:'button',label:'Open workflow',action:'workflow',value}
+        ]}},busy});
+        const renderer=await mount(document.querySelector('main'),snapshot(false),{
+          invoke(_action,input){window.invocations.push(input.value);}
+        },new AbortController().signal);
+        window.readyControl=()=>renderer.update(snapshot(false));
+        window.pendingControl=()=>renderer.update(snapshot(true));
+        window.changeControl=()=>renderer.update(snapshot(false,2));
+        window.originalButton=document.querySelector('button');window.originalLabel=window.originalButton.firstChild;
+        document.addEventListener('mousedown',()=>window.readyControl(),{once:true});
+      },await readFile(new URL('../../../apps/web/standard.js',import.meta.url),'utf8'));
+      await page.getByRole('button',{name:'Open workflow',exact:true}).click();
+      assert.deepEqual(await page.evaluate(()=>window.invocations),[1], 'an unchanged control must receive its mouse gesture across a field refresh');
+      assert(await page.evaluate(()=>document.querySelector('button')===window.originalButton&&document.querySelector('button').firstChild===window.originalLabel));
+      await page.evaluate(()=>window.pendingControl());
+      const pending=clickUiControl(page,'main','Open workflow',{timeout:2000});
+      await page.evaluate(()=>window.readyControl());
+      await pending;
+      assert.deepEqual(await page.evaluate(()=>window.invocations),[1,1], 'the ready control is invoked once');
+      await page.evaluate(()=>{window.changeControl();window.originalButton.click();});
+      assert(await page.evaluate(()=>document.querySelector('button')!==window.originalButton));
+      assert.deepEqual(await page.evaluate(()=>window.invocations),[1,1], 'retired action descriptors cannot dispatch');
+      await clickUiControl(page,'main','Open workflow',{timeout:2000});
+      assert.deepEqual(await page.evaluate(()=>window.invocations),[1,1,2]);
+    } finally {await browser.close();}
+  });
+  test(`${name}: unavailable Workflow controls time out without dispatch or replay`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      for(const markup of ['<button disabled>Cancel workflow</button>','<button hidden>Cancel workflow</button>',
+        '<button>Cancel workflow</button><div style="position:fixed;inset:0"></div>']) {
+        await page.setContent(`<main>${markup}</main>`);
+        await page.evaluate(()=>{window.invocations=0;document.querySelector('button').onclick=()=>++window.invocations;});
+        await assert.rejects(clickUiControl(page,'main','Cancel workflow',{timeout:100}),/Timeout/);
+        await page.evaluate(async()=>{
+          const button=document.querySelector('button');button.disabled=false;button.hidden=false;
+          document.querySelector('main>div')?.remove();
+          await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        });
+        assert.equal(await page.evaluate(()=>window.invocations),0);
+      }
+    } finally {await browser.close();}
+  });
+  test(`${name}: settling an older invocation cannot enable the latest busy control`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();await page.setContent('<main></main>');
+      await page.evaluate(async source=>{
+        const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+        const {mount}=await import(url);URL.revokeObjectURL(url);
+        const snapshot=busy=>({model:{standard_view:{elements:[{kind:'button',label:'Open workflow',action:'workflow',value:1}]}},busy});
+        window.pending=new Promise(resolve=>{window.settle=resolve;});
+        const renderer=await mount(document.querySelector('main'),snapshot(false),{invoke(){return window.pending;}},new AbortController().signal);
+        window.makeBusy=()=>renderer.update(snapshot(true));
+      },await readFile(new URL('../../../apps/web/standard.js',import.meta.url),'utf8'));
+      await clickUiControl(page,'main','Open workflow',{timeout:2000});
+      await page.evaluate(()=>window.makeBusy());
+      await page.evaluate(async()=>{window.settle();await window.pending;});
+      assert.equal(await page.getByRole('button',{name:'Open workflow',exact:true}).isEnabled(),false);
+    } finally {await browser.close();}
+  });
+  test(`${name}: a queued readiness poll cannot dispatch after timeout`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button disabled>Cancel workflow</button></main>');
+      await page.evaluate(()=>{window.invocations=0;document.querySelector('button').onclick=()=>++window.invocations;});
+      let queued;
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return (callback,arg,options)=>{
+          queued={callback,arg};return target.waitForFunction(callback,arg,options);
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await assert.rejects(clickUiControl(observedPage,'main','Cancel workflow',{timeout:100}),/Timeout/);
+      await page.evaluate(()=>{document.querySelector('button').disabled=false;});
+      // A timeout does not fence an already queued document callback.
+      await page.evaluate(queued.callback,queued.arg);
+      assert.equal(await page.evaluate(()=>window.invocations),0);
+    } finally {await browser.close();}
+  });
+  test(`${name}: final control dispatch resolves the current button and never replays a lost reply`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button>Open workflow</button></main>');
+      await page.evaluate(()=>{
+        window.invocations=[];document.querySelector('button').onclick=()=>window.invocations.push('old');
+      });
+      let polls=0,dispatches=0;
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return async (...args)=>{
+          ++polls;const ready=await target.waitForFunction(...args);
+          await target.evaluate(()=>{
+            const button=document.createElement('button');button.textContent='Open workflow';
+            button.onclick=()=>window.invocations.push('current');document.querySelector('main').replaceChildren(button);
+          });
+          return ready;
+        };
+        if(property==='evaluate')return async (...args)=>{
+          ++dispatches;await target.evaluate(...args);throw new Error('dispatch reply was lost');
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await assert.rejects(clickUiControl(observedPage,'main','Open workflow',{timeout:2000}),/dispatch reply was lost/);
+      assert.deepEqual(await page.evaluate(()=>window.invocations),['current']);
+      assert.equal(polls,1);assert.equal(dispatches,1);
+    } finally {await browser.close();}
+  });
+  test(`${name}: a refused final check returns to readiness without dispatch`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<main><button>Open workflow</button></main>');
+      await page.evaluate(()=>{window.invocations=0;document.querySelector('button').onclick=()=>++window.invocations;});
+      const budgets=[];
+      const observedPage=new Proxy(page,{get(target,property){
+        if(property==='waitForFunction')return async (callback,arg,options)=>{
+          budgets.push(options.timeout);
+          if(budgets.length===2)await target.evaluate(()=>{document.querySelector('button').disabled=false;});
+          const ready=await target.waitForFunction(callback,arg,options);
+          if(budgets.length===1)await target.evaluate(()=>{document.querySelector('button').disabled=true;});
+          return ready;
+        };
+        const value=Reflect.get(target,property);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      await clickUiControl(observedPage,'main','Open workflow',{timeout:2000});
+      assert.equal(await page.evaluate(()=>window.invocations),1);
+      assert.equal(budgets.length,2);assert(budgets[1]<budgets[0]);
+    } finally {await browser.close();}
+  });
   test(`${name}: control capture waits for asynchronously mounted controls`, async () => {
     const browser = await engine.launch({ headless: true });
     try {
