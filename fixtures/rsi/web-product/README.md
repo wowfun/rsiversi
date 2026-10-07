@@ -42,13 +42,20 @@ probe accepts only Chromium or Firefox and cannot pass with no selected engine.
 Hit tests resolve and measure the current named button in one document execution,
 because a standard-view refresh can replace a button after actionability checks.
 This does not replay a control action or accept a connected but obscured button.
+Workflow controls resolve, hit-test and dispatch the current enabled button in
+one document execution within the existing 30-second deadline. A renderer refresh
+between mouse down and mouse up can otherwise retire that gesture's handler.
+An unavailable control times out without dispatch; admitted actions are never
+repeated to obtain the expected view.
 It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
 CI retains reports under `RSI_WEB_REPORT`, command logs and explicit step outcomes.
+Workflow failure reports and command logs are uploaded before later integration
+probes, so those probes cannot delay access to the first failure's evidence.
 A successful product step must produce `results.json` with passing Chromium and
 Firefox results; skipped steps remain visibly skipped.
-Recovery and task probes write `binary.json` with the frozen executable's SHA-256
+Recovery, task and Workflow probes write `binary.json` with the frozen executable's SHA-256
 before starting the scenario. CI excludes their executable copies while retaining
 hashes, screenshots, action receipts, logs, assets and durable diagnostic data.
 The archive identifies the executable but does not contain it for binary replay.
@@ -63,6 +70,8 @@ their independent streams as one notification. Cancel after resume also waits
 for the second Turn's held response in the transcript and the displayed Waiting
 driver, then exercises the resumed controls at both viewport sizes. A provider
 request arriving server-side alone does not establish a delivered client state.
+Workflow captures retain bounded Worker invocation/reply evidence before and
+after restart, including the last control requests on failure.
 
 First install the shared document's pinned build dependencies with
 `pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts` from this directory.

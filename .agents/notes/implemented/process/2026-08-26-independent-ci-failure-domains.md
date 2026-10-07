@@ -121,9 +121,11 @@ Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
 retain its distribution receipt, frozen input manifest, and build log.
-The failed Web product log is also uploaded before independent integration
-probes start, making the failure available while those probes continue. The
-final archive still retains the complete step outcomes and visual evidence.
+Early retention covers Web product and Workflow failures: waiting for independent
+integration probes delayed Workflow diagnosis despite a completed failing step.
+The [Web fixture contract](../../../../fixtures/rsi/web-product/README.md) owns
+that evidence boundary. The final archive still retains the complete step
+outcomes and visual evidence.
 
 The always-running `ci-required` job depends on every independent contract and
 consumes the complete `needs` object, failing if it is empty or any result is

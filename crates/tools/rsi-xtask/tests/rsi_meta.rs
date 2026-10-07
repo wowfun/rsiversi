@@ -864,7 +864,12 @@ fn paired_web_consumers_have_independent_failure_domains() {
             .contains("pnpm -C ../../../apps/web build")
     );
     assert!(!build["run"].as_str().unwrap().contains("sudo sysctl"));
-    for id in ["web_product", "web_integrations", "web_terminals"] {
+    for id in [
+        "web_product",
+        "web_workflow",
+        "web_integrations",
+        "web_terminals",
+    ] {
         let consumer = step(id);
         let condition = consumer["if"].as_str().unwrap();
         assert!(condition.contains("!cancelled()"));
@@ -895,27 +900,82 @@ fn paired_web_consumers_have_independent_failure_domains() {
             .unwrap()
             .contains("run-paired.py")
     );
-    let product_index = steps
-        .iter()
-        .position(|step| step["id"] == "web_product")
+}
+
+#[test]
+fn paired_web_failures_publish_evidence_before_integration_probes() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
         .unwrap();
+    let step = |id| {
+        steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some(id))
+            .unwrap()
+    };
     let probes_index = steps
         .iter()
         .position(|step| step["id"] == "web_integrations")
         .unwrap();
-    let log_index = steps
-        .iter()
-        .position(|step| step["with"]["name"] == "rsi-web-product-failure-log")
-        .unwrap();
-    assert!(product_index < log_index && log_index < probes_index);
-    assert_eq!(
-        steps[log_index]["if"].as_str(),
-        Some("${{ !cancelled() && steps.web_product.outcome == 'failure' }}")
+    for (id, artifact, log) in [
+        (
+            "web_product",
+            "rsi-web-product-failure-log",
+            "web_product.log",
+        ),
+        (
+            "web_workflow",
+            "rsi-workflow-failure-evidence",
+            "web_workflow.log",
+        ),
+    ] {
+        let consumer_index = steps.iter().position(|step| step["id"] == id).unwrap();
+        let log_index = steps
+            .iter()
+            .position(|step| step["with"]["name"] == artifact)
+            .unwrap();
+        assert!(consumer_index < log_index && log_index < probes_index);
+        assert_eq!(
+            steps[log_index]["if"].as_str().unwrap(),
+            format!("${{{{ !cancelled() && steps.{id}.outcome == 'failure' }}}}")
+        );
+        assert!(
+            step(id)["run"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("tee \"$RUNNER_TEMP/rsi-browser-logs/{log}\""))
+        );
+        assert!(
+            steps[log_index]["with"]["path"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .any(|line| line == format!("${{{{ runner.temp }}}}/rsi-browser-logs/{log}"))
+        );
+    }
+    let archive_path = |name| {
+        steps
+            .iter()
+            .find(|step| step["with"]["name"] == name)
+            .unwrap()["with"]["path"]
+            .as_str()
+            .unwrap()
+    };
+    let workflow_archive = archive_path("rsi-workflow-failure-evidence");
+    assert!(
+        workflow_archive
+            .lines()
+            .any(|line| line == "${{ runner.temp }}/rsi-web-evidence/workflow-dock")
     );
-    assert_eq!(
-        steps[log_index]["with"]["path"].as_str(),
-        Some("${{ runner.temp }}/rsi-browser-logs/web_product.log")
-    );
+    for archive in [workflow_archive, archive_path("rsi-web-evidence")] {
+        assert!(
+            archive
+                .lines()
+                .any(|line| line == "!${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi")
+        );
+    }
 }
 
 #[test]

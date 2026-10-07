@@ -4,7 +4,23 @@ export async function resources(page) {
   if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
 }
 export const resourceSelector='.resource-dock:not([hidden]) [data-dockkit-content]:not([aria-hidden=true]) .resource-content';
-export function details(page) {return page.locator(`#detail[open], ${resourceSelector}`).last();}
+const detailSelector=`#detail[open], ${resourceSelector}`;
+export function details(page) {return page.locator(detailSelector).last();}
+export async function clickUiControl(page, rootSelector, label, {timeout=30_000}={}) {
+  const dispatched=await page.waitForFunction(({rootSelector,label})=>{
+    const root=[...document.querySelectorAll(rootSelector)].at(-1);
+    const button=root&&[...root.querySelectorAll('button')].find(button=>
+      (button.getAttribute('aria-label')??button.textContent).trim()===label&&
+      button.getBoundingClientRect().width>0&&button.getBoundingClientRect().height>0);
+    if(!button||button.matches(':disabled'))return false;
+    button.scrollIntoView({block:'center'});
+    const rect=button.getBoundingClientRect();
+    if(!button.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)))return false;
+    button.click();return true;
+  },{rootSelector,label},{timeout});
+  await dispatched.dispose();
+}
+export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {
   if(await page.locator('#detail[open]').isVisible()) {
     await page.getByRole('button',{name:'Close details',exact:true}).click();
