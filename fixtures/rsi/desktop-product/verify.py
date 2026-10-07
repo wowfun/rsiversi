@@ -24,7 +24,7 @@ from tasks import ProviderControl, verify as verify_tasks
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import fill as fill_input, asset_pressure
+from controls import fill as fill_input, asset_pressure, file_has_bytes
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -417,7 +417,7 @@ try:
         assets = asset_pressure(script, until)
         assert 'error' not in assets and assets['status'] == 200 and assets['pending'] > 0, assets
         terminal_keys("printf 'native-pty-ok' >> native-pty-result.txt; printf 'Native PTY 界\\n'")
-        until(lambda: (workspace / 'native-pty-result.txt').exists())
+        until(lambda: file_has_bytes(workspace / 'native-pty-result.txt', b'native-pty-ok'))
         assert (workspace / 'native-pty-result.txt').read_text() == 'native-pty-ok'
         until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
         script('void window.fixturePressureCleanup().catch(error=>window.fixturePressure.error=String(error));return true')

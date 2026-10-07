@@ -19,3 +19,11 @@ def fill(script, keys, until, css, value):
 
 def asset_pressure(script, until):
     return until(lambda: script(ASSET_PRESSURE))
+
+
+def file_has_bytes(path, expected):
+    try:
+        with path.open('rb') as source:
+            return source.read(len(expected) + 1) == expected
+    except FileNotFoundError:
+        return False

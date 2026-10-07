@@ -41,6 +41,8 @@ always occupies the frame lane or consume an unacknowledged frame itself. Termin
 asset checks retain completion-time read counts and wait for loaded assets and a
 live nonzero read count in one observation; polling gaps do not imply retired reads.
 Asset errors and pressure errors fail immediately, and asset requests are not replayed.
+PTY side-effect checks wait for the exact bounded file bytes; file creation can
+precede the shell's append. Extra or duplicated bytes never satisfy readiness.
 Each
 rejection checks its exact source-defined category and message.
 The native window also reads and refreshes Plugins status, reads the separate

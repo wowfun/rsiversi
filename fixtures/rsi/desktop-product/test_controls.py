@@ -1,10 +1,23 @@
 """Native gestures start only after readiness and are never replayed."""
 import unittest
+from pathlib import Path
+import tempfile
 from unittest.mock import Mock
-from controls import FOCUS_INPUT, fill
+from controls import FOCUS_INPUT, fill, file_has_bytes
 
 
 class InputControlTest(unittest.TestCase):
+    def test_created_empty_and_partial_files_are_not_completed_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'result'
+            expected = b'native-pty-ok'
+            self.assertFalse(file_has_bytes(path, expected))
+            for incomplete in [b'', expected[:4], expected + expected]:
+                path.write_bytes(incomplete)
+                self.assertFalse(file_has_bytes(path, expected))
+            path.write_bytes(expected)
+            self.assertTrue(file_has_bytes(path, expected))
+
     def test_focus_wait_precedes_one_native_replacement(self):
         item = {'element-6066': 'deployment'}
         value = 'previous'
