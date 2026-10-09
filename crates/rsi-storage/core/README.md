@@ -34,3 +34,12 @@ publication task without fencing a healthy backend or its other domains.
 Values have at most 64 levels, counting the root as level one, and at most
 16 MiB of compact JSON. Encoding checks limits before growing its output;
 existing out-of-contract durable values are corruption, without migration.
+`RecordObjectSize` and `encoded_entry_bytes` supply exact compact record-object
+accounting, including encoded keys, braces, colons and commas. Invalid restored
+object geometry reports `Corrupt`; projection arithmetic errors report
+`InvalidInput`. Restored metadata
+uses bounded stored value lengths and must be checked against durable rows at
+the backend boundary; decoding additionally proves that these lengths equal
+compact JSON lengths. Domain specifications
+and backend aggregate ceilings use this definition; version-envelope bytes belong
+only to a medium's separate file limit.

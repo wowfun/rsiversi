@@ -322,7 +322,6 @@ fn api_projection_preserves_commit_certainty_and_diagnostic_failures() {
         ApiError::OutcomeUnknown
     );
     for error in [
-        StorageError::InvalidInput("invalid".into()),
         StorageError::Corrupt("invalid".into()),
         StorageError::DuplicateBackend("duplicate".into()),
     ] {
@@ -331,6 +330,68 @@ fn api_projection_preserves_commit_certainty_and_diagnostic_failures() {
             ApiError::Backend(error.to_string())
         );
     }
+    assert_eq!(
+        storage_error(StorageError::InvalidInput("invalid".into())),
+        ApiError::Invalid("invalid".into())
+    );
+}
+
+#[tokio::test]
+async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing() {
+    use rsi_api_protocol::{
+        ApiContext, ApiDispatch, ApiError, ApiHandler, ApiOutput, ApiRegistrar, CallOrigin,
+        OperationAccess, OperationClass, OperationEffect, OperationId, OperationSpec,
+        RequestEncoding, RetainedBytes,
+    };
+    #[derive(Debug)]
+    struct OverBoundWrite(Arc<dyn Domain>);
+    #[async_trait]
+    impl ApiHandler for OverBoundWrite {
+        async fn invoke(
+            &self,
+            _: ApiContext,
+            _: RetainedBytes,
+            _: rsi_api_protocol::ApiResponseCapacity,
+        ) -> rsi_api_protocol::Result<ApiOutput> {
+            self.0
+                .put("two", Value::Null)
+                .await
+                .map_err(storage_error)?;
+            unreachable!("over-bound write must reject")
+        }
+    }
+    let backend = Arc::new(Backend::default());
+    let (_runtime, _lease, facility) = facility(backend.clone()).await;
+    let mut specification = spec();
+    specification.maximum_records = 1;
+    let domain = facility.open(specification).await.unwrap();
+    domain.put("one", Value::Null).await.unwrap();
+    let registry = rsi_api::ApiRegistry::new(rsi_meta::Execution::native(
+        tokio::runtime::Handle::current(),
+    ));
+    let operation = OperationSpec {
+        id: OperationId::new("storage", "test-write", 1).unwrap(),
+        class: OperationClass::Data,
+        effect: OperationEffect::Mutation,
+        access: OperationAccess::Authenticated,
+        encoding: RequestEncoding::Json,
+        maximum_request_bytes: 128,
+        maximum_response_bytes: 128,
+    };
+    let registration = registry
+        .register(operation.clone(), Arc::new(OverBoundWrite(domain.clone())))
+        .unwrap();
+    let call = registry.admit(&operation.id, CallOrigin::Local).unwrap();
+    let input = call.input_budget().copy(b"null").unwrap();
+    assert!(matches!(
+        call.invoke(input).await,
+        Err(ApiError::Invalid(_))
+    ));
+    assert_eq!(backend.records.lock().unwrap().len(), 1);
+    assert!(!backend.records.lock().unwrap().contains_key("two"));
+    assert_eq!(domain.snapshot().await.unwrap().len(), 1);
+    registration.close().await;
+    registry.close().await;
 }
 
 #[test]

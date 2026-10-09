@@ -21,6 +21,26 @@ impl Default for RecordObjectSize {
 }
 
 impl RecordObjectSize {
+    /// Restores accounting metadata after checking its minimum compact-object shape.
+    ///
+    /// Empty objects require two bytes; nonempty objects require at least
+    /// `5 * records + 1`. This is neither a row checksum nor an upper byte bound.
+    /// Callers must validate durable rows and their own count/byte limits separately.
+    pub fn from_parts(records: usize, bytes: usize) -> Result<Self, StorageError> {
+        let minimum = if records == 0 {
+            Some(2)
+        } else {
+            records
+                .checked_mul(5)
+                .and_then(|bytes| bytes.checked_add(1))
+        };
+        if minimum.is_none_or(|minimum| bytes < minimum) || (records == 0 && bytes != 2) {
+            return Err(StorageError::Corrupt(format!(
+                "invalid record object geometry: {records} records in {bytes} bytes"
+            )));
+        }
+        Ok(Self { records, bytes })
+    }
     /// Number of records in the object.
     pub const fn records(self) -> usize {
         self.records
@@ -70,9 +90,10 @@ impl RecordObjectSize {
 ///
 /// `value_bytes` is the exact compact JSON length of the validated value.
 pub fn encoded_entry_bytes(key: &str, value_bytes: usize) -> Result<usize, StorageError> {
-    let key_bytes = serde_json::to_vec(key)
-        .map_err(|error| StorageError::InvalidInput(error.to_string()))?
-        .len();
+    let mut writer = crate::BoundedWriter::new(std::io::sink(), usize::MAX);
+    serde_json::to_writer(&mut writer, key)
+        .map_err(|error| StorageError::InvalidInput(error.to_string()))?;
+    let key_bytes = writer.written;
     key_bytes
         .checked_add(1)
         .and_then(|bytes| bytes.checked_add(value_bytes))
@@ -88,6 +109,25 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn restored_metadata_checks_shape_without_imposing_a_backend_byte_limit() {
+        for (records, bytes) in [(0, 2), (1, 6), (2, 11), (1, usize::MAX)] {
+            let size = RecordObjectSize::from_parts(records, bytes).unwrap();
+            assert_eq!((size.records(), size.bytes()), (records, bytes));
+        }
+        for (records, bytes) in [
+            (0, 0),
+            (0, 1),
+            (0, 3),
+            (1, 5),
+            (2, 10),
+            (usize::MAX, usize::MAX),
+        ] {
+            assert!(matches!(RecordObjectSize::from_parts(records, bytes),
+                Err(StorageError::Corrupt(message)) if message.contains("record object geometry")));
+        }
+    }
 
     #[test]
     fn projections_match_json_through_insert_replace_and_delete() {

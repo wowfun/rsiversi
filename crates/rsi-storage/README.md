@@ -15,8 +15,12 @@ Every backend also enforces the family-wide 65,536-record ceiling at raw `put`:
 updating an existing key remains valid at the ceiling, while inserting another
 key fails before commit.
 
-Complete backend loads reject the absolute 256 MiB encoded domain ceiling
-before decoding the body that would cross it. SQLite activates only its exact
+Domain and SQLite use the [core record-object accounting contract](core/README.md)
+for aggregate limits. SQLite raw writes reject projected growth beyond 256 MiB
+before commit, and complete loads reject that ceiling before decoding the body
+that would cross it. JSON instead bounds its complete serialized document to at
+most 64 MiB; it does not maintain per-domain byte projections.
+SQLite activates only its exact
 STRICT schema, constraints, indexes, foreign key, and schema version; an
 existing lookalike layout is corruption, not an implicit migration source.
 

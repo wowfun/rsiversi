@@ -7727,6 +7727,7 @@ name = "rsi-storage-domain"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-storage",

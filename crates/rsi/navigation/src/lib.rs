@@ -17,11 +17,10 @@ use rsi_navigation_api::{
     MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
     PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
 };
+use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use rsi_session_protocol::{SessionContract, SessionError, SessionService};
 use rsi_storage_domain::storage_error;
-use rsi_storage_domain::{
-    Domain, DomainFacilityContract, DomainSpec, RecordObjectSize, encoded_entry_bytes,
-};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use rsi_workspace_protocol::{
     WorkspaceError, WorkspaceId, WorkspaceRegistry, WorkspaceRegistryContract,
 };

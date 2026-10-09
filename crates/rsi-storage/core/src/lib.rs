@@ -9,6 +9,8 @@ mod retirement_tests;
 
 mod directories;
 pub use directories::create_private_directories;
+mod size;
+pub use size::{RecordObjectSize, encoded_entry_bytes};
 
 mod operations;
 pub use operations::{BackendOperations, BackendRegistration};

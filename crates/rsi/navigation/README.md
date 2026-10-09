@@ -60,7 +60,7 @@ recently acknowledged positions until both bounds fit; restart seeds that order
 from the durable key order. Eviction may show old activity as unread again, but
 cannot acknowledge it for another principal or prevent future acknowledgments.
 Reading positions cache their entry sizes and use the
-[Domain record-object accounting](../../rsi-storage/domain/README.md) for projected
+[Storage record-object accounting](../../rsi-storage/core/README.md) for projected
 bounds. An acknowledgment measures only its new position; it neither clones nor
 encodes unrelated positions. Eviction walks recency only until both bounds fit.
 Eviction and the requested acknowledgment are separate record commits. Confirmed

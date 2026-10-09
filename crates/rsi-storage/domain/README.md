@@ -26,8 +26,8 @@ Both mutations check health before validating their arguments. Each retained
 value carries its measured entry size; load validates and measures it once, and
 acknowledged mutations update that size together with the value.
 
-`RecordObjectSize` and `encoded_entry_bytes` own compact record-object byte
-accounting, including escaped keys, delimiters and separators. Consumers planning
+The [core record-object accounting contract](../core/README.md) owns
+`RecordObjectSize` and `encoded_entry_bytes`. Consumers planning
 retention use the same helpers with cached entry sizes; a projection is a pure
 calculation, not a reservation or a durable mutation. The caller supplies exact
 compact value lengths and the measured size of the entry being replaced or
@@ -36,8 +36,9 @@ removed. Domain admission remains authoritative for its specification's bounds.
 A lost domain commit task reports `OutcomeUnknown` and fences that domain authority
 before releasing its commit slot, including when its backend remains healthy.
 The shared `storage_error` API projection preserves unknown outcomes, maps known
-pre-commit I/O failures and unavailable generations to `Unavailable`, and keeps
-invalid input and corruption as diagnostic `Backend` errors. The API dispatcher
+pre-commit I/O failures and unavailable generations to `Unavailable`, and maps
+input rejections to `Invalid`. Corruption and duplicate-backend diagnostics remain
+`Backend` errors. The API dispatcher
 still treats an untyped `Backend` mutation failure conservatively as unknown.
 This adapter consumes only the API protocol; the API foundation does not import
 Storage implementations.

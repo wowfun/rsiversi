@@ -19,7 +19,7 @@ use rsi_navigation_api::{
     revision,
 };
 use rsi_session_protocol::{ActivityStatus, SessionIngress, SessionIngressContract};
-use rsi_storage_domain::{RecordObjectSize, encoded_entry_bytes};
+use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use sha2::Digest as _;
 
 struct ReadingPosition {

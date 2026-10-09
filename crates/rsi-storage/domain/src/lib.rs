@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, LocalContract, PluginFactory, PreparedActivation};
 pub use rsi_storage::StorageError;
 use rsi_storage::{
-    KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_RECORDS, StorageHub,
-    StorageHubContract, validate_identifier, validate_value,
+    KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_RECORDS, RecordObjectSize, StorageHub,
+    StorageHubContract, encoded_entry_bytes, validate_identifier, validate_value,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,9 +19,6 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, OwnedMutexGuard};
-
-mod size;
-pub use size::{RecordObjectSize, encoded_entry_bytes};
 
 /// Immutable declaration for one domain.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -452,8 +449,9 @@ pub fn storage_error(error: StorageError) -> rsi_api_protocol::ApiError {
         StorageError::Io(_)
         | StorageError::RecoveryRequired
         | StorageError::BackendUnavailable(_) => ApiError::Unavailable,
-        error @ (StorageError::InvalidInput(_)
-        | StorageError::DuplicateBackend(_)
-        | StorageError::Corrupt(_)) => ApiError::Backend(error.to_string()),
+        StorageError::InvalidInput(message) => ApiError::Invalid(message),
+        error @ (StorageError::DuplicateBackend(_) | StorageError::Corrupt(_)) => {
+            ApiError::Backend(error.to_string())
+        }
     }
 }
