@@ -156,7 +156,7 @@ async fn lookup(resolver: &TokioResolver, host: &str, port: u16) -> Result<Vec<S
     }
     Ok(addresses)
 }
-async fn resolve(
+pub(super) async fn resolve(
     url: &Url,
     dns: &Result<Arc<TokioResolver>, Error>,
 ) -> Result<Vec<SocketAddr>, Error> {
@@ -178,7 +178,7 @@ async fn resolve(
     checked(addresses, &discovery)
 }
 
-fn destination_url(host: &str, port: u16) -> Result<Url, Error> {
+pub(super) fn destination_url(host: &str, port: u16) -> Result<Url, Error> {
     if host.len() > 253 || host.is_empty() || !matches!(port, 80 | 443) {
         return Err(Error::BlockedUrl);
     }
@@ -208,10 +208,6 @@ fn destination_url(host: &str, port: u16) -> Result<Url, Error> {
         }
     };
     parse_url(&format!("https://{authority}:{port}/"))
-}
-pub(crate) async fn destination(host: &str, port: u16) -> Result<Vec<SocketAddr>, Error> {
-    let url = destination_url(host, port)?;
-    resolve(&url, &system_resolver()).await
 }
 fn client(url: &Url, addresses: &[SocketAddr]) -> Result<Client, Error> {
     Client::builder()

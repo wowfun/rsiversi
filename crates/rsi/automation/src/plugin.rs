@@ -79,7 +79,7 @@ impl PluginFactory for AutomationFactory {
         }
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<ApiRegistrarContract>()
-            .requiring_local::<rsi_process::DuplexProcessContract>()
+            .requiring_local::<rsi_browser::RuntimePoolContract>()
             .requiring_local::<rsi_sandbox::SandboxContract>()
             .requiring_local::<rsi_credentials_protocol::CredentialsResolveContract>()
             .requiring_local::<rsi_session_protocol::FrozenSessionOwnerContract>()
@@ -98,33 +98,21 @@ impl PluginFactory for AutomationFactory {
         .await
         .map_err(meta)?
         .map_err(meta)?;
-        let browser = config
-            .runtime
-            .map(|config| {
-                rsi_browser::NativeRuntime::new(
-                    config,
-                    plan.local::<rsi_process::DuplexProcessContract>()?,
-                    plan.local::<rsi_sandbox::SandboxContract>()?,
-                )
-                .map(Arc::new)
-                .map_err(meta)
-            })
-            .transpose()?;
-        #[cfg(feature = "test-support")]
-        let browser = browser.map(|browser| {
-            if let Some(port) = self.fixture_port {
-                Arc::new(
-                    Arc::try_unwrap(browser)
-                        .expect("unpublished runtime")
-                        .with_fixture_network(port),
-                )
-            } else {
-                browser
+        let browser = match config.runtime {
+            Some(config) => {
+                let pool = plan.local::<rsi_browser::RuntimePoolContract>()?;
+                #[cfg(feature = "test-support")]
+                let runtime = if let Some(port) = self.fixture_port {
+                    pool.acquire_with_fixture(config, port).await
+                } else {
+                    pool.acquire(config).await
+                };
+                #[cfg(not(feature = "test-support"))]
+                let runtime = pool.acquire(config).await;
+                Some(runtime.map_err(meta)?)
             }
-        });
-        if let Some(browser) = &browser {
-            let _ = browser.prepare().await;
-        }
+            None => None,
+        };
         let roots = Arc::new(crate::goal::BrowserRegistry::default());
         let roots_supply = plan
             .context()

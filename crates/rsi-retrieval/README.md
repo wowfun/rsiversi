@@ -17,6 +17,14 @@ retain the separate syntactic HTTP/S link contract.
 The public-destination broker accepts canonical IP text or lowercase DNS names
 with nonempty labels of at most 63 bytes, alphanumeric label edges and no trailing
 dot. Its 80/443 port contract is independent of Browser's narrower HTTPS policy.
+`PublicDestinationResolver` owns one lazily initialized system resolver for its
+consumer generation. Connections repeat complete-answer validation; resolver
+reuse supplies only the existing bounded DNS cache, never connection authority.
+Canonical destination policy is checked before resolver initialization. Public
+IPv4 literals need no DNS; IPv6 literals still require DNS64 discovery.
+Only successful resolver initialization is retained. An initialization failure
+rejects the current DNS-dependent request; a later request may initialize again,
+without replaying the failed operation or changing destination policy.
 Every DNS answer must be public unicast. IPv4 special-use ranges, IPv6 local,
 documentation and transition ranges, and discovered DNS64 translations to
 non-public IPv4 are refused. A private per-hop client pins the checked addresses
@@ -65,11 +73,5 @@ has no private-address override. Test the public-address policy independently
 from the actual pinned HTTP connection, then test their composition. External
 fetch, Exa and model integrations are opt-in and are separate evidence classes.
 
-`resolve_public_destination` is the browser broker's narrow public-address port.
-It validates a canonical host and port, rejects private/transition destinations,
-checks complete DNS answers including discovered NAT64 prefixes, and returns
-actual pinned socket addresses. The broker must connect to those addresses;
-re-resolving the hostname would discard the security decision.
-
-Broker destinations accept only canonical lowercase ASCII DNS names or canonical
-unbracketed IP literals and ports 80/443. URL syntax is rejected before DNS.
+Use an isolated DNS server to verify resolver initialization recovery and cache
+reuse without granting a production private-address override.

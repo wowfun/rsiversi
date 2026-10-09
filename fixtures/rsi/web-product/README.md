@@ -534,6 +534,27 @@ Open action displays its refusal inside the modal. The report labels this as
 presentation fault injection; it does not claim that the injected Session exists
 or that an authorization boundary was exercised by that action.
 
+`session-browser-live.mjs` is an explicit Linux, live-provider acceptance. Supply
+live environment/model/report and a paired binary/assets publication, plus the
+three `RSI_TEST_BROWSER_*` paths and `RSI_TEST_BROWSER_DIGEST` of the installed
+immutable runtime. It uses actual human UI mutations, exact local HTTP/WS grants,
+canonical screenshots, wide/narrow rendering, Unicode history selection and
+workspace-bound model Tools. It correlates durable Tool intents/results and
+checks that LocalDev model opening required human Approval.
+After submitting Approval, it remembers that exact owner/request ID and waits
+for the pending control to retire. Recreating a DOM node or reconnecting cannot
+repeat the same reply while a stale pending projection remains visible.
+DeepSeek's current provider adapter is text-only: image Media is retained and rendered to humans;
+this probe verifies structured page text and never claims model pixel inspection.
+Chromium network-change failures are retained with their failed requests and
+screenshots. During a submitted turn the probe permits at most two explicit
+Reconnect actions, only after `ERR_NETWORK_CHANGED`, and reopens the same saved
+Session without resubmitting input. Read-only UI polling that times out during
+that teardown may recover; actions are not retried and other read failures
+propagate. Durable Facts must contain exactly one
+submission of each prompt. Recovery is reported separately from uninterrupted
+acceptance; other transport or renderer failures still fail the run.
+
 `RSI_REPORT_DIR=/absolute/new/report node fixtures/rsi/web-product/standard-image.mjs`
 checks the current standard renderer with the real MountTable in Chromium. It
 verifies activated source reads, replacement during a pending read, bounded windows,

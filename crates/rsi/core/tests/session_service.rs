@@ -43,6 +43,9 @@ mod addon_acceptance;
 mod attention;
 #[path = "session_service/automation.rs"]
 mod automation;
+#[cfg(target_os = "linux")]
+#[path = "session_service/browser.rs"]
+mod browser;
 #[path = "session_service/external.rs"]
 mod external;
 #[path = "session_service/goal.rs"]

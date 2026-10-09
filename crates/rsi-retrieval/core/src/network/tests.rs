@@ -16,8 +16,13 @@ use hickory_resolver::{
     },
 };
 
-#[tokio::test]
-async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fallback() {
+struct DnsFixture {
+    resolver: Arc<TokioResolver>,
+    discovery: Arc<std::sync::atomic::AtomicUsize>,
+    deny_discovery: Arc<std::sync::atomic::AtomicBool>,
+    server: tokio::task::JoinHandle<()>,
+}
+async fn dns_fixture() -> DnsFixture {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut nameserver = NameServerConfig::udp_and_tcp("127.0.0.1".parse().unwrap());
     nameserver.trust_negative_responses = false;
@@ -72,6 +77,80 @@ async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fall
                 .unwrap();
         }
     });
+    DnsFixture {
+        resolver,
+        discovery,
+        deny_discovery,
+        server,
+    }
+}
+
+#[tokio::test]
+async fn invalid_and_ipv4_destinations_do_not_initialize_dns() {
+    let resolver = crate::PublicDestinationResolver::new();
+    let forbidden = || panic!("this destination must not initialize DNS");
+    for (host, port) in [
+        ("LOCALHOST", 443),
+        ("public.example", 8080),
+        ("127.0.0.1", 443),
+    ] {
+        assert_eq!(
+            resolver.resolve_with(host, port, forbidden).await,
+            Err(Error::BlockedUrl)
+        );
+    }
+    assert_eq!(
+        resolver
+            .resolve_with("8.8.8.8", 443, forbidden)
+            .await
+            .unwrap(),
+        vec!["8.8.8.8:443".parse().unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn public_resolver_retries_initialization_and_reuses_only_success() {
+    let fixture = dns_fixture().await;
+    let resolver = crate::PublicDestinationResolver::new();
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    assert_eq!(
+        resolver
+            .resolve_with("public.example", 443, || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(Error::Resolution)
+            })
+            .await,
+        Err(Error::Resolution)
+    );
+    let initialize = || {
+        attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(fixture.resolver.clone())
+    };
+    let (first, second) = tokio::join!(
+        resolver.resolve_with("public.example", 443, initialize),
+        resolver.resolve_with("public.example", 443, initialize),
+    );
+    let blocked = resolver
+        .resolve_with("mixed.example", 443, || {
+            panic!("successful initialization must be shared");
+        })
+        .await;
+    fixture.server.abort();
+    assert!(fixture.server.await.unwrap_err().is_cancelled());
+    assert_eq!(first.unwrap().len(), 2);
+    assert_eq!(second.unwrap().len(), 2);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(blocked, Err(Error::BlockedUrl));
+}
+
+#[tokio::test]
+async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fallback() {
+    let DnsFixture {
+        resolver,
+        discovery,
+        deny_discovery,
+        server,
+    } = dns_fixture().await;
     let dns = Ok(resolver.clone());
     let url = |host| parse_url(&format!("https://{host}/")).unwrap();
     assert_eq!(
@@ -421,12 +500,16 @@ async fn public_broker_port_rejects_local_addresses_and_noncanonical_hosts() {
         "user@public.example",
     ] {
         assert!(
-            crate::resolve_public_destination(host, 443).await.is_err(),
+            crate::PublicDestinationResolver::new()
+                .resolve(host, 443)
+                .await
+                .is_err(),
             "{host}"
         );
     }
     assert!(
-        crate::resolve_public_destination("example.com", 0)
+        crate::PublicDestinationResolver::new()
+            .resolve("example.com", 0)
             .await
             .is_err()
     );

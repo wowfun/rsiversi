@@ -59,14 +59,36 @@ and requires prepare. Hashing the same tree before each session would still leav
 a verify-to-spawn gap and repeatedly occupy async workers. Prepare instead hashes
 on a blocking worker and proves startup/settlement once; failed settlement fences
 that generation.
-
 Automation claims, publishes a linked cancellation token and dispatches its
 worker in one retained Ledger operation. A state reread alone leaves another
 check-then-act race. The dispatch holds a tracker token across durable claim I/O,
 without retaining the active-map mutex. Closing can cancel promptly and still
-wait for any newly claimed worker to register and settle.
+wait for any newly claimed worker to register and settle. Browser launch is independently owned from its first slot,
+records every returned Process handle before the next await, and joins admitted
+spawns even after cancellation. Panic fences before cleanup can release capacity.
+The independent startup task outlives an abandoned open waiter: awaiting launch
+directly in that waiter would discard an admitted spawn before its returned
+handle could enter cleanup. Concurrent receipt observation preserves every
+settlement error; it does not claim a twofold reduction in cleanup latency,
+because Process supervisors already retire both terminated children independently.
 Cancellation acknowledgement disarms later stages; it does not certify rollback
 or quiescence of work already admitted.
+Browser's private socket workers separate DNS/connect/write waits from CDP
+routing. Per-direction FIFO byte credits bound unacknowledged payload;
+stdout charges include queued and in-flight encoded frames through callback and
+drain. These local bounds do not claim a measured latency or RSS improvement.
+Socket identities are never recycled within a scope: a map collision check alone
+would not stop late worker completion or acknowledgement from acting on a newer
+socket with the same key.
+The [Browser contract](../../../../crates/rsi/browser/README.md) owns proxy close
+and flush deadlines. Clean EOF cannot revoke queued output: cancelling its Rust
+gate or destroying a helper socket before local write receipts would discard
+final response bytes. Graceful close retains ownership until native close, while
+a deadline prevents a stalled local peer from retaining the slot indefinitely.
+Fingerprint discovery bounds directories and paths as well as file bytes before
+retaining them. The [Browser contract](../../../../crates/rsi/browser/README.md)
+owns those limits; excluding directory discovery would leave a wide or deep tree
+outside the resource bound despite small file contents.
 
 Opaque cursor cuts are principal-bound, expire after five minutes, and have both
 global and per-principal caps. A continuation replaces its predecessor, so a

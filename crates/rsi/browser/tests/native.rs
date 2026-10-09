@@ -104,6 +104,7 @@ async fn native_preview_check_and_retirement() {
         .open(
             policy.clone(),
             &format!("dropped-native-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -114,7 +115,11 @@ async fn native_preview_check_and_retirement() {
         "private pumps must not retain the last public scope owner"
     );
     let scope = browser
-        .open(policy, &format!("native-{}", std::process::id()))
+        .open(
+            policy,
+            &format!("native-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     // Retire the owner before assertions, including first-failure evidence.
@@ -160,6 +165,7 @@ async fn native_preview_check_and_retirement() {
                 dependency_hosts: BTreeSet::new(),
             },
             &format!("mcp-native-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -178,6 +184,7 @@ async fn native_preview_check_and_retirement() {
                 dependency_hosts: BTreeSet::new(),
             },
             &format!("ssrf-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -199,6 +206,7 @@ async fn native_preview_check_and_retirement() {
                 dependency_hosts: BTreeSet::new(),
             },
             &format!("redirect-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -220,6 +228,7 @@ async fn native_preview_check_and_retirement() {
                 dependency_hosts: BTreeSet::new(),
             },
             &format!("escaped-mcp-native-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -231,6 +240,7 @@ async fn native_preview_check_and_retirement() {
                 dependency_hosts: BTreeSet::new(),
             },
             &format!("readiness-peer-{}", std::process::id()),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();

@@ -117,6 +117,11 @@ plugin = "rsi.history.tools"
 
 [[steps]]
 kind = "plugin"
+id = "session-browser"
+plugin = "rsi.browser.tools"
+
+[[steps]]
+kind = "plugin"
 id = "host-profile-management"
 plugin = "rsi.profile-leaves.tools"
 enabled_rhai = "defines.standard_host_profile_edits"

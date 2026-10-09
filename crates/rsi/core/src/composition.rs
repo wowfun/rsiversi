@@ -315,6 +315,10 @@ fn standard_agent_addon(
         "rsi.history.tools",
         Arc::new(rsi_history::HistoryToolsFactory),
     )?;
+    register(
+        "rsi.browser.tools",
+        Arc::new(rsi_browser::SessionBrowserToolsFactory),
+    )?;
     #[cfg(unix)]
     register(
         "rsi.profile-leaves.tools",
@@ -1610,6 +1614,29 @@ impl StandardComposition {
         #[cfg(target_os = "linux")]
         {
             builder.register_local_contract::<rsi_automation::AutomationContract>()?;
+            builder.register_fragment(ProfileFragment::program(
+                "rsi.standard.session-browser",
+                [
+                    rsi_meta_profile::ProfileStep::Node(rsi_meta_profile::ProfileNode::Plugin(
+                        ProfileEntry::new("session-browser", "rsi.browser.session", Value::Null),
+                    )),
+                    rsi_meta_profile::ProfileStep::Patch(
+                        rsi_meta_profile::ProfilePatch::SetEnabled {
+                            target: "session-browser".into(),
+                            enabled: false,
+                        },
+                    ),
+                    rsi_meta_profile::ProfileStep::Node(rsi_meta_profile::ProfileNode::Plugin(
+                        ProfileEntry::new("session-browser-ui", "rsi.browser.ui", Value::Null),
+                    )),
+                    rsi_meta_profile::ProfileStep::Patch(
+                        rsi_meta_profile::ProfilePatch::SetEnabled {
+                            target: "session-browser-ui".into(),
+                            enabled: false,
+                        },
+                    ),
+                ],
+            ))?;
             builder.register_local_contract::<rsi_automation::BrowserRegistryContract>()?;
             register(
                 &mut builder,
@@ -1901,6 +1928,28 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        "rsi.browser.runtime-pool",
+        UpdateMode::RestartRequired,
+        rsi_browser::RuntimePoolFactory,
+    )?;
+    #[cfg(target_os = "linux")]
+    {
+        register(
+            builder,
+            "rsi.browser.session",
+            UpdateMode::RestartRequired,
+            rsi_browser::SessionBrowserFactory,
+        )?;
+        register(
+            builder,
+            "rsi.browser.ui",
+            UpdateMode::Replayable,
+            rsi_browser::SessionBrowserUiFactory,
+        )?;
+    }
+
+    register(
+        builder,
         "rsi.acp.host",
         UpdateMode::RestartRequired,
         rsi_acp_host::Factory,
@@ -2135,6 +2184,8 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_agent_context::ContextBudgetContract>()?;
     builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
     builder.register_local_contract::<rsi_history::HistoryContract>()?;
+    builder.register_local_contract::<rsi_browser::RuntimePoolContract>()?;
+    builder.register_local_contract::<rsi_browser::SessionBrowserContract>()?;
     builder.register_local_contract::<rsi_lsp::LanguageContract>()?;
     builder.register_local_contract::<rsi_workspace_review::WorkspaceReviewContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::ExecutionObserverContract>()?;
@@ -2283,6 +2334,12 @@ fn base_fragment(
         ProfileEntry::new("rsi-ai-image", IMAGE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-inspector-api", "rsi.inspector.api", Value::Null),
     ];
+    #[cfg(target_os = "linux")]
+    entries.push(ProfileEntry::new(
+        "rsi-browser-runtime-pool",
+        "rsi.browser.runtime-pool",
+        Value::Null,
+    ));
     #[cfg(unix)]
     entries.push(ProfileEntry::new(
         "rsi-native-addons",
@@ -2725,6 +2782,7 @@ mod tests {
                 "rsi.retrieval.tools",
                 "rsi.acp.tools",
                 "rsi.history.tools",
+                "rsi.browser.tools",
                 "rsi.profile-leaves.tools",
             ]
         );
@@ -2755,6 +2813,7 @@ mod tests {
                 "rsi.retrieval.tools",
                 "rsi.acp.tools",
                 "rsi.history.tools",
+                "rsi.browser.tools",
             ]
         );
 

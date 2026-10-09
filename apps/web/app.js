@@ -1172,8 +1172,12 @@ class Pane {
     const pendingKey = JSON.stringify(pending);
     if (pendingKey !== this.pendingKey) {
       this.pendingKey = pendingKey;
-      this.waiting.replaceChildren(...pending.map(item => button(`${item.kind === "approval" ? "Review" : "Answer"}: ${item.title}`,
-        () => this.action("inspect_interaction", { owner: item.owner, id: item.id }))));
+      this.waiting.replaceChildren(...pending.map(item => {
+        const control = button(`${item.kind === "approval" ? "Review" : "Answer"}: ${item.title}`,
+          () => this.action("inspect_interaction", { owner: item.owner, id: item.id }));
+        control.dataset.interactionOwner = item.owner; control.dataset.interactionId = item.id;
+        return control;
+      }));
     }
   }
   renderTranscript(transcript, changed) {

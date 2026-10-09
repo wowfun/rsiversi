@@ -113,6 +113,9 @@ Clearing a pane also invalidates the cached pending-interaction projection;
 reopening an unchanged question or approval rebuilds its actionable controls.
 Protected panes hide queue edits and pending question/approval actions. Frame
 acknowledgement keeps both queue and stop bindings absent for those panes.
+Pending controls carry their exact interaction owner and ID as DOM data; these
+annotations identify a durable request across rendering and reconnects. Native
+command bindings own the action inputs and authorization.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 

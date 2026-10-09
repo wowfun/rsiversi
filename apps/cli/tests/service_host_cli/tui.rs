@@ -6,6 +6,8 @@ mod capture;
 use capture::RawCapture;
 #[path = "tui/automation.rs"]
 mod automation;
+#[path = "tui/browser.rs"]
+mod browser;
 #[path = "tui/dialogs.rs"]
 mod dialogs;
 #[path = "tui/export.rs"]

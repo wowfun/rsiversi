@@ -5,6 +5,8 @@ durable admission, attempts, bounded evidence and caller-scoped operations.
 It is opt-in in the Linux daemon. A receipt is committed before HTTP 202;
 202 does not promise execution. Unknown commits fence this owner, never replay
 effects, and do not fence the ordinary Agent Store.
+Activation requires the shared Browser runtime to pass readiness; acquisition
+or confinement failure rejects activation before the ingress listener is served.
 
 Delivery identity is source plus GitHub delivery ID. Logical task identity is
 source, repository ID, deployment ID and stable rule ID, independent of status,

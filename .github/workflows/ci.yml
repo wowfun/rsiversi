@@ -250,7 +250,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_readiness.log") 2>&1
-          node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs
+          node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs evidence.test.mjs ../../../crates/rsi/browser/runtime/http-proxy.test.mjs ../../../crates/rsi/browser/runtime/proxy-flow.test.mjs ../../../crates/rsi/browser/runtime/session-helper.test.mjs
 
       - name: Preserve failed fixture readiness before the paired build
         if: ${{ !cancelled() && steps.web_readiness.outcome == 'failure' }}

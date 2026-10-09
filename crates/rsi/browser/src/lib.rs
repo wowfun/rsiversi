@@ -3,8 +3,23 @@
 
 mod protocol;
 mod runtime;
+mod session_policy;
+pub use session_policy::SessionPolicy;
+mod plugin;
+mod session;
+mod tools;
+mod ui;
+pub use plugin::{
+    RuntimePool, RuntimePoolContract, RuntimePoolFactory, SessionBrowserContract,
+    SessionBrowserFactory,
+};
 pub use protocol::*;
-pub use runtime::{BrowserSession, ExplorationBrowser, NativeRuntime, RuntimeConfig};
+pub use runtime::{BrowserSession, ExplorationBrowser, NativeRuntime, OpenError, RuntimeConfig};
+pub use session::{
+    BrowserBinding, SessionAuthority, SessionBrowser, SessionOperation, SessionResult,
+};
+pub use tools::SessionBrowserToolsFactory;
+pub use ui::SessionBrowserUiFactory;
 
 /// Process-local, nonserializable preview observation port. Its owner supplies
 /// the exact frozen policy and retains retirement; text confers no authority.

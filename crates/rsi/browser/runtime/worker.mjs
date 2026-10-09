@@ -1,22 +1,24 @@
 // Fixed helper asset. Its caller supplies a confined Process and bounded framed ports.
 import { spawn } from 'node:child_process';
-import http from 'node:http';
 import readline from 'node:readline';
 import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 
 import {NullFrameReader} from './frame-reader.mjs';
 import {deadline} from './deadline.mjs';
+import {PacketOutput, ProxySocket} from './proxy-flow.mjs';
+import {createProxy} from './http-proxy.mjs';
+import {sessionHelper} from './session-helper.mjs';
+import {cdpPacket,decodeCdp} from './cdp.mjs';
 
 const mode = process.argv[2];
 const maximumFrame = 8 * 1024 * 1024;
-const emit = packet => {
-  const line = JSON.stringify(packet);
-  if (Buffer.byteLength(line) > maximumFrame) throw new Error('helper frame exceeds bound');
-  process.stdout.write(`${line}\n`);
-};
+const output = new PacketOutput(process.stdout, () => terminate(), () => {
+  for (const socket of sockets.values()) socket.pump();
+});
+const emit = packet => output.emit(packet);
 const sockets = new Map();
-let child, browser, peer, proxy, control;
+let child, browser, peer, proxy, control, session;
 let initialized = false, dialogs = 0, privateSequence = -100000;
 const privateResponses=new Map();
 const terminate = () => {
@@ -37,23 +39,25 @@ input.on('line', async line => {
     if (packet.kind==='init' && !initialized) {
       initialized=true;
       if (mode==='browser') await startBrowser(packet);
-      else if (mode==='checker'||mode==='mcp') await startClient(packet);
+      else if (mode==='checker'||mode==='mcp'||mode==='session') await startClient(packet);
       else throw new Error('unknown helper mode');
     } else if (!initialized) throw new Error('helper is not initialized');
     else if (packet.kind==='cdp') {
-      if (mode==='browser') child.stdio[3].write(`${JSON.stringify(packet.value)}\0`);
-      else if (peer?.readyState===1) peer.send(JSON.stringify(packet.value));
+      const value=JSON.stringify(decodeCdp(packet.value));
+      if (mode==='browser') child.stdio[3].write(`${value}\0`);
+      else if (peer?.readyState===1) peer.send(value);
     } else if (packet.kind==='proxy_opened') {
       const socket=sockets.get(packet.id);
-      if (socket) { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); socket.resume(); }
+      socket?.open();
     } else if (packet.kind==='proxy_data') {
-      const bytes=Buffer.from(packet.data,'base64');
-      if (bytes.length>32768) throw new Error('proxy chunk exceeds bound');
-      sockets.get(packet.id)?.write(bytes);
+      sockets.get(packet.id)?.receive(packet.data);
+    } else if (packet.kind==='proxy_ack') {
+      sockets.get(packet.id)?.acknowledge(packet.bytes);
     } else if (packet.kind==='proxy_close') {
-      sockets.get(packet.id)?.destroy(); sockets.delete(packet.id);
+      sockets.get(packet.id)?.close();
     } else if (packet.kind==='mcp' && mode==='mcp') child.stdin.write(`${JSON.stringify(packet.value)}\n`);
     else if (packet.kind==='check' && mode==='checker') await check(packet);
+    else if (packet.kind==='session' && mode==='session') emit({kind:'session_result',result:await session(packet)});
     else if (packet.kind==='page_state' && mode==='browser') {
       const id=privateSequence--;privateResponses.set(id,'page_state');
       child.stdio[3].write(`${JSON.stringify({id,method:'Target.getTargets'})}\0`);
@@ -75,17 +79,13 @@ input.on('line', async line => {
 });
 async function startBrowser(packet) {
   let sequence=0;
-  proxy=http.createServer({maxHeaderSize:16*1024},(_request,response)=>{response.writeHead(403);response.end();});
-  proxy.on('connect',(request,socket,head)=>{
+  proxy=createProxy(({socket,host,port,transport,head,connect})=>{
     if (sockets.size>=8 || head.length>32768) { socket.destroy(); return; }
-    const target=new URL(`https://${request.url}`);
-    const id=++sequence;sockets.set(id,socket);socket.pause();
-    emit({kind:'proxy_open',id,host:target.hostname,port:Number(target.port||443)});
-    socket.on('data',chunk=>{for(let at=0;at<chunk.length;at+=32768)emit({kind:'proxy_data',id,data:chunk.subarray(at,at+32768).toString('base64')});});
-    socket.on('close',()=>{sockets.delete(id);emit({kind:'proxy_close',id});});
-    socket.on('error',()=>socket.destroy());
-    if (head.length) emit({kind:'proxy_data',id,data:head.toString('base64')});
-  });
+    const id=++sequence;
+    const flow=new ProxySocket(socket,id,head,output,()=>{sockets.delete(id);emit({kind:'proxy_close',id});},connect);
+    sockets.set(id,flow);
+    emit({kind:'proxy_open',id,host,port,transport});
+  },packet.session_policy?.mode==='local_dev'?new URL(packet.session_policy.origin):null);
   await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
   child=spawn('/runtime/chrome/chrome',[
     '--headless','--disable-gpu','--no-first-run','--no-default-browser-check',
@@ -114,7 +114,7 @@ async function startBrowser(packet) {
         const id=privateSequence--;privateResponses.set(id,'dialog');
         child.stdio[3].write(`${JSON.stringify({id,sessionId:value.sessionId,method:'Page.handleJavaScriptDialog',params:{accept:false}})}\0`);
       }
-      emit({kind:'cdp',value});
+      emit(cdpPacket(value));
     });
   });
   emit({kind:'ready',mode});
@@ -125,7 +125,7 @@ async function startClient(packet) {
   control.on('connection',(socket,request)=>{
     if(request.url!==`/${packet.token}` || peer){socket.close();return;}
     peer=socket;
-    socket.on('message',data=>emit({kind:'cdp',value:JSON.parse(data.toString())}));
+    socket.on('message',data=>emit(cdpPacket(JSON.parse(data.toString()))));
   });
   await new Promise(resolve=>control.on('listening',resolve));
   if(mode==='mcp'){
@@ -147,10 +147,11 @@ async function startClient(packet) {
   const context=browser.contexts()[0];
   for(const page of context.pages())page.on('dialog',async dialog=>{dialogs++;await dialog.dismiss().catch(()=>{});});
   context.on('page',page=>page.on('dialog',async dialog=>{dialogs++;await dialog.dismiss().catch(()=>{});}));
+  if(mode==='session')session=await sessionHelper(browser,packet.policy,()=>{emit({kind:"error",error:"Single Session page required"});terminate();input.close();process.stdin.destroy();});
   emit({kind:'ready',mode});
 }
 async function observe(page,timeout=deadline(20000)) {
-  const text=await page.locator('body').innerText({timeout:timeout(20000)});
+  const text=(await page.locator('body').innerText({timeout:timeout(20000)})).toWellFormed();
   if(Buffer.byteLength(text)>64*1024)throw new Error('text snapshot exceeds 64 KiB');
   return text;
 }

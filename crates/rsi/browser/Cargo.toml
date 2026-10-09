@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
 hex.workspace = true
 getrandom.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
@@ -18,6 +19,16 @@ rsi-process = { path = "../../rsi-process/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-retrieval = { path = "../../rsi-retrieval/core" }
 rsi-media = { path = "../../rsi-media/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-client = { path = "../client" }
+rsi-ui = { path = "../ui" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -26,6 +37,7 @@ tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 tempfile.workspace = true
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }

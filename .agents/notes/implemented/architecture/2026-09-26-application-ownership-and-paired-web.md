@@ -47,3 +47,6 @@ prevent reclamation until their processes exit; retention limits apply only to
 inactive generations. Explicit external publications remain caller-owned. Mutable
 Vite document source is deliberately outside the release pairing guarantee;
 Worker/WASM and native processes still come from the paired upstream.
+Deterministic fixture-readiness and Browser proxy-helper tests run before the
+paired build with an independent failure log. Native build failure cannot erase
+this evidence, and helper tests do not imply Chromium confinement validation.

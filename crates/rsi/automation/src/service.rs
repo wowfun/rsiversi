@@ -224,6 +224,7 @@ impl AutomationService {
             .open(
                 attempt.rule.policy(&attempt.deployment.url)?,
                 &format!("attempt-{}-check", attempt.id),
+                stop.clone(),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -255,6 +256,7 @@ impl AutomationService {
                     .open_exploration(
                         attempt.rule.policy(&attempt.deployment.url)?,
                         &format!("attempt-{}-explore", attempt.id),
+                        stop.clone(),
                     )
                     .await
                     .map_err(|error| error.to_string())?,

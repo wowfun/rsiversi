@@ -173,6 +173,7 @@ async fn native_death_child() {
                 dependency_hosts: BTreeSet::new(),
             },
             &identity,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -201,16 +202,7 @@ async fn native_death_child() {
             "256"
         );
         if role == "browser" {
-            let group = evidence
-                .lines()
-                .find_map(|l| l.strip_prefix("ControlGroup="))
-                .unwrap();
-            let pids = std::fs::read_to_string(
-                PathBuf::from("/sys/fs/cgroup")
-                    .join(group.trim_start_matches('/'))
-                    .join("cgroup.procs"),
-            )
-            .unwrap();
+            let pids = std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap();
             let mut sandboxed_renderers = 0;
             let renderer_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             for pid in pids.lines() {

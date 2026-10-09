@@ -1,5 +1,14 @@
 # rsi
 
+The Linux Base supplies one lazy `rsi.browser.runtime-pool`. Automation and the
+opt-in `rsi.browser.session` owner must select the same pinned runtime; its two
+slots include opening and retiring instances. `rsi.standard.session-browser`
+ships disabled. Configure the Session owner's `runtime` explicitly and enable
+both `session-browser` and `session-browser-ui`; the standard Agent preset then
+contributes the Session browser Tool through that existing Service owner.
+The [Browser contract](../browser/README.md) owns destinations, admission and
+retirement. Human actions use the ordinary Session-bound UI mutation API.
+
 The Linux daemon registers opt-in `rsi.automation` and the disabled
 `rsi.standard.automation` fragment. Its dedicated directory, fixed browser
 runtime and owner-local webhook credential references are explicit Profile

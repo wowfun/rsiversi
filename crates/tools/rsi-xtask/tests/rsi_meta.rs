@@ -874,6 +874,8 @@ fn paired_web_consumers_have_independent_failure_domains() {
     assert!(
         command.contains("node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs")
     );
+    assert!(command.contains("evidence.test.mjs"));
+    assert!(command.contains("../../../crates/rsi/browser/runtime/proxy-flow.test.mjs"));
     assert!(command.contains("tee \"$RUNNER_TEMP/rsi-browser-logs/web_readiness.log\""));
     for id in [
         "web_product",
