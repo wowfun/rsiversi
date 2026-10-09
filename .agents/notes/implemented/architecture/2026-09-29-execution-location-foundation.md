@@ -103,6 +103,15 @@ rejects reconnect substitution before backend I/O. Endpoint token entries bind
 principal and Session/Header and retain at most 64 resources, including accepted
 opens and queued unpublished replies. Cleanup does not require a new target
 connection. Files resources do not retain Session draft activity.
+Read or listing failure alone cannot prove token loss: an unavailable I/O object
+can still have a live description. The endpoint rechecks that description before
+releasing its resource owner. A retired SSH connection reports cancellation;
+its old tokens cannot move to a replacement provider generation.
+The [Session Files contract](../../../../crates/rsi/session-files/README.md) owns
+endpoint-token translation. Provider counters are local to independent processes,
+so sharing their raw tokens would let another provider occupy an unrelated owner's
+correlation value. Endpoint-owned identities separate routing from provider naming
+without adding provider identity or authority to the wire.
 
 History's API adapter previously discarded its origin while its Tool path called
 the same unscoped Service owner. Both now carry explicit live authority into the

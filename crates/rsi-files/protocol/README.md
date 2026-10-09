@@ -13,6 +13,10 @@ while preserving the exact subject, revision and workspace. This scopes a bindin
 to the wrapper's lease without serializing authority or changing filesystem paths.
 `describe` returns its admitted path/kind/length and executable flag after current binding and expiry
 checks. Adapters compare a client-supplied descriptor before returning its body.
+An `Unavailable` description means that token no longer exists in its issuing
+namespace. Transport or provider retirement reports `Cancelled` or an I/O error,
+not token loss. An `Unavailable` read or list alone does not establish token loss;
+an adapter checks the description before releasing retained token ownership.
 The protocol's `validate_for` methods own reply validation for both API and SSH
 adapters: exact requested metadata, byte ranges, canonical hex, directory ordering,
 child names and encoded page limits. Adapters map malformed replies to their own

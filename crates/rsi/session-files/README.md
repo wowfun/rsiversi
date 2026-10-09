@@ -24,11 +24,23 @@ missing/revoked authentication remains an API authorization failure. API or
 Session retirement and device revocation cancel the finite reader future.
 
 Each endpoint generation supplies a distinct Files caller identity and retains at
-most 64 token resources, including opens in progress. Each token pins its original
-provider and is bound to the opening principal and exact Session/Header. A fresh
+most 64 token resources, including opens in progress. The endpoint mints its own
+opaque tokens and keeps provider tokens private; equal tokens from independent
+providers cannot collide in its owner map. Continuations translate the endpoint
+token back to its retained provider token, and descriptions return the endpoint
+token. Each token pins its original
+provider. Exhausted admission returns `Capacity`; retired admission returns
+`Cancelled` before backend dispatch. Each token is bound to the opening principal
+and exact Session/Header. A fresh
 view authorizes continuation without borrowing the opening caller's old grant.
-Reconnection cannot transfer a token to another provider. Release and endpoint
-retirement dispose the retained scope; idle tokens retain no Session activity.
+Reconnection cannot transfer a token to another provider. The outer resource lease
+starts before backend dispatch and expires within the Files protocol's fixed
+token lifetime. Admission, continuation and release reclaim expired owners;
+an unavailable backend description also removes the matching owner. Unavailable
+read/list replies require a description check before eviction; transport failure
+alone does not release token ownership. In-flight continuations
+retain their scope until their waiter settles. Release and endpoint retirement
+dispose retained scopes outside the owner-map lock; idle tokens retain no Session activity.
 Release authenticates the owning principal and exact token target but needs no
 new execution lease or live Session; it remains cleanup after Use withdrawal,
 target disconnection or draft expiry.

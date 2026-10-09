@@ -12,6 +12,88 @@ fn pair() -> (ProcessConnection, Connection, Incoming) {
     let (helper, incoming) = Connection::start(rr, rw, Role::Helper, 37).unwrap();
     (ProcessConnection::new(client).unwrap(), helper, incoming)
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn closed_files_transport_reports_retirement_instead_of_token_loss() {
+    use rsi_files_protocol::{
+        FileKind, FileToken, Files, FilesBinding, FilesCaller, FilesError, OpenedFile, RelativePath,
+    };
+    let (client, helper, mut incoming) = pair();
+    let files = RemoteFiles::new(client.clone());
+    let root = tempfile::tempdir().unwrap();
+    let binding = FilesBinding::new(
+        FilesCaller::default(),
+        "subject",
+        "revision",
+        root.path().canonicalize().unwrap(),
+    )
+    .unwrap();
+    let opened = OpenedFile {
+        token: FileToken::try_from("a".repeat(32)).unwrap(),
+        path: RelativePath::new(b"object").unwrap(),
+        kind: FileKind::File,
+        executable: false,
+        length: 1,
+    };
+    let replying = tokio::spawn({
+        let opened = opened.clone();
+        async move {
+            incoming
+                .next()
+                .await
+                .unwrap()
+                .reply(serde_json::to_vec(&Reply::FilesOpened { handle: 1, opened }).unwrap())
+                .unwrap();
+        }
+    });
+    assert_eq!(
+        files
+            .open(
+                binding.clone(),
+                opened.path.clone(),
+                opened.kind,
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+        opened
+    );
+    replying.await.unwrap();
+    assert_eq!(
+        files.describe(&binding, &FileToken::try_from("b".repeat(32)).unwrap()),
+        Err(FilesError::Unavailable)
+    );
+    client.transport.close();
+    assert_eq!(
+        files.describe(&binding, &opened.token),
+        Err(FilesError::Cancelled)
+    );
+    assert_eq!(
+        files
+            .read(
+                binding.clone(),
+                opened.token.clone(),
+                0,
+                1,
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await,
+        Err(FilesError::Cancelled)
+    );
+    assert_eq!(
+        files
+            .list(
+                binding,
+                opened.token,
+                0,
+                1,
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await,
+        Err(FilesError::Cancelled)
+    );
+    helper.close();
+}
 
 #[tokio::test(start_paused = true)]
 async fn termination_capacity_backs_off_then_stops_after_acknowledgement() {

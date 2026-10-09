@@ -86,7 +86,7 @@ impl RemoteFiles {
     }
     fn lookup(&self, binding: &FilesBinding, token: &FileToken) -> Result<Arc<Open>> {
         if self.0.client.transport.is_closed() {
-            return Err(FilesError::Unavailable);
+            return Err(FilesError::Cancelled);
         }
         let mut entries = lock(&self.0.entries);
         entries.retain(|_, entry| entry.deadline > Instant::now());

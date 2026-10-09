@@ -7362,6 +7362,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "reqwest 0.12.28",
  "rsi-agent-session-protocol",

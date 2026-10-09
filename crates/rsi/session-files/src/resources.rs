@@ -2,15 +2,16 @@
 use rsi_api_protocol::{CallOrigin, DeviceId};
 use rsi_execution::{ExecutionFiles, ExecutionLease};
 use rsi_files_protocol::{
-    DirectoryPage, FileKind, FilePage, FileToken, Files, FilesBinding, FilesError,
-    MAXIMUM_FILE_TOKENS, OpenedFile, RelativePath, Result,
+    DirectoryPage, FILE_TOKEN_LIFETIME, FileKind, FilePage, FileToken, Files, FilesBinding,
+    FilesError, MAXIMUM_FILE_TOKENS, OpenedFile, RelativePath, Result,
 };
 use rsi_session_protocol::SessionTarget;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -27,12 +28,61 @@ impl Default for FileOwners {
     }
 }
 impl FileOwners {
+    fn publish(&self, mut opened: OpenedFile, entry: Arc<Entry>) -> Result<OpenedFile> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.capacity.is_closed() || entry.expires <= Instant::now() {
+            return Err(FilesError::Cancelled);
+        }
+        for _ in 0..8 {
+            let mut bytes = [0; 16];
+            getrandom::fill(&mut bytes).map_err(|_| FilesError::Io)?;
+            let token = FileToken::try_from(format!("{:032x}", u128::from_be_bytes(bytes)))
+                .expect("128-bit lowercase hexadecimal token");
+            if !entries.contains_key(&token) {
+                opened.token = token;
+                entries.insert(opened.token.clone(), entry);
+                return Ok(opened);
+            }
+        }
+        Err(FilesError::Capacity)
+    }
+    fn prune(&self, now: Instant) {
+        let expired: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extract_if(.., |_, entry| entry.expires <= now)
+            .map(|(_, entry)| entry)
+            .collect();
+        drop(expired);
+    }
+    fn unavailable(&self, token: &FileToken, entry: &Arc<Entry>) {
+        let removed = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if entries
+                .get(token)
+                .is_some_and(|current| Arc::ptr_eq(current, entry))
+            {
+                entries.remove(token)
+            } else {
+                None
+            }
+        };
+        drop(removed);
+    }
     pub fn release(
         &self,
         origin: &CallOrigin,
         target: &SessionTarget,
         token: &FileToken,
     ) -> Result<()> {
+        self.prune(Instant::now());
         let mut entries = self
             .entries
             .lock()
@@ -42,15 +92,20 @@ impl FileOwners {
         {
             return Err(FilesError::Binding);
         }
-        entries.remove(token);
+        let removed = entries.remove(token);
+        drop(entries);
+        drop(removed);
         Ok(())
     }
     pub fn clear(&self) {
         self.capacity.close();
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        let removed = std::mem::take(
+            &mut *self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        drop(removed);
     }
 }
 fn principal(origin: &CallOrigin) -> Option<DeviceId> {
@@ -62,8 +117,10 @@ fn principal(origin: &CallOrigin) -> Option<DeviceId> {
 #[derive(Debug)]
 struct Entry {
     resource: ExecutionFiles,
+    provider_token: FileToken,
     target: SessionTarget,
     principal: Option<DeviceId>,
+    expires: Instant,
     _capacity: OwnedSemaphorePermit,
 }
 #[derive(Debug)]
@@ -97,6 +154,7 @@ impl FilesView {
         }
     }
     fn entry(&self, token: &FileToken) -> Result<Arc<Entry>> {
+        self.owners.prune(Instant::now());
         let entries = self
             .owners
             .entries
@@ -120,7 +178,28 @@ impl FilesView {
     }
     pub fn describe(&self, binding: &FilesBinding, token: &FileToken) -> Result<OpenedFile> {
         let entry = self.entry(token)?;
-        self.view(&entry)?.describe(binding, token)
+        let result = self.view(&entry)?.describe(binding, &entry.provider_token);
+        if matches!(result, Err(FilesError::Unavailable)) {
+            self.owners.unavailable(token, &entry);
+        }
+        result.map(|mut opened| {
+            opened.token = token.clone();
+            opened
+        })
+    }
+    fn check_unavailable(
+        &self,
+        files: &dyn Files,
+        binding: &FilesBinding,
+        token: &FileToken,
+        entry: &Arc<Entry>,
+    ) {
+        if matches!(
+            files.describe(binding, &entry.provider_token),
+            Err(FilesError::Unavailable)
+        ) {
+            self.owners.unavailable(token, entry);
+        }
     }
     pub async fn open(
         &self,
@@ -129,43 +208,45 @@ impl FilesView {
         kind: FileKind,
         cancellation: CancellationToken,
     ) -> Result<OpenedFile> {
-        let capacity = self
-            .owners
-            .capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| FilesError::Capacity)?;
-        let entry = Arc::new(Entry {
-            resource: self
-                .lease
-                .retain_files()
-                .map_err(|error| execution_error(&error))?,
-            target: self.target.clone(),
-            principal: self.principal.clone(),
-            _capacity: capacity,
-        });
-        let files = self.view(&entry)?;
+        self.owners.prune(Instant::now());
+        let capacity =
+            self.owners
+                .capacity
+                .clone()
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    TryAcquireError::Closed => FilesError::Cancelled,
+                    TryAcquireError::NoPermits => FilesError::Capacity,
+                })?;
+        let resource = self
+            .lease
+            .retain_files()
+            .map_err(|error| execution_error(&error))?;
+        let files = resource
+            .view(&self.lease)
+            .map_err(|error| execution_error(&error))?;
+        let target = self.target.clone();
+        let principal = self.principal.clone();
+        let expires = Instant::now() + FILE_TOKEN_LIFETIME;
         // The reply owns the scope and capacity even if the waiter disappears
         // before or after completion. No unconsumed token escapes publication.
         let (reply, result) = oneshot::channel();
         tokio::spawn(async move {
             let opened = files.open(binding, path, kind, cancellation).await;
-            let _ = reply.send(opened.map(|opened| (opened, entry)));
+            let _ = reply.send(opened.map(|opened| {
+                let entry = Arc::new(Entry {
+                    provider_token: opened.token.clone(),
+                    resource,
+                    target,
+                    principal,
+                    expires,
+                    _capacity: capacity,
+                });
+                (opened, entry)
+            }));
         });
         let (opened, entry) = result.await.unwrap_or(Err(FilesError::OutcomeUnknown))?;
-        let mut entries = self
-            .owners
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.owners.capacity.is_closed() {
-            return Err(FilesError::Cancelled);
-        }
-        if entries.contains_key(&opened.token) {
-            return Err(FilesError::Binding);
-        }
-        entries.insert(opened.token.clone(), entry);
-        Ok(opened)
+        self.owners.publish(opened, entry)
     }
     pub async fn read(
         &self,
@@ -176,9 +257,20 @@ impl FilesView {
         cancellation: CancellationToken,
     ) -> Result<FilePage> {
         let entry = self.entry(&token)?;
-        self.view(&entry)?
-            .read(binding, token, offset, maximum, cancellation)
-            .await
+        let files = self.view(&entry)?;
+        let result = files
+            .read(
+                binding.clone(),
+                entry.provider_token.clone(),
+                offset,
+                maximum,
+                cancellation,
+            )
+            .await;
+        if matches!(result, Err(FilesError::Unavailable)) {
+            self.check_unavailable(files.as_ref(), &binding, &token, &entry);
+        }
+        result
     }
     pub async fn list(
         &self,
@@ -189,8 +281,23 @@ impl FilesView {
         cancellation: CancellationToken,
     ) -> Result<DirectoryPage> {
         let entry = self.entry(&token)?;
-        self.view(&entry)?
-            .list(binding, token, offset, maximum, cancellation)
-            .await
+        let files = self.view(&entry)?;
+        let result = files
+            .list(
+                binding.clone(),
+                entry.provider_token.clone(),
+                offset,
+                maximum,
+                cancellation,
+            )
+            .await;
+        if matches!(result, Err(FilesError::Unavailable)) {
+            self.check_unavailable(files.as_ref(), &binding, &token, &entry);
+        }
+        result
     }
 }
+
+#[cfg(test)]
+#[path = "resources_tests.rs"]
+mod tests;
