@@ -23,12 +23,20 @@ The journal limits observed data to 64 MiB per conversation and 1 GiB per owner,
 including metadata reservations for at most 4,096 saved conversations. It reserves
 16 KiB per conversation for settlement metadata before admitting observations.
 SQLite also has a page-count limit; quota exhaustion is explicit. Terminal status
-updates do not consume the observation quota. A crashed Running/Starting/Loading
+updates do not consume the observation quota. A crashed Ready/Running/Starting/Loading
 conversation reopens as Unknown, retaining its last confirmed remote identity.
+Startup recovery commits all conversation resets and unpublished replay cleanup
+in one transaction; rejecting a later corrupt snapshot cannot partially recover
+earlier conversations.
 Opening validates the stored accounting against record lengths before accepting
 new writes. This scans the bounded journal metadata; it is not constant-time
 startup. The database page ceiling reserves room for the rollback image and its
 overhead, so physical storage can exhaust before the logical payload limit.
+Schema 1 requires 4,096-byte pages. Opening rejects other geometry and an existing
+database whose allocated pages or file bytes exceed one third of the owner limit,
+including freelist pages. It verifies SQLite accepted the exact page cap before
+any startup rewrite; it never vacuums or migrates a rejected database.
+The connection uses fail-fast lock handling before any schema or page probe.
 
 The journal stores endpoint IDs, workspace directories, negotiated capabilities,
 user input, received updates and categorical settlement with the exact stable

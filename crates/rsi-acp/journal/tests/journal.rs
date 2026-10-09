@@ -4,6 +4,193 @@ use serde_json::json;
 fn id() -> ConversationId {
     ConversationId::new("external-fixture").unwrap()
 }
+
+#[tokio::test]
+async fn corrupt_later_snapshot_cannot_partially_commit_startup_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    let generation = create(&journal).await;
+    let visible = journal
+        .append(&id(), generation, RecordKind::Update, json!("visible"))
+        .await
+        .unwrap();
+    let replay = journal.begin_replay(&id(), generation).await.unwrap();
+    journal
+        .append(&id(), generation, RecordKind::Update, json!("unpublished"))
+        .await
+        .unwrap();
+    let corrupt = ConversationId::new("z-corrupt").unwrap();
+    journal
+        .create(
+            corrupt.clone(),
+            "configured-peer".into(),
+            std::env::current_dir().unwrap().to_str().unwrap().into(),
+        )
+        .await
+        .unwrap();
+    journal.close().await.unwrap();
+    let path = root.path().join("observed.sqlite3");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let metadata: Vec<u8> = connection
+        .query_row(
+            "SELECT metadata FROM sessions WHERE id=?1",
+            [corrupt.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET metadata=zeroblob(length(metadata)) WHERE id=?1",
+            [corrupt.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        Journal::open(root.path().to_owned(), Limits::default())
+            .await
+            .unwrap_err(),
+        Error::Corrupt
+    );
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "failed startup rewrote an earlier valid conversation"
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET metadata=?1 WHERE id=?2",
+            rusqlite::params![metadata, corrupt.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(journal.get(&id()).await.unwrap().status, Status::Unknown);
+    assert_eq!(journal.get(&corrupt).await.unwrap().status, Status::Unknown);
+    assert_eq!(
+        journal.position(&id(), replay.epoch).await.unwrap(),
+        visible
+    );
+    assert_eq!(
+        journal
+            .page(&id(), replay.epoch, 0)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    journal.close().await.unwrap();
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(journal.get(&id()).await.unwrap().status, Status::Unknown);
+    assert_eq!(
+        journal
+            .page(&id(), replay.epoch, 0)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn opening_a_locked_database_fails_before_the_driver_busy_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    journal.close().await.unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("observed.sqlite3")).unwrap();
+    connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let mut reopening = tokio::spawn(Journal::open(root.path().to_owned(), Limits::default()));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut reopening).await;
+    connection.execute_batch("ROLLBACK").unwrap();
+    if let Ok(result) = result {
+        assert_eq!(result.unwrap().unwrap_err(), Error::Io);
+    } else {
+        if let Ok(journal) = reopening.await.unwrap() {
+            journal.close().await.unwrap();
+        }
+        panic!("startup probes retained the driver's five-second busy timeout");
+    }
+}
+
+#[tokio::test]
+async fn existing_page_geometry_and_freelist_are_rejected_without_startup_rewrites() {
+    for large_pages in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let journal = Journal::open(root.path().to_owned(), Limits::default())
+            .await
+            .unwrap();
+        let generation = create(&journal).await;
+        journal
+            .append(
+                &id(),
+                generation,
+                RecordKind::Update,
+                json!("x".repeat(800_000)),
+            )
+            .await
+            .unwrap();
+        journal.close().await.unwrap();
+        let path = root.path().join("observed.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        if large_pages {
+            connection
+                .execute_batch("PRAGMA page_size=65536; VACUUM;")
+                .unwrap();
+        } else {
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=ON; DELETE FROM observations; DELETE FROM sessions;",
+                )
+                .unwrap();
+            let free: i64 = connection
+                .pragma_query_value(None, "freelist_count", |row| row.get(0))
+                .unwrap();
+            assert!(free > 85);
+            let pages: i64 = connection
+                .pragma_query_value(None, "page_count", |row| row.get(0))
+                .unwrap();
+            assert!(pages - free <= 85, "live pages alone must fit the cap");
+            let rows: i64 = connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM observations) + (SELECT count(*) FROM sessions)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 0);
+        }
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let result = Journal::open(
+            root.path().to_owned(),
+            Limits {
+                session_bytes: 1024 * 1024,
+                owner_bytes: 1024 * 1024,
+            },
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            if large_pages {
+                Error::Corrupt
+            } else {
+                Error::Quota
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
 async fn create(journal: &Journal) -> u64 {
     journal
         .create(

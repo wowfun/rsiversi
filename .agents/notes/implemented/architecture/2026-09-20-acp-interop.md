@@ -67,3 +67,12 @@ exercise payload, frame and pending bounds and unknown-send behavior.
 Peer disconnect or process loss can destroy cleanup evidence. Such outcomes are
 explicitly unknown/unsettled and must never trigger automatic prompt retry.
 Protocol conformance tests alone do not prove native Session or UI integration.
+The [journal contract](../../../../crates/rsi-acp/journal/README.md) owns startup
+geometry and recovery bounds. SQLite can clamp a requested page ceiling to the
+current allocation, so setting it alone cannot establish the physical bound;
+neither can a lower logical payload count. Configuring fail-fast lock handling
+after the first probe would retain rusqlite's five-second default during startup.
+Per-conversation
+commits would let a rejected corrupt snapshot leave earlier histories already
+rewritten. The bounded startup transaction retains the prior durable state on
+validation failure and avoids one durability commit for each conversation.

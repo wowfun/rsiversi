@@ -7,6 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 
 const ID: u32 = 0x5253_4143;
+const DATABASE_PAGE_BYTES: usize = 4096;
 const SCHEMA: &str = "CREATE TABLE sessions (id TEXT PRIMARY KEY, metadata BLOB NOT NULL CHECK(length(metadata)=16384), generation INTEGER NOT NULL CHECK(generation>=0), visible_epoch INTEGER NOT NULL CHECK(visible_epoch>0), write_epoch INTEGER NOT NULL CHECK(write_epoch>0), epoch_counter INTEGER NOT NULL CHECK(epoch_counter>=visible_epoch AND epoch_counter>=write_epoch), sequence INTEGER NOT NULL CHECK(sequence>=0), bytes INTEGER NOT NULL CHECK(bytes>=16384)) STRICT;
 CREATE TABLE observations (session TEXT NOT NULL REFERENCES sessions(id), seq INTEGER NOT NULL CHECK(seq>0), epoch INTEGER NOT NULL CHECK(epoch>0), kind TEXT NOT NULL CHECK(kind IN ('user','update','permission')), payload BLOB NOT NULL CHECK(length(payload)<=1048576), PRIMARY KEY(session,seq)) STRICT;
 CREATE INDEX observations_epoch ON observations(session,epoch,seq);";
@@ -38,6 +39,9 @@ pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|error| sql(&error))?;
+    connection
+        .busy_timeout(std::time::Duration::ZERO)
+        .map_err(|error| sql(&error))?;
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| sql(&error))?;
@@ -50,18 +54,11 @@ pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
     if !empty {
         validate_schema(&connection)?;
     }
-    connection
-        .busy_timeout(std::time::Duration::ZERO)
-        .map_err(|error| sql(&error))?;
+    validate_geometry(&connection, path, empty, limits)?;
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL;",
         )
-        .map_err(|error| sql(&error))?;
-    // Allow a capped database, its rollback image and journal/page overhead within
-    // the owner disk ceiling. Logical quotas reserve terminal metadata separately.
-    connection
-        .pragma_update(None, "max_page_count", integer(limits.owner_bytes / 12288)?)
         .map_err(|error| sql(&error))?;
     if empty {
         let transaction = connection.transaction().map_err(|error| sql(&error))?;
@@ -77,6 +74,59 @@ pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
         transaction.commit().map_err(|error| sql(&error))?;
     }
     validate_schema(&connection)?;
+    recover(&mut connection, limits)?;
+    Ok(connection)
+}
+
+fn validate_geometry(
+    connection: &Connection,
+    path: &Path,
+    empty: bool,
+    limits: Limits,
+) -> Result<()> {
+    if empty {
+        connection
+            .pragma_update(None, "page_size", integer(DATABASE_PAGE_BYTES)?)
+            .map_err(|error| sql(&error))?;
+    }
+    let page_size: i64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(|error| sql(&error))?;
+    if page_size != integer(DATABASE_PAGE_BYTES)? {
+        return Err(Error::Corrupt);
+    }
+    let maximum_pages = limits.owner_bytes / (3 * DATABASE_PAGE_BYTES);
+    let pages: i64 = connection
+        .pragma_query_value(None, "page_count", |row| row.get(0))
+        .map_err(|error| sql(&error))?;
+    if pages > integer(maximum_pages)?
+        || std::fs::metadata(path).map_err(|_| Error::Io)?.len()
+            > (maximum_pages * DATABASE_PAGE_BYTES) as u64
+    {
+        return Err(Error::Quota);
+    }
+    connection
+        .pragma_update(None, "max_page_count", integer(maximum_pages)?)
+        .map_err(|error| sql(&error))?;
+    let effective: i64 = connection
+        .pragma_query_value(None, "max_page_count", |row| row.get(0))
+        .map_err(|error| sql(&error))?;
+    if effective != integer(maximum_pages)? {
+        return Err(Error::Quota);
+    }
+    Ok(())
+}
+
+fn recover(connection: &mut Connection, limits: Limits) -> Result<()> {
+    let transaction = connection.transaction().map_err(|error| sql(&error))?;
+    if let Err(error) = recover_conversations(&transaction, limits) {
+        transaction.rollback().map_err(|error| sql(&error))?;
+        return Err(error);
+    }
+    transaction.commit().map_err(|error| sql(&error))
+}
+
+fn recover_conversations(connection: &rusqlite::Transaction<'_>, limits: Limits) -> Result<()> {
     let ids = {
         let mut statement = connection
             .prepare("SELECT id FROM sessions ORDER BY id LIMIT 4097")
@@ -90,31 +140,29 @@ pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
     if ids.len() > MAX_SESSIONS {
         return Err(Error::Corrupt);
     }
-    validate_counters(&connection, limits)?;
+    validate_counters(connection, limits)?;
     // The exclusive connection owns this derived counter; temporary triggers keep
     // it consistent with committed, rolled-back and failed mutations alike.
     connection.execute_batch("CREATE TEMP TABLE accounting(bytes INTEGER NOT NULL); INSERT INTO accounting SELECT coalesce(sum(bytes),0) FROM sessions; CREATE TEMP TRIGGER account_insert AFTER INSERT ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes; END; CREATE TEMP TRIGGER account_update AFTER UPDATE OF bytes ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes-old.bytes; END;").map_err(|error| sql(&error))?;
     for id in ids {
         let id = ConversationId::new(id).map_err(|_| Error::Corrupt)?;
-        let transaction = connection.transaction().map_err(|error| sql(&error))?;
-        discard_replay(&transaction, &id)?;
-        let mut snapshot = get(&transaction, &id)?;
+        discard_replay(connection, &id)?;
+        let mut snapshot = get(connection, &id)?;
         if matches!(
             snapshot.status,
             Status::Starting | Status::Running | Status::Loading | Status::Ready
         ) {
             snapshot.status = Status::Unknown;
-            save(&transaction, &snapshot)?;
-            transaction
+            save(connection, &snapshot)?;
+            connection
                 .execute(
                     "UPDATE sessions SET write_epoch=visible_epoch WHERE id=?",
                     [id.as_str()],
                 )
                 .map_err(|error| sql(&error))?;
         }
-        transaction.commit().map_err(|error| sql(&error))?;
     }
-    Ok(connection)
+    Ok(())
 }
 
 fn validate_counters(connection: &Connection, limits: Limits) -> Result<()> {
