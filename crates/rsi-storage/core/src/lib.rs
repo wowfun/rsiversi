@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+#[cfg(test)]
+mod retirement_tests;
+
 mod directories;
 pub use directories::create_private_directories;
 
@@ -141,17 +144,22 @@ impl Drop for BackendLease {
         let Some(hub) = self.hub.upgrade() else {
             return;
         };
-        let mut state = hub
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state
-            .backends
-            .get(&self.name)
-            .is_some_and(|entry| entry.registration == self.registration)
-        {
-            state.backends.remove(&self.name);
-        }
+        let removed = {
+            let mut state = hub
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .backends
+                .get(&self.name)
+                .is_some_and(|entry| entry.registration == self.registration)
+            {
+                state.backends.remove(&self.name)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 

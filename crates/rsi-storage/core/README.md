@@ -10,7 +10,8 @@ default backend, retry failed writes, or expose mutable registry internals.
 Backend operations acquire one owned slot before dispatching blocking work;
 cancelling a caller after dispatch does not release that slot. Disposal closes
 admission, drains accepted work, then withdraws registration. A registration guard
-closes admission even if its cleanup callback or future is dropped; the actual
+closes admission even if its cleanup callback or future is dropped; withdrawal
+drops the registration outside the admission lock. The actual
 blocking worker retains registration until it finishes. Old handles stay
 unavailable. A replacement generation may open only after disposal completes.
 The slot bounds dispatched blocking work, not caller-owned futures or payloads.

@@ -23,3 +23,5 @@ existing lookalike layout is corruption, not an implicit migration source.
 There is no implicit backend, path, format migration, cross-process merge, or
 fallback routing. Duplicate backend names, missing routes, schema-version
 mismatches, and corrupt media fail loud at their owning boundary.
+Backend withdrawal removes visibility under the hub lock and destroys the
+removed backend after unlocking, including any dependent leases it owns.

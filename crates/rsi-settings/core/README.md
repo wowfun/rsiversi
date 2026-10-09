@@ -4,6 +4,10 @@ This ordinary plugin owns the active Settings namespace registry. It loads one
 complete raw provider document before publication, validates every namespace
 at registration, and resolves objects recursively in `defaults -> base -> user`
 order while arrays and scalar values replace as complete values.
+Registration runs the namespace validator outside the registry mutex, then
+rechecks namespace availability and its raw snapshot before publication. A raw
+value changed by a concurrent namespace generation returns `StaleRegistration`.
+Revision exhaustion is rejected before durable write admission.
 
 Failed provider writes or validation leave the published value and revision
 unchanged. Once a durable write begins, a service-owned operation completes its
@@ -13,6 +17,11 @@ reload stale activation-time state. Dropping a registration lease makes all
 escaped scopes stale and defers namespace handoff until any in-flight commit
 has converged. A provider panic fails that commit but still releases its
 in-flight namespace ownership so retirement cannot strand the name.
+Final namespace destruction runs outside the registry lock, both on immediate
+withdrawal and after a retained commit converges. Validators may own dependent leases.
+Meta withdrawal removes service discovery and does not revoke an escaped typed
+registry handle. Namespace leases still own scope validity and handoff as above;
+this follows Meta's [local-service lifetime](../../rsi-meta/core/README.md).
 
 The same plugin publishes asynchronous `SettingsAccess` for explicit client
 namespace projections. Registration allocates a fresh opaque scope identity;

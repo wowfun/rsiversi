@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+#[cfg(test)]
+mod retirement_tests;
+
 use async_trait::async_trait;
 use rsi_commands_protocol::{
     CommandDefinition, CommandDescriptor, CommandError, CommandLease, CommandRequest,
@@ -110,17 +113,22 @@ fn remove_if_current(state: &Weak<State>, name: &str, registration: u64) {
     let Some(state) = state.upgrade() else {
         return;
     };
-    let mut inner = state
-        .inner
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if inner
-        .definitions
-        .get(name)
-        .is_some_and(|entry| entry.registration == registration)
-    {
-        inner.definitions.remove(name);
-    }
+    let removed = {
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner
+            .definitions
+            .get(name)
+            .is_some_and(|entry| entry.registration == registration)
+        {
+            inner.definitions.remove(name)
+        } else {
+            None
+        }
+    };
+    drop(removed);
 }
 
 /// Ordinary factory for one Commands registry generation.

@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+#[cfg(test)]
+mod retirement_tests;
+
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
@@ -156,11 +159,12 @@ impl ProjectionRegistry for Registry {
 
 fn remove(state: &Weak<State>, name: &str) {
     if let Some(state) = state.upgrade() {
-        state
+        let removed = state
             .units
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(name);
+        drop(removed);
     }
 }
 

@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+#[cfg(test)]
+mod retirement_tests;
+
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{
@@ -69,22 +72,27 @@ struct InFlightCommit {
 
 impl Drop for InFlightCommit {
     fn drop(&mut self) {
-        let mut inner = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let remove = inner
-            .namespaces
-            .get_mut(&self.namespace)
-            .filter(|entry| entry.registration == self.registration)
-            .is_some_and(|entry| {
-                entry.in_flight = entry.in_flight.saturating_sub(1);
-                entry.retiring && entry.in_flight == 0
-            });
-        if remove {
-            inner.namespaces.remove(&self.namespace);
-        }
+        let removed = {
+            let mut inner = self
+                .state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let remove = inner
+                .namespaces
+                .get_mut(&self.namespace)
+                .filter(|entry| entry.registration == self.registration)
+                .is_some_and(|entry| {
+                    entry.in_flight = entry.in_flight.saturating_sub(1);
+                    entry.retiring && entry.in_flight == 0
+                });
+            if remove {
+                inner.namespaces.remove(&self.namespace)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 
@@ -305,23 +313,29 @@ impl Service {
         validate_section(&spec.defaults)?;
         validate_section(&spec.base)?;
         spec.metadata.validate()?;
-        let mut state = self
+        let state = self
             .state
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.namespaces.contains_key(&spec.namespace)
-            || (!migrating && state.migrations.contains(&spec.namespace))
-        {
-            return Err(SettingsError::DuplicateNamespace(spec.namespace));
-        }
+        check_namespace_vacant(&state, &spec.namespace, migrating)?;
         let raw = state.raw.get(&spec.namespace).cloned();
+        drop(state);
         if let Some(raw) = &raw {
             validate_section(raw)?;
         }
         let resolved = resolve(&spec.defaults, &spec.base, raw.as_ref());
         validate_section(&resolved)?;
         spec.validator.validate(&resolved)?;
+        let mut state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        check_namespace_vacant(&state, &spec.namespace, migrating)?;
+        if state.raw.get(&spec.namespace) != raw.as_ref() {
+            return Err(SettingsError::StaleRegistration(spec.namespace));
+        }
         state.next_registration = state
             .next_registration
             .checked_add(1)
@@ -360,23 +374,39 @@ impl Service {
             let Some(state) = weak.upgrade() else {
                 return;
             };
-            let mut inner = state
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = inner
-                .namespaces
-                .get_mut(&namespace)
-                .filter(|entry| entry.registration == registration)
-            {
-                if entry.in_flight == 0 {
-                    inner.namespaces.remove(&namespace);
+            let removed = {
+                let mut inner = state
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = inner
+                    .namespaces
+                    .get_mut(&namespace)
+                    .filter(|entry| entry.registration == registration)
+                {
+                    if entry.in_flight == 0 {
+                        inner.namespaces.remove(&namespace)
+                    } else {
+                        entry.retiring = true;
+                        None
+                    }
                 } else {
-                    entry.retiring = true;
+                    None
                 }
-            }
+            };
+            drop(removed);
         });
         Ok(SettingsRegistration { scope, lease })
+    }
+}
+
+fn check_namespace_vacant(state: &ServiceInner, namespace: &str, migrating: bool) -> Result<()> {
+    if state.namespaces.contains_key(namespace)
+        || (!migrating && state.migrations.contains(namespace))
+    {
+        Err(SettingsError::DuplicateNamespace(namespace.to_owned()))
+    } else {
+        Ok(())
     }
 }
 
@@ -435,6 +465,10 @@ impl Scope {
                     actual: entry.revision,
                 });
             }
+            entry
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| SettingsError::InvalidInput("settings revision exhausted".into()))?;
             (
                 entry.raw.clone(),
                 entry.defaults.clone(),
@@ -543,9 +577,9 @@ fn publish_settings_commit(
         Some(entry) => match committed {
             Ok(committed) => {
                 if entry.revision == expected_revision {
-                    entry.revision = entry.revision.checked_add(1).ok_or_else(|| {
-                        SettingsError::InvalidInput("settings revision exhausted".into())
-                    })?;
+                    entry.revision = expected_revision
+                        .checked_add(1)
+                        .expect("write admission checked revision capacity");
                     entry.raw.clone_from(&committed);
                     entry.resolved = resolve(&entry.defaults, &entry.base, committed.as_ref());
                     Ok(SettingsSnapshot {

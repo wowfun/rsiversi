@@ -59,9 +59,13 @@ impl BackendOperations {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         admission.closed = true;
-        if !admission.active {
-            admission.registration.take();
-        }
+        let registration = if admission.active {
+            None
+        } else {
+            admission.registration.take()
+        };
+        drop(admission);
+        drop(registration);
     }
 
     /// Checks local health, without accessing the durable medium.
@@ -146,9 +150,13 @@ impl Drop for Completion {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         admission.active = false;
-        if admission.closed {
-            admission.registration.take();
-        }
+        let registration = if admission.closed {
+            admission.registration.take()
+        } else {
+            None
+        };
+        drop(admission);
+        drop(registration);
     }
 }
 
@@ -161,8 +169,20 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    #[derive(Debug)]
-    struct UnusedBackend;
+    #[derive(Debug, Default)]
+    struct UnusedBackend {
+        drop_probe: Option<(std::sync::Weak<BackendOperations>, Arc<AtomicBool>)>,
+    }
+    impl Drop for UnusedBackend {
+        fn drop(&mut self) {
+            if let Some((owner, unlocked)) = &self.drop_probe {
+                unlocked.store(
+                    owner.upgrade().unwrap().admission.try_lock().is_ok(),
+                    Ordering::SeqCst,
+                );
+            }
+        }
+    }
     #[async_trait::async_trait]
     impl crate::KvBackend for UnusedBackend {
         fn ensure_available(&self) -> Result<()> {
@@ -184,7 +204,7 @@ mod tests {
         use crate::StorageHub as _;
         for polled in [false, true] {
             let hub = crate::Hub::new();
-            let backend = Arc::new(UnusedBackend);
+            let backend = Arc::new(UnusedBackend::default());
             let owner = Arc::new(BackendOperations::default());
             let registration =
                 owner.retain_registration(hub.register("owned", backend.clone()).unwrap());
@@ -223,6 +243,54 @@ mod tests {
             worker.await.unwrap().unwrap();
             assert!(hub.resolve("owned").is_err());
             let _replacement = hub.register("owned", backend).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn withdrawal_drops_the_backend_outside_admission_for_idle_and_active_owners() {
+        use crate::StorageHub as _;
+        for active in [false, true] {
+            let hub = crate::Hub::new();
+            let owner = Arc::new(BackendOperations::default());
+            let unlocked = Arc::new(AtomicBool::new(false));
+            let backend = Arc::new(UnusedBackend {
+                drop_probe: Some((Arc::downgrade(&owner), unlocked.clone())),
+            });
+            let registration = owner.retain_registration(hub.register("probe", backend).unwrap());
+            if active {
+                let (entered, started) = tokio::sync::oneshot::channel();
+                let (release, released) = tokio::sync::oneshot::channel();
+                let worker = tokio::spawn({
+                    let owner = owner.clone();
+                    async move {
+                        owner
+                            .run(move || {
+                                entered.send(()).unwrap();
+                                released.blocking_recv().unwrap();
+                                Ok(())
+                            })
+                            .await
+                    }
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(2), started)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                drop(registration);
+                assert!(!unlocked.load(Ordering::SeqCst));
+                release.send(()).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            } else {
+                drop(registration);
+            }
+            assert!(
+                unlocked.load(Ordering::SeqCst),
+                "backend destructor must be able to reenter admission"
+            );
         }
     }
 
