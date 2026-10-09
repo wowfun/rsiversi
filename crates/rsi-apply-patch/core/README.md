@@ -29,8 +29,8 @@ After helper start, unsuccessful exit, lost or malformed output, and wait/read
 failures have unknown effects just like cancellation; none permits replay.
 Once the helper has started, cancellation may race a committed filesystem
 prefix before the helper can emit its sole effect ledger. After terminating and
-reaping that helper, the Tool therefore returns an explicit `effects_unknown`,
-`effects_known: false`, non-replayable result instead of a bare cancellation.
+reaping that helper, the Tool returns the family's
+[`OutcomeUnknown` failure](../README.md); no ordinary model-facing result is published.
 
 The private patch engine owns no-follow, descriptor-relative filesystem
 resolution, complete preflight, bounded fuzzy-match audits, and exact partial
@@ -54,8 +54,9 @@ semantics exist.
 Patch framing normalizes CRLF delimiters but preserves a lone carriage return
 inside an added line. A pure-addition update with an `@@ context` marker inserts
 after that exact anchor; without an anchor it appends.
-Updated text is serialized with the source's first observed line ending and a
-trailing line ending, so mixed endings are intentionally normalized. An
+Unchanged lines retain their original endings; a final line without an ending,
+inserted lines and changed lines use the source's first observed ending.
+Nonempty output has a trailing ending. An
 `*** End of File` hunk is anchored to the final matching block. If its expected
 lines do not end the source, preflight rejects the patch instead of silently
 applying the hunk to an earlier occurrence.

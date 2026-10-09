@@ -75,7 +75,7 @@ fn matcher_uses_global_layer_priority_and_audits_only_fuzzy_matches() {
 }
 
 #[test]
-fn normalizes_mixed_line_endings_and_terminates_nonempty_output() {
+fn preserves_unchanged_mixed_line_endings_and_terminates_nonempty_output() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("mixed.txt"), b"one\r\ntwo\rthree\nfour").unwrap();
     let result = patch(

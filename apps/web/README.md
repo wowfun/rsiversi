@@ -29,7 +29,7 @@ IndexedDB schema 4 namespaces composer records by endpoint, real principal
 validates both old pane ledgers, migrates their records and commits one aggregate
 ledger atomically. It preserves exact pending request strings, phases, receipts
 and incarnations; a malformed record or quota mismatch aborts the entire upgrade.
-Upgrade from schema 1, 2 or 3 removes the obsolete workspace-trust field from
+Upgrade from schema 1 or 2 removes the obsolete workspace-trust field from
 creation intents. Existing editor text, images, references and Header bindings
 remain intact; it never rewrites the opaque Rust submission. A different service/Store version does not
 make an old pending request replayable: Rust checks its operation and immutable
