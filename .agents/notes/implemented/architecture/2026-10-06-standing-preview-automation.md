@@ -60,6 +60,14 @@ a verify-to-spawn gap and repeatedly occupy async workers. Prepare instead hashe
 on a blocking worker and proves startup/settlement once; failed settlement fences
 that generation.
 
+Automation claims, publishes a linked cancellation token and dispatches its
+worker in one retained Ledger operation. A state reread alone leaves another
+check-then-act race. The dispatch holds a tracker token across durable claim I/O,
+without retaining the active-map mutex. Closing can cancel promptly and still
+wait for any newly claimed worker to register and settle.
+Cancellation acknowledgement disarms later stages; it does not certify rollback
+or quiescence of work already admitted.
+
 Opaque cursor cuts are principal-bound, expire after five minutes, and have both
 global and per-principal caps. A continuation replaces its predecessor, so a
 long scan consumes one retained cut and cannot evict another principal's scans.

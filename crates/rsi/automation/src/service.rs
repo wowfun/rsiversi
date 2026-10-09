@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use tokio::{
@@ -53,7 +53,29 @@ pub struct AutomationService {
     pub(crate) stop: CancellationToken,
     active: Mutex<BTreeMap<u64, CancellationToken>>,
 }
+struct AttemptReservation {
+    owner: Arc<AutomationService>,
+    id: u64,
+    stop: CancellationToken,
+    converged: bool,
+}
+impl Drop for AttemptReservation {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.owner.active().remove(&self.id);
+        if !self.converged {
+            self.owner.ledger.fence();
+        }
+    }
+}
 impl AutomationService {
+    fn active(&self) -> MutexGuard<'_, BTreeMap<u64, CancellationToken>> {
+        self.active.lock().unwrap_or_else(|poisoned| {
+            self.ledger.fence();
+            poisoned.into_inner()
+        })
+    }
+
     pub fn new(
         ledger: Arc<Ledger>,
         policy: Arc<PolicyOwner>,
@@ -84,7 +106,7 @@ impl AutomationService {
         }
     }
     /// # Panics
-    /// Panics if internal ownership bookkeeping is poisoned; spawning also requires a Tokio runtime.
+    /// Panics if no Tokio runtime is entered.
     pub fn start(self: &Arc<Self>) {
         let owner = self.clone();
         self.tasks.spawn(async move {
@@ -102,24 +124,69 @@ impl AutomationService {
                             last_retention = instant;
                         }
                         if !matches!(owner.readiness(), Readiness::Available)
-                            || owner.active.lock().expect("automation active").len() >= 2
+                            || owner.active().len() >= 2
                         {
                             continue;
                         }
-                        let Ok(Some(attempt)) = owner.ledger.run(move |ledger| ledger.claim(instant)).await else { continue };
-                        let child = owner.clone();
-                        owner.tasks.spawn(async move { child.run(attempt).await; });
+                        let _ = owner.claim_and_dispatch(instant).await;
                     }
                 }
             }
         });
     }
-    async fn run(self: Arc<Self>, attempt: Attempt) {
+    async fn claim_and_dispatch(
+        self: &Arc<Self>,
+        instant: u64,
+    ) -> Result<Option<u64>, AdmissionError> {
+        let owner = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        self.ledger
+            .run(move |ledger| owner.dispatch_claim(ledger, instant, &runtime))
+            .await
+    }
+    fn dispatch_claim(
+        self: &Arc<Self>,
+        ledger: &Ledger,
+        instant: u64,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<Option<u64>, AdmissionError> {
+        self.dispatch_with(runtime, || ledger.claim(instant))
+    }
+    fn dispatch_with(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+        claim: impl FnOnce() -> Result<Option<Attempt>, AdmissionError>,
+    ) -> Result<Option<u64>, AdmissionError> {
+        let _dispatch = {
+            let active = self.active();
+            if self.stop.is_cancelled() || active.len() >= 2 {
+                return Ok(None);
+            }
+            self.tasks.token()
+        };
+        let Some(attempt) = claim()? else {
+            return Ok(None);
+        };
+        let id = attempt.id;
         let stop = self.stop.child_token();
-        self.active
-            .lock()
-            .expect("automation active")
-            .insert(attempt.id, stop.clone());
+        self.active().insert(id, stop.clone());
+        let reservation = AttemptReservation {
+            owner: self.clone(),
+            id,
+            stop,
+            converged: false,
+        };
+        let owner = self.clone();
+        self.tasks.spawn_on(
+            async move {
+                owner.run(attempt, reservation).await;
+            },
+            runtime,
+        );
+        Ok(Some(id))
+    }
+    async fn run(self: Arc<Self>, attempt: Attempt, mut reservation: AttemptReservation) {
+        let stop = reservation.stop.clone();
         let deadline = stop.clone();
         let timer = self.tasks.spawn(attempt_deadline(deadline));
         let result = self.execute(&attempt, stop.clone()).await;
@@ -138,13 +205,10 @@ impl AutomationService {
         stop.cancel();
         let _ = timer.await;
         stop.cancel();
-        self.active
-            .lock()
-            .expect("automation active")
-            .remove(&attempt.id);
+        reservation.converged = true;
     }
     async fn execute(&self, attempt: &Attempt, stop: CancellationToken) -> Result<(), String> {
-        let source = self.source_for(attempt).await?;
+        let source = tokio::select! { biased; () = stop.cancelled() => return Err("attempt cancelled".into()), source = self.source_for(attempt) => source? };
         let policy = self.policy.snapshot().map_err(|e| e.to_string())?;
         let rule = policy
             .rule(&source, &attempt.rule.id)
@@ -153,12 +217,16 @@ impl AutomationService {
             return Err("rule disabled".into());
         }
         let browser = self.browser.as_ref().ok_or("browser unavailable")?;
+        if stop.is_cancelled() {
+            return Err("attempt cancelled".into());
+        }
         let scope = browser
             .open(
                 attempt.rule.policy(&attempt.deployment.url)?,
                 &format!("attempt-{}-check", attempt.id),
             )
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
         let result = tokio::select! {()=stop.cancelled()=>Err("attempt cancelled".into()),result=scope.check(attempt.rule.checks.clone())=>result};
         let cleanup = scope.close().await;
         drop(scope);
@@ -179,13 +247,17 @@ impl AutomationService {
             if self.explorer.is_none() {
                 return Err("exploration integration unavailable".into());
             }
+            if stop.is_cancelled() {
+                return Err("attempt cancelled".into());
+            }
             let scope = Arc::new(
                 browser
                     .open_exploration(
                         attempt.rule.policy(&attempt.deployment.url)?,
                         &format!("attempt-{}-explore", attempt.id),
                     )
-                    .await?,
+                    .await
+                    .map_err(|error| error.to_string())?,
             );
             self.explore_failed(settled.id, scope, stop.clone()).await?;
         }
@@ -312,7 +384,7 @@ impl AutomationService {
     /// # Errors
     /// Rejects identity conflicts, capacity or failed and uncertain durable cancellation.
     /// # Panics
-    /// Panics if internal ownership bookkeeping is poisoned; spawning also requires a Tokio runtime.
+    /// Panics if no Tokio runtime is entered.
     pub async fn cancel(
         self: &Arc<Self>,
         id: u64,
@@ -323,7 +395,7 @@ impl AutomationService {
         self.ledger
             .run(move |ledger| {
                 let result = ledger.cancel(id, &request)?;
-                if let Some(token) = owner.active.lock().expect("automation active").get(&id) {
+                if let Some(token) = owner.active().get(&id) {
                     token.cancel();
                 }
                 Ok(result)
@@ -331,13 +403,11 @@ impl AutomationService {
             .await
     }
     /// # Panics
-    /// Panics if internal ownership bookkeeping is poisoned; spawning also requires a Tokio runtime.
+    /// Panics if no Tokio runtime is entered.
     pub async fn revoke_disabled(&self) {
         let policy = self.policy.snapshot().ok();
         let active = self
-            .active
-            .lock()
-            .expect("automation active")
+            .active()
             .iter()
             .map(|(id, token)| (*id, token.clone()))
             .collect::<Vec<_>>();
@@ -485,10 +555,10 @@ impl AutomationService {
         Ok(actual)
     }
     /// # Panics
-    /// Panics if internal ownership bookkeeping is poisoned; spawning also requires a Tokio runtime.
+    /// Panics if no Tokio runtime is entered.
     pub async fn close(&self) {
         self.stop.cancel();
-        for token in self.active.lock().expect("automation active").values() {
+        for token in self.active().values() {
             token.cancel();
         }
         self.tasks.close();
@@ -720,6 +790,206 @@ async fn reply(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn claim_io_releases_bookkeeping_while_dispatch_remains_tracked_through_close() {
+        let directory = crate::test_directory();
+        let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
+        let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
+        let receipt = ledger
+            .admit(
+                "source".into(),
+                "close-during-claim".into(),
+                "b".repeat(64),
+                crate::store::tests::rule(),
+                crate::store::tests::deployment(1, now()),
+                now(),
+            )
+            .await
+            .unwrap();
+        let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let runtime = tokio::runtime::Handle::current();
+        let dispatch = std::thread::spawn({
+            let owner = owner.clone();
+            let ledger = ledger.clone();
+            move || {
+                owner.dispatch_with(&runtime, || {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    ledger.claim(now())
+                })
+            }
+        });
+        entering.await.unwrap();
+        let available = owner.active.try_lock().is_ok();
+        if !available {
+            release.send(()).unwrap();
+            dispatch.join().unwrap().unwrap();
+            owner.close().await;
+            assert!(
+                available,
+                "durable claim must not hold the active-attempt mutex"
+            );
+            return;
+        }
+        let mut closing = Box::pin(owner.close());
+        assert!(futures_util::poll!(&mut closing).is_pending());
+        assert!(owner.stop.is_cancelled());
+        assert!(
+            !owner.tasks.is_empty(),
+            "claim-to-worker handoff must retain task ownership"
+        );
+        release.send(()).unwrap();
+        assert_eq!(dispatch.join().unwrap().unwrap(), Some(receipt.attempt_id));
+        closing.await;
+        assert!(owner.active().is_empty());
+        assert_eq!(
+            ledger.get(receipt.attempt_id).unwrap().state,
+            crate::AttemptState::Cancelled
+        );
+        assert!(ledger.available());
+    }
+
+    #[tokio::test]
+    async fn converged_reservation_releases_bookkeeping_without_fencing_a_healthy_ledger() {
+        let directory = crate::test_directory();
+        let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
+        let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
+        let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
+        let token = owner.stop.child_token();
+        owner.active().insert(1, token.clone());
+        drop(AttemptReservation {
+            owner: owner.clone(),
+            id: 1,
+            stop: token.clone(),
+            converged: true,
+        });
+        assert!(token.is_cancelled());
+        assert!(owner.active().is_empty());
+        assert!(ledger.available());
+        owner.close().await;
+    }
+
+    #[tokio::test]
+    async fn poisoned_attempt_bookkeeping_does_not_panic_during_teardown() {
+        for converged in [false, true] {
+            let directory = crate::test_directory();
+            let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
+            let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
+            let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
+            let token = owner.stop.child_token();
+            owner.active.lock().unwrap().insert(1, token.clone());
+            let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _active = owner.active.lock().unwrap();
+                panic!("bookkeeping interrupted");
+            }));
+            assert!(poisoned.is_err());
+            let reservation = AttemptReservation {
+                owner: owner.clone(),
+                id: 1,
+                stop: token.clone(),
+                converged,
+            };
+            let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(reservation);
+            }));
+            assert!(
+                dropped.is_ok(),
+                "reservation cleanup panicked on a poisoned mutex"
+            );
+            assert!(token.is_cancelled());
+            assert!(
+                owner
+                    .active
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            );
+            assert!(!ledger.available());
+
+            let unwinding = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _reservation = AttemptReservation {
+                    owner: owner.clone(),
+                    id: 2,
+                    stop: owner.stop.child_token(),
+                    converged: false,
+                };
+                panic!("worker interrupted");
+            }));
+            assert_eq!(
+                unwinding.unwrap_err().downcast_ref::<&str>(),
+                Some(&"worker interrupted")
+            );
+            owner.close().await;
+        }
+    }
+
+    #[test]
+    fn cancellation_before_the_first_worker_poll_reaches_the_published_token() {
+        let admission = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let worker = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = crate::test_directory();
+        let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
+        let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
+        let receipt = admission
+            .block_on(ledger.admit(
+                "source".into(),
+                "cancel-before-poll".into(),
+                "b".repeat(64),
+                crate::store::tests::rule(),
+                crate::store::tests::deployment(1, now()),
+                now(),
+            ))
+            .unwrap();
+        let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
+        assert_eq!(
+            owner
+                .dispatch_claim(&ledger, now(), worker.handle())
+                .unwrap(),
+            Some(receipt.attempt_id)
+        );
+        let token = owner.active.lock().unwrap()[&receipt.attempt_id].clone();
+        assert!(!token.is_cancelled());
+        admission
+            .block_on(owner.cancel(receipt.attempt_id, "cancel"))
+            .unwrap();
+        assert!(token.is_cancelled());
+        worker.block_on(owner.close());
+        assert!(owner.active.lock().unwrap().is_empty());
+        assert_eq!(
+            ledger.get(receipt.attempt_id).unwrap().state,
+            crate::AttemptState::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_scheduler_does_not_claim_and_abnormal_reservation_destruction_fences() {
+        let directory = crate::test_directory();
+        let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
+        let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
+        let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
+        owner.stop.cancel();
+        assert_eq!(owner.claim_and_dispatch(now()).await.unwrap(), None);
+        let token = CancellationToken::new();
+        owner.active.lock().unwrap().insert(1, token.clone());
+        drop(AttemptReservation {
+            owner: owner.clone(),
+            id: 1,
+            stop: token.clone(),
+            converged: false,
+        });
+        assert!(token.is_cancelled());
+        assert!(owner.active.lock().unwrap().is_empty());
+        assert!(!ledger.available());
+        owner.close().await;
+    }
     use super::*;
     #[tokio::test(start_paused = true)]
     async fn accept_error_retries_and_retirement_interrupts_backoff() {
@@ -767,7 +1037,19 @@ mod tests {
         crate::store::tests::exhaust_metadata(&ledger);
         let policy = Arc::new(PolicyOwner::open(directory.path().join("policy")).unwrap());
         let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
-        owner.clone().run(attempt).await;
+        let stop = owner.stop.child_token();
+        owner
+            .active
+            .lock()
+            .unwrap()
+            .insert(attempt.id, stop.clone());
+        let reservation = AttemptReservation {
+            owner: owner.clone(),
+            id: attempt.id,
+            stop,
+            converged: false,
+        };
+        owner.clone().run(attempt, reservation).await;
         assert!(
             !ledger.available(),
             "failure settlement must not leave a healthy running ledger"
@@ -835,9 +1117,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let attempt = ledger.claim(now()).unwrap().unwrap();
         let owner = AutomationService::new(ledger.clone(), policy, None, BTreeMap::new(), None);
-        owner.clone().run(attempt).await;
+        owner.claim_and_dispatch(now()).await.unwrap();
+        owner.tasks.close();
+        owner.tasks.wait().await;
         let attempt = ledger.get(receipt.attempt_id).unwrap();
         assert_eq!(attempt.state, crate::AttemptState::Unavailable);
         assert_eq!(

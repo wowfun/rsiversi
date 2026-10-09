@@ -39,6 +39,9 @@ Row and encoded-metadata totals are initialized from durable tables once at open
 then maintained by SQLite triggers in each transaction, including rollback and
 retention. Capacity checks and row replacements read those totals without
 rescanning unrelated bodies. Attempts have a covering task/id index.
+The active-attempt mutex protects only bookkeeping and task admission; durable
+claim I/O runs without holding it. A tracked dispatch reservation keeps shutdown
+waiting through claim, cancellation-token publication and worker registration.
 Idle or fully occupied claim polling performs only indexed reads; it neither
 starts a write transaction nor checkpoints. Claim materializes one queued row at
 a time, retiring expired rows before selecting live work.
@@ -58,6 +61,14 @@ callers occupy no blocking thread; abandoning a caller before dispatch cancels
 its operation, while a dispatched worker retains the lane through settlement.
 Retirement closes the lane, refuses waiting callers and awaits dispatched work
 before releasing leases.
+Claim, linked cancellation-token registration and task dispatch share the Ledger
+lane with cancellation. Cancellation commits first and cancels the registered
+token before acknowledgement. Workers check cancellation before browser launch
+and exploration. An acknowledgement disarms future stages; it is not a quiescence
+receipt or rollback of effects already admitted. Abnormal worker destruction
+removes its reservation and fences the Ledger rather than assuming convergence.
+Poisoned live-attempt bookkeeping also fences the Ledger. Teardown recovers the
+retained entries to cancel and remove them without panicking again.
 Artifact reads bound the SQLite blob before allocation and revalidate canonical
 PNG pixels and bytes. Corrupt durable evidence fences this Automation owner.
 Settlement normalizes and validates every screenshot before the transaction, so
