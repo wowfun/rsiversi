@@ -3,8 +3,10 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod capture_context;
 mod export;
 mod selected;
+pub use capture_context::CaptureContext;
 pub use selected::{ObservedReferenceText, ReferenceText, reference_texts};
 mod plugin;
 mod tools;
@@ -16,7 +18,7 @@ use rsi_agent_session_protocol::{
     MAXIMUM_REFERENCE_SCAN_FACTS, MAXIMUM_REFERENCE_TEXT_BYTES, ModelEventPurpose,
     ReferenceBinding, ReferenceCapture, ReferenceMetadata, ReferenceOmission, ReferenceReadRequest,
     ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource, ReferenceSuffix,
-    ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, TurnId,
 };
 use rsi_agent_store_protocol::{CasObjectRef, SessionStore, StoreError};
 use sha2::{Digest as _, Sha256};
@@ -168,16 +170,28 @@ impl References {
     /// Captures a durable source's current bounded suffix for this actual target.
     pub async fn capture(
         &self,
-        source: SessionId,
-        target: SessionHeader,
+        context: CaptureContext,
         cancellation: CancellationToken,
     ) -> Result<FrozenReference> {
-        target.validate().map_err(invalid)?;
+        context.check()?;
+        let ReferenceSource::Native { binding } = context.source() else {
+            return Err(invalid("suffix capture requires a native source"));
+        };
+        let binding = binding.clone();
+        let source = binding.session_id.clone();
         self.run(cancellation, move |store, stop, _cache| async move {
             let source_header = store.header(&source).await?;
             check(&stop)?;
+            context.check()?;
+            if source_header.fingerprint().map_err(invalid)? != binding.header_sha256
+                || source_header.coordinates() != context.coordinates()
+                || source_header.protection().is_some()
+            {
+                return Err(invalid("suffix source Header or workspace mismatch"));
+            }
             let _validation = store.prepare_session(&source).await?;
             check(&stop)?;
+            context.check()?;
             let suffix = store
                 .read_fact_suffix(
                     &source,
@@ -186,11 +200,14 @@ impl References {
                 )
                 .await?;
             check(&stop)?;
-            let envelope = export::capture(&source_header, &target, suffix)?;
+            context.check()?;
+            let envelope = export::capture(&source_header, context.target(), suffix)?;
             let bytes: Arc<[u8]> = serde_json::to_vec(&envelope).map_err(invalid)?.into();
             check(&stop)?;
+            context.check()?;
             let object = store.put_cas(bytes).await?;
             check(&stop)?;
+            context.check()?;
             envelope.into_frozen(ReferenceSnapshotRef {
                 sha256: object.sha256,
                 byte_len: object.byte_len,

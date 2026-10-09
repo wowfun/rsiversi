@@ -11,6 +11,7 @@ use std::{
     fs::{File, OpenOptions},
     path::Path,
 };
+mod query;
 
 const MAXIMUM_PAGES: i64 = 1024 * 1024 * 1024 / 4096;
 struct Database {
@@ -118,10 +119,10 @@ fn open(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 fn schema(connection: &Connection) -> Result<String> {
-    connection.execute_batch("CREATE TABLE meta(generation TEXT NOT NULL);CREATE TABLE sources(key TEXT PRIMARY KEY,coverage TEXT NOT NULL CHECK(length(coverage)<=8192));CREATE VIRTUAL TABLE documents USING fts5(body,source,metadata UNINDEXED,tokenize='unicode61');PRAGMA user_version=2;").map_err(invalid)?;
+    connection.execute_batch("CREATE TABLE meta(generation TEXT NOT NULL,revision INTEGER NOT NULL);CREATE TABLE catalog(key TEXT PRIMARY KEY,scope TEXT NOT NULL CHECK(length(CAST(scope AS BLOB))<=8192));CREATE TABLE sources(key TEXT PRIMARY KEY,coverage TEXT NOT NULL CHECK(length(coverage)<=8192));CREATE VIRTUAL TABLE documents USING fts5(body,source,metadata UNINDEXED,tokenize='unicode61');PRAGMA user_version=3;").map_err(invalid)?;
     let generation = generation()?;
     connection
-        .execute("INSERT INTO meta VALUES (?1)", [&generation])
+        .execute("INSERT INTO meta VALUES (?1,0)", [&generation])
         .map_err(invalid)?;
     Ok(generation)
 }
@@ -135,7 +136,7 @@ fn valid(connection: &Connection) -> Result<String> {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql)?;
-    if version != 2 {
+    if version != 3 {
         return Err(invalid("obsolete history cache"));
     }
     // Inspect only bounded schema metadata, never the FTS contents on startup.
@@ -152,6 +153,12 @@ fn valid(connection: &Connection) -> Result<String> {
     };
     if layout(connection)? != layout(&expected)? {
         return Err(invalid("obsolete history cache schema"));
+    }
+    let revision: i64 = connection
+        .query_row("SELECT revision FROM meta LIMIT 1", [], |row| row.get(0))
+        .map_err(sql)?;
+    if revision < 0 {
+        return Err(invalid("invalid cache revision"));
     }
     let generations = connection.prepare("SELECT CASE WHEN length(CAST(generation AS BLOB))=32 THEN generation END FROM meta LIMIT 2").map_err(sql)?
         .query_map([], |row| row.get::<_, Option<String>>(0)).map_err(sql)?
@@ -177,8 +184,16 @@ fn clear_source(db: &mut Database, key: &str, stop: &CancellationToken) -> Resul
     let tx = db.connection.transaction().map_err(sql)?;
     tx.execute("DELETE FROM sources WHERE key=?1", [key])
         .map_err(sql)?;
-    tx.execute("UPDATE meta SET generation=?1", [&next])
-        .map_err(sql)?;
+    if tx
+        .execute(
+            "UPDATE meta SET generation=?1,revision=revision+1 WHERE revision<9223372036854775807",
+            [&next],
+        )
+        .map_err(sql)?
+        != 1
+    {
+        return Err(ApiError::Capacity);
+    }
     tx.commit().map_err(sql)?;
     db.generation = next;
     loop {
@@ -356,13 +371,17 @@ impl Cache {
         self.run(stop.clone(),move|db|{
         let actual=load(&db.connection,&key,previous.source.clone())?;if actual!=previous{return Err(invalid("history progress changed"));}
         if previous.indexed_through=="0" && db.connection.query_row("SELECT rowid FROM documents WHERE documents MATCH ?1 LIMIT 1",[source_match(&key)],|row|row.get::<_,i64>(0)).optional().map_err(sql)?.is_some() {clear_source(db,&key,&stop)?;budget(&db.connection,stop.clone())?;}
+        let has_documents = !batch.documents.is_empty();
         let tx=db.connection.transaction().map_err(sql)?;
         for document in batch.documents {tx.execute("INSERT INTO documents(body,source,metadata) VALUES (?1,?2,?3)",params![document.text,key,serde_json::to_string(&document.hit).map_err(invalid)?]).map_err(sql)?;}
-        let coverage=Coverage{source:previous.source,indexed_through:batch.through.to_string(),observed_through:batch.horizon.to_string(),omissions:rsi_history_api::decimal(&previous.omissions)?.checked_add(batch.omissions).ok_or_else(||invalid("history omission count exhausted"))?.to_string(),has_more:batch.has_more};coverage.validate()?;
+        let coverage=Coverage{source:previous.source.clone(),indexed_through:batch.through.to_string(),observed_through:batch.horizon.to_string(),omissions:rsi_history_api::decimal(&previous.omissions)?.checked_add(batch.omissions).ok_or_else(||invalid("history omission count exhausted"))?.to_string(),has_more:batch.has_more};coverage.validate()?;
+        if !has_documents && coverage == previous { return Ok(Reply::Coverage { coverage }); }
         let count:i64=tx.query_row("SELECT count(*) FROM sources",[],|row|row.get(0)).map_err(invalid)?;
         if count>=4096 && tx.query_row("SELECT 1 FROM sources WHERE key=?1",[&key],|_|Ok(())).optional().map_err(invalid)?.is_none(){return Err(ApiError::Capacity);}
         tx.execute("INSERT INTO sources(key,coverage) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET coverage=excluded.coverage",params![key,serde_json::to_string(&coverage).map_err(invalid)?]).map_err(sql)?;
-        tx.commit().map_err(sql)?;Ok(Reply::Coverage{coverage})
+        let next=generation()?;
+        if tx.execute("UPDATE meta SET generation=?1,revision=revision+1 WHERE revision<9223372036854775807",[&next]).map_err(sql)?!=1{return Err(ApiError::Capacity);}
+        tx.commit().map_err(sql)?;db.generation=next;Ok(Reply::Coverage{coverage})
     }).await
     }
     pub async fn rebuild(

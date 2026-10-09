@@ -413,6 +413,9 @@ fails without modifying its rows or database version. Schema 1 and 2 drafts have
 no references and retain their validated migration. Unsupported reference metadata
 is never translated into a new selection or silently removed from an uncertain
 submission.
+Changing History's query or source filters clears the displayed matches and their
+pagination actions. Changing a source filter also drops discovery continuation;
+pagination cannot silently reuse a previous query or workspace.
 
 External panes keep their switch guard through same-generation frames; only a
 confirmed new binding clears it. Both buttons and keyboard submission respect it.

@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 mod authority;
 mod cache;
+mod discovery;
 mod plugin;
 mod source;
 mod tools;
@@ -47,6 +48,7 @@ fn check(stop: &CancellationToken) -> Result<()> {
 pub struct ProductHistorySearch {
     store: Arc<dyn SessionStore>,
     sessions: Arc<dyn rsi_session_protocol::SessionService>,
+    ingress: Arc<dyn rsi_session_protocol::SessionIngress>,
     external: Arc<dyn ExternalConversations>,
     workspaces: Arc<dyn WorkspaceRegistry>,
     references: Arc<References>,
@@ -59,6 +61,7 @@ pub struct ProductHistorySearch {
     stop: CancellationToken,
     admission: Mutex<()>,
     protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
+    discovery: Mutex<std::collections::VecDeque<discovery::Pass>>,
 }
 /// Exact source and authorization providers retained by one history owner.
 #[derive(Debug)]
@@ -67,6 +70,8 @@ pub struct HistorySources {
     pub store: Arc<dyn SessionStore>,
     /// Current Session identity and draft lifetime provider.
     pub sessions: Arc<dyn rsi_session_protocol::SessionService>,
+    /// Actual human-origin Session narrowing, including live drafts.
+    pub ingress: Arc<dyn rsi_session_protocol::SessionIngress>,
     /// External observed conversation owner.
     pub external: Arc<dyn ExternalConversations>,
     /// Registered coordinate authority.
@@ -89,6 +94,7 @@ impl ProductHistorySearch {
         Ok(Arc::new(Self {
             store: sources.store,
             sessions: sources.sessions,
+            ingress: sources.ingress,
             external: sources.external,
             workspaces: sources.workspaces,
             references: sources.references,
@@ -101,6 +107,7 @@ impl ProductHistorySearch {
             stop: CancellationToken::new(),
             admission: Mutex::new(()),
             protection: sources.protection,
+            discovery: Mutex::new(std::collections::VecDeque::new()),
         }))
     }
     /// Executes one finite request. A dropped waiter never releases a dispatched worker.
@@ -153,15 +160,32 @@ impl ProductHistorySearch {
         self.tasks.wait().await;
         self.cache.close().await;
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One exhaustive owner dispatch retains authorization and settlement for every History operation."
+    )]
     async fn execute(
         &self,
         authority: HistoryAuthority,
         request: Request,
         stop: &CancellationToken,
     ) -> Result<Reply> {
-        let scope = request.scope().clone();
+        if matches!(
+            request,
+            Request::Discover { .. }
+                | Request::Query { .. }
+                | Request::Progress { .. }
+                | Request::Reset { .. }
+        ) {
+            return self.execute_query(authority, request, stop).await;
+        }
+        let scope = request
+            .scope()
+            .ok_or_else(|| invalid("missing source"))?
+            .clone();
         let source = self.authorize(&authority, &scope, stop).await?;
         let protection = source.protection.clone();
+        let coordinates = source.coordinates.clone();
         if protection.is_cancelled() {
             return Err(ApiError::Unauthorized);
         }
@@ -169,6 +193,7 @@ impl ProductHistorySearch {
         let reply = match &request {
             Request::Advance { .. } => {
                 let _writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
+                self.cache.remember(scope.clone(), stop.clone()).await?;
                 let coverage = self
                     .cache
                     .coverage(key.clone(), source.identity.clone(), stop.clone())
@@ -235,16 +260,31 @@ impl ProductHistorySearch {
                 start,
                 end,
                 ..
-            } => self.freeze(source, hit, target, *start, *end, stop).await?,
+            } => {
+                self.freeze(&authority, source, hit, target, *start, *end, stop)
+                    .await?
+            }
+            Request::Discover { .. }
+            | Request::Query { .. }
+            | Request::Progress { .. }
+            | Request::Reset { .. } => unreachable!("aggregate dispatch handled above"),
         };
-        if protection.is_cancelled() {
-            return Err(ApiError::Unauthorized);
-        }
-        rsi_history_api::validate_reply(&request, &reply)?;
-        Ok(reply)
+        publish_source_reply(
+            &authority,
+            self.resolver.as_ref(),
+            &coordinates,
+            &protection,
+            &request,
+            reply,
+        )
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Capture independently binds authority, source/hit, actual target and byte selection."
+    )]
     async fn freeze(
         &self,
+        authority: &HistoryAuthority,
         source: source::Source,
         hit: &Hit,
         target: &rsi_agent_session_protocol::SessionId,
@@ -254,26 +294,55 @@ impl ProductHistorySearch {
     ) -> Result<Reply> {
         // The history location permit covers ordinary Sessions at these coordinates.
         // A hit never authorizes a protected receiving Header.
-        let target_handle = self.sessions.attach(target).await.map_err(session_error)?;
+        let target_handle = match authority {
+            HistoryAuthority::Caller(origin) => {
+                self.ingress.scoped(origin.clone()).attach(target).await
+            }
+            HistoryAuthority::Agent(caller) if caller.session_id() == target => {
+                self.sessions.attach(target).await
+            }
+            HistoryAuthority::Agent(_) => return Err(ApiError::Unauthorized),
+        }
+        .map_err(session_error)?;
         check(stop)?;
         let target = target_handle.header().await.map_err(session_error)?;
         if source.protected || target.protection().is_some() {
             return Err(ApiError::Unauthorized);
         }
         check(stop)?;
-        if target.coordinates() != &source.coordinates {
-            return Err(invalid(
-                "reference target is outside the requested workspace",
-            ));
-        }
+        let target_admission = authority.admit(self.resolver.as_ref(), target.coordinates())?;
         let original = self.original(&source, hit, stop).await?;
         let mut selection = hit.original.clone();
         selection.start = start;
         selection.end = end;
-        let reference = match source.identity {
+        let source_identity = source.identity.clone();
+        let source_coordinates = source.coordinates.clone();
+        let target_coordinates = target.coordinates().clone();
+        let resolver = self.resolver.clone();
+        let gate_authority = authority.clone();
+        let gate_source = source_coordinates.clone();
+        let gate_target = target_coordinates.clone();
+        let source_protection = source.protection.clone();
+        let context = rsi_agent_references::CaptureContext::new(
+            source_identity,
+            source.coordinates.clone(),
+            target,
+            (source, target_admission, target_handle),
+            move || {
+                !source_protection.is_cancelled()
+                    && gate_authority
+                        .admit(resolver.as_ref(), &gate_source)
+                        .is_ok()
+                    && gate_authority
+                        .admit(resolver.as_ref(), &gate_target)
+                        .is_ok()
+            },
+        )
+        .map_err(invalid)?;
+        let reference = match context.source().clone() {
             rsi_agent_session_protocol::ReferenceSource::Native { binding } => {
                 self.references
-                    .capture_selected(binding, target, selection, stop.clone())
+                    .capture_selected(binding, context, selection, stop.clone())
                     .await
             }
             observed @ rsi_agent_session_protocol::ReferenceSource::Observed { .. } => {
@@ -281,19 +350,37 @@ impl ProductHistorySearch {
                     .capture_observed(
                         rsi_agent_references::ObservedReferenceText {
                             source: observed,
-                            coordinates: source.coordinates,
+                            coordinates: context.coordinates().clone(),
                             text: original.text,
                             selection,
                         },
-                        target,
+                        context,
                         stop.clone(),
                     )
                     .await
             }
-        }
-        .map_err(invalid)?;
+        };
+        let _source_check = authority.admit(self.resolver.as_ref(), &source_coordinates)?;
+        let _target_check = authority.admit(self.resolver.as_ref(), &target_coordinates)?;
+        let reference = reference.map_err(invalid)?;
         Ok(Reply::Frozen { reference })
     }
+}
+
+fn publish_source_reply(
+    authority: &HistoryAuthority,
+    resolver: &dyn rsi_execution::ExecutionResolver,
+    coordinates: &rsi_execution::ExecutionCoordinates,
+    protection: &CancellationToken,
+    request: &Request,
+    reply: Reply,
+) -> Result<Reply> {
+    let _fresh = authority.admit(resolver, coordinates)?;
+    if protection.is_cancelled() {
+        return Err(ApiError::Unauthorized);
+    }
+    rsi_history_api::validate_reply(request, &reply)?;
+    Ok(reply)
 }
 
 #[cfg(test)]

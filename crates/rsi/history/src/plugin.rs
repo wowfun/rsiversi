@@ -33,6 +33,7 @@ impl PluginFactory for HistoryFactory {
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<rsi_agent_store_protocol::SessionStoreContract>()
             .requiring_local::<rsi_session_protocol::SessionContract>()
+            .requiring_local::<rsi_session_protocol::SessionIngressContract>()
             .requiring_local::<rsi_agent_references::ReferencesContract>()
             .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<rsi_acp_protocol::service::ExternalConversationsContract>()
@@ -46,6 +47,7 @@ impl PluginFactory for HistoryFactory {
             super::HistorySources {
                 store: plan.local::<rsi_agent_store_protocol::SessionStoreContract>()?,
                 sessions: plan.local::<rsi_session_protocol::SessionContract>()?,
+                ingress: plan.local::<rsi_session_protocol::SessionIngressContract>()?,
                 external: plan
                     .local::<rsi_acp_protocol::service::ExternalConversationsContract>()?,
                 workspaces: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,

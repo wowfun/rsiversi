@@ -1,4 +1,4 @@
-use rsi_agent_references::{ReferenceError, References};
+use rsi_agent_references::{CaptureContext, ReferenceError, References};
 use rsi_agent_session_protocol::*;
 use rsi_agent_store_protocol::{AppendBatch, SessionStore};
 use rsi_agent_testkit::{MemoryStore, append_history_fixture};
@@ -22,6 +22,76 @@ fn header(id: &str) -> SessionHeader {
         .unwrap(),
     )
     .unwrap()
+}
+fn capture_context(source: ReferenceSource, target: SessionHeader) -> CaptureContext {
+    CaptureContext::new(
+        source,
+        header("source").coordinates().clone(),
+        target,
+        (),
+        || true,
+    )
+    .unwrap()
+}
+fn selected_context(binding: &ReferenceBinding, target: SessionHeader) -> CaptureContext {
+    capture_context(
+        ReferenceSource::Native {
+            binding: binding.clone(),
+        },
+        target,
+    )
+}
+
+#[tokio::test]
+async fn suffix_capture_rechecks_retained_admission_and_exact_source_header() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runtime = rsi_meta::Runtime::default();
+    let store = Arc::new(MemoryStore::default());
+    let source = header("suffix-source");
+    append(
+        &*store,
+        &source,
+        0,
+        vec![accepted("seed", "saved original"), terminal("seed")],
+    )
+    .await;
+    let owner = References::new(store, runtime.execution().clone());
+    let allowed = Arc::new(AtomicBool::new(true));
+    let current = allowed.clone();
+    let binding = ReferenceBinding {
+        session_id: source.session_id().clone(),
+        header_sha256: source.fingerprint().unwrap(),
+    };
+    let context = CaptureContext::new(
+        ReferenceSource::Native {
+            binding: binding.clone(),
+        },
+        source.coordinates().clone(),
+        header("suffix-target"),
+        allowed.clone(),
+        move || current.load(Ordering::SeqCst),
+    )
+    .unwrap();
+    allowed.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        owner.capture(context, CancellationToken::new()).await,
+        Err(ReferenceError::Cancelled)
+    ));
+    let wrong = ReferenceBinding {
+        header_sha256: "a".repeat(64),
+        ..binding
+    };
+    assert!(matches!(
+        owner
+            .capture(
+                selected_context(&wrong, header("suffix-target")),
+                CancellationToken::new()
+            )
+            .await,
+        Err(ReferenceError::Invalid(_))
+    ));
+    owner.close().await;
+    assert!(runtime.shutdown().await.is_clean());
 }
 fn accepted(turn: &str, text: &str) -> SessionFactBody {
     SessionFactBody::TurnAccepted {
@@ -109,8 +179,13 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
     let owner = References::new(store.clone(), runtime.execution().clone());
     let frozen = owner
         .capture(
-            source.session_id().clone(),
-            target.clone(),
+            selected_context(
+                &ReferenceBinding {
+                    session_id: source.session_id().clone(),
+                    header_sha256: source.fingerprint().unwrap(),
+                },
+                target.clone(),
+            ),
             CancellationToken::new(),
         )
         .await
@@ -130,8 +205,13 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
     .await;
     let again = owner
         .capture(
-            source.session_id().clone(),
-            target.clone(),
+            selected_context(
+                &ReferenceBinding {
+                    session_id: source.session_id().clone(),
+                    header_sha256: source.fingerprint().unwrap(),
+                },
+                target.clone(),
+            ),
             CancellationToken::new(),
         )
         .await
@@ -264,7 +344,16 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
     cancelled.cancel();
     assert!(matches!(
         owner
-            .capture(source.session_id().clone(), target, cancelled)
+            .capture(
+                selected_context(
+                    &ReferenceBinding {
+                        session_id: source.session_id().clone(),
+                        header_sha256: source.fingerprint().unwrap()
+                    },
+                    target
+                ),
+                cancelled
+            )
             .await,
         Err(ReferenceError::Cancelled)
     ));
@@ -329,7 +418,19 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
         owner
             .capture_selected(
                 binding.clone(),
-                serde_json::from_value(remote).unwrap(),
+                CaptureContext::new(
+                    ReferenceSource::Native {
+                        binding: binding.clone()
+                    },
+                    serde_json::from_value::<SessionHeader>(remote)
+                        .unwrap()
+                        .coordinates()
+                        .clone(),
+                    target.clone(),
+                    (),
+                    || true
+                )
+                .unwrap(),
                 selection.clone(),
                 CancellationToken::new()
             )
@@ -340,7 +441,7 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
     let frozen = owner
         .capture_selected(
             binding.clone(),
-            target.clone(),
+            selected_context(&binding, target.clone()),
             selection.clone(),
             CancellationToken::new(),
         )
@@ -377,7 +478,7 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
             owner
                 .capture_selected(
                     binding.clone(),
-                    target.clone(),
+                    selected_context(&binding, target.clone()),
                     changed,
                     CancellationToken::new()
                 )
@@ -397,12 +498,13 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
         owner
             .capture_selected(
                 binding.clone(),
-                foreign,
+                selected_context(&binding, foreign),
                 selection.clone(),
                 CancellationToken::new()
             )
             .await
-            .is_err()
+            .is_ok(),
+        "independently admitted cross-workspace target accepts verified source bytes"
     );
     append(
         &*store,
@@ -412,7 +514,12 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
     )
     .await;
     let again = owner
-        .capture_selected(binding, target.clone(), selection, CancellationToken::new())
+        .capture_selected(
+            binding.clone(),
+            selected_context(&binding, target.clone()),
+            selection,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(again, frozen);
@@ -467,7 +574,7 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
                     text: "observed".into(),
                     selection: selection.clone(),
                 },
-                header("target"),
+                capture_context(source.clone(), header("target")),
                 CancellationToken::new()
             )
             .await
@@ -481,7 +588,7 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
                 text: "observed".into(),
                 selection: selection.clone(),
             },
-            header("target"),
+            capture_context(source.clone(), header("target")),
             CancellationToken::new(),
         )
         .await
@@ -491,7 +598,7 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
         owner
             .capture_observed(
                 ObservedReferenceText {
-                    source,
+                    source: source.clone(),
                     coordinates: rsi_agent_session_protocol::ExecutionCoordinates::new(
                         rsi_agent_session_protocol::ExecutionLocation::Local,
                         "/different"
@@ -500,7 +607,7 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
                     text: "observed".into(),
                     selection
                 },
-                header("target"),
+                capture_context(source.clone(), header("target")),
                 CancellationToken::new()
             )
             .await

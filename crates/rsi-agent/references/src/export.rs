@@ -230,7 +230,7 @@ fn append_group<'a>(
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{
-        AgentPresetId, ContributionId, FrozenAgentSettings, MessageId, StepId,
+        AgentPresetId, ContributionId, FrozenAgentSettings, MessageId, SessionId, StepId,
     };
     fn header() -> SessionHeader {
         SessionHeader::new_local(

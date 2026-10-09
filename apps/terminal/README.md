@@ -493,3 +493,12 @@ path determines its contents; each result confirms its own replacement only.
 
 Terminal closed reviews accept a choice number followed by optional feedback
 under the [question protocol](../../crates/rsi-user-questions/protocol/README.md).
+
+`/history <query>` searches saved text across currently authorized registered
+workspaces. `/history workspace <query>` narrows to the current workspace;
+`/history session:<id> <query>` and `/history external:<id> <query>` select one
+source. Global search first advances one discovery/index batch. Its action menu
+continues partial indexing, reports source coverage, resets a workspace in finite
+steps and opens verified originals for UTF-8 selection and draft references.
+The [History contract](../../crates/rsi/history-api/README.md) owns scope and bounds.
+

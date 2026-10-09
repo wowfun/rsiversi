@@ -533,3 +533,9 @@ Worker presentation frame and an empty surface projection. It verifies that the 
 Open action displays its refusal inside the modal. The report labels this as
 presentation fault injection; it does not claim that the injected Session exists
 or that an authorization boundary was exercised by that action.
+
+`RSI_REPORT_DIR=/absolute/new/report node fixtures/rsi/web-product/history-picker.mjs`
+checks the current History dialog in Chromium with controlled replies. Query and
+range edits retire old pagination controls; continuation and subsequent paging
+use the current workspace and query. This keyless document check does not claim
+History authority or live-provider evidence.

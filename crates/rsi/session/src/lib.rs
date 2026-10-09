@@ -804,16 +804,55 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         source: SessionId,
     ) -> Result<rsi_agent_session_protocol::FrozenReference> {
-        let _admission = self.admit_mutation()?;
-        let _activity = self.begin_activity()?;
+        let admission = self.admit_mutation()?;
+        let activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
         let header = self.header_snapshot().await?;
         let source_header = self.store.header(&source).await.map_err(map_store_error)?;
-        if source_header.protection().is_some() {
+        let source_admission = access::admit_execution(
+            self.resolver.as_ref(),
+            &self.origin,
+            source_header.coordinates().location(),
+        )?;
+        if source_header.protection().is_some() || header.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
+        let resolver = self.resolver.clone();
+        let origin = self.origin.clone();
+        let source_coordinates = source_header.coordinates().clone();
+        let target_coordinates = header.coordinates().clone();
+        let stopped = self.projection_stopped.clone();
+        let context = rsi_agent_references::CaptureContext::new(
+            rsi_agent_session_protocol::ReferenceSource::Native {
+                binding: rsi_agent_session_protocol::ReferenceBinding {
+                    session_id: source,
+                    header_sha256: source_header
+                        .fingerprint()
+                        .map_err(|error| SessionError::Invalid(error.to_string()))?,
+                },
+            },
+            source_coordinates.clone(),
+            (*header).clone(),
+            (source_admission, admission, activity),
+            move || {
+                !stopped.is_cancelled()
+                    && access::admit_execution(
+                        resolver.as_ref(),
+                        &origin,
+                        source_coordinates.location(),
+                    )
+                    .is_ok()
+                    && access::admit_execution(
+                        resolver.as_ref(),
+                        &origin,
+                        target_coordinates.location(),
+                    )
+                    .is_ok()
+            },
+        )
+        .map_err(map_reference_error)?;
         self.reference_owner()?
-            .capture(source, (*header).clone(), self.projection_stopped.clone())
+            .capture(context, self.projection_stopped.clone())
             .await
             .map_err(map_reference_error)
     }

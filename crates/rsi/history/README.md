@@ -20,6 +20,8 @@ through bounded windows. Explicit oversized-record and text omissions advance
 coverage without pretending the original was indexed. Only direct human text,
 visible assistant text and explicit Tool text are exported; reasoning, provider
 requests, permissions and raw Tool JSON are excluded.
+Malformed source bodies instead leave that source unavailable without advancing
+its confirmed horizon; repairing durable truth belongs to the source owner.
 
 The index has a 1 GiB page ceiling and bounded SQLite VM work. It uses DELETE
 journaling; no second writer or database is permitted in its dedicated directory.
@@ -28,25 +30,40 @@ not scan unrelated documents. A reset first invalidates coverage and cursors,
 then commits deletion in batches of at most 128 documents, each with its own VM
 budget and cancellation check. Interrupted cleanup remains hidden and resumes
 before the next indexing batch; it cannot publish old documents as new coverage.
+A batch with no documents and unchanged coverage performs no cache publication
+and preserves query cursors. Deferred reset cleanup still runs before this check.
 A malformed database or obsolete schema is rebuilt under the lease, with a new generation,
 without touching source truth. Cache entries cannot authorize original reads or
 supply frozen text. A validated original is always reread at its exact identity.
 
 Every operation carries either the actual API origin or the current Agent caller.
+Discovery continuations bind that principal; authenticated devices use their
+canonical DeviceId, independent of diagnostic formatting.
 Before source bodies or cache contents are accessed, the registered workspace's
 execution location must admit that origin. Agent requests additionally match the
 caller's exact coordinates and retain its current execution lease, never a Local
 Service grant. The accepted finite worker retains the location permit through
-actual source/cache settlement. Offline metadata authority suffices for API
+actual source/cache settlement. Range scans share that retained permit among
+sources at the same execution location, with fresh admission checks before each
+source read and before publishing the result. Catalog size therefore does not
+consume one simultaneous execution slot per conversation. Offline metadata authority suffices for API
 history reads; searching never connects an SSH target. A stale cache or hit grants
-no access after Use withdrawal. Freeze checks the receiving Header and requires
-the same admitted workspace. The retained execution-location permit covers
-ordinary receiving Sessions there; protected sources and targets are forbidden.
+no access after Use withdrawal. Freeze independently admits the source and actual
+receiving Header through caller-scoped Session ingress. A typed in-process capture
+context retains both permissions and binds their identities; capture follows
+[References' protection rules](../../rsi-agent/references/README.md). References owns integrity and CAS; this product owns
+grants.
 Session authentication refusals retain Unauthorized; unavailable Session identities
 and backend reads surface Unavailable through the History API.
 
 The `history_search` Tool derives workspace and target from AgentCallerAuthority,
-uses the same owner operations, and emits the `rsi.history` version-1 typed output.
+exposes discover/query/progress plus read/freeze/rebuild, and emits the
+`rsi.history` version-2 typed output. Discover alone advances finite indexing;
+its continuation is reused with discover. Tool arguments put operation,
+conversation, query, after, hit and selection/window fields at the same level.
+Read copies only matches[].hit and defaults offset to zero. Conversation optionally narrows the
+first three operations and is required for the latter three. The model Tool does
+not expose the separate human exact-source Advance/Search operations.
 Its original-text window is capped at 32 KiB so worst-case JSON escaping remains
 inside the Tools output bound; subsequent reads retain exact source coordinates.
 

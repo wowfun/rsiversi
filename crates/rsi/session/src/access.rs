@@ -108,7 +108,7 @@ impl LocalSessionHandle {
         )
     }
 }
-fn admit_execution(
+pub(super) fn admit_execution(
     resolver: Option<&Arc<dyn rsi_execution::ExecutionResolver>>,
     origin: &rsi_api_protocol::CallOrigin,
     location: &rsi_workspace_protocol::ExecutionLocation,

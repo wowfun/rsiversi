@@ -142,23 +142,33 @@ impl References {
     pub async fn capture_selected(
         &self,
         source: ReferenceBinding,
-        target: SessionHeader,
+        context: super::CaptureContext,
         selection: ReferenceSelection,
         cancellation: CancellationToken,
     ) -> Result<FrozenReference> {
         source.validate().map_err(invalid)?;
-        target.validate().map_err(invalid)?;
+        context.check()?;
+        if context.source()
+            != &(ReferenceSource::Native {
+                binding: source.clone(),
+            })
+        {
+            return Err(invalid("capture source binding mismatch"));
+        }
         selection.validate().map_err(invalid)?;
         self.run(cancellation, move |store, stop, _| async move {
             let header = store.header(&source.session_id).await?;
             check(&stop)?;
+            context.check()?;
             if header.fingerprint().map_err(invalid)? != source.header_sha256
-                || header.coordinates() != target.coordinates()
+                || header.coordinates() != context.coordinates()
+                || header.protection().is_some()
             {
                 return Err(invalid("selected source Header or workspace mismatch"));
             }
             let _validation = store.prepare_session(&source.session_id).await?;
             check(&stop)?;
+            context.check()?;
             let window = store
                 .read_fact_window(
                     &source.session_id,
@@ -186,11 +196,14 @@ impl References {
                 .ok_or_else(|| invalid("selected content is not exportable"))?;
             let envelope = envelope(
                 ReferenceSource::Native { binding: source },
-                &target,
+                context.target(),
                 selection,
                 original.text,
             )?;
-            publish(&*store, envelope, &stop).await
+            context.check()?;
+            let reference = publish(&*store, envelope, &stop).await?;
+            context.check()?;
+            Ok(reference)
         })
         .await
     }
@@ -199,16 +212,27 @@ impl References {
     pub async fn capture_observed(
         &self,
         original: ObservedReferenceText,
-        target: SessionHeader,
+        context: super::CaptureContext,
         cancellation: CancellationToken,
     ) -> Result<FrozenReference> {
-        target.validate().map_err(invalid)?;
-        if original.source.native().is_some() || &original.coordinates != target.coordinates() {
+        context.check()?;
+        if original.source.native().is_some()
+            || &original.coordinates != context.coordinates()
+            || &original.source != context.source()
+        {
             return Err(invalid("observed source kind or workspace mismatch"));
         }
-        let envelope = envelope(original.source, &target, original.selection, &original.text)?;
+        let envelope = envelope(
+            original.source,
+            context.target(),
+            original.selection,
+            &original.text,
+        )?;
         self.run(cancellation, move |store, stop, _| async move {
-            publish(&*store, envelope, &stop).await
+            context.check()?;
+            let reference = publish(&*store, envelope, &stop).await?;
+            context.check()?;
+            Ok(reference)
         })
         .await
     }

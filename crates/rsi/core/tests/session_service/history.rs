@@ -1,14 +1,21 @@
 use super::*;
 use rsi_api_protocol::{ApiError, ApiOutput, ByteBudget, CallOrigin};
 use rsi_history_api::ConversationIdentity;
-use rsi_history_api::{Reply, Request, Scope};
+use rsi_history_api::{QueryScope, Reply, Request, Scope};
 async fn call(running: &RunningRsi, request: Request) -> Result<Reply, ApiError> {
+    call_as(running, CallOrigin::Local, request).await
+}
+async fn call_as(
+    running: &RunningRsi,
+    origin: CallOrigin,
+    request: Request,
+) -> Result<Reply, ApiError> {
     let spec = request.spec();
     let input = ByteBudget::default().encode(&request, spec.maximum_request_bytes)?;
     let ApiOutput::Reply(output) = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, CallOrigin::Local)?
+        .admit(&spec.id, origin)?
         .invoke(input)
         .await?
     else {
@@ -17,6 +24,97 @@ async fn call(running: &RunningRsi, request: Request) -> Result<Reply, ApiError>
     let reply = serde_json::from_slice(output.json.as_bytes()).unwrap();
     rsi_history_api::validate_reply(&request, &reply)?;
     Ok(reply)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_limits_each_metadata_step_and_fences_continuations_by_caller_and_range() {
+    let (endpoint, provider) = provider().await;
+    let fixture = fixture(&endpoint);
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let service = running.session_service().unwrap();
+    let workspace = running
+        .workspace_registry()
+        .unwrap()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    for number in 0..65 {
+        let session = service
+            .create(CreateSession {
+                workspace_id: workspace.id.clone(),
+                session_id: SessionId::new(format!("discovery-{number:03}")).unwrap(),
+                agent_preset_id: None,
+            })
+            .await
+            .unwrap();
+        run_message_to_terminal(&session, &format!("discovery-input-{number}")).await;
+    }
+    let range = QueryScope::Workspace {
+        workspace: workspace.id.clone(),
+    };
+    let Reply::Progress { progress, .. } = call(
+        &running,
+        Request::Discover {
+            scope: range.clone(),
+            after: None,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("progress")
+    };
+    assert!(progress.visible_sources > 0 && progress.visible_sources <= 64);
+    assert!(!progress.discovery_complete);
+    let token = progress.continuation.unwrap();
+    let foreign = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
+        id: rsi_api_protocol::DeviceId::from_bytes([7; 16]),
+        revoked: tokio_util::sync::CancellationToken::new(),
+    });
+    assert!(
+        matches!(call_as(&running, foreign, Request::Discover { scope: range.clone(), after: Some(token.clone()) }).await, Err(ApiError::Invalid(reason)) if reason.contains("Stale discovery"))
+    );
+    assert!(
+        matches!(call(&running, Request::Discover { scope: QueryScope::AccessibleHost, after: Some(token.clone()) }).await, Err(ApiError::Invalid(reason)) if reason.contains("Stale discovery"))
+    );
+    let Reply::Progress { progress, .. } = call(
+        &running,
+        Request::Discover {
+            scope: range.clone(),
+            after: Some(token.clone()),
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("progress")
+    };
+    assert_eq!(progress.visible_sources, 65);
+    assert!(progress.discovery_complete && progress.pending_sources > 0);
+    assert!(
+        matches!(call(&running, Request::Discover { scope: range.clone(), after: Some(token) }).await, Err(ApiError::Invalid(reason)) if reason.contains("Stale discovery"))
+    );
+    assert!(!progress.capacity_limited);
+    let Reply::Matches {
+        matches, progress, ..
+    } = call(
+        &running,
+        Request::Query {
+            scope: range,
+            query: "inspect".into(),
+            after: None,
+        },
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("query across every discovered source")
+    };
+    assert!(!matches.is_empty() && matches.len() <= 64);
+    assert_eq!(progress.visible_sources, 65);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -132,6 +230,135 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
     let foreign_dir = fixture.temporary.path().join("foreign-history");
     std::fs::create_dir(&foreign_dir).unwrap();
     let foreign = registry.get_or_create(&foreign_dir).await.unwrap();
+    let foreign_target = service
+        .create(CreateSession {
+            workspace_id: foreign.id.clone(),
+            session_id: SessionId::new("history-cross-project-target").unwrap(),
+            agent_preset_id: None,
+        })
+        .await
+        .unwrap();
+    let Reply::Frozen {
+        reference: cross_project,
+    } = call(
+        &running,
+        Request::Freeze {
+            scope: scope.clone(),
+            hit: hit.clone(),
+            target: foreign_target.header().await.unwrap().session_id().clone(),
+            start: 0,
+            end: 7,
+        },
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("cross-project capture")
+    };
+    assert_eq!(
+        foreign_target
+            .preview_reference(cross_project, 0, 65536)
+            .await
+            .unwrap()
+            .text,
+        "inspect"
+    );
+    let mut continuation = None;
+    let suffix = foreign_target
+        .capture_reference(source.header().await.unwrap().session_id().clone())
+        .await
+        .unwrap();
+    assert!(
+        foreign_target
+            .preview_reference(suffix, 0, 65536)
+            .await
+            .unwrap()
+            .text
+            .contains("inspect")
+    );
+    for _ in 0..16 {
+        let Reply::Progress { progress, .. } = call(
+            &running,
+            Request::Discover {
+                scope: QueryScope::AccessibleHost,
+                after: continuation,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("source discovery")
+        };
+        continuation = progress.continuation;
+        if continuation.is_none() {
+            break;
+        }
+    }
+    assert!(
+        continuation.is_none(),
+        "finite native discovery and indexing terminate"
+    );
+    let Reply::Matches { matches, .. } = call(
+        &running,
+        Request::Query {
+            scope: QueryScope::AccessibleHost,
+            query: "inspect".into(),
+            after: None,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("global candidates")
+    };
+    assert!(matches.iter().any(|m| m.scope == scope && m.hit == hit));
+    let Reply::Progress { sources, next, .. } = call(
+        &running,
+        Request::Reset {
+            scope: QueryScope::Workspace {
+                workspace: workspace.id.clone(),
+            },
+            after: None,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("workspace reset")
+    };
+    assert!(next.is_none());
+    assert!(sources.iter().all(|s| s.coverage.indexed_through == "0"));
+    let Reply::Matches { matches, .. } = call(
+        &running,
+        Request::Query {
+            scope: QueryScope::Workspace {
+                workspace: workspace.id.clone(),
+            },
+            query: "inspect".into(),
+            after: None,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("reset search")
+    };
+    assert!(matches.is_empty());
+    assert!(
+        call(
+            &running,
+            Request::Reset {
+                scope: QueryScope::AccessibleHost,
+                after: None
+            }
+        )
+        .await
+        .is_err()
+    );
+    call(
+        &running,
+        Request::Advance {
+            scope: scope.clone(),
+        },
+    )
+    .await
+    .unwrap();
     assert!(
         call(
             &running,
@@ -217,7 +444,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
         target.preview_reference(old, 0, 65536).await.unwrap().text,
         "inspect"
     );
-    drop((source, target, service, registry));
+    drop((source, target, foreign_target, service, registry));
     assert!(running.shutdown().await.is_clean());
     // Rebuilding this cache must leave durable Agent data untouched.
     let agent_db = fixture.paths.state().join("agent/sessions.sqlite3");

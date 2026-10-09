@@ -1,5 +1,5 @@
 use super::{Action, Client, Menu, Update, error};
-use rsi_history_api::{ConversationIdentity, Coverage, Reply, Request, Scope};
+use rsi_history_api::{ConversationIdentity, Coverage, QueryScope, Reply, Request, Scope};
 use std::fmt::Write as _;
 fn coverage(value: &Coverage) -> String {
     format!(
@@ -15,6 +15,42 @@ fn coverage(value: &Coverage) -> String {
     )
 }
 impl Client {
+    pub(super) fn search_all_history(&mut self, query: String, workspace_only: bool) {
+        let scope = if workspace_only {
+            QueryScope::Workspace {
+                workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(
+                    self.state.header.coordinates(),
+                ),
+            }
+        } else {
+            QueryScope::AccessibleHost
+        };
+        let request = Request::Query {
+            scope,
+            query,
+            after: None,
+        };
+        self.history_query = Some(request.clone());
+        let Some(client) = self.text_history.clone() else {
+            self.state.notice("History text search is unavailable");
+            return;
+        };
+        self.state.open_detail("Discovering saved history…".into());
+        self.spawn_detail(async move {
+            let Request::Query { scope, .. } = &request else {
+                unreachable!()
+            };
+            client
+                .call(Request::Discover {
+                    scope: scope.clone(),
+                    after: None,
+                })
+                .await
+                .map_err(error)?;
+            let reply = client.call(request.clone()).await.map_err(error)?;
+            Ok(Update::HistorySearch(Box::new(request), Box::new(reply)))
+        });
+    }
     pub(super) fn search_history(&mut self, conversation: ConversationIdentity, query: String) {
         let workspace =
             rsi_workspace_protocol::WorkspaceId::from_coordinates(self.state.header.coordinates());
@@ -66,7 +102,17 @@ impl Client {
         reason = "One exhaustive reply projection keeps read, selection and draft ownership together"
     )]
     pub(super) fn show_history(&mut self, request: &Request, reply: Reply) {
-        let scope = request.scope().clone();
+        if matches!(
+            request,
+            Request::Query { .. }
+                | Request::Discover { .. }
+                | Request::Progress { .. }
+                | Request::Reset { .. }
+        ) {
+            self.show_history_query(request, reply);
+            return;
+        }
+        let scope = request.scope().expect("exact source request").clone();
         match reply {
             Reply::Coverage { coverage: progress } => {
                 self.state
@@ -200,8 +246,170 @@ impl Client {
             Reply::Frozen { reference } => {
                 self.reference_action(Action::PreviewReference(reference, 0));
             }
+            Reply::Matches { .. } | Reply::Progress { .. } | Reply::Stale { .. } => {
+                unreachable!("validated exact reply")
+            }
         }
         self.state
             .info("↑/↓ scroll · ←/→ original pages · Enter actions · Esc returns to draft");
+    }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One reply projection keeps finite history progress, source actions and continuation coherent."
+    )]
+    fn show_history_query(&mut self, request: &Request, reply: Reply) {
+        let scope = match request {
+            Request::Query { scope, .. }
+            | Request::Discover { scope, .. }
+            | Request::Progress { scope, .. }
+            | Request::Reset { scope, .. } => scope.clone(),
+            _ => unreachable!(),
+        };
+        let mut text = String::from("Saved history\n");
+        let mut items = Vec::new();
+        let progress = match reply {
+            Reply::Matches {
+                progress,
+                matches,
+                next,
+            } => {
+                for result in matches {
+                    let label = format!("{} · {:?}", result.label, result.scope.conversation);
+                    let _ = writeln!(
+                        text,
+                        "\n{}\n{}",
+                        super::super::terminal_text(&label),
+                        super::super::terminal_text(&result.hit.preview)
+                    );
+                    items.push((
+                        format!("Open original · {}", super::super::terminal_text(&label)),
+                        Action::HistoryRequest(Box::new(Request::Read {
+                            scope: result.scope,
+                            hit: result.hit,
+                            offset: 0,
+                        })),
+                    ));
+                }
+                if let (Some(after), Request::Query { query, .. }) = (next, request) {
+                    items.push((
+                        "More matches".into(),
+                        Action::HistoryRequest(Box::new(Request::Query {
+                            scope: scope.clone(),
+                            query: query.clone(),
+                            after: Some(after),
+                        })),
+                    ));
+                }
+                Some(progress)
+            }
+            Reply::Progress {
+                progress,
+                sources,
+                next,
+            } => {
+                for source in sources {
+                    let _ = writeln!(
+                        text,
+                        "\n{} · {:?}\n{}{}",
+                        super::super::terminal_text(&source.label),
+                        source.scope.conversation,
+                        coverage(&source.coverage),
+                        if source.unavailable {
+                            "\nUnavailable in this pass; refresh to retry"
+                        } else {
+                            ""
+                        }
+                    );
+                    items.push((
+                        format!("Rebuild {:?}", source.scope.conversation),
+                        Action::HistoryRequest(Box::new(Request::Rebuild {
+                            scope: source.scope,
+                        })),
+                    ));
+                }
+                if let Some(after) = next {
+                    let resetting = matches!(request, Request::Reset { .. });
+                    items.push((
+                        if resetting {
+                            "Continue workspace reset"
+                        } else {
+                            "More source coverage"
+                        }
+                        .into(),
+                        Action::HistoryRequest(Box::new(if resetting {
+                            Request::Reset {
+                                scope: scope.clone(),
+                                after: Some(after),
+                            }
+                        } else {
+                            Request::Progress {
+                                scope: scope.clone(),
+                                after: Some(after),
+                            }
+                        })),
+                    ));
+                }
+                Some(progress)
+            }
+            Reply::Stale { reason } => {
+                text.push_str(&super::super::terminal_text(&reason));
+                None
+            }
+            _ => unreachable!("validated range reply"),
+        };
+        if let Some(progress) = progress {
+            let _ = writeln!(
+                text,
+                "\nAuthorized sources: {} · pending: {} · discovery complete: {} · capacity limited: {}",
+                progress.visible_sources,
+                progress.pending_sources,
+                progress.discovery_complete,
+                progress.capacity_limited
+            );
+            if progress.metadata_unavailable {
+                text.push_str("Saved metadata unavailable; refresh discovery to retry.\n");
+            }
+            if let Some(after) = progress.continuation {
+                items.push((
+                    "Continue indexing".into(),
+                    Action::HistoryRequest(Box::new(Request::Discover {
+                        scope: scope.clone(),
+                        after: Some(after),
+                    })),
+                ));
+            }
+        }
+        items.push((
+            "Refresh saved source discovery".into(),
+            Action::HistoryRequest(Box::new(Request::Discover {
+                scope: scope.clone(),
+                after: None,
+            })),
+        ));
+        if matches!(scope, QueryScope::Workspace { .. }) {
+            items.push((
+                "Reset this workspace index".into(),
+                Action::HistoryRequest(Box::new(Request::Reset {
+                    scope: scope.clone(),
+                    after: None,
+                })),
+            ));
+        }
+        items.push((
+            "Inspect source coverage".into(),
+            Action::HistoryRequest(Box::new(Request::Progress { scope, after: None })),
+        ));
+        if let Some(query) = &self.history_query {
+            items.push((
+                "Search indexed text again".into(),
+                Action::HistoryRequest(Box::new(query.clone())),
+            ));
+        }
+        self.state.open_detail(text);
+        self.state.detail_actions = Some(Menu {
+            title: "History sources and matches".into(),
+            items,
+            selected: 0,
+        });
     }
 }

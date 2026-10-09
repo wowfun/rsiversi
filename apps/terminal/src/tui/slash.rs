@@ -16,7 +16,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ),
     (
         "history",
-        "Search conversation text: /history <session-id|external:id> <query>",
+        "Search saved text: /history <query>; /history workspace <query>; /history session:<id>|external:<id> <query>",
     ),
     (
         "attention",

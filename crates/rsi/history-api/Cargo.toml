@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
 rsi-conversation = { path = "../conversation" }
 rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 serde.workspace = true

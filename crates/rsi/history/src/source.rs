@@ -7,11 +7,15 @@ use rsi_agent_session_protocol::{
 use rsi_conversation::ConversationIdentity;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use std::{collections::BTreeMap, sync::Arc};
+
+pub(super) type Admissions =
+    BTreeMap<rsi_execution::ExecutionLocation, Arc<rsi_execution::ExecutionOperation>>;
 
 pub(super) struct Source {
     pub identity: ReferenceSource,
     pub coordinates: rsi_workspace_protocol::ExecutionCoordinates,
-    _admission: rsi_execution::ExecutionOperation,
+    _admission: Arc<rsi_execution::ExecutionOperation>,
     pub protection: CancellationToken,
     pub protected: bool,
 }
@@ -164,13 +168,28 @@ impl ProductHistorySearch {
         scope: &Scope,
         stop: &CancellationToken,
     ) -> Result<Source> {
+        self.authorize_shared(authority, scope, stop, &mut Admissions::new())
+            .await
+    }
+    pub(super) async fn authorize_shared(
+        &self,
+        authority: &super::HistoryAuthority,
+        scope: &Scope,
+        stop: &CancellationToken,
+        admissions: &mut Admissions,
+    ) -> Result<Source> {
         let workspace = self
             .workspaces
             .get(&scope.workspace)
             .await
             .map_err(invalid)?;
         check(stop)?;
-        let admission = authority.admit(self.resolver.as_ref(), &workspace.coordinates)?;
+        // A fresh check never substitutes for the pin retained through accepted work.
+        let current = authority.admit(self.resolver.as_ref(), &workspace.coordinates)?;
+        let admission = admissions
+            .entry(workspace.coordinates.location().clone())
+            .or_insert_with(|| Arc::new(current))
+            .clone();
         let source = match &scope.conversation {
             ConversationIdentity::Native(id) => {
                 let header = self.store.header(id).await.map_err(invalid)?;
@@ -487,6 +506,138 @@ impl ProductHistorySearch {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep one indexing and pagination workflow together across unchanged and changed durable cuts"
+    )]
+    async fn unchanged_indexing_preserves_a_query_page_but_new_content_expires_it() {
+        use super::super::{Coverage, Reply, cache::Cache};
+        use rsi_history_api::{QueryProgress, QueryScope, SourceCoverage};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Cache::open(directory.path().join("cache")).await.unwrap();
+        let identity = ReferenceSource::Observed {
+            owner: "acp".into(),
+            id: "source".into(),
+            epoch: 1,
+        };
+        let scope: Scope = serde_json::from_value(
+            json!({"workspace":"a".repeat(64),"conversation":{"kind":"external","id":"source"}}),
+        )
+        .unwrap();
+        let key = super::super::cache::key(&scope);
+        let mut batch = Batch {
+            documents: vec![],
+            through: 65,
+            horizon: 65,
+            omissions: 0,
+            has_more: false,
+            retained: 0,
+        };
+        for sequence in 1..=65 {
+            assert!(
+                batch
+                    .append_original(
+                        &identity,
+                        std::iter::once((
+                            ReferenceRecord {
+                                sequence,
+                                kind: ReferenceContentKind::Human,
+                                content_index: 0
+                            },
+                            "needle"
+                        )),
+                        128
+                    )
+                    .unwrap()
+            );
+        }
+        let previous = cache
+            .coverage(key.clone(), identity.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        let Reply::Coverage { coverage } = cache
+            .advance(key.clone(), previous, batch, CancellationToken::new())
+            .await
+            .unwrap()
+        else {
+            panic!("indexed coverage")
+        };
+        let query = |after, coverage: Coverage| {
+            cache.query(
+                QueryScope::AccessibleHost,
+                "needle".into(),
+                after,
+                "a".repeat(64),
+                vec![SourceCoverage {
+                    scope: scope.clone(),
+                    label: "source".into(),
+                    coverage,
+                    unavailable: false,
+                    reference_allowed: true,
+                }],
+                QueryProgress::default(),
+                CancellationToken::new(),
+            )
+        };
+        let Reply::Matches {
+            next: Some(cursor), ..
+        } = query(None, coverage.clone()).await.unwrap()
+        else {
+            panic!("first page")
+        };
+        let empty = Batch {
+            documents: vec![],
+            through: 65,
+            horizon: 65,
+            omissions: 0,
+            has_more: false,
+            retained: 0,
+        };
+        cache
+            .advance(
+                key.clone(),
+                coverage.clone(),
+                empty,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(query(Some(cursor.clone()), coverage.clone()).await.unwrap(), Reply::Matches { matches, .. } if matches.len()==1)
+        );
+        let mut changed = Batch {
+            documents: vec![],
+            through: 66,
+            horizon: 66,
+            omissions: 0,
+            has_more: false,
+            retained: 0,
+        };
+        changed
+            .append_original(
+                &identity,
+                std::iter::once((
+                    ReferenceRecord {
+                        sequence: 66,
+                        kind: ReferenceContentKind::Human,
+                        content_index: 0,
+                    },
+                    "needle",
+                )),
+                128,
+            )
+            .unwrap();
+        cache
+            .advance(key, coverage.clone(), changed, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            query(Some(cursor), coverage).await.unwrap(),
+            Reply::Stale { .. }
+        ));
+        cache.close().await;
+    }
     #[test]
     fn external_text_export_excludes_thoughts_permissions_and_raw_tool_json() {
         let visible = json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"可见🦀"}});

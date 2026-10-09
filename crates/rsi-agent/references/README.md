@@ -16,9 +16,13 @@ raw provider requests and arbitrary Tool JSON are never reference exports.
 Only direct human text, conversation assistant text, and explicit Tool text
 evidence can be selected. Source growth does not change an already frozen CAS
 envelope. A source identity or original-text mismatch rejects capture.
-Selected native and observed captures compare complete execution coordinates,
-including machine identity, against the target Header before reading or publishing
-text. Equal path spellings on different machines do not share a workspace.
+Suffix, selected native and observed captures consume a non-serializable capture context
+issued by the product after independently admitting source reading and target
+mutation. It binds complete source coordinates and identity, receiving Header and
+both admission lifetimes. This owner verifies that binding and source integrity;
+admission remains current before reading and before and after CAS publication.
+Host grant policy stays with the product. Protected sources and targets cannot
+be captured. Equal path spellings on different machines do not share a workspace.
 
 Capture uses at most 1,024 Facts and 16 MiB of encoded suffix bodies, exporting
 only direct human text and visible conversation assistant text. Newer text wins

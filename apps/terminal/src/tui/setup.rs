@@ -51,6 +51,8 @@ pub(super) enum Command {
     Resume(Option<SessionId>),
     Reference(Option<SessionId>),
     History(rsi_history_api::ConversationIdentity, String),
+    HistoryAll(String),
+    HistoryWorkspace(String),
     Quit,
     Invalid,
 }
@@ -83,18 +85,25 @@ pub(super) fn command(text: &str) -> Option<Command> {
         ["/resume", id] => {
             Some(SessionId::new(*id).map_or(Command::Invalid, |id| Command::Resume(Some(id))))
         }
-        ["/history", source, query @ ..] if !query.is_empty() => {
+        ["/history", "workspace", query @ ..] if !query.is_empty() => {
+            Some(Command::HistoryWorkspace(query.join(" ")))
+        }
+        ["/history", source, query @ ..]
+            if !query.is_empty()
+                && (source.starts_with("external:") || source.starts_with("session:")) =>
+        {
             let id = if let Some(id) = source.strip_prefix("external:") {
                 rsi_acp_protocol::observation::ConversationId::new(id)
                     .map(rsi_history_api::ConversationIdentity::External)
                     .map_err(|_| ())
             } else {
-                SessionId::new(*source)
+                SessionId::new(source.strip_prefix("session:").expect("native prefix"))
                     .map(rsi_history_api::ConversationIdentity::Native)
                     .map_err(|_| ())
             };
             Some(id.map_or(Command::Invalid, |id| Command::History(id, query.join(" "))))
         }
+        ["/history", query @ ..] if !query.is_empty() => Some(Command::HistoryAll(query.join(" "))),
         ["/reference"] => Some(Command::Reference(None)),
         ["/reference", id] => {
             Some(SessionId::new(*id).map_or(Command::Invalid, |id| Command::Reference(Some(id))))
