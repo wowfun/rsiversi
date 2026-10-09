@@ -49,3 +49,7 @@ acknowledgments instead of permanently rejecting all principals. Eviction can ma
 old observations appear unread again; it never grants access or suppresses another
 principal’s unread state. Poll backoff trades up to eight seconds of idle discovery
 latency for lower IPC cost, while explicit invalidation resets the interval.
+The [Navigation contract](../../../../crates/rsi/navigation/README.md) owns read
+admission and retirement. Caller ownership stops further queries when interest
+is lost; independent mutation ownership preserves durable publication. This
+separation avoids conflating product cancellation with backend syscall preemption.

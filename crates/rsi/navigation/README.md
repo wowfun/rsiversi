@@ -3,8 +3,15 @@
 The ordinary `AttentionFactory` owns a separate version-1 Storage domain of
 explicit per-principal reading positions. It combines bounded Session activity
 metadata with eight ACP resident observations, never scans recent history, and
-does not persist runtime status. Two read slots and one nonqueued writer bound
-work; accepted writes survive waiter loss and retirement drains them. Its API
+does not persist runtime status. Two nonqueued request slots shared by reads and
+marks, and one nonqueued writer, bound work. A mark reserves its writer before
+dispatch; accepted writes survive waiter loss and retirement drains them. Finite
+reads start a cancellable owner task on first poll, release their slots on
+settled abandonment, and stop on retirement independently of further caller polls.
+A returned read reserves a slot, constructs work, and registers with
+retirement only when first polled; an unpolled future consumes no request capacity
+and cannot keep retirement waiting. Already dispatched backend
+blocking reads retain their own lower-level admission until I/O ends. The API
 returns pending targets before running, unknown and unread activity. A closed
 native durable cut is an unread update, not a guarantee of effect settlement.
 Native attention candidates use the actual caller's Session ingress view for
@@ -49,7 +56,9 @@ the remaining lookup queue.
 The [wire contract](../navigation-api/README.md)
 owns external fields, bounds and client validation.
 
-Eight non-queued requests and one non-queued writer bound work. The writer owns
+Eight non-queued requests and one non-queued writer bound work.
+Finite query, pin, order-seed and summary reads use the caller ownership and
+first-poll retirement contract above. The writer owns
 global expected-revision CAS and holds the accepted operation through durable
 commit and publication if its caller disappears. Retirement closes admission
 before draining. Authenticated devices can edit navigation without a configuration

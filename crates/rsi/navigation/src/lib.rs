@@ -10,15 +10,14 @@ use rsi_api_protocol::{
     ApiError, ApiRegistrarContract, CallOrigin, ConnectionDescriptionContract, HostEpoch, Result,
 };
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Execution, LocalContract, MetaError, PluginFactory,
-    PreparedActivation,
+    ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_navigation_api::{
     MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
     PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
 };
-use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use rsi_session_protocol::{SessionContract, SessionError, SessionService};
+use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use rsi_storage_domain::storage_error;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use rsi_workspace_protocol::{
@@ -30,8 +29,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::Semaphore;
-use tokio_util::task::TaskTracker;
+mod admission;
 mod attention;
+use admission::Admission;
 mod endpoint;
 mod order;
 pub use attention::AttentionFactory;
@@ -134,7 +134,6 @@ impl Document {
 }
 #[derive(Debug)]
 struct State {
-    closed: bool,
     document: Arc<Document>,
 }
 /// One Host's navigation owner; it never owns Session execution.
@@ -149,35 +148,24 @@ pub struct Navigation {
     workspace: Arc<dyn WorkspaceRegistry>,
     epoch: HostEpoch,
     state: Mutex<State>,
-    slots: Arc<Semaphore>,
     writer: Arc<Semaphore>,
-    tasks: TaskTracker,
-    execution: Execution,
+    admission: Arc<Admission>,
 }
 impl Navigation {
-    fn run<T: Send + 'static>(
+    fn run_mutation<T: Send + 'static>(
         self: &Arc<Self>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
     ) -> Result<BoxFuture<'static, Result<T>>> {
         self.domain.ensure_available().map_err(storage_error)?;
-        let state = self.state.lock().expect("navigation state poisoned");
-        if state.closed {
-            return Err(ApiError::ShuttingDown);
-        }
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ApiError::Capacity)?;
-        let future = work(self.clone());
-        let task = self.execution.spawn(self.tasks.track_future(async move {
-            let _permit = permit;
-            future.await
-        }));
-        drop(state);
-        Ok(Box::pin(async move {
-            task.await.map_err(|_| ApiError::OutcomeUnknown)?
-        }))
+        self.admission.run_mutation(|| work(self.clone()))
+    }
+    fn run_read<T: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>> + Send + 'static,
+    ) -> Result<BoxFuture<'static, Result<T>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
+        let owner = self.clone();
+        self.admission.run_read(move || work(owner))
     }
     /// Admits a bounded filtered scan; empty results may still have a continuation.
     pub fn query(
@@ -189,7 +177,7 @@ impl Navigation {
         filter.validate()?;
         let visibility = self.resolver.visibility(origin)?;
         let origin = origin.clone();
-        self.run(move |owner| {
+        self.run_read(move |owner| {
             Box::pin(async move { owner.scan(visibility, origin, filter, after).await })
         })
     }
@@ -419,7 +407,7 @@ impl Navigation {
     ) -> Result<BoxFuture<'static, Result<PinnedPage>>> {
         filter.validate()?;
         let visibility = self.resolver.visibility(&origin)?;
-        self.run(move |owner| {
+        self.run_read(move |owner| {
             Box::pin(async move {
                 owner.domain.ensure_available().map_err(storage_error)?;
                 let document = owner
@@ -543,7 +531,7 @@ impl Navigation {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ApiError::Capacity)?;
-        self.run(move |owner| {
+        self.run_mutation(move |owner| {
             Box::pin(async move {
                 let _permit = permit;
                 let mut document = owner
@@ -606,14 +594,7 @@ impl Navigation {
         })
     }
     async fn close(&self) {
-        {
-            let mut state = self.state.lock().expect("navigation state poisoned");
-            state.closed = true;
-            self.slots.close();
-            self.writer.close();
-            self.tasks.close();
-        }
-        self.tasks.wait().await;
+        self.admission.close(&self.writer).await;
     }
 }
 fn session_error(error: SessionError) -> ApiError {
@@ -698,13 +679,10 @@ impl PluginFactory for NavigationFactory {
                 .host_epoch
                 .clone(),
             state: Mutex::new(State {
-                closed: false,
                 document: Arc::new(document),
             }),
-            slots: Arc::new(Semaphore::new(8)),
             writer: Arc::new(Semaphore::new(1)),
-            tasks: TaskTracker::new(),
-            execution: plan.context().runtime().execution().clone(),
+            admission: Admission::new(8, plan.context().runtime().execution().clone()),
         });
         let registrations = endpoint::register(
             plan.local::<ApiRegistrarContract>()?.as_ref(),

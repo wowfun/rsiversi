@@ -14,7 +14,7 @@ impl Navigation {
     ) -> Result<BoxFuture<'static, Result<OrderSeed>>> {
         let visibility = self.resolver.visibility(origin)?;
         let origin = origin.clone();
-        self.run(move |owner| {
+        self.run_read(move |owner| {
             Box::pin(async move {
                 let document = owner.document();
                 if scope.coordinates().is_some_and(|coordinates| {
@@ -93,7 +93,7 @@ impl Navigation {
         request.validate()?;
         let visibility = self.resolver.visibility(origin)?;
         let origin = origin.clone();
-        self.run(move |owner| {
+        self.run_read(move |owner| {
             Box::pin(async move {
                 let document = owner.document();
                 if request.metadata_revision != document.revision.to_string() {

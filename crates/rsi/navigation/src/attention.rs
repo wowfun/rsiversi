@@ -1,7 +1,8 @@
+use super::admission::Admission;
 use super::{
     Arc, BTreeMap, BoxFuture, Config, ConfigValue, Deserialize, Domain, DomainFacilityContract,
-    DomainSpec, Execution, Mutex, PluginFactory, PreparedActivation, Result, Semaphore,
-    TaskTracker, activation, session_error, storage_error,
+    DomainSpec, Mutex, PluginFactory, PreparedActivation, Result, Semaphore, activation,
+    session_error, storage_error,
 };
 use async_trait::async_trait;
 use rsi_acp_protocol::{
@@ -27,7 +28,6 @@ struct ReadingPosition {
     encoded_bytes: usize,
 }
 struct State {
-    closed: bool,
     positions: BTreeMap<String, ReadingPosition>,
     recency: std::collections::VecDeque<String>,
     size: RecordObjectSize,
@@ -56,7 +56,6 @@ impl State {
             })
             .collect();
         Self {
-            closed: false,
             positions,
             recency,
             size,
@@ -106,10 +105,8 @@ struct Attention {
     epoch: HostEpoch,
     domain: Arc<dyn Domain>,
     state: Mutex<State>,
-    execution: Execution,
-    tasks: TaskTracker,
-    slots: Arc<Semaphore>,
     writer: Arc<Semaphore>,
+    admission: Arc<Admission>,
 }
 fn key(origin: &CallOrigin, id: &ConversationIdentity) -> String {
     let principal = match origin {
@@ -121,29 +118,20 @@ fn key(origin: &CallOrigin, id: &ConversationIdentity) -> String {
     ))
 }
 impl Attention {
-    fn run<T: Send + 'static>(
+    fn run_mutation<T: Send + 'static>(
         self: &Arc<Self>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
     ) -> Result<BoxFuture<'static, Result<T>>> {
         self.domain.ensure_available().map_err(storage_error)?;
-        let state = self.state.lock().expect("attention admission");
-        if state.closed {
-            return Err(ApiError::ShuttingDown);
-        }
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ApiError::Capacity)?;
-        let future = work(self.clone());
-        let task = self.execution.spawn(self.tasks.track_future(async move {
-            let _permit = permit;
-            future.await
-        }));
-        drop(state);
-        Ok(Box::pin(async move {
-            task.await.map_err(|_| ApiError::OutcomeUnknown)?
-        }))
+        self.admission.run_mutation(|| work(self.clone()))
+    }
+    fn run_read<T: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>> + Send + 'static,
+    ) -> Result<BoxFuture<'static, Result<T>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
+        let owner = self.clone();
+        self.admission.run_read(move || work(owner))
     }
     async fn candidates(&self, origin: &CallOrigin) -> Result<Page> {
         self.domain.ensure_available().map_err(storage_error)?;
@@ -262,8 +250,25 @@ impl Attention {
         page.validate()?;
         Ok(page)
     }
-    async fn mark(&self, origin: CallOrigin, request: MarkRead) -> Result<Position> {
-        let _writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
+    fn mark(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        request: MarkRead,
+    ) -> Result<BoxFuture<'static, Result<Position>>> {
+        self.domain.ensure_available().map_err(storage_error)?;
+        let writer = self
+            .writer
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::Capacity)?;
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                let _writer = writer;
+                owner.commit_mark(origin, request).await
+            })
+        })
+    }
+    async fn commit_mark(&self, origin: CallOrigin, request: MarkRead) -> Result<Position> {
         request.position.validate()?;
         if request.host_epoch != self.epoch {
             return Err(ApiError::Invalid("attention Host changed".into()));
@@ -337,14 +342,7 @@ impl Attention {
         Ok(position)
     }
     async fn close(&self) {
-        {
-            let mut state = self.state.lock().expect("attention admission");
-            state.closed = true;
-            self.slots.close();
-            self.writer.close();
-            self.tasks.close();
-        }
-        self.tasks.wait().await;
+        self.admission.close(&self.writer).await;
     }
 }
 /// Ordinary Host owner of bounded native/external attention and reading positions.
@@ -409,9 +407,7 @@ impl PluginFactory for AttentionFactory {
                 .clone(),
             domain,
             state: Mutex::new(State::from_positions(positions)),
-            execution: plan.context().runtime().execution().clone(),
-            tasks: TaskTracker::new(),
-            slots: Arc::new(Semaphore::new(2)),
+            admission: Admission::new(2, plan.context().runtime().execution().clone()),
             writer: Arc::new(Semaphore::new(1)),
         });
         let registrar = plan.local::<ApiRegistrarContract>()?;
@@ -422,7 +418,7 @@ impl PluginFactory for AttentionFactory {
                 json_handler(move |context, _: Empty| {
                     let read = read.clone();
                     async move {
-                        read.run(move |owner| {
+                        read.run_read(move |owner| {
                             Box::pin(async move { owner.read(&context.origin).await })
                         })?
                         .await
@@ -439,9 +435,7 @@ impl PluginFactory for AttentionFactory {
                     let write = write.clone();
                     async move {
                         write
-                            .run(move |owner| {
-                                Box::pin(async move { owner.mark(context.origin, request).await })
-                            })?
+                            .mark(context.origin, request)?
                             .await
                             .map(Ok::<_, Never>)
                     }

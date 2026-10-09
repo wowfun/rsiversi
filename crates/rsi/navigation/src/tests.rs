@@ -8,6 +8,90 @@ use rsi_session_protocol::{
 };
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, WorkspaceStatus};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finite_read_tracking_can_be_polled_without_an_entered_tokio_runtime() {
+    let owner = owner().await;
+    let executor = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut read = owner.run_read(|_| Box::pin(async { Ok(42) })).unwrap();
+        match read.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => assert_eq!(value.unwrap(), 42),
+            std::task::Poll::Pending => assert_eq!(executor.block_on(read).unwrap(), 42),
+        }
+        let mut pending = owner
+            .run_read(|_| Box::pin(std::future::pending::<Result<()>>()))
+            .unwrap();
+        assert!(pending.as_mut().poll(&mut context).is_pending());
+        assert_eq!(owner.admission.slots.available_permits(), 7);
+        drop(pending);
+        executor.block_on(owner.close());
+        assert_eq!(owner.admission.slots.available_permits(), 8);
+        assert!(owner.admission.tasks.is_empty());
+    })
+    .join()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn read_abandonment_and_retirement_release_slots_without_dispatching_more_work() {
+    let owner = owner().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let work = {
+        let calls = calls.clone();
+        move |_: Arc<Navigation>| -> BoxFuture<'static, Result<()>> {
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        }
+    };
+    let mut read = owner.run_read(work.clone()).unwrap();
+    assert!(futures_util::poll!(&mut read).is_pending());
+    assert_eq!(owner.admission.slots.available_permits(), 7);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while calls.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(read);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !owner.admission.tasks.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(owner.admission.slots.available_permits(), 8);
+    assert!(owner.admission.tasks.is_empty());
+    let mut unpolled = owner.run_read(work.clone()).unwrap();
+    let mut active = owner.run_read(work).unwrap();
+    assert!(futures_util::poll!(&mut active).is_pending());
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while calls.load(std::sync::atomic::Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let mut retiring = Box::pin(owner.close());
+    assert!(futures_util::poll!(&mut retiring).is_pending());
+    retiring.await;
+    assert_eq!(active.await, Err(ApiError::ShuttingDown));
+    assert!(matches!(
+        futures_util::poll!(&mut unpolled),
+        std::task::Poll::Ready(Err(ApiError::ShuttingDown))
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(owner.admission.slots.available_permits(), 8);
+    assert!(owner.admission.tasks.is_empty());
+}
+
 #[derive(Debug)]
 struct Rows(Vec<SessionSummary>, Arc<ReadConcurrency>);
 #[derive(Debug, Default)]
@@ -186,13 +270,13 @@ async fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
         workspace: Arc::new(Workspaces::default()),
         epoch: HostEpoch::generate().unwrap(),
         state: Mutex::new(State {
-            closed: false,
             document: Arc::new(Document::default()),
         }),
-        slots: Arc::new(Semaphore::new(8)),
         writer: Arc::new(Semaphore::new(1)),
-        tasks: TaskTracker::new(),
-        execution: Execution::native(tokio::runtime::Handle::current()),
+        admission: Admission::new(
+            8,
+            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        ),
     })
 }
 #[tokio::test]
