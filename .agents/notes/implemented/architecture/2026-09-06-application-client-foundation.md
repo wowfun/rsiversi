@@ -87,6 +87,16 @@ admission and an idle deadline while active subscriptions retain delivery owners
 Explicit loopback HTTP
 remains a transport debugging mode.
 
+Media upload independently publishes an immutable object. Rolling it back when
+a later Message fails could break another Session. The descriptor remains usable
+for reconciliation; cross-service staging, reference tracking and garbage
+collection require a separate recovery protocol and remain a future milestone.
+The [local CAS receipt](../../../../crates/rsi-media/local/README.md) preserves
+that independence when acknowledgement is lost. Immutable identity permits an
+explicit same-object retry to reconcile publication. A failed directory flush
+cannot prove durable rejection, and deleting the object would revoke a shared
+identity.
+
 ## Alternatives considered
 
 Keeping applications below Session couples independent capabilities to a
@@ -100,11 +110,6 @@ Multi-device access requires explicit authentication, resource admission and TLS
 Executable equality cannot serve as a cross-device wire version. A generic
 durable request-outcome ledger would duplicate domain truth; the clients use
 Message status and exact live interaction receipts instead.
-
-Media upload independently publishes an immutable object. Rolling it back when
-a later Message fails could break another Session. The descriptor remains usable
-for reconciliation; cross-service staging, reference tracking and garbage
-collection require a separate recovery protocol and remain a future milestone.
 
 ## Consequences
 

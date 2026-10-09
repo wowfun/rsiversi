@@ -53,7 +53,7 @@ struct Backend {
 #[async_trait]
 impl MediaBackend for Backend {
     async fn put(&self, media: StoredMedia) -> Result<()> {
-        verify(&media)?;
+        verify_shape(&media)?;
         let root = self.root.clone();
         let permit = self
             .io
@@ -63,11 +63,13 @@ impl MediaBackend for Backend {
         let reads = self.reads.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            verify(&media)?;
             let path = object_path(&root, &media.reference.id);
             match read_object(&path, &media.reference.id, &reads) {
                 Ok(existing) => {
                     if existing.reference == media.reference && existing.bytes == media.bytes {
-                        return Ok(());
+                        return sync_publication(&path, sync_directory)
+                            .map_err(|_| publication_unknown());
                     }
                     return Err(MediaError::Corrupt(
                         "existing MediaId has different content".into(),
@@ -80,7 +82,7 @@ impl MediaBackend for Backend {
             Ok(())
         })
         .await
-        .map_err(|error| join_error(&error))?
+        .map_err(|_| publication_unknown())?
     }
 
     async fn get(&self, id: &MediaId) -> Result<StoredMedia> {
@@ -125,14 +127,10 @@ impl PluginFactory for LocalMediaBackendFactory {
         let config = plan.take_state::<LocalMediaConfig>()?;
         let root = config.root;
         let setup_root = root.clone();
-        tokio::task::spawn_blocking(move || {
-            fs::create_dir_all(setup_root.join("objects"))
-                .map_err(|error| MediaError::Io(error.to_string()))?;
-            set_directory_permissions(&setup_root.join("objects"))
-        })
-        .await
-        .map_err(|error| MetaError::Activation(error.to_string()))?
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        tokio::task::spawn_blocking(move || prepare_objects(&setup_root))
+            .await
+            .map_err(|error| MetaError::Activation(error.to_string()))?
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let backend: Arc<dyn MediaBackend> = Arc::new(Backend {
             root,
             reads: ByteBudget::default(),
@@ -291,10 +289,61 @@ fn changed_file(label: &str) -> std::io::Error {
 }
 
 fn write_object(path: &Path, media: &StoredMedia, reads: &ByteBudget) -> Result<()> {
+    write_object_with_sync(path, media, reads, sync_directory)
+}
+
+#[cfg(unix)]
+fn sync_directory(parent: &Path) -> std::io::Result<()> {
+    File::open(parent).and_then(|directory| directory.sync_all())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn publication_unknown() -> MediaError {
+    MediaError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)
+}
+
+fn prepare_objects(root: &Path) -> Result<()> {
+    let objects = root.join("objects");
+    fs::create_dir_all(&objects).map_err(|error| MediaError::Io(error.to_string()))?;
+    set_directory_permissions(&objects)?;
+    // Establish every namespace entry created by activation, including the CAS root.
+    for directory in objects.ancestors() {
+        sync_directory(directory).map_err(|error| MediaError::Io(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn sync_publication(
+    path: &Path,
+    mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let shard = path.parent().expect("owned object path");
+    sync(shard)?;
+    sync(shard.parent().expect("owned objects directory"))
+}
+
+fn write_object_with_sync(
+    path: &Path,
+    media: &StoredMedia,
+    reads: &ByteBudget,
+    sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| MediaError::InvalidInput("object path has no parent".into()))?;
-    fs::create_dir_all(parent).map_err(|error| MediaError::Io(error.to_string()))?;
+    fs::create_dir(parent)
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| MediaError::Io(error.to_string()))?;
     set_directory_permissions(parent)?;
     let header =
         serde_json::to_vec(&media.reference).map_err(|error| MediaError::Io(error.to_string()))?;
@@ -321,25 +370,23 @@ fn write_object(path: &Path, media: &StoredMedia, reads: &ByteBudget) -> Result<
             .and_then(|()| file.write_all(&media.bytes))
             .and_then(|()| file.sync_all())
             .map_err(|error| MediaError::Io(error.to_string()))?;
+        drop(file);
         match fs::hard_link(&temporary, path) {
             Ok(()) => {
-                fs::remove_file(&temporary).map_err(|error| MediaError::Io(error.to_string()))?;
+                fs::remove_file(&temporary).map_err(|_| publication_unknown())?;
             }
-            Err(_error) if path.exists() => {
-                let _ = fs::remove_file(&temporary);
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&temporary).map_err(|_| publication_unknown())?;
                 let existing = read_object(path, &media.reference.id, reads)?;
                 if existing.reference != media.reference || existing.bytes != media.bytes {
                     return Err(MediaError::Corrupt(
                         "concurrent MediaId publication differs".into(),
                     ));
                 }
-                return Ok(());
             }
             Err(error) => return Err(MediaError::Io(error.to_string())),
         }
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| MediaError::Io(error.to_string()))
+        sync_publication(path, sync).map_err(|_| publication_unknown())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -348,6 +395,16 @@ fn write_object(path: &Path, media: &StoredMedia, reads: &ByteBudget) -> Result<
 }
 
 fn verify(media: &StoredMedia) -> Result<()> {
+    verify_shape(media)?;
+    let digest = hex::encode(Sha256::digest(&media.bytes));
+    if digest != media.reference.id.as_str() {
+        return Err(MediaError::Corrupt(
+            "media bytes do not match their SHA-256 identity".into(),
+        ));
+    }
+    Ok(())
+}
+fn verify_shape(media: &StoredMedia) -> Result<()> {
     media.reference.validate()?;
     if media.bytes.len()
         != usize::try_from(media.reference.bytes)
@@ -355,12 +412,6 @@ fn verify(media: &StoredMedia) -> Result<()> {
     {
         return Err(MediaError::Corrupt(
             "media byte length does not match its reference".into(),
-        ));
-    }
-    let digest = hex::encode(Sha256::digest(&media.bytes));
-    if digest != media.reference.id.as_str() {
-        return Err(MediaError::Corrupt(
-            "media bytes do not match their SHA-256 identity".into(),
         ));
     }
     Ok(())
