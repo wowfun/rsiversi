@@ -12,11 +12,16 @@ writer after that group is gone, and reaps the direct child. A leader that exits
 descendants remain causes the provider to close the group before publishing a
 terminal outcome. Opaque plan resources are released at settlement before
 publishing that outcome; retained output handles keep capture ownership, not an
-already-settled native plan. `terminate` is idempotent and sends TERM to the managed
+already-settled native plan. Tail reads copy only the requested suffix through
+at most two contiguous slices. `terminate` is idempotent and sends TERM to the managed
 group, waits the caller-supplied grace, then sends KILL if the group is still
 live. Provider retirement closes admission, waits for every in-flight spawn to
 publish into provider ownership, starts termination for every live group, and
 waits for complete group settlement under a finite provider bound.
+Retirement joins every admitted child and the output cache before returning the
+first resource-settlement failure in PID order. An output error or nonzero exit
+does not imply a failed resource receipt; failures of already retired children
+are not latched into later shutdowns.
 If that bound expires, provider retirement reports the timeout while its
 detached cleanup task retains the sole service and child ownership through
 TERM, delayed KILL, pipe-task joins, direct-child reaping, and output-cache
@@ -107,3 +112,15 @@ The duplex supervisor publishes its separate resource-settlement receipt only
 after reaping/group observation and all pipe-task joins. An intentional stdout
 cancellation can leave `wait` as an output error while `wait_settlement` confirms
 resource cleanup. Group-settlement and native-wait errors remain errors in both.
+An interrupted duplex supervisor transfers its child, pipe joins and capture
+ownership to a recovery task that terminates and reaps the group. `wait` then
+reports the supervisor failure; `wait_settlement` reports the actual recovery
+receipt. If recovery itself is interrupted, waiters receive a failed receipt,
+new process admission is fenced, and the registry retains the unsettled plan
+and active reservation. Runtime destruction cannot establish native cleanup.
+If a still-running supervisor subsequently supplies an actual settlement receipt,
+it replaces the provisional interruption receipt and releases reaped ownership;
+the generation remains fenced against new admission.
+For PTY output, an acknowledged reader error changes the outcome but confirms that
+the reader released its I/O resources and capture reservation pin. A missing acknowledgement or drain timeout
+also fails settlement, preserving any earlier settlement error.

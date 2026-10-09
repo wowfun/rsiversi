@@ -112,6 +112,11 @@ endpoint-token translation. Provider counters are local to independent processes
 so sharing their raw tokens would let another provider occupy an unrelated owner's
 correlation value. Endpoint-owned identities separate routing from provider naming
 without adding provider identity or authority to the wire.
+Duplex supervisor recovery retains the native child and unfinished pipe joins
+together. Waking waiters alone cannot justify releasing the confined plan: the
+resource receipt comes from actual reaping and joins. A failed recovery fences
+admission and retains the unsettled reservation, following the
+[local Process contract](../../../../crates/rsi-process/local/README.md).
 
 History's API adapter previously discarded its origin while its Tool path called
 the same unscoped Service owner. Both now carry explicit live authority into the

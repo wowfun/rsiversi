@@ -180,19 +180,40 @@ impl Drop for CaptureReservation {
 }
 
 #[cfg(unix)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TailInner {
-    bytes: VecDeque<u8>,
+    bytes: Box<[u8]>,
+    head: usize,
+    length: usize,
     total: u64,
+}
+
+#[cfg(unix)]
+impl TailInner {
+    fn copy_from(&self, offset: usize) -> Vec<u8> {
+        let length = self.length - offset;
+        let start = (self.head + offset) % self.bytes.len();
+        let first = length.min(self.bytes.len() - start);
+        let mut bytes = Vec::with_capacity(length);
+        bytes.extend_from_slice(&self.bytes[start..start + first]);
+        bytes.extend_from_slice(&self.bytes[..length - first]);
+        bytes
+    }
 }
 
 #[cfg(unix)]
 impl Tail {
     fn new(maximum: usize, reservation: Arc<CaptureReservation>) -> Self {
+        assert!(maximum > 0, "capture tail requires a nonzero bound");
         Self {
             capture: None,
             maximum,
-            inner: Mutex::new(TailInner::default()),
+            inner: Mutex::new(TailInner {
+                bytes: vec![0; maximum].into_boxed_slice(),
+                head: 0,
+                length: 0,
+                total: 0,
+            }),
             _reservation: reservation,
         }
     }
@@ -206,9 +227,18 @@ impl Tail {
             .total
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| ProcessError::Io("process output offset overflow".into()))?;
-        inner.bytes.extend(chunk);
-        let excess = inner.bytes.len().saturating_sub(self.maximum);
-        inner.bytes.drain(..excess);
+        let suffix = &chunk[chunk.len().saturating_sub(self.maximum)..];
+        let excess = inner
+            .length
+            .saturating_add(suffix.len())
+            .saturating_sub(self.maximum);
+        inner.head = (inner.head + excess) % self.maximum;
+        inner.length -= excess;
+        let start = (inner.head + inner.length) % self.maximum;
+        let first = suffix.len().min(self.maximum - start);
+        inner.bytes[start..start + first].copy_from_slice(&suffix[..first]);
+        inner.bytes[..suffix.len() - first].copy_from_slice(&suffix[first..]);
+        inner.length += suffix.len();
         if let Some(capture) = &self.capture {
             capture.push(chunk);
         }
@@ -228,14 +258,9 @@ impl ProcessOutput for Tail {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let length = inner.bytes.len().min(maximum);
+        let length = inner.length.min(maximum);
         Ok(ProcessRead {
-            bytes: inner
-                .bytes
-                .iter()
-                .skip(inner.bytes.len() - length)
-                .copied()
-                .collect(),
+            bytes: inner.copy_from(inner.length - length),
             oldest_offset: inner.total - length as u64,
             next_offset: inner.total,
             lossy: inner.total > length as u64,
@@ -255,13 +280,13 @@ impl ProcessOutput for Tail {
                 "process output offset exceeds the stream tail".into(),
             ));
         }
-        let retained = inner.bytes.len() as u64;
+        let retained = inner.length as u64;
         let oldest_offset = inner.total.saturating_sub(retained);
         let lossy = offset < oldest_offset;
         let start = usize::try_from(offset.max(oldest_offset).saturating_sub(oldest_offset))
             .map_err(|_| ProcessError::InvalidInput("process output offset is too large".into()))?;
         Ok(ProcessRead {
-            bytes: inner.bytes.iter().skip(start).copied().collect(),
+            bytes: inner.copy_from(start),
             oldest_offset,
             next_offset: inner.total,
             lossy,
@@ -282,11 +307,19 @@ struct ChildState {
     runtime: tokio::runtime::Handle,
     service: Weak<ServiceState>,
     groups: Arc<dyn ProcessGroups>,
-    outcome: Mutex<Option<Result<ProcessOutcome>>>,
+    outcome: Mutex<Option<Completion>>,
     settled: Notify,
     active_released: AtomicBool,
     termination_started: AtomicBool,
     duplex_stop: Option<tokio_util::sync::CancellationToken>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+struct Completion {
+    outcome: Result<ProcessOutcome>,
+    settlement: Result<()>,
+    provisional: bool,
 }
 
 #[cfg(unix)]
@@ -299,12 +332,34 @@ struct ManagedControl {
 
 #[cfg(unix)]
 impl ChildState {
-    fn finish(&self, outcome: Result<ProcessOutcome>) {
+    fn recovery_interrupted(&self) {
+        if let Some(service) = self.service.upgrade() {
+            lock_registry(&service).accepting = false;
+        }
+        self.signal_if_current(SignalTier::Kill);
         let mut current = self
             .outcome
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current.is_some() {
+        if current.is_none() {
+            let error =
+                ProcessError::Io("duplex supervisor recovery ended before settlement".into());
+            *current = Some(Completion {
+                outcome: Err(error.clone()),
+                settlement: Err(error),
+                provisional: true,
+            });
+        }
+        drop(current);
+        // This is an error receipt, not proof of reaping. Retain plan/registry ownership.
+        self.settled.notify_waiters();
+    }
+    fn finish(&self, outcome: Result<ProcessOutcome>, settlement: Result<()>) {
+        let mut current = self
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.as_ref().is_some_and(|receipt| !receipt.provisional) {
             return;
         }
         // Reaping and pipe settlement precede finish. Captured-output handles may
@@ -315,7 +370,11 @@ impl ChildState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         drop(owner);
-        *current = Some(outcome);
+        *current = Some(Completion {
+            outcome,
+            settlement,
+            provisional: false,
+        });
         drop(current);
         self.release_active();
         self.settled.notify_waiters();
@@ -396,15 +455,21 @@ impl ChildState {
     }
 
     async fn wait_outcome(&self) -> Result<ProcessOutcome> {
+        self.wait_completion().await.outcome
+    }
+    async fn wait_settlement(&self) -> Result<()> {
+        self.wait_completion().await.settlement
+    }
+    async fn wait_completion(&self) -> Completion {
         loop {
             let notified = self.settled.notified();
-            if let Some(outcome) = self
+            if let Some(completion) = self
                 .outcome
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
             {
-                return outcome;
+                return completion;
             }
             notified.await;
         }
@@ -640,7 +705,7 @@ impl Service {
 
     #[cfg(unix)]
     async fn shutdown(&self) -> Result<()> {
-        let processes = loop {
+        let mut processes = loop {
             let notified = self.state.changed.notified();
             let processes = {
                 let mut registry = lock_registry(&self.state);
@@ -653,6 +718,7 @@ impl Service {
             }
             notified.await;
         };
+        processes.sort_by_key(|process| process.pid);
         for process in &processes {
             process.terminate();
         }
@@ -660,13 +726,18 @@ impl Service {
         let cache = self.cache.clone();
         let mut cleanup = tokio::spawn(async move {
             let _state = state;
+            let mut failure = None;
             for process in processes {
-                let _ = process.wait_outcome().await;
+                if let Err(error) = process.wait_settlement().await {
+                    failure.get_or_insert(error);
+                }
             }
-            if let Some(cache) = cache {
-                cache.shutdown().await?;
+            if let Some(cache) = cache
+                && let Err(error) = cache.shutdown().await
+            {
+                failure.get_or_insert(error);
             }
-            Ok(())
+            failure.map_or(Ok(()), Err)
         });
         match tokio::time::timeout(
             Duration::from_millis(self.config.shutdown_timeout_ms),
@@ -738,6 +809,7 @@ fn supervise_child(
                 capture.abandon();
             }
         }
+        let settlement = status.as_ref().map(|_| ()).map_err(Clone::clone);
         let outcome = status.and_then(|status| {
             if let Some(error) = drain_error {
                 return Err(ProcessError::Io(error));
@@ -745,7 +817,7 @@ fn supervise_child(
             Ok(status)
         });
         drop((stdout, stderr));
-        wait_state.finish(outcome);
+        wait_state.finish(outcome, settlement);
     });
 }
 
@@ -960,41 +1032,89 @@ impl PluginFactory for ProcessLocalFactory {
 
 #[cfg(unix)]
 async fn settle_drains(
-    mut stdout: tokio::task::JoinHandle<Result<()>>,
-    mut stderr: tokio::task::JoinHandle<Result<()>>,
+    stdout: tokio::task::JoinHandle<Result<()>>,
+    stderr: tokio::task::JoinHandle<Result<()>>,
     grace: Duration,
 ) -> Option<String> {
-    let deadline = tokio::time::sleep(grace);
-    tokio::pin!(deadline);
-    let (mut out, mut err) = (None, None);
-    let mut timed_out = false;
-    while out.is_none() || err.is_none() {
-        tokio::select! { biased;
-            result = &mut stdout, if out.is_none() => out = Some(result),
-            result = &mut stderr, if err.is_none() => err = Some(result),
-            () = &mut deadline => {
-                timed_out = true;
-                if out.is_none() { stdout.abort(); }
-                if err.is_none() { stderr.abort(); }
-                // A task can finish between the deadline and abort. Its actual
-                // join result wins; an already joined task must never be polled twice.
-                if out.is_none() { out = Some(stdout.await); }
-                if err.is_none() { err = Some(stderr.await); }
-                break;
+    DrainTasks::new(stdout, stderr).settle(grace).await
+}
+
+#[cfg(unix)]
+type DrainResult = std::result::Result<Result<()>, tokio::task::JoinError>;
+
+#[cfg(unix)]
+struct DrainTasks {
+    stdout: Option<tokio::task::JoinHandle<Result<()>>>,
+    stderr: Option<tokio::task::JoinHandle<Result<()>>>,
+    out: Option<DrainResult>,
+    err: Option<DrainResult>,
+}
+
+#[cfg(unix)]
+impl DrainTasks {
+    fn new(
+        stdout: tokio::task::JoinHandle<Result<()>>,
+        stderr: tokio::task::JoinHandle<Result<()>>,
+    ) -> Self {
+        Self {
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            out: None,
+            err: None,
+        }
+    }
+    // Borrowed joins stay with the supervisor owner if this wait is interrupted.
+    async fn settle(&mut self, grace: Duration) -> Option<String> {
+        let deadline = tokio::time::sleep(grace);
+        tokio::pin!(deadline);
+        let mut timed_out = false;
+        while self.stdout.is_some() || self.stderr.is_some() {
+            tokio::select! { biased;
+                result = async { self.stdout.as_mut().expect("pending stdout").await }, if self.stdout.is_some() => {
+                    self.out = Some(result); self.stdout = None;
+                },
+                result = async { self.stderr.as_mut().expect("pending stderr").await }, if self.stderr.is_some() => {
+                    self.err = Some(result); self.stderr = None;
+                },
+                () = &mut deadline => {
+                    timed_out = true;
+                    if let Some(task) = &self.stdout { task.abort(); }
+                    if let Some(task) = &self.stderr { task.abort(); }
+                    // A task can finish between the deadline and abort. Its actual
+                    // join result wins; an already joined task must never be polled twice.
+                    if let Some(task) = &mut self.stdout { self.out = Some(task.await); self.stdout = None; }
+                    if let Some(task) = &mut self.stderr { self.err = Some(task.await); self.stderr = None; }
+                    break;
+                }
+            }
+        }
+        match (
+            self.out.as_ref().expect("stdout joined"),
+            self.err.as_ref().expect("stderr joined"),
+        ) {
+            (Ok(Ok(())), Ok(Ok(()))) => None,
+            (out, err) => {
+                let reason = if timed_out {
+                    "pipe drain timed out before EOF"
+                } else {
+                    "pipe closed before clean EOF"
+                };
+                Some(format!(
+                    "{reason}: stdout drain={out:?}, stderr drain={err:?}"
+                ))
             }
         }
     }
-    match (out.expect("stdout joined"), err.expect("stderr joined")) {
-        (Ok(Ok(())), Ok(Ok(()))) => None,
-        (out, err) => {
-            let reason = if timed_out {
-                "pipe drain timed out before EOF"
-            } else {
-                "pipe closed before clean EOF"
-            };
-            Some(format!(
-                "{reason}: stdout drain={out:?}, stderr drain={err:?}"
-            ))
+}
+
+#[cfg(unix)]
+impl Drop for DrainTasks {
+    fn drop(&mut self) {
+        if let Some(task) = &self.stdout {
+            task.abort();
+        }
+        if let Some(task) = &self.stderr {
+            task.abort();
         }
     }
 }
@@ -1038,6 +1158,35 @@ mod tests {
         assert!(error.contains("fixture failure"), "{error}");
         assert!(error.contains("Cancelled"), "{error}");
     }
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_drain_wait_retains_completed_and_pending_join_ownership() {
+        use std::{
+            future::Future as _,
+            task::{Context, Poll, Waker},
+        };
+        let out = tokio::spawn(async { Ok(()) });
+        while !out.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let err = tokio::spawn(std::future::pending::<Result<()>>());
+        let abort = err.abort_handle();
+        let mut drains = DrainTasks::new(out, err);
+        {
+            let mut wait = std::pin::pin!(drains.settle(Duration::from_secs(1)));
+            assert!(matches!(
+                wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+        }
+        assert!(matches!(drains.out, Some(Ok(Ok(())))));
+        assert!(drains.stdout.is_none());
+        assert!(drains.stderr.is_some());
+        abort.abort();
+        let error = drains.settle(Duration::from_secs(1)).await.unwrap();
+        assert!(error.contains("stdout drain=Ok(Ok(()))"), "{error}");
+        assert!(error.contains("Cancelled"), "{error}");
+        assert!(drains.stderr.is_none());
+    }
 
     #[derive(Debug, Default)]
     struct StubbornProcessGroups {
@@ -1073,7 +1222,7 @@ mod tests {
         }
     }
 
-    fn immediate_process() -> ProcessSpec {
+    pub(super) fn immediate_process() -> ProcessSpec {
         let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
         ProcessSpec {
             process: ConfinedProcess {
@@ -1230,5 +1379,134 @@ mod tests {
         assert_eq!(managed.wait().await, Err(ProcessError::SettlementTimeout));
         groups.alive.store(false, Ordering::Release);
         service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retirement_reports_the_failure_of_a_child_it_joins() {
+        let groups = Arc::new(StubbornProcessGroups {
+            alive: AtomicBool::new(true),
+            ..StubbornProcessGroups::default()
+        });
+        let service = Service::with_groups(
+            ProcessLocalConfig {
+                shutdown_timeout_ms: 30_000,
+                ..ProcessLocalConfig::default()
+            },
+            groups.clone(),
+        );
+        let managed = service.spawn(immediate_process()).await.unwrap();
+        groups.wait_until_terminated().await;
+        assert_eq!(
+            service.shutdown().await,
+            Err(ProcessError::SettlementTimeout)
+        );
+        assert_eq!(managed.wait().await, Err(ProcessError::SettlementTimeout));
+        assert!(lock_registry(&service.state).managed.is_empty());
+        groups.alive.store(false, Ordering::Release);
+    }
+
+    #[test]
+    #[should_panic(expected = "capture tail requires a nonzero bound")]
+    fn zero_capture_tail_is_rejected_at_construction() {
+        let _tail = Tail::new(
+            0,
+            Arc::new(CaptureReservation {
+                service: Weak::new(),
+                bytes: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn wrapped_tail_reads_requested_suffixes_and_preserves_offsets() {
+        let tail = Tail::new(
+            7,
+            Arc::new(CaptureReservation {
+                service: Weak::new(),
+                bytes: 7,
+            }),
+        );
+        assert!(tail.read_from(0).unwrap().bytes.is_empty());
+        tail.push(b"0123456").unwrap();
+        tail.push(b"78").unwrap();
+        let expired = tail.read_from(0).unwrap();
+        assert_eq!(expired.bytes, b"2345678");
+        assert_eq!(expired.oldest_offset, 2);
+        assert_eq!(expired.next_offset, 9);
+        assert!(expired.lossy);
+        for (offset, bytes) in [(4, b"45678".as_slice()), (7, b"78"), (9, b"")] {
+            let read = tail.read_from(offset).unwrap();
+            assert_eq!(read.bytes, bytes);
+            assert!(!read.lossy);
+        }
+        let peek = tail.peek_tail(4).unwrap();
+        assert_eq!(peek.bytes, b"5678");
+        assert_eq!(peek.oldest_offset, 5);
+        assert_eq!(peek.next_offset, 9);
+        assert!(peek.lossy);
+    }
+
+    #[test]
+    fn lossy_tail_reads_translate_absolute_offsets_before_copying_retained_bytes() {
+        let stream: Vec<u8> = (0..127).collect();
+        for maximum in [1, 7, 32] {
+            let tail = Tail::new(
+                maximum,
+                Arc::new(CaptureReservation {
+                    service: Weak::new(),
+                    bytes: maximum,
+                }),
+            );
+            for chunk in [
+                &stream[..5],
+                &stream[5..7],
+                &[],
+                &stream[7..52],
+                &stream[52..],
+            ] {
+                tail.push(chunk).unwrap();
+            }
+            let oldest = stream.len() - maximum;
+            for offset in 0..=stream.len() {
+                let read = tail.read_from(offset as u64).unwrap();
+                assert_eq!(read.bytes, stream[offset.max(oldest)..]);
+                assert_eq!(read.oldest_offset, oldest as u64);
+                assert_eq!(read.next_offset, stream.len() as u64);
+                assert_eq!(read.lossy, offset < oldest);
+            }
+            assert!(matches!(
+                tail.read_from(stream.len() as u64 + 1),
+                Err(ProcessError::InvalidInput(_))
+            ));
+        }
+    }
+    #[test]
+    fn tail_overflow_keeps_exact_storage_and_raw_offsets() {
+        for maximum in [1, 7, 8192, 1_048_576] {
+            let tail = Tail::new(
+                maximum,
+                Arc::new(CaptureReservation {
+                    service: Weak::new(),
+                    bytes: maximum,
+                }),
+            );
+            let allocation = tail.inner.lock().unwrap().bytes.as_ptr();
+            let mut all = Vec::new();
+            for length in [maximum - 1, maximum, maximum + 1, 8192, 3] {
+                let chunk: Vec<_> = (0..length)
+                    .map(|i| u8::try_from(i % 256).unwrap())
+                    .collect();
+                all.extend_from_slice(&chunk);
+                tail.push(&chunk).unwrap();
+                let inner = tail.inner.lock().unwrap();
+                assert_eq!(inner.bytes.len(), maximum);
+                assert_eq!(inner.bytes.as_ptr(), allocation);
+                drop(inner);
+                let read = tail.read_from(0).unwrap();
+                assert_eq!(read.bytes, all[all.len().saturating_sub(maximum)..]);
+                assert_eq!(read.next_offset, all.len() as u64);
+                assert_eq!(read.oldest_offset, all.len().saturating_sub(maximum) as u64);
+            }
+        }
     }
 }

@@ -231,7 +231,6 @@ mod native {
     #[derive(Debug)]
     struct Control {
         child: Arc<ChildState>,
-        settlement: tokio::sync::watch::Receiver<Option<Result<()>>>,
         input: Arc<Input>,
         output: Arc<Output>,
         stderr: Arc<Tail>,
@@ -257,14 +256,75 @@ mod native {
             self.child.wait_outcome().await
         }
         async fn wait_settlement(&self) -> Result<()> {
-            let mut settled = self.settlement.clone();
-            loop {
-                if let Some(result) = settled.borrow_and_update().clone() {
-                    return result;
-                }
-                settled.changed().await.map_err(|_| {
-                    ProcessError::Io("duplex supervisor ended before settlement".into())
-                })?;
+            self.child.wait_settlement().await
+        }
+    }
+    struct SupervisorResources {
+        child: tokio::process::Child,
+        state: Arc<ChildState>,
+        input: Option<tokio::task::JoinHandle<()>>,
+        input_stop: CancellationToken,
+        drains: DrainTasks,
+        output: Option<Arc<Output>>,
+    }
+    impl SupervisorResources {
+        async fn settle(&mut self) -> (Result<ProcessOutcome>, Result<()>) {
+            let outcome = reap_group(&mut self.child, &self.state).await;
+            self.input_stop.cancel();
+            if let Some(task) = &mut self.input {
+                let _ = task.await;
+                self.input = None;
+            }
+            let drain_error = self
+                .drains
+                .settle(self.state.grace)
+                .await
+                .map(ProcessError::Io);
+            // Keep capture ownership through both joins, independently of stdout EOF.
+            self.output.take();
+            let reaped = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+            (
+                outcome.and_then(|outcome| drain_error.map_or(Ok(outcome), Err)),
+                reaped,
+            )
+        }
+    }
+    /// Created before spawn, including the abort-before-first-poll case.
+    struct SupervisorGuard(Option<SupervisorResources>);
+    impl Drop for SupervisorGuard {
+        fn drop(&mut self) {
+            let Some(mut resources) = self.0.take() else {
+                return;
+            };
+            resources.state.terminate();
+            if let Some(task) = &resources.input {
+                task.abort();
+            }
+            let runtime = resources.state.runtime.clone();
+            let failure = RecoveryCompletion(resources.state.clone());
+            runtime.spawn(async move {
+                let _failure = failure;
+                let (_, receipt) = resources.settle().await;
+                resources.state.finish(
+                    Err(ProcessError::Io(
+                        "duplex supervisor ended before settlement".into(),
+                    )),
+                    receipt,
+                );
+            });
+        }
+    }
+    struct RecoveryCompletion(Arc<ChildState>);
+    impl Drop for RecoveryCompletion {
+        fn drop(&mut self) {
+            if self
+                .0
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            {
+                self.0.recovery_interrupted();
             }
         }
     }
@@ -274,6 +334,14 @@ mod native {
             spec: DuplexProcessSpec,
             runtime: &tokio::runtime::Handle,
         ) -> Result<ManagedDuplexProcess> {
+            self.spawn_duplex_tracked(spec, runtime)
+                .map(|(process, _)| process)
+        }
+        fn spawn_duplex_tracked(
+            &self,
+            spec: DuplexProcessSpec,
+            runtime: &tokio::runtime::Handle,
+        ) -> Result<(ManagedDuplexProcess, tokio::task::AbortHandle)> {
             let spec = spec.into_process_spec();
             let (mut child, pid, capture_bytes) = self.admit_and_spawn(&spec, true)?;
             let reservation = Arc::new(CaptureReservation {
@@ -322,38 +390,172 @@ mod native {
                 result
             });
             let stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
-            let waiting = state.clone();
-            let final_output = output.clone();
-            let (settled, settlement) = tokio::sync::watch::channel(None);
-            runtime.spawn(async move {
-                let outcome = reap_group(&mut child, &waiting).await;
-                input_stop.cancel();
-                let _ = input_task.await;
-                let drain_error = settle_drains(stdout_task, stderr_task, waiting.grace)
-                    .await
-                    .map(ProcessError::Io);
-                // Keep capture ownership through both joins, independently of stdout EOF.
-                drop(final_output);
-                let reaped = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
-                waiting.finish(outcome.and_then(|outcome| drain_error.map_or(Ok(outcome), Err)));
-                settled.send_replace(Some(reaped));
+            let guard = SupervisorGuard(Some(SupervisorResources {
+                child,
+                state: state.clone(),
+                input: Some(input_task),
+                input_stop,
+                drains: DrainTasks::new(stdout_task, stderr_task),
+                output: Some(output.clone()),
+            }));
+            let supervisor = runtime.spawn(async move {
+                let mut guard = guard;
+                let resources = guard.0.as_mut().expect("supervisor owns its resources");
+                let (outcome, receipt) = resources.settle().await;
+                resources.state.finish(outcome, receipt);
+                guard.0 = None;
             });
             if !published {
                 state.terminate();
                 return Err(ProcessError::ShuttingDown);
             }
-            Ok(ManagedDuplexProcess::new(Arc::new(Control {
-                child: state,
-                settlement,
-                input,
-                output,
-                stderr,
-            })))
+            Ok((
+                ManagedDuplexProcess::new(Arc::new(Control {
+                    child: state,
+                    input,
+                    output,
+                    stderr,
+                })),
+                supervisor.abort_handle(),
+            ))
         }
     }
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[derive(Debug, Default)]
+        struct PanicOnceGroups(AtomicBool);
+        impl ProcessGroups for PanicOnceGroups {
+            fn signal(&self, pid: u32, tier: SignalTier) {
+                SystemProcessGroups.signal(pid, tier);
+            }
+            fn is_alive(&self, pid: u32) -> bool {
+                assert!(
+                    self.0.swap(true, Ordering::AcqRel),
+                    "injected supervisor panic after direct-child reap"
+                );
+                SystemProcessGroups.is_alive(pid)
+            }
+        }
+        #[tokio::test]
+        async fn panicking_supervisor_recovers_a_reaped_child_and_preserves_the_failure() {
+            let service = Service::with_groups(
+                ProcessLocalConfig::default(),
+                Arc::new(PanicOnceGroups::default()),
+            );
+            let spec = crate::tests::immediate_process();
+            let process = service
+                .spawn_duplex(
+                    DuplexProcessSpec {
+                        process: spec.process,
+                        environment: spec.environment,
+                        stdout_buffer_bytes: 8,
+                        stderr_max_bytes: 8,
+                        termination_grace_ms: 50,
+                    },
+                    &tokio::runtime::Handle::current(),
+                )
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), process.wait_settlement())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(process.wait().await, Err(ProcessError::Io(message)) if message.contains("supervisor"))
+            );
+            assert!(!SystemProcessGroups.is_alive(process.pid()));
+            assert_eq!(lock_registry(&service.state).active, 0);
+            service.shutdown().await.unwrap();
+        }
+        #[tokio::test]
+        async fn interrupted_recovery_wakes_waiters_without_releasing_unreaped_ownership() {
+            #[derive(Debug)]
+            struct PlanDrop(Arc<AtomicBool>);
+            impl Drop for PlanDrop {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let service = Service::new(ProcessLocalConfig::default());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut spec = crate::tests::immediate_process();
+            spec.process.arguments[1] = "exec sleep 30".into();
+            spec.process.owner = Some(rsi_sandbox::ProcessPlanOwner::new(PlanDrop(
+                dropped.clone(),
+            )));
+            let (process, supervisor) = service
+                .spawn_duplex_tracked(
+                    DuplexProcessSpec {
+                        process: spec.process,
+                        environment: spec.environment,
+                        stdout_buffer_bytes: 8,
+                        stderr_max_bytes: 8,
+                        termination_grace_ms: 50,
+                    },
+                    &tokio::runtime::Handle::current(),
+                )
+                .unwrap();
+            let state = lock_registry(&service.state).managed[&process.pid()].clone();
+            drop(RecoveryCompletion(state.clone()));
+            assert!(matches!(
+                process.wait_settlement().await,
+                Err(ProcessError::Io(_))
+            ));
+            assert!(!dropped.load(Ordering::Acquire));
+            assert!(!lock_registry(&service.state).accepting);
+            assert_eq!(lock_registry(&service.state).active, 1);
+            // The original supervisor is still available in this injected failure.
+            // Await its actual reap/joins before explicitly releasing retained ownership.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !supervisor.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the retained original supervisor must reap and join");
+            process.wait_settlement().await.unwrap();
+            assert!(dropped.load(Ordering::Acquire));
+            assert_eq!(lock_registry(&service.state).active, 0);
+            assert!(!lock_registry(&service.state).accepting);
+            assert!(!SystemProcessGroups.is_alive(process.pid()));
+        }
+        #[tokio::test]
+        async fn interrupted_supervisor_recovers_the_native_child_before_releasing_admission() {
+            let service = Service::new(ProcessLocalConfig::default());
+            let mut spec = crate::tests::immediate_process();
+            spec.process.arguments[1] = "exec sleep 30".into();
+            let (process, supervisor) = service
+                .spawn_duplex_tracked(
+                    DuplexProcessSpec {
+                        process: spec.process,
+                        environment: spec.environment,
+                        stdout_buffer_bytes: 8,
+                        stderr_max_bytes: 8,
+                        termination_grace_ms: 50,
+                    },
+                    &tokio::runtime::Handle::current(),
+                )
+                .unwrap();
+            let pid = process.pid();
+            supervisor.abort();
+            let receipt =
+                tokio::time::timeout(Duration::from_secs(2), process.wait_settlement()).await;
+            if receipt.is_err() {
+                service.groups.signal(pid, SignalTier::Kill);
+            }
+            receipt
+                .expect("supervisor loss must wake settlement waiters")
+                .unwrap();
+            assert!(
+                matches!(process.wait().await, Err(ProcessError::Io(message)) if message.contains("supervisor"))
+            );
+            assert!(
+                !service.groups.is_alive(pid),
+                "native group must actually be gone"
+            );
+            assert_eq!(lock_registry(&service.state).active, 0);
+            service.shutdown().await.unwrap();
+        }
         fn output() -> Arc<Output> {
             Arc::new(Output {
                 capacity: 8,

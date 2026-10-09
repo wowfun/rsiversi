@@ -74,6 +74,74 @@ mod native {
             *outcome = Err(error);
         }
     }
+    fn complete_output(
+        receipt: Option<Result<()>>,
+        outcome: &mut Result<ProcessOutcome>,
+        settlement: &mut Result<()>,
+        stop: Option<&CancellationToken>,
+    ) {
+        match receipt {
+            Some(Ok(())) => {}
+            Some(Err(error)) => record_failure(outcome, error),
+            None => {
+                let error = ProcessError::Io("PTY output did not settle after reaping".into());
+                if settlement.is_ok() {
+                    *settlement = Err(error.clone());
+                }
+                if let Some(stop) = stop {
+                    stop.cancel();
+                }
+                record_failure(outcome, error);
+            }
+        }
+    }
+    #[test]
+    fn acknowledged_output_error_changes_outcome_without_failing_resource_settlement() {
+        let mut outcome = Ok(ProcessOutcome {
+            exit_code: Some(0),
+            signal: None,
+        });
+        let mut settlement = Ok(());
+        let stop = CancellationToken::new();
+        let error = ProcessError::Io("reader failed after releasing its resources".into());
+        complete_output(
+            Some(Err(error.clone())),
+            &mut outcome,
+            &mut settlement,
+            Some(&stop),
+        );
+        assert_eq!(outcome, Err(error));
+        assert_eq!(settlement, Ok(()));
+        assert!(!stop.is_cancelled());
+    }
+    #[test]
+    fn missing_output_receipt_fails_settlement_and_preserves_prior_errors() {
+        for prior in [false, true] {
+            let mut outcome = if prior {
+                Err(ProcessError::SettlementTimeout)
+            } else {
+                Ok(ProcessOutcome {
+                    exit_code: Some(0),
+                    signal: None,
+                })
+            };
+            let mut settlement = if prior {
+                Err(ProcessError::SettlementTimeout)
+            } else {
+                Ok(())
+            };
+            let stop = CancellationToken::new();
+            complete_output(None, &mut outcome, &mut settlement, Some(&stop));
+            assert!(stop.is_cancelled());
+            let error = if prior {
+                ProcessError::SettlementTimeout
+            } else {
+                ProcessError::Io("PTY output did not settle after reaping".into())
+            };
+            assert_eq!(outcome, Err(error.clone()));
+            assert_eq!(settlement, Err(error));
+        }
+    }
     #[test]
     fn later_io_failure_preserves_the_original_settlement_error() {
         let mut outcome = Err(ProcessError::SettlementTimeout);
@@ -298,7 +366,7 @@ mod native {
             let reader_thread = std::thread::Builder::new()
                 .name("rsi-pty-read".into())
                 .spawn(move || {
-                    let _retained = read_retained;
+                    let retained = read_retained;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         drain(reader, output, stop, read_runtime)
                     }))
@@ -306,6 +374,7 @@ mod native {
                     if result.is_err() {
                         read_state.terminate();
                     }
+                    drop(retained);
                     let _ = read_done.send(result);
                 });
             let (child_done, child_result) = oneshot::channel();
@@ -322,6 +391,7 @@ mod native {
                 let mut outcome = child_result
                     .await
                     .unwrap_or_else(|_| Err(ProcessError::Io("PTY reaper failed".into())));
+                let mut settlement = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
                 if settling.group_is_alive() {
                     settling.terminate();
                     if !wait_for_group_disappearance(
@@ -333,6 +403,7 @@ mod native {
                     .await
                     {
                         record_failure(&mut outcome, ProcessError::SettlementTimeout);
+                        settlement = Err(ProcessError::SettlementTimeout);
                     }
                 }
                 // Stop new input after reaping, while normal output still drains in order.
@@ -344,25 +415,27 @@ mod native {
                 .await
                 .is_err()
                 {
+                    if settlement.is_ok() {
+                        settlement = Err(ProcessError::Io(
+                            "PTY input did not settle after reaping".into(),
+                        ));
+                    }
                     record_failure(
                         &mut outcome,
                         ProcessError::Io("PTY input did not settle after reaping".into()),
                     );
                 }
-                match tokio::time::timeout(settling.grace, read_wait).await {
-                    Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(error))) => record_failure(&mut outcome, error),
-                    _ => {
-                        if let Some(stop) = &settling.duplex_stop {
-                            stop.cancel();
-                        }
-                        record_failure(
-                            &mut outcome,
-                            ProcessError::Io("PTY output did not settle after reaping".into()),
-                        );
-                    }
-                }
-                settling.finish(outcome);
+                let receipt = tokio::time::timeout(settling.grace, read_wait)
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok);
+                complete_output(
+                    receipt,
+                    &mut outcome,
+                    &mut settlement,
+                    settling.duplex_stop.as_ref(),
+                );
+                settling.finish(outcome, settlement);
             });
             if failed || !published {
                 state.terminate();
