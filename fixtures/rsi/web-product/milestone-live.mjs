@@ -2,11 +2,12 @@ import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Explicit live milestone acceptance. Never imported by the deterministic suite.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir,copyFile,chmod,readdir} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,copyFile,chmod} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService,boundedRun} from './service.mjs';
 import {startMcpFixture} from './mcp-fixture.mjs';
+import {liveTurnTerminal,settleLiveEvidence} from './evidence.mjs';
 const report=process.env.RSI_WEB_REPORT,model=process.env.RSI_LIVE_MODEL;
 assert(process.env.RSI_LIVE_ENV_FILE && report && model && process.env.RSI_WEB_ASSETS,'explicit live inputs required');
 assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));
@@ -18,16 +19,22 @@ const mcp=await startMcpFixture({requireCredential:false}),browser=await chromiu
 let service,page;const errors=[],started=Date.now();let approvals=0;
 const bodyMarker='BODY_ONLY_7e29c6af';
 async function complete(pane,input,prompt) {
+  const previous=await pane.getAttribute('data-session-id');
+  const afterSeq=previous&&['Completed','Failed'].includes(await pane.locator('.pane-status').innerText())?(facts(previous).at(-1)?.seq??0):0;
   await input.fill(prompt);await pane.getByTestId('composer-send').click();
-  const deadline=Date.now()+180000;let sawRunning=false;
+  const deadline=Date.now()+180000;
   while(Date.now()<deadline) {
-    const status=await pane.locator('.pane-status').innerText();if(status!=='Completed')sawRunning=true;
+    const status=await pane.locator('.pane-status').innerText();
     const review=pane.locator('.pending button').filter({hasText:'Review:'});
     if(await review.count() && await review.first().isVisible()){await review.first().click();await page.getByRole('button',{name:'Allow once',exact:true}).click();approvals++;}
-    if((sawRunning || await input.inputValue()==='') && ['Completed','Failed'].includes(status))break;
+    if(['Completed','Failed'].includes(status)){
+      const session=await pane.getAttribute('data-session-id');
+      const terminal=session&&liveTurnTerminal(facts(session),prompt,afterSeq);
+      if(terminal){assert.equal(terminal.outcome.status,'completed');assert.equal(status,'Completed',(await pane.locator('.transcript').innerText()).slice(-4096));return;}
+    }
     await page.waitForTimeout(100);
   }
-  assert.equal(await pane.locator('.pane-status').innerText(),'Completed',(await pane.locator('.transcript').innerText()).slice(-4096));
+  throw new Error('Live turn exceeded 180 seconds');
 }
 function facts(session) {
   // --history intentionally returns one 128-Fact page. Read the bounded prior
@@ -80,8 +87,5 @@ try {
   if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.txt'),String(error).replaceAll(key,'[REDACTED]'));}
   throw new Error(String(error).replaceAll(key,'[REDACTED]'));
 } finally {
-  await browser.close();await service?.close();await mcp.close();
-  for(const name of await readdir(report))if(/\.(json|log|txt)$/.test(name)){
-    const path=join(report,name),text=await readFile(path,'utf8');if(text.includes(key)){await writeFile(path,text.replaceAll(key,'[REDACTED]'));throw new Error('Live evidence contained a credential and was redacted');}
-  }
+  await settleLiveEvidence(report,key,()=>browser.close(),()=>service?.close(),()=>mcp.close());
 }

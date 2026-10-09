@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import {readFile, writeFile, readdir} from 'node:fs/promises';
 import {join} from 'node:path';
+import {cleanupFinally} from './cleanup.mjs';
+
+export async function settleLiveEvidence(directory, key, ...owners) {
+  await cleanupFinally(() => redactEvidence(directory, key), ...owners);
+}
+
+// Use only for reads: recovery does not invoke the callback a second time.
+export async function recoverLiveRead(read, recover) {
+  try { return await read(); }
+  catch(error) {
+    if(error?.name==='TimeoutError' && await recover())return undefined;
+    throw error;
+  }
+}
 
 // Evidence text only; never follow links into files owned outside the fixture.
 export async function redactEvidence(directory, key) {
@@ -12,7 +26,7 @@ export async function redactEvidence(directory, key) {
     for (const entry of entries) {
       const child = join(path, entry.name);
       if (entry.isDirectory()) await scan(child);
-      else if (entry.isFile() && /\.(json|jsonl|log|txt)$/.test(entry.name)) {
+      else if (entry.isFile() && /\.(json|jsonl|log|txt|html)$/.test(entry.name)) {
         try {
           const text = await readFile(child, 'utf8');
           if (text.includes(key)) { await writeFile(child, text.replaceAll(key, '[REDACTED]')); redacted++; }
@@ -32,4 +46,12 @@ export function requireProviderUsage(facts) {
     assert(Number.isSafeInteger(entry.output_tokens) && entry.output_tokens > 0, 'Invalid provider output usage');
   }
   return usage;
+}
+
+export function liveTurnTerminal(facts, prompt, afterSeq) {
+  const input = facts.findLast(fact => fact.seq > afterSeq && fact.type === 'input_message_entered'
+    && fact.source?.type === 'human'
+    && fact.content?.some(part => part.type === 'text' && part.text === prompt));
+  return input && facts.find(fact => fact.seq > input.seq && fact.type === 'turn_terminal'
+    && fact.turn_id === input.turn_id);
 }

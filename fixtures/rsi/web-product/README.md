@@ -301,10 +301,19 @@ Markdown Agent definitions, next-fresh-spawn refresh, and bounded Files code,
 Markdown, PNG/SVG and opaque HTML previews. `preview-live.mjs` is a separate opt-in
 using `RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
 a new `RSI_WEB_REPORT`; it checks real parent/child replies and tool-created HTML.
+`RSI_WEB_BROWSER` selects Chromium (the default) or Firefox for this live probe.
 The parent prompt explicitly requests a verbatim child reply, including its source
 identifier. Assertions require the current definition marker in the child's reply,
 the matching durable completion input, and the parent's quoted reply; ordinary
 paraphrasing alone does not satisfy this traceability probe.
+Multi-turn live waiters record the prior Fact sequence before submission and
+require the submitted Human input's own `turn_terminal`. Clearing the draft or
+observing a previous `Completed` status does not acknowledge the new Turn;
+completion may also arrive without a sampled intermediate `Running` status.
+`evidence.test.mjs` checks this causal matching without a live credential.
+Live fixture cleanup attempts every resource close before scanning all evidence
+text for credentials, even when a close fails. Cleanup and redaction failures
+are both reported.
 
 Preview probes include catalog overflow, encoded image dimension rejection before
 any image `src` assignment, and actual frame-src/frame-ancestors behavior with a

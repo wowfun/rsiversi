@@ -4,7 +4,43 @@ import {mkdtemp, mkdir, writeFile, readFile, symlink, rm} from 'node:fs/promises
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {cleanupAll} from './cleanup.mjs';
-import {redactEvidence, requireProviderUsage} from './evidence.mjs';
+import {redactEvidence, requireProviderUsage, liveTurnTerminal, settleLiveEvidence, recoverLiveRead} from './evidence.mjs';
+
+test('live read recovery never replays the read or masks unclassified failures',async()=>{
+  const timeout=new Error('read timed out');timeout.name='TimeoutError';
+  let reads=0,recoveries=0;
+  const read=async()=>{reads++;throw timeout;};
+  assert.equal(await recoverLiveRead(read,async()=>{recoveries++;return true;}),undefined);
+  assert.equal(reads,1);assert.equal(recoveries,1);
+  await assert.rejects(recoverLiveRead(read,async()=>false),error=>error===timeout);
+  const unknown=new Error('unclassified read failure');
+  await assert.rejects(recoverLiveRead(async()=>{throw unknown;},async()=>{throw new Error('must not recover');}),error=>error===unknown);
+  assert.deepEqual(await recoverLiveRead(async()=>({status:'Completed'}),()=>{throw new Error('must not recover');}),{status:'Completed'});
+});
+
+test('live cleanup closes every owner before scanning even after a close failure', async () => {
+  const report = await mkdtemp(join(tmpdir(), 'rsi-live-cleanup-'));
+  const key = 'fixture-cleanup-private-key', failure = new Error('close rejected');
+  const closed = [];
+  try {
+    await assert.rejects(settleLiveEvidence(report, key,
+      () => { closed.push('browser'); throw failure; },
+      async () => { await writeFile(join(report, 'late.html'), key); closed.push('service'); },
+      () => { closed.push('mcp'); },
+    ), error => error instanceof AggregateError && error.errors.length === 2
+      && error.errors[0].errors.includes(failure) && /1 files sanitized/.test(error.errors[1].message));
+    assert.deepEqual([...closed].sort(), ['browser', 'mcp', 'service']);
+    assert.equal(await readFile(join(report, 'late.html'), 'utf8'), '[REDACTED]');
+  } finally { await rm(report, {recursive: true, force: true}); }
+});
+
+test('a completed turn with different human text cannot acknowledge the requested prompt', () => {
+  const facts = [
+    {seq: 1, type: 'input_message_entered', turn_id: 'other', source: {type: 'human'}, content: [{type: 'text', text: 'different'}]},
+    {seq: 2, type: 'turn_terminal', turn_id: 'other', outcome: {status: 'completed'}},
+  ];
+  assert.equal(liveTurnTerminal(facts, 'requested', 0), undefined);
+});
 
 test('cleanup settles every owner after synchronous and asynchronous failures', async () => {
   const settled = [];
@@ -39,6 +75,32 @@ test('live usage evidence cannot succeed on absent or invalid counts', () => {
     assert.throws(() => requireProviderUsage(value));
   }
   assert.deepEqual(requireProviderUsage(facts({input_tokens: 12, output_tokens: 4})), [{input_tokens: 12, output_tokens: 4}]);
+});
+
+test('a previous terminal or another Turn cannot acknowledge the submitted live input', () => {
+  const old = {seq: 2, type: 'turn_terminal', turn_id: 'old', outcome: {status: 'completed'}};
+  const input = {seq: 3, type: 'input_message_entered', turn_id: 'new', source: {type: 'human'}, content: [{type: 'text', text: 'next'}]};
+  const unrelated = {seq: 4, type: 'turn_terminal', turn_id: 'other', outcome: {status: 'completed'}};
+  assert.equal(liveTurnTerminal([old], 'next', 2), undefined);
+  assert.equal(liveTurnTerminal([old, input, unrelated], 'next', 2), undefined);
+  const terminal = {seq: 5, type: 'turn_terminal', turn_id: 'new', outcome: {status: 'completed'}};
+  assert.equal(liveTurnTerminal([old, input, unrelated, terminal], 'next', 2), terminal);
+});
+
+test('live matching handles repeated prompts, immediate completion and failed outcomes', () => {
+  const input = (seq, turn_id, source = 'human') => ({seq, type: 'input_message_entered', turn_id, source: {type: source}, content: [{type: 'text', text: 'repeat'}]});
+  const terminal = (seq, turn_id, status) => ({seq, type: 'turn_terminal', turn_id, outcome: {status}});
+  const prior = [input(1, 'old'), terminal(2, 'old', 'completed')];
+  assert.equal(liveTurnTerminal(prior, 'repeat', 2), undefined);
+  const current = terminal(4, 'new', 'completed');
+  assert.equal(liveTurnTerminal([...prior, input(3, 'new'), current], 'repeat', 2), current);
+  const failed = terminal(4, 'new', 'failed');
+  assert.equal(liveTurnTerminal([...prior, input(3, 'new'), failed], 'repeat', 2), failed);
+  assert.equal(liveTurnTerminal([...prior, input(3, 'context', 'plugin_context'), terminal(4, 'context', 'completed')], 'repeat', 2), undefined);
+  const repeated = [...prior, input(3, 'first'), terminal(4, 'first', 'completed'), input(5, 'second')];
+  assert.equal(liveTurnTerminal(repeated, 'repeat', 2), undefined);
+  const latest = terminal(6, 'second', 'failed');
+  assert.equal(liveTurnTerminal([...repeated, latest], 'repeat', 2), latest);
 });
 
 
