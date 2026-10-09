@@ -502,3 +502,14 @@ continues partial indexing, reports source coverage, resets a workspace in finit
 steps and opens verified originals for UTF-8 selection and draft references.
 The [History contract](../../crates/rsi/history-api/README.md) owns scope and bounds.
 
+The opt-in Session browser appears in Service extensions through the shared
+standard contribution. “View current screenshot” reads its authorized PNG in
+64 KiB windows and presents a grayscale terminal preview up to 90x25 cells,
+scaled to the terminal width captured when requested, with local contrast
+normalization. Request another preview after resizing the terminal. Source
+reads share the form's nonqueued action admission; PNG decode and resampling run
+on a blocking worker. It verifies the
+1280x720 viewport and a bounded decoder allocation before decoding. Replacing
+the details form invalidates pending and already completed preview deliveries.
+The existing TUI has no native image viewer;
+this text preview works within its cell renderer and needs no external application.

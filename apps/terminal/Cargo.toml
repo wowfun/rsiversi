@@ -35,6 +35,7 @@ rsi-application = { path = "../../crates/rsi/application" }
 rsi-client = { path = "../../crates/rsi/client" }
 rsi-conversation = { path = "../../crates/rsi/conversation" }
 bytes.workspace = true
+image.workspace = true
 rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
 rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
 rsi-user-questions-protocol = { path = "../../crates/rsi-user-questions/protocol" }

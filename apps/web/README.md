@@ -1,5 +1,17 @@
 # Web document bridge
 
+The standard renderer displays an optional `data.image` by reading its explicitly
+declared PNG source in bounded 64 KiB windows. Its published renderer declares
+the source capability, and reads start only after presentation activation.
+The Session screenshot contract
+admits exactly 1280x720 and at most 4 MiB. Replacing the model or disposing its
+resource pane invalidates pending reads and releases the object URL. A new
+presentation revision refreshes source reads even when its model is unchanged;
+inline cards and resource details carry the current revision into renderer snapshots. The
+Service source owner rechecks current Session authority for each window. Current
+source failures appear in the screenshot figure; retired reads cannot publish an
+image or error into a replacement snapshot.
+
 The directory bridge preserves typed domain failures. A known validation or
 pre-mutation filesystem rejection leaves folder creation editable. An unknown
 transport or mutation outcome requires explicit parent readback before retry.

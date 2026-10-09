@@ -22,6 +22,7 @@ pub(super) enum Action {
     UiCard,
     UiEdit(String, u64),
     UiInvoke(rsi_ui::UiReference, serde_json::Value, u64),
+    UiImage(u64),
     New,
     Recent,
     References,
@@ -249,8 +250,7 @@ impl State {
         self.detail_stop = tokio_util::sync::CancellationToken::new();
     }
     pub(super) fn open_detail(&mut self, text: String) {
-        self.detail_stop.cancel();
-        self.detail_stop = tokio_util::sync::CancellationToken::new();
+        self.invalidate_detail();
         self.ui_form = None;
         self.ui_edit = None;
         self.detail = Some(text);

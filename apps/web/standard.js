@@ -9,6 +9,8 @@ export async function mount(root, initial, host, signal) {
   let body, currentBusy;
   let buttons = new Map();
   let events = new AbortController();
+  let imageEpoch=0,imageUrl,pendingImage;
+  const releaseImage=()=>{pendingImage=undefined;imageEpoch++;if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=undefined;};
   signal.addEventListener("abort", () => events.abort(), { once: true });
   function update(snapshot) {
     const { model, busy, error } = snapshot;
@@ -17,6 +19,7 @@ export async function mount(root, initial, host, signal) {
     if (key === previous) return;
     previous = key;
     currentBusy = busy;
+    releaseImage();
     events.abort();
     events = new AbortController();
     const fields = new Map();
@@ -52,6 +55,18 @@ export async function mount(root, initial, host, signal) {
       }
     }
     buttons = nextButtons;
+    const image=model.data?.image;
+    if(!busy&&image&&Number.isSafeInteger(image.bytes)&&image.bytes>0&&image.bytes<=4*1024*1024&&image.width===1280&&image.height===720&&model.sources?.some(source=>source.name===image.source&&source.media_type==="image/png")){
+      const figure=element("figure","ui-screenshot"),img=element("img");img.alt="Current Session browser screenshot";img.width=1280;img.height=720;img.style.maxWidth="100%";img.style.height="auto";figure.append(img);nodes.splice(1,0,figure);
+      const epoch=imageEpoch;
+      pendingImage=async()=>{try{
+        const data=new Uint8Array(image.bytes);let offset=0;
+        while(offset<data.length){if(signal.aborted||epoch!==imageEpoch)return;const chunk=await host.source(image.source,offset,Math.min(65536,data.length-offset));if(!chunk.length||chunk.length>data.length-offset)throw new Error("Incomplete screenshot source");data.set(chunk,offset);offset+=chunk.length;}
+        if(signal.aborted||epoch!==imageEpoch)return;
+        if(data[0]!==137||data[1]!==80||data[2]!==78||data[3]!==71)throw new Error("Invalid screenshot source");
+        imageUrl=URL.createObjectURL(new Blob([data],{type:"image/png"}));img.src=imageUrl;
+      }catch(error){if(!signal.aborted&&epoch===imageEpoch)figure.replaceChildren(element("p","source-error",error.message));}};
+    }
     if (busy) nodes.push(element("p", "hint", "Working…"));
     const focused = root.querySelector("[data-ui-field]:focus");
     const selection = focused && { key: focused.dataset.uiField, start: focused.selectionStart, end: focused.selectionEnd };
@@ -66,5 +81,5 @@ export async function mount(root, initial, host, signal) {
     if (selection) { const input = fields.get(selection.key); input?.focus(); input?.setSelectionRange(selection.start, selection.end); }
   }
   update(initial);
-  return { async update(snapshot) { update(snapshot); }, async dispose() { events.abort(); buttons.clear(); root.replaceChildren(); } };
+  return { async update(snapshot) { update(snapshot); }, activate() { const load=pendingImage;pendingImage=undefined;void load?.(); }, async dispose() { events.abort(); releaseImage(); buttons.clear(); root.replaceChildren(); } };
 }

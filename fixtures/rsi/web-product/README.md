@@ -534,6 +534,13 @@ Open action displays its refusal inside the modal. The report labels this as
 presentation fault injection; it does not claim that the injected Session exists
 or that an authorization boundary was exercised by that action.
 
+`RSI_REPORT_DIR=/absolute/new/report node fixtures/rsi/web-product/standard-image.mjs`
+checks the current standard renderer with the real MountTable in Chromium. It
+verifies activated source reads, replacement during a pending read, bounded windows,
+visible incomplete, invalid and rejected-source errors, suppression of retired
+read failures, Close joining source work, and object URL disposal. This is keyless document
+lifecycle evidence and does not establish Service or native runtime behavior.
+
 `RSI_REPORT_DIR=/absolute/new/report node fixtures/rsi/web-product/history-picker.mjs`
 checks the current History dialog in Chromium with controlled replies. Query and
 range edits retire old pagination controls; continuation and subsequent paging

@@ -9,7 +9,7 @@ use rsi_meta::{
 };
 use rsi_ui::{
     ActionContribution, ActionInput, ActionTarget, Contributions, Result, SurfaceContribution,
-    SurfaceRenderer, TargetKind, UiAction, UiContract, UiElement, UiError, UiView,
+    SurfaceRenderer, TargetKind, UiAction, UiContract, UiElement, UiError, UiModel, UiView,
 };
 use rsi_ui_api::{
     CatalogCursor, CatalogPage, CatalogRequest, ExportScope, Invoke, Observe, Selection, UiClient,
@@ -28,12 +28,23 @@ struct State {
     catalog: Option<CatalogPage>,
     remote: Option<Remote>,
 }
+#[derive(Clone, Eq, PartialEq)]
+struct RemoteSource {
+    application: String,
+    presentation: rsi_ui::PresentationIdentity,
+    revision: u64,
+}
+struct Published {
+    model: UiModel,
+    remote: Option<RemoteSource>,
+}
 /// Captured reader for one actual Session target and API connection.
 pub struct Reader {
     revision: String,
     scope: ExportScope,
     client: UiClient,
     state: tokio::sync::Mutex<State>,
+    published: std::sync::Mutex<Option<Published>>,
     stop: CancellationToken,
 }
 impl std::fmt::Debug for Reader {
@@ -73,6 +84,7 @@ impl PluginFactory for TargetFactory {
             client: UiClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?)
                 .map_err(meta)?,
             state: tokio::sync::Mutex::new(State::default()),
+            published: std::sync::Mutex::new(None),
             stop: CancellationToken::new(),
         });
         let supply = plan
@@ -85,6 +97,11 @@ impl PluginFactory for TargetFactory {
                     reader.stop.cancel();
                     drop(supply);
                     reader.state.lock().await.remote.take();
+                    reader
+                        .published
+                        .lock()
+                        .expect("service UI publication")
+                        .take();
                     Ok(())
                 })
             }),
@@ -209,18 +226,99 @@ fn initial(reader: &Reader) -> UiView {
 #[derive(Debug)]
 struct Surface;
 impl SurfaceRenderer for Surface {
-    fn render(&self, context: &Context) -> Result<UiView> {
-        Ok(initial(reader(context)?.as_ref()))
+    fn render(&self, _: &Context) -> Result<UiView> {
+        Err(UiError::Invalid(
+            "Service UI requires asynchronous model presentation".into(),
+        ))
     }
+    fn model(&self, target: Context) -> BoxFuture<'_, Result<UiModel>> {
+        Box::pin(async move {
+            let reader = reader(&target)?;
+            local_model(&reader, initial(&reader))
+        })
+    }
+    fn source(
+        &self,
+        target: ActionTarget,
+        name: String,
+        offset: u64,
+        maximum: usize,
+    ) -> BoxFuture<'static, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let reader = reader(target.context())?;
+            tokio::select! {biased;()=target.cancelled()=>Err(UiError::Retired),()=target.view_closed()=>Err(UiError::Retired),()=reader.stop.cancelled()=>Err(UiError::Retired),result=tokio::time::timeout(Duration::from_secs(15),source(&reader,name,offset,maximum))=>result.map_err(|_|error("Service UI source deadline"))?}
+        })
+    }
+}
+fn local_model(reader: &Reader, view: UiView) -> Result<UiModel> {
+    let published = reader.published.lock().expect("service UI publication");
+    if let Some(published) = &*published {
+        return Ok(published.model.clone());
+    }
+    Ok(UiModel::standard(view)?)
+}
+fn publish_model(reader: &Reader, state: &State, view: UiView) -> Result<()> {
+    let mut model = UiModel::standard(view)?;
+    if let Some(remote) = &state.remote {
+        model.data = remote.item.item.snapshot.model.data.clone();
+        model
+            .sources
+            .clone_from(&remote.item.item.snapshot.model.sources);
+    }
+    model.validate()?;
+    let remote = state.remote.as_ref().map(|remote| RemoteSource {
+        application: remote.application.clone(),
+        presentation: remote.item.item.snapshot.presentation.clone(),
+        revision: remote.item.item.snapshot.revision,
+    });
+    *reader.published.lock().expect("service UI publication") = Some(Published { model, remote });
+    Ok(())
+}
+async fn source(reader: &Reader, name: String, offset: u64, maximum: usize) -> Result<Vec<u8>> {
+    if maximum == 0 || maximum > 65536 {
+        return Err(UiError::Capacity);
+    }
+    let (request, captured) = {
+        let published = reader.published.lock().expect("service UI publication");
+        let published = published.as_ref().ok_or(UiError::Retired)?;
+        let remote = published.remote.as_ref().ok_or(UiError::Retired)?;
+        if !published.model.sources.iter().any(|s| s.name == name) {
+            return Err(UiError::Retired);
+        }
+        (
+            rsi_ui_api::Source {
+                application: remote.application.clone(),
+                presentation: remote.presentation.clone(),
+                revision: remote.revision,
+                name,
+                offset,
+                maximum,
+            },
+            remote.clone(),
+        )
+    };
+    let bytes = reader.client.source(&request).await.map_err(error)?;
+    if reader.stop.is_cancelled()
+        || reader
+            .published
+            .lock()
+            .expect("service UI publication")
+            .as_ref()
+            .and_then(|published| published.remote.as_ref())
+            != Some(&captured)
+    {
+        return Err(UiError::Retired);
+    }
+    Ok(bytes.as_ref().to_vec())
 }
 #[derive(Debug)]
 struct Read;
 impl UiAction for Read {
-    fn invoke(
+    fn invoke_model(
         &self,
         target: ActionTarget,
         input: ActionInput,
-    ) -> BoxFuture<'static, Result<UiView>> {
+    ) -> BoxFuture<'static, Result<UiModel>> {
         Box::pin(async move {
             let reader = reader(target.context())?;
             let request: Request = serde_json::from_value(input.value)
@@ -229,12 +327,76 @@ impl UiAction for Read {
                 return Err(UiError::Retired);
             }
             let mut state = reader.state.try_lock().map_err(|_| UiError::Capacity)?;
-            let future = read(&reader, &mut state, request.operation, input.fields);
-            tokio::select! {biased;()=target.cancelled()=>Err(UiError::Retired),()=target.view_closed()=>Err(UiError::Retired),()=reader.stop.cancelled()=>Err(UiError::Retired),result=tokio::time::timeout(Duration::from_secs(40),future)=>result.map_err(|_|error("Service UI read deadline"))?}
+            let result = {
+                let future = read(&reader, &mut state, request.operation, input.fields);
+                tokio::select! {biased;()=target.cancelled()=>Err(UiError::Retired),()=target.view_closed()=>Err(UiError::Retired),()=reader.stop.cancelled()=>Err(UiError::Retired),result=tokio::time::timeout(Duration::from_mins(2),future)=>result.unwrap_or_else(|_|Err(error("Service UI read deadline")))}
+            };
+            match result {
+                Ok(view) => local_model(&reader, view),
+                Err(error) => {
+                    if state.remote.is_none() || reader.stop.is_cancelled() {
+                        reader
+                            .published
+                            .lock()
+                            .expect("service UI publication")
+                            .take();
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+    fn invoke(
+        &self,
+        target: ActionTarget,
+        input: ActionInput,
+    ) -> BoxFuture<'static, Result<UiView>> {
+        Box::pin(async move {
+            self::Read
+                .invoke_model(target, input)
+                .await?
+                .standard_view
+                .ok_or(UiError::Retired)
         })
     }
 }
+
 async fn read(
+    reader: &Reader,
+    state: &mut State,
+    operation: Operation,
+    fields: std::collections::BTreeMap<String, String>,
+) -> Result<UiView> {
+    let result = read_operation(reader, state, operation, fields).await;
+    match result {
+        Ok(mut view) => {
+            if let Err(problem) = publish_model(reader, state, view.clone()) {
+                state.remote = None;
+                state.catalog = None;
+                view = initial(reader);
+                view.elements.insert(
+                    0,
+                    UiElement::Text {
+                        text: format!("Service view unavailable: {}", error(problem)),
+                    },
+                );
+                publish_model(reader, state, view.clone())?;
+            }
+            Ok(view)
+        }
+        Err(error) => {
+            if state.remote.is_none() {
+                reader
+                    .published
+                    .lock()
+                    .expect("service UI publication")
+                    .take();
+            }
+            Err(error)
+        }
+    }
+}
+async fn read_operation(
     reader: &Reader,
     state: &mut State,
     operation: Operation,
@@ -251,6 +413,11 @@ async fn read(
         }
         Operation::List { after } => {
             state.remote = None;
+            reader
+                .published
+                .lock()
+                .expect("service UI publication")
+                .take();
             let page = reader
                 .client
                 .catalog(&CatalogRequest {
@@ -273,6 +440,11 @@ async fn read(
                 return Err(error("Service view is outside the displayed catalog"));
             }
             state.remote = None;
+            reader
+                .published
+                .lock()
+                .expect("service UI publication")
+                .take();
             let application = rsi_ui::fresh_identity("terminal-service-ui").map_err(error)?;
             let mut observation = reader
                 .client

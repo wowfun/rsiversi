@@ -7782,6 +7782,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "image",
  "libc",
  "portable-pty",
  "ratatui",

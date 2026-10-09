@@ -7,6 +7,133 @@ use std::sync::{
 };
 use termina::event::KeyEvent;
 
+#[tokio::test]
+async fn stale_history_diagnostics_escape_terminal_controls() {
+    let (mut client, _, runtime, surface) = client().await;
+    let request = rsi_history_api::Request::Query {
+        scope: rsi_history_api::QueryScope::AccessibleHost,
+        query: "saved".into(),
+        after: None,
+    };
+    client.show_history(
+        &request,
+        rsi_history_api::Reply::Stale {
+            reason: "Refresh \u{202e}spoof\u{001b}[31m".into(),
+        },
+    );
+    let detail = client.state.detail.as_ref().unwrap();
+    assert!(detail.contains("Refresh"));
+    assert!(!detail.contains('\u{202e}') && !detail.contains('\u{001b}'));
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+#[tokio::test]
+async fn replacing_a_details_form_fences_an_already_completed_screenshot_delivery() {
+    let (mut client, _, runtime, surface) = client().await;
+    let fiber = mount(&mut client, &runtime, Arc::new(Addon::default())).await;
+    let reference = client
+        .ui
+        .registry
+        .surfaces(&client.ui.surface)
+        .unwrap()
+        .into_iter()
+        .find(|surface| surface.title == "Independent form")
+        .unwrap()
+        .reference;
+    let mut replacement = client.ui.registry.surface(&reference).unwrap();
+    replacement.view.title = "Unrelated card details".into();
+    client.state.open_detail("Browser screenshot".into());
+    let stop = client.state.detail_stop.clone();
+    client.spawn_detail(async { Ok(Update::UiImage("OLD SCREENSHOT".into())) });
+    let work = client.tasks.next().await.unwrap();
+    assert!(matches!(work.result, Ok(Update::UiImage(_))));
+    // Direct synchronous form replacement takes the same open_detail path as card details.
+    client.show_ui(replacement);
+    assert!(stop.is_cancelled());
+    assert_ne!(work.view_revision, client.state.view_revision);
+    assert!(
+        client
+            .state
+            .ui_form
+            .as_ref()
+            .unwrap()
+            .image_preview
+            .is_none()
+    );
+    assert!(
+        !client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("OLD SCREENSHOT")
+    );
+    assert!(fiber.dispose().await.is_clean());
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn screenshot_source_reads_are_serialized_and_the_completed_preview_reenables_actions() {
+    let (mut client, _, runtime, surface) = client().await;
+    let mut png = std::io::Cursor::new(Vec::new());
+    let mut picture = image::RgbImage::new(1280, 720);
+    for (x, y, pixel) in picture.enumerate_pixels_mut() {
+        let shade = if x / 160 == y / 90 { 0 } else { 255 };
+        *pixel = image::Rgb([shade, shade, shade]);
+    }
+    image::DynamicImage::ImageRgb8(picture)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let addon = Arc::new(Addon {
+        asynchronous: true,
+        image: Some(png.into_inner().into()),
+        ..Addon::default()
+    });
+    let fiber = mount(&mut client, &runtime, addon.clone()).await;
+    let revision = client.state.view_revision;
+    client.ui_action(Action::UiImage(revision));
+    client.ui_action(Action::UiImage(client.state.view_revision));
+    assert!(client.state.detail_actions.is_none());
+    let text = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let work = client.tasks.next().await.unwrap();
+            if let Ok(Update::UiImage(text)) = work.result {
+                assert_eq!(work.view_revision, client.state.view_revision);
+                break text;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(addon.source_calls.load(Ordering::SeqCst), 1);
+    assert!(text.contains('█'));
+    assert!(text.lines().all(|line| line.chars().count() <= 90));
+    client.show_ui_image(text);
+    assert!(
+        client
+            .state
+            .detail_actions
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .any(|(_, action)| matches!(action, Action::UiImage(_)))
+    );
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("grayscale terminal preview")
+    );
+    rendered(&client, "screenshot-serialized-wide", 120, 45);
+    rendered(&client, "screenshot-serialized-narrow", 42, 32);
+    assert!(fiber.dispose().await.is_clean());
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -24,6 +151,8 @@ struct Addon {
     gate_second_model: bool,
     models: AtomicUsize,
     refresh_defaults: bool,
+    image: Option<Arc<[u8]>>,
+    source_calls: AtomicUsize,
 }
 impl Addon {
     fn view() -> UiView {
@@ -75,7 +204,31 @@ impl SurfaceRenderer for Addon {
                 self.gate.notified().await;
                 view.title = "New presentation".into();
             }
-            UiModel::standard(view).map_err(Into::into)
+            let mut model = UiModel::standard(view)?;
+            if let Some(png) = &self.image {
+                model.data = serde_json::json!({"image":{"source":"viewport","bytes":png.len(),"width":1280,"height":720}});
+                model.sources.push(ModelSource {
+                    name: "viewport".into(),
+                    title: "Screenshot".into(),
+                    media_type: "image/png".into(),
+                });
+            }
+            Ok(model)
+        })
+    }
+    fn source(
+        &self,
+        _: ActionTarget,
+        name: String,
+        offset: u64,
+        maximum: usize,
+    ) -> futures_util::future::BoxFuture<'static, rsi_ui::Result<Vec<u8>>> {
+        assert_eq!(name, "viewport");
+        self.source_calls.fetch_add(1, Ordering::SeqCst);
+        let png = self.image.clone().unwrap();
+        Box::pin(async move {
+            let start = usize::try_from(offset).unwrap().min(png.len());
+            Ok(png[start..(start + maximum).min(png.len())].to_vec())
         })
     }
 }

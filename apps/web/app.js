@@ -515,7 +515,7 @@ class Pane {
         continue;
       }
       rendererSlots.push({ key: `inline-${this.index}-${card.binding.epoch}`, surface: "pane", root: entry.inline,
-        binding: JSON.stringify(card.binding), snapshot: { model: card.model, busy: card.busy, error: card.error },
+        binding: JSON.stringify(card.binding), snapshot: { revision: card.ticket, model: card.model, busy: card.busy, error: card.error },
         host: { invoke(action, input) { return owner.request("command", JSON.stringify({ action: "ui_invoke", ticket: card.ticket, name: action, input })); },
           source(name, offset, maximum) { return owner.request("ui_source", JSON.stringify({ ticket: card.ticket, name, offset, maximum })); } }
       });
@@ -1552,7 +1552,7 @@ function renderUiDetail(detail, target) {
   if (target.key === key) body = target.body.firstElementChild;
   else { body = element("div", "ui-presentation"); target.show(key, detail.model.standard_view?.title ?? "Card details", body); }
   rendererSlots.push({ key: target.rendererKey, surface: target.surface, root: body, binding,
-    snapshot: { model: detail.model, busy: detail.busy, error: detail.error },
+    snapshot: { revision: detail.ticket, model: detail.model, busy: detail.busy, error: detail.error },
     host: { invoke(action, input) {
       if (detail.busy || !detail.model.actions.some(item => item.name === action)) throw new Error("This action is no longer available");
       return command({ action: "ui_invoke", ticket: detail.ticket, name: action, input });

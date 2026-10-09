@@ -6,6 +6,46 @@ use rsi_ui::{
 use std::{collections::BTreeMap, sync::Arc};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
+fn screenshot_preview(png: &[u8], columns: u16) -> super::Result<String> {
+    use image::ImageDecoder as _;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1280);
+    limits.max_image_height = Some(720);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let decoder = reader.into_decoder().map_err(error)?;
+    if decoder.dimensions() != (1280, 720) {
+        return Err(error("invalid viewport screenshot"));
+    }
+    let picture = image::DynamicImage::from_decoder(decoder).map_err(error)?;
+    let width = u32::from(columns.clamp(1, 96));
+    let height = (width * 27 / 96).max(1);
+    let pixels = picture
+        .resize_exact(width, height, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    // Downsampling small dark text otherwise quantizes an entire light page to spaces.
+    let (darkest, brightest) = pixels
+        .pixels()
+        .fold((u8::MAX, u8::MIN), |(dark, light), pixel| {
+            (dark.min(pixel[0]), light.max(pixel[0]))
+        });
+    let mut text = String::new();
+    for row in pixels.rows() {
+        for pixel in row {
+            let shade = if darkest == brightest {
+                usize::from(pixel[0])
+            } else {
+                usize::from(pixel[0] - darkest) * 255 / usize::from(brightest - darkest)
+            };
+            text.push(['█', '▓', '▒', '░', ' '][shade * 5 / 256]);
+        }
+        text.push('\n');
+    }
+    Ok(text)
+}
+
 pub(super) struct Bindings {
     pub registry: Arc<Ui>,
     pub application: Arc<UiTarget>,
@@ -15,6 +55,8 @@ pub(super) struct Form {
     view: BoundView,
     fields: BTreeMap<String, String>,
     busy: bool,
+    image: Option<(String, usize)>,
+    pub(super) image_preview: Option<String>,
     pub(super) presentation: Option<(Arc<PresentationLease>, SnapshotPin)>,
 }
 pub(super) struct Edit {
@@ -41,11 +83,31 @@ impl Form {
             view,
             fields,
             busy: false,
+            image: None,
+            image_preview: None,
             presentation: None,
         }
     }
     fn from_snapshot(lease: Arc<PresentationLease>, pin: SnapshotPin) -> rsi_ui::Result<Self> {
         let model = pin.model().model;
+        let image = model
+            .data
+            .get("image")
+            .filter(|image| image["width"] == 1280 && image["height"] == 720)
+            .and_then(|image| {
+                Some((
+                    image["source"].as_str()?.to_owned(),
+                    usize::try_from(image["bytes"].as_u64()?).ok()?,
+                ))
+            })
+            .filter(|(name, bytes)| {
+                *bytes > 0
+                    && *bytes <= 4 * 1024 * 1024
+                    && model
+                        .sources
+                        .iter()
+                        .any(|source| source.name == *name && source.media_type == "image/png")
+            });
         let view = model.standard_view.ok_or_else(|| {
             rsi_ui::UiError::Invalid("Terminal requires a standard surface view".into())
         })?;
@@ -65,11 +127,19 @@ impl Form {
             actions,
         });
         form.presentation = Some((lease, pin));
+        form.image = image;
         Ok(form)
     }
     fn text(&self) -> String {
         use std::fmt::Write as _;
         let mut text = self.view.view.title.clone();
+        if let Some(image) = &self.image_preview {
+            let _ = write!(
+                text,
+                "\n\nCurrent screenshot · grayscale terminal preview\n{image}"
+            );
+        }
+
         for element in &self.view.view.elements {
             match element {
                 UiElement::Text { text: value } | UiElement::Code { text: value } => {
@@ -87,7 +157,7 @@ impl Form {
         super::super::terminal_text(&text)
     }
     fn menu(&self, revision: u64) -> Menu {
-        let items = self
+        let mut items: Vec<_> = self
             .view
             .view
             .elements
@@ -108,6 +178,9 @@ impl Form {
                 _ => None,
             })
             .collect();
+        if self.image.is_some() {
+            items.push(("View current screenshot".into(), Action::UiImage(revision)));
+        }
         Menu {
             title: super::super::terminal_text(&self.view.view.title),
             selected: 0,
@@ -335,6 +408,10 @@ impl Client {
             Err(problem) => self.state.notice(problem.to_string()),
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One fenced dispatcher handles displayed UI actions and revision-bound source reads."
+    )]
     pub(super) fn ui_action(&mut self, action: Action) {
         let Some(form) = &mut self.state.ui_form else {
             return;
@@ -343,6 +420,41 @@ impl Client {
             return;
         }
         match action {
+            Action::UiImage(revision) if revision == self.state.view_revision => {
+                let Some((name, bytes)) = form.image.clone() else {
+                    return;
+                };
+                let Some((lease, pin)) = form.presentation.clone() else {
+                    return;
+                };
+                form.busy = true;
+                self.state.invalidate_detail();
+                self.state.refresh_ui();
+                let columns = super::terminal::size().0.min(96).saturating_sub(6);
+                self.spawn_detail(async move {
+                    let mut png = Vec::with_capacity(bytes);
+                    while png.len() < bytes {
+                        let chunk = lease
+                            .source(
+                                pin.revision(),
+                                &name,
+                                png.len() as u64,
+                                (bytes - png.len()).min(65536),
+                            )
+                            .await
+                            .map_err(error)?;
+                        if chunk.is_empty() || chunk.len() > bytes - png.len() {
+                            return Err(error("incomplete screenshot"));
+                        }
+                        png.extend_from_slice(chunk.as_ref());
+                    }
+                    tokio::task::spawn_blocking(move || screenshot_preview(&png, columns))
+                        .await
+                        .map_err(error)?
+                        .map(Update::UiImage)
+                });
+                self.state.info("Reading screenshot…");
+            }
             Action::UiEdit(name, revision) if revision == self.state.view_revision => {
                 let Some((label, multiline)) = form.view.view.elements.iter().find_map(|element| {
                     if let UiElement::Input {
@@ -429,6 +541,15 @@ impl Client {
         self.state.refresh_ui();
         self.watch_ui_presentation();
     }
+    pub(super) fn show_ui_image(&mut self, text: String) {
+        if let Some(form) = &mut self.state.ui_form {
+            form.busy = false;
+            form.image_preview = Some(text);
+            self.state.refresh_ui();
+            self.state.clear_info();
+            self.watch_ui_presentation();
+        }
+    }
     pub(super) fn ui_changed(&mut self) {
         if self
             .state
@@ -447,6 +568,45 @@ impl Client {
             .is_some_and(|menu| menu.title == "Actions")
         {
             self.action_menu();
+        }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::screenshot_preview;
+    #[test]
+    fn viewport_preview_is_finite_and_rejects_other_dimensions() {
+        for (width, height, valid) in [
+            (1280, 720, true),
+            (1281, 1, false),
+            (1, 721, false),
+            (1, 1, false),
+        ] {
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(width, height)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let result = screenshot_preview(png.get_ref(), 96);
+            if valid {
+                let text = result.unwrap();
+                assert_eq!(text.lines().count(), 27);
+                assert!(text.lines().all(|row| row.chars().count() == 96));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+    #[test]
+    fn preview_scales_to_the_available_terminal_columns() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1280, 720)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        for (columns, width, height) in [(0, 1, 1), (36, 36, 10), (96, 96, 27), (160, 96, 27)] {
+            let preview = screenshot_preview(png.get_ref(), columns).unwrap();
+            assert_eq!(preview.lines().count(), height);
+            assert!(preview.lines().all(|row| row.chars().count() == width));
         }
     }
 }

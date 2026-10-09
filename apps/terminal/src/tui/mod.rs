@@ -191,6 +191,7 @@ enum Update {
     Ui(rsi_ui::BoundView),
     UiPresentation(Arc<rsi_ui::PresentationLease>, rsi_ui::SnapshotPin),
     UiRetired,
+    UiImage(String),
     Plugins(Box<rsi_workbench_ui::PluginsView>),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
@@ -1005,7 +1006,10 @@ impl Client {
                 .notice("Client requests are busy; try again shortly");
             return false;
         }
-        if matches!(action, Action::UiEdit(..) | Action::UiInvoke(..)) {
+        if matches!(
+            action,
+            Action::UiEdit(..) | Action::UiInvoke(..) | Action::UiImage(..)
+        ) {
             self.ui_action(action);
             return false;
         }
@@ -1062,7 +1066,7 @@ impl Client {
             Action::RecallPrompt(id) => self.recall_prompt(id),
             Action::UiSurface(reference) => self.ui_surface(&reference),
             Action::UiCard => self.ui_card(),
-            Action::UiEdit(..) | Action::UiInvoke(..) => {
+            Action::UiEdit(..) | Action::UiInvoke(..) | Action::UiImage(..) => {
                 unreachable!("UI edit/actions dispatched above")
             }
             Action::Commands => self.command_menu(),
@@ -2088,11 +2092,12 @@ async fn run_inner(
                         WorkKind::Automation => client.automation_pending = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit | WorkKind::Queue => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::UiImage(_) | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
                         Ok(Update::Ui(view)) => client.show_ui(view),
                         Ok(Update::UiPresentation(lease, pin)) => client.show_ui_presentation(lease, pin),
                         Ok(Update::UiRetired) => client.ui_retired(),
+                        Ok(Update::UiImage(text)) => client.show_ui_image(text),
                         Ok(Update::Command(result)) => { client.command_finished(result); client.state.slash.invalidate(); },
                         Err(problem) => {
                             if matches!(work.kind, WorkKind::Detail) { client.ui_failed(); }

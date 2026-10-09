@@ -11,7 +11,7 @@ export async function buildRenderers(output) {
   const bytes = await readFile(join(source, "standard.js"));
   const catalog = { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js",
     files: [{ name: "standard.js", sha256: createHash("sha256").update(bytes).digest("hex") }],
-    schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["root", "pane", "sidebar", "dialog"],
+    schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "source", "focus"], surfaces: ["root", "pane", "sidebar", "dialog"],
   }] };
   const built=await build({configFile:false,root:source,logLevel:"error",build:{write:false,target:"es2022",minify:true,lib:{entry:join(source,"file-preview.js"),formats:["es"],fileName:()=>"file-preview.js"},rollupOptions:{output:{inlineDynamicImports:true}}}});
   const preview=Buffer.from(built[0].output.find(item=>item.type==="chunk").code);
