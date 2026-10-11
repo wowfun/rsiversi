@@ -47,6 +47,13 @@ applicable Usage, canonical hard limits and explicit ContextLimit recovery
 apply. Instructions, original task input, latest human steering and whole recent
 interaction units are protected, including a 64 KiB canonical-byte recent tail.
 
+The [metrics contract](../../../../crates/rsi/conversation/README.md) owns an
+immutable validated context-capacity observation. This prevents presentation
+callers from combining a captured request with unrelated capacity metadata or
+silently changing its reserve calculation. Catalog changes invalidate the
+displayed context observation without rewriting historical usage; malformed
+captured bindings remain errors rather than being disguised as absent telemetry.
+
 ## Alternatives considered
 
 Heuristic token estimates do not provide evidence about the active deployment.

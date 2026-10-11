@@ -88,6 +88,10 @@ impl MetricsCache {
                 .map_err(map_store_error)?
                 .durable_fact_seq;
         }
+        if scan.reducer.summary().through_seq == 0 && scan.watermark > 0 {
+            let header = store.header(session).await.map_err(map_store_error)?;
+            scan.reducer = MetricsReducer::new(header.settings().output_budgets().clone());
+        }
         let mut bytes = 0usize;
         for _ in 0..8 {
             if scan.reducer.summary().through_seq == scan.watermark {
@@ -190,6 +194,7 @@ impl MetricsCache {
             };
             let member = &tree.members[index];
             let id = member.session_id.clone();
+            let member_through_seq = member.through_seq;
             let Some(watermark) = member.watermark else {
                 let watermark = store
                     .inspect_session(&id)
@@ -201,8 +206,12 @@ impl MetricsCache {
                 member.complete = watermark == 0;
                 continue;
             };
+            if member_through_seq == 0 {
+                let header = store.header(&id).await.map_err(map_store_error)?;
+                scan.reducer = MetricsReducer::new(header.settings().output_budgets().clone());
+            }
             let page = store
-                .read_facts(&id, member.through_seq, 128)
+                .read_facts(&id, member_through_seq, 128)
                 .await
                 .map_err(map_store_error)?;
             if page.facts.is_empty() {

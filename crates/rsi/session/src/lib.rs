@@ -1359,7 +1359,7 @@ impl SessionHandle for LocalSessionHandle {
                 let mut progress = result?;
                 if let Some(context) = &progress.summary.last_context {
                     let matches = match &current_model.availability {
-                        rsi_session_protocol::ModelAvailability::Available {description} => &context.description == description,
+                        rsi_session_protocol::ModelAvailability::Available {description} => context.description() == description,
                         rsi_session_protocol::ModelAvailability::Unavailable {..} => false,
                     };
                     if !matches {progress.summary.last_context = None;}

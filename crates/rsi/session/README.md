@@ -1,5 +1,9 @@
 # rsi-session
 
+Metrics acquisition supplies each Session's immutable output budget table to its
+reducer, including separate child tables during tree scans. It never derives a
+historical request cap from the current live model catalog.
+
 Request-evidence reads bind an exact ModelIntent sequence in the attached Session.
 The Session owner resolves one direct original-inline reference per selected
 section, checks its digest/length and returns at most 256 KiB aligned UTF-8 bytes.

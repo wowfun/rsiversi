@@ -1,7 +1,7 @@
 //! Ordered usage reduction without history retention or model execution.
 
 use rsi_agent_session_protocol::{
-    EffectId, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
+    EffectId, ModelEventPurpose, OutputBudgetTable, SessionFact, SessionFactBody, TurnId,
 };
 use rsi_ai_protocol::{
     LanguageEvent, ModelRef, PreparedLanguageSettings, ReasoningEffortId, TokenUsage,
@@ -23,18 +23,67 @@ pub struct AttemptMetrics {
     pub terminal_seq: u64,
 }
 
-/// Last successful ordinary request's observed input and captured capacity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Last finished ordinary request's observed input and captured capacity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextUsage {
-    pub description: rsi_ai_protocol::LanguageModelDescription,
-    pub input_tokens: u64,
-    pub finished_seq: u64,
+    description: rsi_ai_protocol::LanguageModelDescription,
+    max_output_tokens: Option<u32>,
+    input_tokens: u64,
+    finished_seq: u64,
+    #[serde(skip)]
+    input_capacity_tokens: u32,
+}
+impl<'de> Deserialize<'de> for ContextUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            description: rsi_ai_protocol::LanguageModelDescription,
+            max_output_tokens: Option<u32>,
+            input_tokens: u64,
+            finished_seq: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.description,
+            wire.max_output_tokens,
+            wire.input_tokens,
+            wire.finished_seq,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 impl ContextUsage {
+    fn new(
+        description: rsi_ai_protocol::LanguageModelDescription,
+        max_output_tokens: Option<u32>,
+        input_tokens: u64,
+        finished_seq: u64,
+    ) -> Result<Self, &'static str> {
+        let input_capacity_tokens = description
+            .profile()
+            .input_capacity_tokens(max_output_tokens)
+            .map_err(|_| "invalid captured request output capacity")?;
+        Ok(Self {
+            description,
+            max_output_tokens,
+            input_tokens,
+            finished_seq,
+            input_capacity_tokens,
+        })
+    }
+    pub fn description(&self) -> &rsi_ai_protocol::LanguageModelDescription {
+        &self.description
+    }
+    pub const fn input_tokens(&self) -> u64 {
+        self.input_tokens
+    }
+    pub const fn finished_seq(&self) -> u64 {
+        self.finished_seq
+    }
     pub fn input_capacity(&self) -> u32 {
-        self.description.profile().context_window_tokens()
-            - self.description.profile().default_output_reserve_tokens()
+        self.input_capacity_tokens
     }
 }
 
@@ -94,9 +143,17 @@ struct OpenAttempt {
 pub struct MetricsReducer {
     summary: SessionMetrics,
     open: Option<OpenAttempt>,
+    output_budgets: OutputBudgetTable,
 }
 
 impl MetricsReducer {
+    /// Starts a reduction with the immutable request caps of this Session.
+    pub fn new(output_budgets: OutputBudgetTable) -> Self {
+        Self {
+            output_budgets,
+            ..Self::default()
+        }
+    }
     /// Conservative cache charge for bounded scalar/vector/string state, without Facts.
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -223,14 +280,18 @@ impl MetricsReducer {
                         self.summary.failed_attempts = add(self.summary.failed_attempts, 1)?;
                     }
                     if !failed && open.purpose == ModelEventPurpose::Conversation {
-                        self.summary.last_context =
-                            open.usage
-                                .zip(open.description)
-                                .map(|(usage, description)| ContextUsage {
+                        self.summary.last_context = open
+                            .usage
+                            .zip(open.description)
+                            .map(|(usage, description)| {
+                                ContextUsage::new(
                                     description,
-                                    input_tokens: usage.input_tokens(),
-                                    finished_seq: fact.seq(),
-                                });
+                                    self.output_budgets.cap(&open.model),
+                                    usage.input_tokens(),
+                                    fact.seq(),
+                                )
+                            })
+                            .transpose()?;
                     } else if !failed && open.purpose == ModelEventPurpose::ContextCompaction {
                         self.summary.last_context = None;
                     }

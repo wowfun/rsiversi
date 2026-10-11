@@ -1,5 +1,11 @@
 # rsi-conversation
 
+Metrics reduction receives the Session-frozen exact-model output budget table.
+Each last-context observation binds its reported input to the prepared profile
+and that route's explicit cap. Its input capacity follows
+`LanguageProfile::input_capacity_tokens`, shared with Agent pressure planning.
+ContextUsage validates this binding when decoded and exposes immutable fields.
+
 Tool presentation retains at most one bounded external conversation identity from
 a successful result. It exposes that navigation hint only when the exact matched
 intent names `external_agent`; an isolated result or another Tool cannot supply

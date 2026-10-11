@@ -280,7 +280,7 @@ async fn exercise(scenario: Scenario) {
             .last_context
             .as_ref()
             .unwrap()
-            .description
+            .description()
             .model()
             .model(),
         "second"
@@ -328,6 +328,13 @@ async fn dispatched_failure_is_not_retried_and_next_turn_uses_new_selection() {
 async fn default_effort_is_described_and_changed_capacity_invalidates_context_after_restart() {
     let (endpoint, server) = provider().await;
     let fixture = fixture(&endpoint);
+    let settings_path = fixture.temporary.path().join("config/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["rsi.agent"]["output_budgets"] = serde_json::json!([{
+        "model":{"deployment":"fixture","model":"fixture-model"},"max_output_tokens":8192
+    }]);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
     let mut profile = std::fs::read_to_string(&fixture.profile).unwrap();
     profile.push_str("\n[steps.config.reasoning_efforts.fixture-model]\nsupported = [\"low\", \"high\"]\ndefault = \"low\"\n");
     std::fs::write(&fixture.profile, &profile).unwrap();
@@ -366,7 +373,7 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
         .last_context
         .as_ref()
         .unwrap()
-        .description
+        .description()
         .clone();
     assert_eq!(
         first
@@ -375,7 +382,7 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
             .as_ref()
             .unwrap()
             .input_capacity(),
-        128_000 - 4096
+        128_000 - 8192
     );
     assert!(running.shutdown().await.is_clean());
     drop(handle);
@@ -387,6 +394,9 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
         )
         .replace("default = \"low\"", "default = \"high\"");
     std::fs::write(&fixture.profile, changed).unwrap();
+    // Existing Sessions retain their Header caps when startup defaults change.
+    settings["rsi.agent"]["output_budgets"][0]["max_output_tokens"] = serde_json::json!(1024);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
@@ -420,7 +430,7 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
     let read = handle.metrics().await.unwrap();
     assert_eq!(
         read.summary.last_context.as_ref().unwrap().input_capacity(),
-        64000 - 4096
+        64000 - 8192
     );
     assert_eq!(
         read.summary
@@ -441,6 +451,113 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_whole_turn_override_precedes_changed_domain_but_does_not_replace_it() {
     exercise(Scenario::WholeTurn).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // One durable Session is checked across capacity reduction and a failed new request.
+async fn reduced_output_capacity_preserves_metrics_and_tree_usage() {
+    let (endpoint, server) = provider().await;
+    let fixture = fixture(&endpoint);
+    let settings_path = fixture.temporary.path().join("config/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["rsi.agent"]["output_budgets"] = serde_json::json!([{
+        "model":{"deployment":"fixture","model":"fixture-model"}, "max_output_tokens":8192
+    }]);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let session = SessionId::new("reduced-output-capacity").unwrap();
+    let handle = running
+        .session_service()
+        .unwrap()
+        .create(CreateSession {
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: session.clone(),
+            agent_preset_id: None,
+        })
+        .await
+        .unwrap();
+    run_message_to_terminal(&handle, "before-reduction").await;
+    let first = handle.metrics().await.unwrap();
+    assert_eq!(
+        first
+            .summary
+            .last_context
+            .as_ref()
+            .unwrap()
+            .input_capacity(),
+        128_000 - 8192
+    );
+    assert_eq!(first.summary.reported_attempts, 1);
+    assert!(running.shutdown().await.is_clean());
+    drop(handle);
+    let mut profile: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.profile).unwrap()).unwrap();
+    let config = &mut profile["steps"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|step| step["id"].as_str() == Some("fixture-provider"))
+        .unwrap()["config"];
+    config["language_models"]["fixture-model"]["max_output_reserve_tokens"] =
+        toml::Value::Integer(4096);
+    std::fs::write(&fixture.profile, toml::to_string(&profile).unwrap()).unwrap();
+    // New startup defaults must not replace this Session's frozen 8192-token cap.
+    settings["rsi.agent"]["output_budgets"][0]["max_output_tokens"] = serde_json::json!(1024);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = running
+        .session_service()
+        .unwrap()
+        .attach(&session)
+        .await
+        .unwrap();
+    let read = handle.metrics().await.unwrap();
+    read.validate().unwrap();
+    assert!(read.summary.last_context.is_none());
+    assert_eq!(read.summary.tokens, first.summary.tokens);
+    let tree = handle.tree_metrics(true).await.unwrap();
+    tree.validate().unwrap();
+    assert!(tree.complete && tree.membership_complete);
+    assert_eq!(tree.totals.tokens, first.summary.tokens);
+    run_message_to_terminal(&handle, "after-reduction").await;
+    let history = handle.history_before(None, 128).await.unwrap();
+    assert!(
+        matches!(
+            history.facts.last().unwrap().body(),
+            SessionFactBody::TurnTerminal {
+                outcome: rsi_agent_session_protocol::TurnOutcome::Failed { .. },
+                ..
+            }
+        ),
+        "the frozen cap must reject preparation against the smaller current profile"
+    );
+    let read = handle.metrics().await.unwrap();
+    read.validate().unwrap();
+    assert_eq!(read.summary.tokens, first.summary.tokens);
+    assert_eq!(
+        read.summary.reported_attempts,
+        first.summary.reported_attempts
+    );
+    assert!(read.summary.last_context.is_none());
+    let tree = handle.tree_metrics(true).await.unwrap();
+    tree.validate().unwrap();
+    assert!(tree.complete && tree.membership_complete);
+    assert_eq!(tree.totals.tokens, first.summary.tokens);
+    assert_eq!(tree.totals.attempts, read.summary.attempts);
+    assert!(running.shutdown().await.is_clean());
+    server.abort();
+    let _ = server.await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_input_uses_execution_time_selection_and_cold_recovery_retains_it() {

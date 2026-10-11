@@ -69,11 +69,11 @@ pub(super) fn build(state: &Input<'_>, width: u16, y: u16) -> Footer {
     let mut optional = Vec::new();
     if let Some(metrics) = state.metrics {
         if let Some(context) = &metrics.last_context
-            && context.description.model() == model
+            && context.description().model() == model
         {
             optional.push(format!(
                 "last {}/{} ctx",
-                context.input_tokens,
+                context.input_tokens(),
                 context.input_capacity()
             ));
         }

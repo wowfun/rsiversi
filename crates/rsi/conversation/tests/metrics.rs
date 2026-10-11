@@ -58,6 +58,83 @@ fn event(seq: u64, id: &str, event: LanguageEvent) -> SessionFact {
 }
 
 #[test]
+fn captured_input_capacity_uses_frozen_caps_and_rejects_invalid_decode() {
+    use rsi_agent_session_protocol::{ModelOutputBudget, OutputBudgetTable};
+    use rsi_ai_protocol::{
+        ImageToolResultCapability, LanguageProfile, ModelRef, PreparedLanguageSettings, ToolDialect,
+    };
+    let profile = LanguageProfile::new(
+        100_000,
+        1000,
+        10_000,
+        ToolDialect::Responses,
+        false,
+        ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap();
+    for (cap, expected) in [
+        (None, 99_000),
+        (Some(500), 99_000),
+        (Some(9000), 91_000),
+        (Some(10_000), 90_000),
+    ] {
+        let table = OutputBudgetTable::new(
+            cap.into_iter()
+                .map(|cap| ModelOutputBudget {
+                    model: ModelRef::new("fixture", "model").unwrap(),
+                    max_output_tokens: cap,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let mut reducer = MetricsReducer::new(table);
+        let mut body = intent(1, "capacity").into_body();
+        let SessionFactBody::ModelIntent { snapshot, .. } = &mut body else {
+            unreachable!()
+        };
+        snapshot.language_settings =
+            Some(PreparedLanguageSettings::new(profile.clone(), None).unwrap());
+        for fact in [
+            fact(1, body),
+            event(
+                2,
+                "capacity",
+                LanguageEvent::Usage {
+                    usage: TokenUsage::new(76_000, 0, None, None, None).unwrap(),
+                },
+            ),
+            event(
+                3,
+                "capacity",
+                LanguageEvent::Finished {
+                    reason: FinishReason::MaxTokens,
+                    replay: None,
+                },
+            ),
+        ] {
+            reducer.observe(&fact).unwrap();
+        }
+        let summary = reducer.summary();
+        assert_eq!(
+            summary.last_context.as_ref().unwrap().input_capacity(),
+            expected
+        );
+        assert_eq!(profile.input_capacity_tokens(cap).unwrap(), expected);
+        let wire = serde_json::to_value(summary).unwrap();
+        assert_eq!(
+            serde_json::from_value::<rsi_conversation::SessionMetrics>(wire.clone()).unwrap(),
+            *summary
+        );
+        for invalid in [0, 10_001, u32::MAX] {
+            let mut bad = wire.clone();
+            bad["last_context"]["max_output_tokens"] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<rsi_conversation::SessionMetrics>(bad).is_err());
+        }
+    }
+}
+
+#[test]
 fn request_metadata_backfill_preserves_actual_default_effort_failed_usage_and_elapsed_time() {
     use rsi_ai_protocol::{
         ImageToolResultCapability, LanguageProfile, PreparedLanguageSettings, ReasoningEffortId,
