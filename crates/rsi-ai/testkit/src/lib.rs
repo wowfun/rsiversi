@@ -114,7 +114,9 @@ impl LanguageRunError {
         match self {
             Self::Provider(error)
             | Self::Assembly(LanguageAssemblyError::Provider { error, .. }) => Some(error),
-            Self::Assembly(LanguageAssemblyError::Protocol(_)) => None,
+            Self::Assembly(
+                LanguageAssemblyError::Protocol(_) | LanguageAssemblyError::Incomplete { .. },
+            ) => None,
         }
     }
 }

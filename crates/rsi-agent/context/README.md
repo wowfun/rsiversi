@@ -1,10 +1,26 @@
 # rsi-agent-context
 
+MaxTokens output is incomplete evidence, never an assistant message or a Tool
+batch. The fold retains its reported Conversation usage for pressure planning
+but excludes all its content and provider replay from requests. A validated
+ModelOutputRecovery marker supplies a fixed, bounded developer instruction to
+split remaining work into smaller calls without concatenating partial arguments.
+This instruction applies only to the owning live Turn's Conversation requests,
+not to compaction or subsequent Turns. Full replay and checkpoints preserve the
+same projection. Input pressure reserves the greater of the declared default
+output reserve and the explicit request cap.
+Recovery instructions reserve message and encoded-byte capacity before ordinary
+projection and canonical pressure planning. They remain outside canonical summary
+content and view digests, and cannot turn a fitting projection into a late limit.
+If protected current input and the recovery instruction cannot fit together,
+recovery fails with context.limit; it cannot discard protected input or split an
+active Turn to make room.
+
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden deliberately binds builder 2.8.0 and Session format 20,
-while retaining the v10 fold and v6 envelope formats.
+The allocation golden binds builder 2.9.0, Session format 21, the v11 fold
+and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
 deterministic compaction. It consumes validated session Facts and emits bounded
@@ -21,8 +37,8 @@ Invalid or mismatched summaries are inert, including summaries whose transitive
 source is outside the exact fork selection. Raw Facts remain authoritative.
 
 Pressure uses the most recent finished Conversation's reported input tokens
-for the same ModelRef, at eighty percent of described context window minus
-default output reserve. Summary Usage and Usage covered by an installed summary
+for the same ModelRef, at eighty percent of the input window remaining after
+the effective output reserve. Summary Usage and Usage covered by an installed summary
 are ineligible. Installing an eligible summary consumes the preceding Usage,
 including inherited parent Usage; only new Conversation Usage can rearm it.
 An optional Usage trigger with no selectable whole unit leaves the ordinary
@@ -72,7 +88,7 @@ reuses retained per-Turn totals and serializes only synthesized outcomes.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
-LanguageProfile along with frozen Language request options. Builder 2.8.0 emits
+LanguageProfile along with frozen Language request options. Builder 2.9.0 emits
 nested ToolResult images only when that profile positively declares image Tool
 results. No or Unknown uses deterministic descriptor text in the same block
 position, without reading Media or changing call IDs and error status. Ordinary

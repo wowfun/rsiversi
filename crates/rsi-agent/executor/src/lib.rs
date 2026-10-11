@@ -316,6 +316,7 @@ use execution_support::{
 #[derive(Debug)]
 enum ModelAttempt {
     Output(EffectId, Box<rsi_ai_protocol::LanguageOutput>),
+    Incomplete(EffectId),
     Retry,
     ContextLimit,
 }
@@ -353,6 +354,7 @@ struct ScannedTurn {
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
     budget_exhausted: Option<(BudgetDimension, u64, u64)>,
+    output_recovery_ordinal: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -605,6 +607,11 @@ fn scan_turn(
                 state.completed_model_without_successor = false;
                 state.effects.clear();
             }
+            SessionFactBody::ModelOutputRecovery {
+                turn_id, ordinal, ..
+            } if turn_id == claim.turn_id() => {
+                state.output_recovery_ordinal = *ordinal;
+            }
             SessionFactBody::BudgetExhausted {
                 turn_id,
                 dimension,
@@ -621,6 +628,7 @@ fn scan_turn(
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ImageRequested { .. }
             | SessionFactBody::CancelRequested { .. }
+            | SessionFactBody::ModelOutputRecovery { .. }
             | SessionFactBody::BudgetExhausted { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }

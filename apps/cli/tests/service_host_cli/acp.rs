@@ -129,6 +129,81 @@ fn contains_secret(path: &std::path::Path) -> bool {
     })
 }
 
+async fn truncated_chat(
+    State(requests): State<Arc<std::sync::Mutex<Vec<Value>>>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    requests.lock().unwrap().push(body);
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"delta":{"role":"assistant","content":"unfinished response"},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}),
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/v1/chat/completions", post(truncated_chat))
+        .with_state(requests.clone());
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let fixture = CliFixture::new(&endpoint);
+    profile(&fixture);
+    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let mut settings: Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["rsi.agent"]["turn_budget"] = json!(
+        rsi_agent_session_protocol::TurnBudget::default()
+            .with_maximum_output_recoveries(0)
+            .unwrap()
+    );
+    settings["rsi.agent"]["output_budgets"] = json!([{
+        "model":{"deployment":"fixture","model":"fixture-model"}, "max_output_tokens":8192
+    }]);
+    std::fs::write(settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let (child, mut peer) = start(&fixture).await;
+    let port = peer.handle();
+    let session = request(
+        &port,
+        "session/new",
+        json!({"cwd":fixture.workspace,"mcpServers":[]}),
+    )
+    .await;
+    let result = request(&port, "session/prompt", json!({"sessionId":session["sessionId"],"prompt":[{"type":"text","text":"produce a response"}]})).await;
+    assert_eq!(result["stopReason"], "max_tokens");
+    let chunk = update(&mut peer).await;
+    assert_eq!(chunk["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(chunk["content"]["text"], "unfinished response");
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "zero recovery allowance must not dispatch another request"
+        );
+        assert_eq!(requests[0]["max_tokens"], 8192);
+    }
+    request(
+        &port,
+        "session/close",
+        json!({"sessionId":session["sessionId"]}),
+    )
+    .await;
+    stop(&fixture, peer, child).await;
+    provider.abort();
+    let _ = provider.await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_during_permission_preserves_peer_and_accepts_late_reply() {
     let (endpoint, state, provider) = gated_provider("bash").await;

@@ -634,6 +634,7 @@ struct TurnControl {
     conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
     evidence_inline_bytes: usize,
     tool_source: Option<Arc<tool_origin::ToolSource>>,
+    output_recovery_ordinal: u64,
     seen_model_effects: Arc<BTreeSet<EffectId>>,
     elapsed: Arc<elapsed::ElapsedState>,
     accepted_at_ms: u64,
@@ -674,6 +675,7 @@ struct DurableMessageScan {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct BudgetUsage {
     provider_attempts: u64,
+    output_recoveries: u64,
     tool_calls: u64,
     generated_records: u64,
     generated_record_bytes: u64,
@@ -729,6 +731,7 @@ impl TurnControl {
             program_roles: Arc::new(BTreeMap::new()),
             conclusion: None,
             tool_source: None,
+            output_recovery_ordinal: 0,
             seen_model_effects: Arc::new(BTreeSet::new()),
             evidence_inline_bytes: 0,
             elapsed: Arc::new(elapsed::ElapsedState::default()),

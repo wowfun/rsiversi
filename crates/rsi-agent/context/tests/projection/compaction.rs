@@ -29,6 +29,93 @@ fn cursor() -> ModelContextState {
 }
 
 #[test]
+fn incomplete_usage_and_explicit_reserve_drive_pressure_across_checkpoint_and_replay() {
+    let (mut state, mut facts, _) = history(None);
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "cut",
+            ModelPurpose::Conversation,
+            "discarded-incomplete-content",
+            Some(76000),
+            FinishReason::MaxTokens,
+        ),
+    );
+    append(
+        &mut state,
+        &mut facts,
+        vec![SessionFactBody::ModelOutputRecovery {
+            turn_id: TurnId::new("current").unwrap(),
+            source_model_effect_id: EffectId::new("cut").unwrap(),
+            ordinal: 1,
+        }],
+    );
+    let options = rsi_ai_protocol::LanguageRequestOptions::new(
+        vec![],
+        ToolChoice::Auto,
+        vec![],
+        rsi_ai_protocol::ResponseFormat::Text,
+        rsi_ai_protocol::LanguageSettings::default()
+            .with_max_output_tokens(9000)
+            .unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let model = ModelRef::new("deployment", "model").unwrap();
+    assert!(
+        state
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &model,
+                &profile(),
+                None,
+                false
+            )
+            .unwrap()
+            .is_none()
+    );
+    let planned = state
+        .plan_compaction(&options, &model, &profile(), None, false)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        planned.plan.trigger,
+        CompactionTrigger::Usage {
+            input_tokens: 76000,
+            ..
+        }
+    ));
+    assert!(
+        !serde_json::to_string(&planned.request)
+            .unwrap()
+            .contains("split large files")
+    );
+    let view = serde_json::to_string(&state.build(options.clone(), &profile()).unwrap()).unwrap();
+    assert!(!view.contains("discarded-incomplete-content"));
+    let checkpoint = state.checkpoint().unwrap();
+    let mut restored = cursor();
+    restored.restore(&checkpoint).unwrap();
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    for other in [&restored, &replay] {
+        assert_eq!(
+            other
+                .plan_compaction(&options, &model, &profile(), None, false)
+                .unwrap()
+                .unwrap()
+                .plan,
+            planned.plan
+        );
+        assert_eq!(
+            serde_json::to_string(&other.build(options.clone(), &profile()).unwrap()).unwrap(),
+            view
+        );
+    }
+}
+
+#[test]
 fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation() {
     let mut state = cursor();
     let mut history = Vec::new();
@@ -901,6 +988,69 @@ fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64
         vec![accepted("current", "original task")],
     );
     (state, history, old_end)
+}
+
+#[test]
+fn recovery_hint_capacity_triggers_canonical_compaction_without_usage() {
+    let (_, mut facts, _) = history(None);
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("instructions"),
+        ContextLimits::new(4, 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    state.ingest(ContextPage::Canonical(&facts)).unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    assert!(
+        state
+            .plan_compaction(
+                &options,
+                &ModelRef::new("deployment", "model").unwrap(),
+                &profile(),
+                None,
+                false
+            )
+            .unwrap()
+            .is_none()
+    );
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "cut",
+            ModelPurpose::Conversation,
+            "discarded",
+            None,
+            FinishReason::MaxTokens,
+        ),
+    );
+    append(
+        &mut state,
+        &mut facts,
+        vec![SessionFactBody::ModelOutputRecovery {
+            turn_id: TurnId::new("current").unwrap(),
+            source_model_effect_id: EffectId::new("cut").unwrap(),
+            ordinal: 1,
+        }],
+    );
+    let planned = state
+        .plan_compaction(
+            &options,
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            None,
+            false,
+        )
+        .unwrap()
+        .expect("hint pressure must be planned before building");
+    assert_eq!(planned.plan.trigger, CompactionTrigger::CanonicalLimit);
+    assert!(
+        !serde_json::to_string(&planned.request)
+            .unwrap()
+            .contains("split large files")
+    );
 }
 fn plan(state: &ModelContextState) -> ContextCompactionPlan {
     let planned = state
@@ -2285,4 +2435,118 @@ fn program_provenance_survives_compaction_remap_checkpoint_and_canonical_replay(
             .unwrap()
             .contains("HIDDEN_INTERNAL_VALUE")
     }));
+}
+
+#[test]
+fn protected_input_that_fits_can_refuse_a_recovery_instruction() {
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("instructions"),
+        ContextLimits::new(2, 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    let mut facts = Vec::new();
+    append(
+        &mut state,
+        &mut facts,
+        vec![accepted("current", "original task")],
+    );
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let before = state.build(options.clone(), &profile()).unwrap();
+    assert_eq!(before.messages().len(), 2);
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "cut",
+            ModelPurpose::Conversation,
+            "discarded",
+            None,
+            FinishReason::MaxTokens,
+        ),
+    );
+    append(
+        &mut state,
+        &mut facts,
+        vec![SessionFactBody::ModelOutputRecovery {
+            turn_id: TurnId::new("current").unwrap(),
+            source_model_effect_id: EffectId::new("cut").unwrap(),
+            ordinal: 1,
+        }],
+    );
+    assert!(matches!(
+        state.build(options.clone(), &profile()),
+        Err(ContextError::TooLarge)
+    ));
+    assert!(matches!(
+        state.plan_compaction(
+            &options,
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            None,
+            false,
+        ),
+        Err(ContextError::TooLarge)
+    ));
+}
+
+#[test]
+fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
+    let (_, mut history, _) = history(None);
+    let turn = TurnId::new("current").unwrap();
+    let mut bodies = model_bodies(
+        "current",
+        "cut",
+        rsi_agent_session_protocol::ModelPurpose::Conversation,
+        "discarded",
+        None,
+        FinishReason::MaxTokens,
+    );
+    bodies.push(SessionFactBody::ModelOutputRecovery {
+        turn_id: turn,
+        source_model_effect_id: EffectId::new("cut").unwrap(),
+        ordinal: 1,
+    });
+    history.extend(
+        facts_after(history.len() as u64, bodies)
+            .into_iter()
+            .map(std::sync::Arc::new),
+    );
+    let mut fold = ContextFold::new(
+        header("instructions"),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    fold.apply(&history).unwrap();
+    // The canonical view fits in four messages, but adding the hint requires
+    // removing the old complete Turn and admitting its omission notice first.
+    let request = fold
+        .request(
+            ContextLimits::new(4, 1024 * 1024).unwrap(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(request.messages().len(), 4);
+    let wire = serde_json::to_string(&request).unwrap();
+    assert!(wire.contains("split large files"));
+    assert!(wire.contains("original task"));
+    assert!(!wire.contains("older private task"));
+    let bytes = serde_json::to_vec(request.messages()).unwrap().len();
+    assert_eq!(
+        fold.request(
+            ContextLimits::new(8, bytes).unwrap(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        )
+        .unwrap(),
+        request
+    );
+    assert!(matches!(
+        fold.request(
+            ContextLimits::new(8, bytes - 1).unwrap(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        ),
+        Err(ContextError::TooLarge)
+    ));
 }

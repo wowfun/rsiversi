@@ -1,5 +1,11 @@
 # rsi-agent-kernel
 
+An executor publication contains at most one ModelOutputRecovery marker. Rejected
+output recovery work reports the already admitted count, which equals the frozen
+limit when the next single marker exhausts it; other work dimensions retain their
+attempted-work accounting. Rejection leaves all staged Facts and control state
+unchanged. The marker must be flushed before a fresh model effect is prepared.
+
 Program append commits reconcile lost acknowledgements against the exact durable
 suffix. If an I/O failure cannot be reconciled, acceptance, progress and terminal
 publication report `ExecutionOutcomeUnknown`; pre-admission refusals retain their
@@ -163,8 +169,9 @@ ending channel after business work is exhausted. `finish_turn` owns a bounded
 atomic ending batch: at most one current-Step closure, one required budget
 marker and the terminal Fact. Only the adjacent closure in that ending batch
 is exempt from generated-record and elapsed limits. Ordinary Step closure
-remains charged. Domain mutations cannot append ending records or Kernel-owned
-Tool supersession markers. Only atomic message entry may supersede outstanding
+remains charged. Domain mutations cannot append ending records, Kernel-owned
+Tool supersession markers or executor-owned model output recovery markers.
+Only atomic message entry may supersede outstanding
 model calls. This prevents
 an exhausted open Step from blocking finalization without creating a reusable
 free business-work lane.

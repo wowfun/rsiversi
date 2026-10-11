@@ -1,12 +1,22 @@
 # rsi-agent-session-protocol
 
+Format 21 freezes `FrozenAgentSettings.output_budgets`: at most 256 unique
+exact deployment/model entries, 64 KiB encoded, each with a validated
+`max_output_tokens`. An empty table leaves the provider request cap unspecified.
+Model/effort selection never changes this Session policy.
+The immutable table validates at construction and deserialization; enclosing
+settings validation trusts that typed value without reserializing it.
+Within the current format, omitted output policy means an empty output budget
+table and two output recoveries. Serialization emits both fields explicitly.
+These policy defaults do not admit any earlier Header format.
+
 Reference envelopes use version 2. Source identity distinguishes native Header
 bindings from observed product records; capture metadata distinguishes a bounded
 suffix from an exact selected record, content kind, range and cutoff. These are
 user-data provenance, never execution authority or evidence of an external agent's
 durable acceptance. Only the source owner can reread and freeze a selection.
 
-Format 19 requires complete execution coordinates: a Local or stable SSH location
+Headers require complete execution coordinates: a Local or stable SSH location
 and its target-canonical workspace path. Decoding validates both together without
 filesystem I/O; a path alone never selects an execution machine. Forks preserve
 the exact parent coordinates. These coordinates are durable identity, not a grant
@@ -81,7 +91,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 20 is accepted; all other formats are unsupported. Header protection is
+format 21 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -122,8 +132,8 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 18), bounded identities, append-only Facts, and one terminal outcome per
-turn. It is a data contract, not a Runtime service or transport.
+headers, bounded identities, append-only Facts, and one terminal outcome per
+Turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
 They use the [Workspace host-path grammar](../../rsi-workspace/path/README.md).
@@ -164,8 +174,8 @@ value records which preset a session selected; process-local composition
 generation handles are deliberately outside this format.
 
 Each immutable settings value carries a `TurnBudget`, with repository hard maxima
-of 30 elapsed minutes, 64 provider attempts, 256
-Tool calls, 65,536 generated records, and 64 MiB of generated record bytes.
+of 30 elapsed minutes, 64 provider attempts, 256 Tool calls, 16 output recoveries,
+65,536 generated records, and 64 MiB of generated record bytes.
 Generated records include ordinary generated Facts and Turn-attributed domain
 controls, charged by their complete canonical envelope. Baselines and external
 commands use separate bounded admission; necessary atomic ending records retain
@@ -173,11 +183,19 @@ the Kernel-owned ending channel. Settings may only tighten these limits.
 Budget exhaustion is itself a nonterminal Fact
 followed by the sole `budget_exceeded` terminal outcome, so interrupted
 observers and recovery can classify the stop from durable history.
-Both records validate that their frozen limit is positive and no greater than
-the hard maximum for the named dimension; foreign history cannot widen a
-budget while claiming it was exhausted.
+Both records validate that their frozen limit is no greater than the hard maximum
+for the named dimension; foreign history cannot widen a budget while claiming it
+was exhausted. Limits must be positive except for output recoveries.
 The budget is mandatory in the current durable header encoding; decoding never
 widens an omitted budget to repository maxima.
+
+`TurnBudget.maximum_output_recoveries` defaults to two; zero disables recovery.
+`ModelOutputRecovery` binds the next ordinal to the latest same-Turn Conversation
+effect that durably finished with MaxTokens. Its source cannot have executed any
+Tools or already authorized recovery. Kernel validates the same provenance during
+publication and replay. The marker charges `OutputRecoveries` before a new effect
+can be prepared; exhaustion uses the ordinary BudgetExhausted/BudgetExceeded pair.
+Only this dimension accepts a zero limit. Recovery counts never reset within a Turn.
 
 Language, Image, and Tool effects follow explicit intent/start ordering. A
 direct Image request is durable before preparation, each successfully imported

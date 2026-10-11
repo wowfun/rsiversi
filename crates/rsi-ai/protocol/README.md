@@ -5,6 +5,14 @@ the exact model limit, then owns the request input-window calculation:
 the context window minus the larger of the default output reserve and the explicit
 request output cap.
 
+Finished(MaxTokens) assembles as LanguageAssemblyError::Incomplete, carrying
+bounded partial output and usage rather than a successful LanguageOutput. The
+event grammar remains strict; empty content and unfinished Tool arguments are
+valid incomplete evidence only after the stream's blocks have closed. No caller
+may use incomplete content as Tool execution authority. A request's explicit
+output cap is validated against the actual prepared model profile before
+credential or Media access; capability reserves never supply request defaults.
+
 This package is the authoritative provider-neutral semantic contract for the
 Language and Image `rsi-ai` capabilities. It defines closed validated requests, normalized
 events and results, strict assemblers, safe provider errors, locator-free media

@@ -26,14 +26,21 @@ publication does not repeatedly copy a growing full argument string. Completed
 call arguments become fixed SHA-256 fingerprints of typed JSON equality. They
 are consumed by exact ToolIntent admission and recomputed during recovery,
 so parsed JSON trees do not accumulate in resident control state.
-
-## Alternatives considered
+MaxTokens closes the source without authorizing any calls, including complete
+siblings. A recovery marker consumes that exact truncated source before a new
+Conversation intent can replace it; source-bound recovery cannot be reused.
+The [output recovery decision](../bug-fix/2026-10-10-model-output-recovery.md)
+owns the bounded replanning policy rather than a second Tool authority path.
 
 Both ordinary publication and mixed domain commits enforce Kernel ownership of
-supersession. A source-proven pre-start rejection does not require prepared
-execution settings because it conveys no execution or child authority. Historical
+supersession. Mixed domain commits also reject executor-owned recovery markers,
+so a domain mutation cannot consume the executor's recovery ordinal. A
+source-proven pre-start rejection does not require prepared execution settings
+because it conveys no execution or child authority. Historical
 bare rejections without source evidence are rejected rather than silently trusted;
 pre-release operators preserve the old Store and initialize a fresh one.
+
+## Alternatives considered
 
 Reading the current selection races with delayed Tools. Reading the parent
 Header ignores Session and explicit Turn selection. Trusting an Executor-supplied

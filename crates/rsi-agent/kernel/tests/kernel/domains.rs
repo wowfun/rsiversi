@@ -54,6 +54,43 @@ struct DomainRun {
 }
 
 #[tokio::test]
+async fn domain_mutation_cannot_consume_executor_owned_output_recovery() {
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    for body in super::output_recovery::source_bodies(run.claim.turn_id()) {
+        super::tool_origin::flush_bodies(&run.kernel, &run.claim, vec![body]).await;
+    }
+    let recovery = SessionFactBody::ModelOutputRecovery {
+        turn_id: run.claim.turn_id().clone(),
+        source_model_effect_id: EffectId::new("cut").unwrap(),
+        ordinal: 1,
+    };
+    let before = store.read_watermarks(run.claim.session_id()).await.unwrap();
+    let result = run
+        .kernel
+        .commit_domains(
+            &run.claim,
+            run.mutation("stolen-recovery", 1, true, vec![recovery.clone()]),
+        )
+        .await;
+    assert!(matches!(result, Err(TurnError::Invalid(_))), "{result:?}");
+    assert_eq!(
+        store.read_watermarks(run.claim.session_id()).await.unwrap(),
+        before
+    );
+    assert_eq!(
+        run.kernel
+            .domain_states(run.claim.session_id())
+            .await
+            .unwrap()[0]
+            .revision,
+        DomainRevision::new(1)
+    );
+    super::tool_origin::flush_bodies(&run.kernel, &run.claim, vec![recovery]).await;
+    run.stop().await;
+}
+
+#[tokio::test]
 async fn domain_mutation_cannot_forge_kernel_owned_supersession() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store.clone(), TurnBudget::default()).await;

@@ -23,6 +23,7 @@ fn admitted_options(
     budget: &rsi_agent_context::ContextBudget,
     composition: &AgentCompositionPin,
     model: &rsi_agent_session_protocol::ModelSelection,
+    output_cap: Option<u32>,
 ) -> std::result::Result<
     (
         rsi_ai_protocol::LanguageRequestOptions,
@@ -48,13 +49,19 @@ fn admitted_options(
                 "request options exceed Context capacity",
             )
         })?;
+    let mut settings = rsi_ai_protocol::LanguageSettings::default()
+        .with_optional_reasoning_effort(model.reasoning_effort.clone());
+    if let Some(cap) = output_cap {
+        settings = settings
+            .with_max_output_tokens(cap)
+            .map_err(|error| options_failure(&error))?;
+    }
     let options = rsi_ai_protocol::LanguageRequestOptions::new(
         composition.tools().definitions(),
         rsi_ai_protocol::ToolChoice::Auto,
         Vec::new(),
         rsi_ai_protocol::ResponseFormat::Text,
-        rsi_ai_protocol::LanguageSettings::default()
-            .with_optional_reasoning_effort(model.reasoning_effort.clone()),
+        settings,
         Vec::new(),
     )
     .map_err(|error| options_failure(&error))?;
@@ -79,14 +86,22 @@ impl Driver {
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        let (options, _options_credit) = admitted_options(&self.context_budget, composition, model)
-            .map_err(DriveFailure::Turn)?;
+        let (options, _options_credit) = admitted_options(
+            &self.context_budget,
+            composition,
+            model,
+            claim.header().settings().output_budgets().cap(&model.model),
+        )
+        .map_err(DriveFailure::Turn)?;
         self.sync_fold(claim, fold).await?;
         let profile = self
             .language
             .describe(&model.model)
             .map_err(|error| ai_failure(&error))?
             .into_profile();
+        profile
+            .validate_output_cap(options.settings())
+            .map_err(|error| failed("model.settings", error.to_string()))?;
         if retry_attempt == 0 {
             self.compact(
                 claim,
@@ -209,6 +224,12 @@ impl Driver {
                 )
                 .await?
             {
+                ModelAttempt::Incomplete(_) => {
+                    return Err(failed(
+                        "context.compaction_failed",
+                        "summary reached its output limit",
+                    ));
+                }
                 ModelAttempt::Output(_, _) => {
                     // A steering message accepted during the summary must enter
                     // before the resumed ordinary request is prepared.
@@ -250,7 +271,7 @@ mod tests {
             model: rsi_ai_protocol::ModelRef::new("fixture", "model").unwrap(),
             reasoning_effort: None,
         };
-        let (options, credit) = admitted_options(&budget, &pin, &model).unwrap();
+        let (options, credit) = admitted_options(&budget, &pin, &model, None).unwrap();
         let weight = options.encoded_weight();
         assert_eq!(credit.bytes(), weight);
         assert_eq!(budget.used(), weight);
@@ -277,7 +298,7 @@ mod tests {
         assert_eq!(budget.used(), 0);
         let held = budget.reserve(budget.maximum()).unwrap();
         assert!(
-            matches!(admitted_options(&budget, &pin, &model), Err(rsi_agent_session_protocol::TurnOutcome::Failed { code, .. }) if code == "context.capacity")
+            matches!(admitted_options(&budget, &pin, &model, None), Err(rsi_agent_session_protocol::TurnOutcome::Failed { code, .. }) if code == "context.capacity")
         );
         assert_eq!(budget.used(), budget.maximum());
         drop(held);

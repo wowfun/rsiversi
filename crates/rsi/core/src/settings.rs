@@ -57,6 +57,7 @@ impl PluginFactory for AgentSettingsFactory {
                     "turn_budget": {
                         "maximum_elapsed_ms": 1_800_000,
                         "maximum_provider_attempts": 64,
+                        "maximum_output_recoveries": rsi_agent_session_protocol::TurnBudget::default().maximum_output_recoveries(),
                         "maximum_tool_calls": 256,
                         "maximum_generated_records": 65_536,
                         "maximum_generated_record_bytes": 67_108_864
@@ -97,12 +98,14 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
                 "system_prompt":{"type":"string"},
                 "default_model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},
                 "default_reasoning_effort":{"type":["string","null"],"minLength":1,"maxLength":32,"pattern":"^[A-Za-z0-9_-]+$"},
+                "output_budgets":{"type":"array","maxItems":256,"description":"Session-frozen exact model request caps; capacity reserves do not set request caps.","items":{"type":"object","additionalProperties":false,"required":["model","max_output_tokens"],"properties":{"model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},"max_output_tokens":{"type":"integer","minimum":1,"maximum":1_000_000}}}},
                 "pricing":{"type":"array","maxItems":256,"description":"Session-frozen exact deployment/endpoint/model quotes in integer currency billionths per token; validated by the Agent price table."},
                 "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
                 "require_approval":{"type":"boolean"},
                 "turn_budget":{"type":"object","additionalProperties":false,"properties":{
                     "maximum_elapsed_ms":{"type":"integer","minimum":0},
                     "maximum_provider_attempts":{"type":"integer","minimum":0},
+                    "maximum_output_recoveries":{"type":"integer","minimum":0,"maximum":rsi_agent_session_protocol::MAXIMUM_TURN_OUTPUT_RECOVERIES},
                     "maximum_tool_calls":{"type":"integer","minimum":0},
                     "maximum_generated_records":{"type":"integer","minimum":0},
                     "maximum_generated_record_bytes":{"type":"integer","minimum":0}
@@ -126,6 +129,8 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
         #[serde(default)]
         pricing: rsi_agent_session_protocol::PriceTable,
+        #[serde(default, rename = "output_budgets")]
+        _output_budgets: rsi_agent_session_protocol::OutputBudgetTable,
         sandbox: rsi_sandbox::SandboxMode,
         require_approval: bool,
         turn_budget: rsi_agent_session_protocol::TurnBudget,
@@ -164,6 +169,27 @@ fn settings_meta(error: &SettingsError) -> rsi_meta::MetaError {
 mod tests {
     use super::validate_settings;
     use serde_json::json;
+
+    #[test]
+    fn decoded_output_policy_is_validated_before_settings_admission() {
+        let mut value = json!({
+            "settings_id":"test", "system_prompt":"", "sandbox":"workspace-write",
+            "require_approval":false, "turn_budget":rsi_agent_session_protocol::TurnBudget::default(),
+            "output_budgets":[{"model":{"deployment":"fixture","model":"model"},"max_output_tokens":32768}],
+        });
+        validate_settings(&value).unwrap();
+        for cap in [0, 1_000_001] {
+            value["output_budgets"][0]["max_output_tokens"] = json!(cap);
+            assert!(validate_settings(&value).is_err());
+        }
+        value["output_budgets"][0]["max_output_tokens"] = json!(32768);
+        let duplicate = value["output_budgets"][0].clone();
+        value["output_budgets"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(validate_settings(&value).is_err());
+    }
 
     #[tokio::test]
     async fn defaults_read_current_validated_settings_and_retire_with_their_scope() {

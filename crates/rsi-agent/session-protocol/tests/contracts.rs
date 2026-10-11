@@ -16,6 +16,35 @@ fn agent_path_compact_encoding_fits_its_protocol_owned_byte_bound() {
 }
 
 #[test]
+fn current_header_policy_defaults_do_not_admit_older_formats() {
+    let header = SessionHeader::new_local(
+        SessionId::new("policy-defaults").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let mut wire = serde_json::to_value(&header).unwrap();
+    let settings = wire["settings"].as_object_mut().unwrap();
+    assert!(settings.remove("output_budgets").is_some());
+    assert!(
+        settings["turn_budget"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maximum_output_recoveries")
+            .is_some()
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionHeader>(wire.clone()).unwrap(),
+        header
+    );
+    wire["format_version"] = json!(SESSION_FORMAT_VERSION - 1);
+    let error = serde_json::from_value::<SessionHeader>(wire).unwrap_err();
+    assert!(error.to_string().contains("unsupported"), "{error}");
+}
+
+#[test]
 fn protection_is_bounded_immutable_and_part_of_header_identity() {
     let ordinary = SessionHeader::new_local(
         SessionId::new("protected").unwrap(),
@@ -409,9 +438,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 20);
+    assert_eq!(current["format_version"], 21);
     assert!(current.get("workspace_trust").is_none());
-    for version in [19, 18, 17, 16, 15, 14, 1] {
+    for version in [20, 19, 18, 17, 16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -493,6 +522,10 @@ fn exhaustion_records_cannot_widen_the_named_budget_dimension() {
         (
             BudgetDimension::ProviderAttempts,
             MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+        ),
+        (
+            BudgetDimension::OutputRecoveries,
+            MAXIMUM_TURN_OUTPUT_RECOVERIES,
         ),
         (BudgetDimension::ToolCalls, MAXIMUM_TURN_TOOL_CALLS),
         (

@@ -966,6 +966,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::CancelRequested { .. } => "cancel",
         SessionFactBody::BudgetExhausted { .. } => "budget_exhausted",
         SessionFactBody::ToolCallsSuperseded { .. } => "tool_calls_superseded",
+        SessionFactBody::ModelOutputRecovery { .. } => "model_output_recovery",
     }
 }
 

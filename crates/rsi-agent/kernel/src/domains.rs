@@ -65,12 +65,14 @@ impl AgentKernel {
             || request.facts.iter().any(|body| {
                 matches!(
                     body,
-                    SessionFactBody::BudgetExhausted { .. } | SessionFactBody::TurnTerminal { .. }
+                    SessionFactBody::ModelOutputRecovery { .. }
+                        | SessionFactBody::BudgetExhausted { .. }
+                        | SessionFactBody::TurnTerminal { .. }
                 )
             })
         {
             return Err(TurnError::Invalid(
-                "domain mutation requires bounded business work and cannot use the ending channel"
+                "domain mutation requires bounded business work without output recovery or ending records"
                     .into(),
             ));
         }

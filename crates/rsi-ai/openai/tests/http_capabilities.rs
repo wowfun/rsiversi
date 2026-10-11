@@ -77,7 +77,9 @@ impl CompleteError {
         match self {
             Self::Provider(error)
             | Self::Assembly(LanguageAssemblyError::Provider { error, .. }) => Some(error),
-            Self::Assembly(LanguageAssemblyError::Protocol(_)) => None,
+            Self::Assembly(
+                LanguageAssemblyError::Protocol(_) | LanguageAssemblyError::Incomplete { .. },
+            ) => None,
         }
     }
 }
@@ -731,11 +733,13 @@ async fn max_output_token_incomplete_response_preserves_partial_output() {
             .expect("request"),
         )
         .await
-        .expect("bounded incomplete is a successful terminal");
-    assert_eq!(output.visible_text(), "partial");
-    assert_eq!(
-        output.finish_reason,
-        rsi_ai_protocol::FinishReason::MaxTokens
+        .expect_err("bounded incomplete must retain diagnostics without becoming success");
+    let CompleteError::Assembly(LanguageAssemblyError::Incomplete { partial: output }) = output
+    else {
+        panic!("expected incomplete response")
+    };
+    assert!(
+        matches!(output.content.as_slice(), [rsi_ai_protocol::ContentBlock::Text { text }] if text == "partial")
     );
     assert_eq!(output.usage.expect("usage").output_tokens(), 8);
     assert_eq!(

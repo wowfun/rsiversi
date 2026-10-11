@@ -1,5 +1,9 @@
 # rsi-acp-agent
 
+OutputRecoveries budget exhaustion returns the stable ACP max_tokens stop
+reason after native settlement. Other budget dimensions retain max_turn_requests.
+Incomplete output is never end_turn and recovery remains native Agent policy.
+
 The native ACP adapter translates the bounded connection driver's stable methods
 into the product Session interface. Its injected `SessionOwner` is the sole
 authority for preparing private composition and MCP, creating ACP Sessions,

@@ -1149,6 +1149,42 @@ fn completed_model_with_tool_call() -> (TurnClaim, Vec<Arc<SessionFact>>) {
 }
 
 #[test]
+fn scan_turn_recovers_only_the_claimed_turn_output_ordinal() {
+    let (claim, mut facts) = completed_model_with_tool_call();
+    let mut terminal = facts.pop().unwrap().body().clone();
+    if let SessionFactBody::ModelEvent {
+        event: LanguageEvent::Finished { reason, .. },
+        ..
+    } = &mut terminal
+    {
+        *reason = FinishReason::MaxTokens;
+    }
+    facts.push(Arc::new(SessionFact::new(7, 7, terminal).unwrap()));
+    for (seq, turn_id, ordinal) in [
+        (8, claim.turn_id().clone(), 1),
+        (9, TurnId::new("other-turn").unwrap(), 2),
+    ] {
+        facts.push(Arc::new(
+            SessionFact::new(
+                seq,
+                seq,
+                SessionFactBody::ModelOutputRecovery {
+                    turn_id,
+                    source_model_effect_id: EffectId::new("effect-model-complete").unwrap(),
+                    ordinal,
+                },
+            )
+            .unwrap(),
+        ));
+    }
+    let mut state = ScannedTurn::default();
+    scan_turn(&claim, &mut state, &facts).unwrap();
+    assert_eq!(state.output_recovery_ordinal, 1);
+    assert!(state.completed_model_without_successor);
+    assert!(state.effects.is_empty());
+}
+
+#[test]
 fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
     let (claim, facts) = completed_model_with_tool_call();
     let mut state = ScannedTurn::default();

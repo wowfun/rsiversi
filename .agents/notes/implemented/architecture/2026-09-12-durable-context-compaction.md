@@ -38,9 +38,11 @@ answer. The event tag preserves that distinction directly in each bounded page;
 it does not duplicate the compaction plan or become independent install
 authority.
 
-Pressure uses reported successful Conversation input tokens at eighty percent of
-the described model's context window minus default output reserve. Describe is
-provider-I/O-free but does not prove the later preparation's generation. With no
+Pressure uses reported finished Conversation input tokens, including incomplete
+MaxTokens attempts, at eighty percent of the input window remaining after
+subtracting the greater of the model's default output reserve and the explicit
+request cap. Describe is provider-I/O-free but does not prove the later
+preparation's generation. With no
 applicable Usage, canonical hard limits and explicit ContextLimit recovery
 apply. Instructions, original task input, latest human steering and whole recent
 interaction units are protected, including a 64 KiB canonical-byte recent tail.
@@ -108,7 +110,7 @@ the exact installed prior summary. Inductive replay validates each prior before
 its successor, including fork visibility. Copying every transitive raw Turn
 binding imposed a lifetime cap unrelated to the retained context. Fully
 summarized completed Turns are released; the optional recent tail respects both
-byte and message pressure. The private fold payload is version 8; the generic
+byte and message pressure. The private fold payload is version 11; the generic
 builder envelope remains version 6.
 
 An interrupted Tool batch is evidence that cannot be summarized as a completed
@@ -156,3 +158,13 @@ replaying an uncertain started Tool, or removing raw incomplete groups would
 misrepresent evidence. Raising protocol limits would only move capacity failures
 downstream. Size-only projections use counting writers and turn metadata uses the
 existing ordinal index; no additional cache or projection bypass is required.
+
+Incomplete Conversation output contributes Usage pressure without becoming
+assistant or Tool history. Its recovery instruction reserves message and encoded
+byte capacity before projection and planning, and stays outside summary input and
+canonical view digests. If protected input plus that instruction exceeds the
+request limit, recovery terminates with context.limit rather than discarding the
+task or splitting an active Turn. Compaction can reclaim complete history but
+cannot make an unsplittable protected unit fit. The
+[output recovery decision](../bug-fix/2026-10-10-model-output-recovery.md) owns why
+replanning replaces concatenation of partial output.

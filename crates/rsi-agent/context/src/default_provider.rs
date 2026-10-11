@@ -21,7 +21,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.8.0",
+                "2.9.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -69,6 +69,9 @@ impl ModelContextCursor for DefaultCursor {
         options: LanguageRequestOptions,
         profile: &LanguageProfile,
     ) -> Result<LanguageRequest> {
+        profile
+            .validate_output_cap(options.settings())
+            .map_err(|error| crate::ContextError::Invalid(error.to_string()))?;
         let mut credit = self.fold.projection_credit(options.encoded_weight())?;
         let request = self.fold.request_messages(self.limits, &options)?;
         let request = crate::emission::project_tool_images(request, options, profile, self.limits)?;

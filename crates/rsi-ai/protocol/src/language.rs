@@ -528,6 +528,10 @@ impl LanguageOutput {
         })?;
         let rebuilt = assembler.finish().map_err(|error| match error {
             LanguageAssemblyError::Protocol(error) => error,
+            LanguageAssemblyError::Incomplete { .. } => StreamError::invalid(
+                "stream.incomplete",
+                "incomplete output is not a successful LanguageOutput",
+            ),
             LanguageAssemblyError::Provider { .. } => unreachable!("success event cannot fail"),
         })?;
         if &rebuilt != self {
@@ -590,6 +594,12 @@ pub enum LanguageAssemblyError {
     /// The normalized event stream violated ordering, bounds, or terminal grammar.
     #[error(transparent)]
     Protocol(#[from] StreamError),
+    /// The provider reached its output budget; this content cannot authorize Tools.
+    #[error("language output reached its token limit")]
+    Incomplete {
+        /// Valid bounded diagnostic content and usage.
+        partial: Box<LanguagePartialOutput>,
+    },
     /// The provider emitted a semantic failure after some valid output.
     #[error("{error}")]
     Provider {
@@ -604,6 +614,7 @@ impl LanguageAssemblyError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Protocol(error) => error.code(),
+            Self::Incomplete { .. } => "stream.incomplete",
             Self::Provider { error, .. } => error.kind().code(),
         }
     }
@@ -864,6 +875,17 @@ impl LanguageAssembler {
                 "language stream ended without a terminal event",
             ))
         })?;
+        if finish_reason == FinishReason::MaxTokens {
+            return Err(LanguageAssemblyError::Incomplete {
+                partial: Box::new(LanguagePartialOutput {
+                    content: self.content.into_values().collect(),
+                    usage: self.usage,
+                    replay: self.replay,
+                    warnings: self.warnings,
+                    sources: self.sources,
+                }),
+            });
+        }
         if self.content.is_empty() {
             return Err(LanguageAssemblyError::Protocol(StreamError::invalid(
                 "stream.empty_output",

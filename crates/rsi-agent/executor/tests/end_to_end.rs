@@ -1102,6 +1102,18 @@ fn header() -> SessionHeader {
     header_with_budget(TurnBudget::default())
 }
 
+fn header_with_output_budget(recoveries: u64) -> SessionHeader {
+    let mut wire = serde_json::to_value(header_with_budget(
+        TurnBudget::default()
+            .with_maximum_output_recoveries(recoveries)
+            .unwrap(),
+    ))
+    .unwrap();
+    wire["settings"]["output_budgets"] =
+        json!([{"model":{"deployment":"deployment","model":"model"},"max_output_tokens":9000}]);
+    serde_json::from_value(wire).unwrap()
+}
+
 fn header_with_budget(turn_budget: TurnBudget) -> SessionHeader {
     header_for_session("session-e2e", turn_budget)
 }
@@ -1656,6 +1668,8 @@ mod contributions;
 mod files;
 #[path = "end_to_end/image_and_shutdown.rs"]
 mod image_and_shutdown;
+#[path = "end_to_end/output_recovery.rs"]
+mod output_recovery;
 #[path = "end_to_end/pool.rs"]
 mod pool;
 #[path = "end_to_end/tool_execution.rs"]

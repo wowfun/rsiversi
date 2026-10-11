@@ -148,6 +148,31 @@ async fn builder_cannot_silently_drop_selected_effort_before_provider_prepare() 
 }
 
 #[tokio::test]
+async fn builder_cannot_drop_frozen_output_cap_before_provider_prepare() {
+    let stack = BaseStack::activate().await;
+    let mut selected = SelectedBuilder::new("fixture.context.drops-cap");
+    Arc::get_mut(&mut selected).unwrap().drop_effort = true;
+    *stack.composition.context_builder.lock().unwrap() = selected;
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("test.language.drops-cap", provider.clone())
+        .await;
+    let executor = stack.activate_executor("executor-drops-cap").await;
+    let (_, outcome) = stack
+        .submit_and_wait_with_header("work", None, header_with_output_budget(2))
+        .await;
+    assert!(matches!(outcome, TurnOutcome::Failed { code, .. } if code == "context.settings"));
+    assert!(provider.requests.lock().unwrap().is_empty());
+    stack.dispose(language, executor).await;
+}
+
+#[tokio::test]
 async fn execution_and_delayed_checkpoint_keep_the_admitted_builder_after_catalog_replacement() {
     let stack = BaseStack::activate().await;
     let selected = SelectedBuilder::new("fixture.context.admitted");

@@ -9,6 +9,71 @@ fn usage() -> TokenUsage {
 }
 
 #[test]
+fn token_limit_is_incomplete_for_empty_text_reasoning_and_tool_arguments() {
+    for start in [
+        None,
+        Some(ContentStart::Text),
+        Some(ContentStart::Reasoning),
+        Some(ContentStart::ToolCall {
+            id: "partial".into(),
+            name: "write".into(),
+            kind: rsi_ai_protocol::ToolCallKind::Function,
+        }),
+    ] {
+        let mut assembler = LanguageAssembler::new();
+        if let Some(start) = start {
+            let delta = match &start {
+                ContentStart::Text => ContentDelta::Text("partial text".into()),
+                ContentStart::Reasoning => ContentDelta::Reasoning("partial thought".into()),
+                ContentStart::ToolCall { .. } => {
+                    ContentDelta::ToolArguments("{\"content\":\"unfinished".into())
+                }
+            };
+            assembler
+                .push(&LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: start,
+                })
+                .unwrap();
+            assembler
+                .push(&LanguageEvent::ContentDelta { index: 0, delta })
+                .unwrap();
+            assembler
+                .push(&LanguageEvent::ContentFinished { index: 0 })
+                .unwrap();
+        }
+        assembler
+            .push(&LanguageEvent::Usage { usage: usage() })
+            .unwrap();
+        assembler
+            .push(&LanguageEvent::Finished {
+                reason: FinishReason::MaxTokens,
+                replay: None,
+            })
+            .unwrap();
+        let LanguageAssemblyError::Incomplete { partial } = assembler.finish().unwrap_err() else {
+            panic!("expected incomplete output")
+        };
+        assert_eq!(partial.usage, Some(usage()));
+    }
+    let mut open = LanguageAssembler::new();
+    open.push(&LanguageEvent::ContentStarted {
+        index: 0,
+        content: ContentStart::Text,
+    })
+    .unwrap();
+    assert_eq!(
+        open.push(&LanguageEvent::Finished {
+            reason: FinishReason::MaxTokens,
+            replay: None
+        })
+        .unwrap_err()
+        .code(),
+        "stream.content_still_open"
+    );
+}
+
+#[test]
 fn language_stream_bounds_and_validates_sources_and_warnings() {
     let mut invalid_source = LanguageAssembler::new();
     let error = invalid_source

@@ -21,6 +21,105 @@ mod contributions;
 #[path = "projection/images.rs"]
 mod images;
 
+#[test]
+fn truncated_call_and_recovery_hint_have_identical_checkpoint_and_replay_views() {
+    let mut bodies: Vec<_> = tool_result_facts(ToolResult::new(json!({}), vec![], false).unwrap())
+        .into_iter()
+        .map(SessionFact::into_body)
+        .take_while(|body| !matches!(body, SessionFactBody::ToolIntent { .. }))
+        .collect();
+    let source = EffectId::new("model-1").unwrap();
+    let turn = TurnId::new("turn-1").unwrap();
+    for body in &mut bodies {
+        if let SessionFactBody::ModelEvent {
+            event: LanguageEvent::Finished { reason, .. },
+            ..
+        } = body
+        {
+            *reason = FinishReason::MaxTokens;
+        }
+    }
+    bodies.push(SessionFactBody::ModelOutputRecovery {
+        turn_id: turn.clone(),
+        source_model_effect_id: source,
+        ordinal: 1,
+    });
+    let history = facts(bodies);
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    fold.apply(&history).unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let request = fold
+        .request(ContextLimits::default(), options.clone())
+        .unwrap();
+    let wire = serde_json::to_string(&request).unwrap();
+    assert!(wire.contains("split large files"));
+    assert!(!wire.contains("tool-call"));
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let mut restored = ContextFold::from_checkpoint(
+        header("system"),
+        ContextLimits::default(),
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .request(ContextLimits::default(), options.clone())
+            .unwrap(),
+        request
+    );
+    let terminal = facts_after(
+        history.len() as u64,
+        vec![SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Interrupted {
+                reason: "restart".into(),
+                effect: None,
+            },
+            result: None,
+        }],
+    );
+    restored.apply(&terminal).unwrap();
+    assert!(
+        !serde_json::to_string(
+            &restored
+                .request(ContextLimits::default(), options.clone())
+                .unwrap()
+        )
+        .unwrap()
+        .contains("split large files")
+    );
+    let seed: Vec<_> = history.into_iter().chain(terminal).collect();
+    let mut child = ContextFold::with_limits(
+        fork_header("system", seed.len() as u64, 1),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    child.apply_seed_page(&seed).unwrap();
+    child.finish_seed().unwrap();
+    child
+        .apply(&facts(vec![SessionFactBody::TurnAccepted {
+            turn_id: TurnId::new("child-turn").unwrap(),
+            text: "child task".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        }]))
+        .unwrap();
+    let wire =
+        serde_json::to_string(&child.request(ContextLimits::default(), options).unwrap()).unwrap();
+    assert!(wire.contains("child task"));
+    assert!(!wire.contains("split large files"));
+    assert!(!wire.contains("tool-call"));
+}
+
 fn header(system: &str) -> SessionHeader {
     SessionHeader::new_local(
         SessionId::new("session-1").unwrap(),

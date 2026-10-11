@@ -31,6 +31,8 @@ pub use delegation::{
     DelegationPolicy, DelegationRole, MAXIMUM_DELEGATION_PERSONA_BYTES, MAXIMUM_DELEGATION_TOOLS,
 };
 mod continuation;
+mod output_budget;
+pub use output_budget::{ModelOutputBudget, OutputBudgetTable};
 mod pricing;
 pub use pricing::{PriceError, PriceQuote, PriceTable};
 mod evidence;
@@ -80,7 +82,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 20;
+pub const SESSION_FORMAT_VERSION: u32 = 21;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -105,6 +107,8 @@ pub const MAXIMUM_FACTS_PER_READ: usize = 512;
 pub const MAXIMUM_TURN_ELAPSED_MS: u64 = 30 * 60 * 1_000;
 /// Hard maximum provider attempts for one accepted turn.
 pub const MAXIMUM_TURN_PROVIDER_ATTEMPTS: u64 = 64;
+/// Hard maximum logical recoveries after incomplete Conversation output.
+pub const MAXIMUM_TURN_OUTPUT_RECOVERIES: u64 = 16;
 /// Hard maximum Tool calls for one accepted turn.
 pub const MAXIMUM_TURN_TOOL_CALLS: u64 = 256;
 /// Hard maximum generated Facts and Turn-attributed domain controls for one accepted turn.
@@ -1222,6 +1226,7 @@ impl AsRef<str> for AgentPresetId {
 pub struct TurnBudget {
     maximum_elapsed_ms: u64,
     maximum_provider_attempts: u64,
+    maximum_output_recoveries: u64,
     maximum_tool_calls: u64,
     maximum_generated_records: u64,
     maximum_generated_record_bytes: u64,
@@ -1238,6 +1243,8 @@ impl<'de> Deserialize<'de> for TurnBudget {
         struct WireBudget {
             maximum_elapsed_ms: u64,
             maximum_provider_attempts: u64,
+            #[serde(default = "default_output_recoveries")]
+            maximum_output_recoveries: u64,
             maximum_tool_calls: u64,
             maximum_generated_records: u64,
             maximum_generated_record_bytes: u64,
@@ -1251,6 +1258,7 @@ impl<'de> Deserialize<'de> for TurnBudget {
             wire.maximum_generated_records,
             wire.maximum_generated_record_bytes,
         )
+        .and_then(|budget| budget.with_maximum_output_recoveries(wire.maximum_output_recoveries))
         .map_err(serde::de::Error::custom)
     }
 }
@@ -1260,6 +1268,7 @@ impl Default for TurnBudget {
         Self {
             maximum_elapsed_ms: MAXIMUM_TURN_ELAPSED_MS,
             maximum_provider_attempts: MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+            maximum_output_recoveries: default_output_recoveries(),
             maximum_tool_calls: MAXIMUM_TURN_TOOL_CALLS,
             maximum_generated_records: MAXIMUM_TURN_GENERATED_RECORDS,
             maximum_generated_record_bytes: MAXIMUM_TURN_GENERATED_RECORD_BYTES,
@@ -1269,6 +1278,9 @@ impl Default for TurnBudget {
 
 impl TurnBudget {
     /// Creates a positive budget no wider than the repository hard maxima.
+    ///
+    /// Starts with two output recoveries. Use [`Self::with_maximum_output_recoveries`]
+    /// to select another allowance, including zero.
     pub fn new(
         maximum_elapsed_ms: u64,
         maximum_provider_attempts: u64,
@@ -1279,6 +1291,7 @@ impl TurnBudget {
         let budget = Self {
             maximum_elapsed_ms,
             maximum_provider_attempts,
+            maximum_output_recoveries: default_output_recoveries(),
             maximum_tool_calls,
             maximum_generated_records,
             maximum_generated_record_bytes,
@@ -1287,8 +1300,25 @@ impl TurnBudget {
         Ok(budget)
     }
 
+    /// Configures the bounded per-Turn recovery allowance; zero disables recovery.
+    pub fn with_maximum_output_recoveries(mut self, value: u64) -> Result<Self> {
+        self.maximum_output_recoveries = value;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Returns the frozen output recovery allowance.
+    pub const fn maximum_output_recoveries(&self) -> u64 {
+        self.maximum_output_recoveries
+    }
+
     /// Revalidates positivity and every fixed hard maximum.
     pub fn validate(&self) -> Result<()> {
+        if self.maximum_output_recoveries > MAXIMUM_TURN_OUTPUT_RECOVERIES {
+            return Err(SessionError::Invalid(format!(
+                "maximum_output_recoveries must be within 0..={MAXIMUM_TURN_OUTPUT_RECOVERIES}",
+            )));
+        }
         validate_budget_dimension(
             "maximum_elapsed_ms",
             self.maximum_elapsed_ms,
@@ -1342,6 +1372,10 @@ impl TurnBudget {
     }
 }
 
+const fn default_output_recoveries() -> u64 {
+    2
+}
+
 fn validate_budget_dimension(name: &'static str, value: u64, maximum: u64) -> Result<()> {
     if value == 0 || value > maximum {
         return Err(SessionError::Invalid(format!(
@@ -1359,6 +1393,8 @@ pub enum BudgetDimension {
     Elapsed,
     /// Language or Image provider attempts.
     ProviderAttempts,
+    /// New logical attempts after incomplete Conversation output.
+    OutputRecoveries,
     /// Tool invocations.
     ToolCalls,
     /// Generated Fact and Turn domain-control count.
@@ -1373,6 +1409,7 @@ impl BudgetDimension {
         match self {
             Self::Elapsed => MAXIMUM_TURN_ELAPSED_MS,
             Self::ProviderAttempts => MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+            Self::OutputRecoveries => MAXIMUM_TURN_OUTPUT_RECOVERIES,
             Self::ToolCalls => MAXIMUM_TURN_TOOL_CALLS,
             Self::GeneratedRecords => MAXIMUM_TURN_GENERATED_RECORDS,
             Self::GeneratedRecordBytes => MAXIMUM_TURN_GENERATED_RECORD_BYTES,
@@ -1392,6 +1429,7 @@ pub struct FrozenAgentSettings {
     require_approval: bool,
     turn_budget: TurnBudget,
     pricing: PriceTable,
+    output_budgets: OutputBudgetTable,
 }
 
 impl<'de> Deserialize<'de> for FrozenAgentSettings {
@@ -1411,6 +1449,8 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
             turn_budget: TurnBudget,
             #[serde(default)]
             pricing: PriceTable,
+            #[serde(default)]
+            output_budgets: OutputBudgetTable,
         }
 
         let wire = WireSettings::deserialize(deserializer)?;
@@ -1425,6 +1465,7 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
         .map(|mut settings| {
             settings.default_reasoning_effort = wire.default_reasoning_effort;
             settings.pricing = wire.pricing;
+            settings.output_budgets = wire.output_budgets;
             settings
         })
         .map_err(serde::de::Error::custom)
@@ -1465,6 +1506,7 @@ impl FrozenAgentSettings {
             default_model,
             default_reasoning_effort: None,
             pricing: PriceTable::default(),
+            output_budgets: OutputBudgetTable::default(),
             sandbox,
             require_approval,
             turn_budget,
@@ -1554,6 +1596,18 @@ impl FrozenAgentSettings {
     #[must_use]
     pub fn with_pricing(mut self, pricing: PriceTable) -> Self {
         self.pricing = pricing;
+        self
+    }
+
+    /// Immutable exact-route request output policy.
+    pub fn output_budgets(&self) -> &OutputBudgetTable {
+        &self.output_budgets
+    }
+
+    /// Captures validated request output policy.
+    #[must_use]
+    pub fn with_output_budgets(mut self, table: OutputBudgetTable) -> Self {
+        self.output_budgets = table;
         self
     }
 
@@ -2266,6 +2320,15 @@ pub enum SessionFactBody {
         /// Frozen limit for this turn.
         limit: u64,
     },
+    /// A truncated Conversation authorized one new logical model attempt.
+    ModelOutputRecovery {
+        /// Owning Turn.
+        turn_id: TurnId,
+        /// Latest Conversation effect which finished with `MaxTokens`.
+        source_model_effect_id: EffectId,
+        /// One-based ordinal across the complete Turn.
+        ordinal: u64,
+    },
     /// Immutable Language provider input was prepared before I/O.
     ModelIntent {
         /// Exact target turn.
@@ -2469,6 +2532,14 @@ impl SessionFactBody {
                 }
                 Ok(())
             }
+            Self::ModelOutputRecovery { ordinal, .. } => {
+                if *ordinal == 0 || *ordinal > MAXIMUM_TURN_OUTPUT_RECOVERIES {
+                    return Err(SessionError::Invalid(format!(
+                        "output recovery ordinal must be within 1..={MAXIMUM_TURN_OUTPUT_RECOVERIES}",
+                    )));
+                }
+                Ok(())
+            }
             Self::BudgetExhausted {
                 dimension,
                 consumed,
@@ -2593,6 +2664,7 @@ impl SessionFactBody {
             | Self::WorkspaceTouched { turn_id, .. }
             | Self::ImageRequested { turn_id, .. }
             | Self::CancelRequested { turn_id, .. }
+            | Self::ModelOutputRecovery { turn_id, .. }
             | Self::BudgetExhausted { turn_id, .. }
             | Self::ModelIntent { turn_id, .. }
             | Self::ModelStarted { turn_id, .. }
@@ -2672,9 +2744,13 @@ fn validate_workspace_touch(paths: &[String]) -> Result<()> {
 }
 
 fn validate_budget_exhaustion(dimension: BudgetDimension, consumed: u64, limit: u64) -> Result<()> {
-    if limit == 0 || limit > dimension.hard_maximum() || consumed < limit {
+    if (limit == 0 && dimension != BudgetDimension::OutputRecoveries)
+        || limit > dimension.hard_maximum()
+        || consumed < limit
+    {
         return Err(SessionError::Invalid(
-            "budget exhaustion requires a positive reached dimension limit".into(),
+            "budget exhaustion requires a reached limit within the dimension's allowed range"
+                .into(),
         ));
     }
     Ok(())

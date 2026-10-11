@@ -1,5 +1,20 @@
 # rsi-agent-executor
 
+Conversation requests select their explicit output cap from the immutable
+Header's exact-model output budget table before Context build and Prepare.
+Builders must preserve that cap, including absence; compaction instead preserves
+its admitted summary-plan cap. MaxTokens Conversation results authorize no Tools.
+After cancellation checks, the executor publishes and flushes one source-bound
+ModelOutputRecovery before preparing a fresh logical model effect. This is not an
+undispatched provider retry and remains subject to every Turn budget. Summary
+truncation fails with context.compaction_failed without Conversation recovery.
+Cold process recovery interrupts unfinished work rather than reissuing effects.
+Each authorized recovery re-enters ordinary step preparation, including pending
+inputs, model selection and compaction, while retaining the Turn's recovery count.
+Live executor replacement reads that count from claim-visible recovery Facts
+before continuing after a recoverable Tool. A prepared or finished model without
+its required successor remains Interrupted.
+
 Every Conversation and compaction request preserves the selected reasoning
 effort. Executor rejects a builder that changes it before evidence capture or
 provider preparation. A matching durable Tool supersession closes the completed

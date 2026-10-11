@@ -179,6 +179,10 @@ async fn observe(
                     let reason = match outcome {
                         TurnOutcome::Completed => schema::StopReason::EndTurn,
                         TurnOutcome::Cancelled => schema::StopReason::Cancelled,
+                        TurnOutcome::BudgetExceeded {
+                            dimension: rsi_agent_session_protocol::BudgetDimension::OutputRecoveries,
+                            ..
+                        } => schema::StopReason::MaxTokens,
                         TurnOutcome::BudgetExceeded { .. } => schema::StopReason::MaxTurnRequests,
                         _ => return Err(Failure::Backend),
                     };

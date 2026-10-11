@@ -152,7 +152,7 @@ async fn provider_capacity_allows_one_summary_recovery_and_one_ordinary_resubmis
 }
 
 #[tokio::test]
-async fn invalid_summary_stops_without_an_ordinary_resubmission() {
+async fn truncated_summary_stops_without_recovery_or_an_ordinary_resubmission() {
     let stack = BaseStack::activate().await;
     let mut invalid = answer_script();
     *invalid.last_mut().unwrap() = LanguageEvent::Finished {
@@ -172,11 +172,36 @@ async fn invalid_summary_stops_without_an_ordinary_resubmission() {
     let executor = stack.activate_executor("invalid-summary").await;
     let (first, outcome) = stack.submit_and_wait("older task").await;
     assert_eq!(outcome, TurnOutcome::Completed);
-    let (_, outcome) = stack.resume_and_wait("continue", first.session_id).await;
-    assert!(
-        matches!(outcome, TurnOutcome::Failed { code, .. } if code == "context.compaction_failed")
-    );
+    let (second, outcome) = stack
+        .resume_and_wait("continue", first.session_id.clone())
+        .await;
+    assert!(matches!(outcome, TurnOutcome::Failed { code, message }
+            if code == "context.compaction_failed" && message == "summary reached its output limit"));
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let facts = stack
+        .store
+        .read_facts(&first.session_id, 0, 512)
+        .await
+        .unwrap()
+        .facts;
+    let purposes: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ModelIntent {
+                turn_id, purpose, ..
+            } if turn_id == &second.turn_id => Some(purpose),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(
+        purposes.as_slice(),
+        [ModelPurpose::ContextCompaction(_)]
+    ));
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::ModelOutputRecovery { .. }))
+    );
     stack.dispose(language, executor).await;
 }
 

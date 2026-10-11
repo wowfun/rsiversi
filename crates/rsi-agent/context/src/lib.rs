@@ -48,9 +48,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 10;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v10\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v10\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 11;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v11\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v11\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,6 +158,7 @@ struct ProjectedTurn {
     messages: Vec<Message>,
     message_bytes: usize,
     terminal: bool,
+    recovery: Option<EffectId>,
     batches: outcomes::Batches,
 }
 
@@ -190,6 +191,7 @@ struct CheckpointTurn {
     id: TurnId,
     messages: Vec<Message>,
     terminal: bool,
+    recovery: Option<EffectId>,
     batches: outcomes::Batches,
 }
 
@@ -212,6 +214,7 @@ struct CheckpointTurnRef<'a> {
     id: &'a TurnId,
     messages: &'a [Message],
     terminal: bool,
+    recovery: Option<&'a EffectId>,
     batches: &'a outcomes::Batches,
 }
 
@@ -339,7 +342,7 @@ impl ContextFold {
             .semantic
             .as_ref()
             .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
-        budget::weight(&(turn.terminal, usize::MAX))?
+        budget::weight(&(turn.terminal, &turn.recovery, usize::MAX))?
             .checked_add(turn.batches.weight()?)
             .and_then(|bytes| bytes.checked_add(1))
             .ok_or(ContextError::Capacity)?
@@ -536,6 +539,7 @@ impl ContextFold {
                     id: &turn.id,
                     messages: &turn.messages,
                     terminal: turn.terminal,
+                    recovery: turn.recovery.as_ref(),
                     batches: &turn.batches,
                 })
                 .collect(),
@@ -678,6 +682,7 @@ impl ContextFold {
                 messages: turn.messages,
                 message_bytes,
                 terminal: turn.terminal,
+                recovery: turn.recovery,
                 batches: turn.batches,
             });
         }
@@ -1076,7 +1081,45 @@ impl ContextFold {
         options: &LanguageRequestOptions,
     ) -> Result<Vec<Message>> {
         let limits = emission_limits(limits, options)?;
-        without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)
+        let (limits, hints) = self.reserve_recovery_hints(limits)?;
+        let mut messages =
+            without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)?;
+        messages.extend(hints);
+        Ok(messages)
+    }
+
+    fn reserve_recovery_hints(
+        &self,
+        mut limits: ContextLimits,
+    ) -> Result<(ContextLimits, Vec<Message>)> {
+        let mut hints = Vec::new();
+        for turn in self.turns.iter().filter(|turn| !turn.terminal) {
+            let Some(source) = &turn.recovery else {
+                continue;
+            };
+            let text = format!(
+                "Conversation attempt {source} in Turn {} reached its output token limit. None of that attempt's Tools executed. For remaining work in this Turn, split large files into small complete Tool calls or patches, inspect completed writes, and verify the final result. Do not concatenate or execute truncated arguments.",
+                turn.id,
+            );
+            hints.push(
+                Message::developer_text(text)
+                    .map_err(|error| ContextError::Invalid(error.to_string()))?,
+            );
+        }
+        for hint in &hints {
+            // Each appended hint adds its JSON body and one array separator.
+            limits.max_messages = limits
+                .max_messages
+                .checked_sub(1)
+                .filter(|count| *count > 0)
+                .ok_or(ContextError::TooLarge)?;
+            limits.max_bytes = limits
+                .max_bytes
+                .checked_sub(encoded_message_bytes(hint)? + 1)
+                .filter(|bytes| *bytes > 0)
+                .ok_or(ContextError::TooLarge)?;
+        }
+        Ok((limits, hints))
     }
 
     fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
@@ -1131,6 +1174,13 @@ impl ContextFold {
                 event,
                 purpose,
             } => self.apply_model_event(turn_id, effect_id, event, *purpose, seq)?,
+            SessionFactBody::ModelOutputRecovery {
+                turn_id,
+                source_model_effect_id,
+                ..
+            } => {
+                self.turn_mut(turn_id)?.recovery = Some(source_model_effect_id.clone());
+            }
             SessionFactBody::ToolCallsSuperseded { .. }
             | SessionFactBody::ToolIntent { .. }
             | SessionFactBody::ToolStarted { .. }
@@ -1269,6 +1319,10 @@ impl ContextFold {
                 })?;
                 Ok(())
             }
+            Err(LanguageAssemblyError::Incomplete { partial }) => {
+                self.observe_conversation_usage(&active.purpose, active.model, seq, partial.usage);
+                Ok(())
+            }
             Err(LanguageAssemblyError::Provider { .. }) => Ok(()),
             Err(LanguageAssemblyError::Protocol(error)) => {
                 Err(ContextError::Invalid(error.to_string()))
@@ -1316,6 +1370,7 @@ impl ContextFold {
             messages: vec![message],
             message_bytes,
             terminal: false,
+            recovery: None,
             batches: outcomes::Batches::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);
@@ -1339,6 +1394,7 @@ impl ContextFold {
             messages: Vec::new(),
             message_bytes: 0,
             terminal: false,
+            recovery: None,
             batches: outcomes::Batches::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);

@@ -534,6 +534,11 @@ impl ContextFold {
         shrink: bool,
     ) -> Result<Option<PlannedCompaction>> {
         self.ensure_usable()?;
+        let input_window = u64::from(
+            profile
+                .input_capacity_tokens(options.settings().max_output_tokens())
+                .map_err(|error| invalid(error.to_string()))?,
+        );
         let Some(state) = &self.semantic else {
             return Ok(None);
         };
@@ -544,6 +549,7 @@ impl ContextFold {
         let projected = self.projected_turns()?;
         let view = self.semantic_messages_from(&projected)?;
         let limits = crate::emission_limits(self.retention_limits.unwrap_or_default(), options)?;
+        let (limits, _hints) = self.reserve_recovery_hints(limits)?;
         let optional = force.is_none();
         let trigger = if let Some(trigger) = force {
             trigger
@@ -553,9 +559,6 @@ impl ContextFold {
         {
             CompactionTrigger::CanonicalLimit
         } else if let Some(usage) = &state.usage {
-            let input_window = u64::from(
-                profile.context_window_tokens() - profile.default_output_reserve_tokens(),
-            );
             if &usage.model != model
                 || state.summary.as_ref().is_some_and(|summary| {
                     usage.session == summary.prior.session
@@ -1003,6 +1006,27 @@ impl ContextFold {
             .is_ok_and(|(sha256, bytes)| sha256 == plan.view_sha256 && bytes == plan.original_bytes)
     }
 
+    pub(crate) fn observe_conversation_usage(
+        &mut self,
+        purpose: &ModelPurpose,
+        model: ModelRef,
+        seq: u64,
+        usage: Option<rsi_ai_protocol::TokenUsage>,
+    ) {
+        if !matches!(purpose, ModelPurpose::Conversation) || self.semantic.is_none() {
+            return;
+        }
+        if let Some(usage) = usage {
+            let session = self.observed_session();
+            self.semantic.as_mut().expect("semantic cursor").usage = Some(ConversationUsage {
+                session,
+                model,
+                finished_seq: seq,
+                input_tokens: usage.input_tokens(),
+            });
+        }
+    }
+
     pub(crate) fn finish_semantic(
         &mut self,
         effect: &EffectId,
@@ -1015,25 +1039,8 @@ impl ContextFold {
         let Some(_) = self.semantic else {
             return Ok(());
         };
-        let session = self
-            .header
-            .fork_origin()
-            .filter(|origin| {
-                self.through_seq == 0 && self.seed_through_seq < origin.resolved_terminal_seq
-            })
-            .map_or_else(
-                || self.header.session_id().clone(),
-                |origin| origin.parent_session_id.clone(),
-            );
         let ModelPurpose::ContextCompaction(plan) = purpose else {
-            if let Some(usage) = &output.usage {
-                self.semantic.as_mut().expect("semantic cursor").usage = Some(ConversationUsage {
-                    session,
-                    model,
-                    finished_seq: seq,
-                    input_tokens: usage.input_tokens(),
-                });
-            }
+            self.observe_conversation_usage(purpose, model, seq, output.usage);
             return Ok(());
         };
         // Inert summaries still consume their real provider events, never ordinary content.
@@ -1043,7 +1050,19 @@ impl ContextFold {
         let Ok(text) = validate_summary_output(plan, output) else {
             return Ok(());
         };
-        self.install_summary(effect, plan, session, seq, text)
+        self.install_summary(effect, plan, self.observed_session(), seq, text)
+    }
+
+    fn observed_session(&self) -> SessionId {
+        self.header
+            .fork_origin()
+            .filter(|origin| {
+                self.through_seq == 0 && self.seed_through_seq < origin.resolved_terminal_seq
+            })
+            .map_or_else(
+                || self.header.session_id().clone(),
+                |origin| origin.parent_session_id.clone(),
+            )
     }
 
     #[allow(clippy::too_many_lines)] // One replay transaction stages, checks shrink, and installs the exact summary and coordinates.
@@ -1254,6 +1273,7 @@ mod view_tests {
                 messages,
                 message_bytes,
                 terminal: true,
+                recovery: None,
                 batches: crate::outcomes::Batches::new(),
             });
         }

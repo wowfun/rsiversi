@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v11_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -127,20 +127,20 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // The v10 fold carries complete model Tool identity alongside Program provenance; the generic
-    // v6 outer envelope is unchanged; Session 20 and builder 2.8.0 bind the current cache.
+    // The v11 fold additionally carries the live Turn recovery instruction binding; the generic
+    // v6 outer envelope is unchanged; Session 21 and builder 2.9.0 bind the current cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
         serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
-    assert_eq!(metadata["builder"]["semantic_version"], "2.8.0");
+    assert_eq!(metadata["builder"]["semantic_version"], "2.9.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v10\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v11\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 10);
+    assert_eq!(decoded["version"], 11);
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
     assert!(
         decoded["turns"]
@@ -151,7 +151,7 @@ fn full_builder_preserves_v10_payload_and_v6_envelope_without_a_third_full_copy(
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "c22d1029abe21b2247005530002d5bffe5ca02bbf72b32709266e20ad84c7362"
+        "61a7fb18845b5145c51db715d9eee4fe3bdf5eca46d0acfc64ee1595b222cfc3"
     );
     assert!(
         additional < 3 * bytes.len(),

@@ -1834,6 +1834,8 @@ mod domains;
 mod fork_and_scheduler;
 #[path = "kernel/jobs.rs"]
 mod jobs;
+#[path = "kernel/output_recovery.rs"]
+mod output_recovery;
 #[path = "kernel/recovery_and_finalization.rs"]
 mod recovery_and_finalization;
 #[path = "kernel/settlement.rs"]

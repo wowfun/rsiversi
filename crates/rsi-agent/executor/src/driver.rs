@@ -401,6 +401,7 @@ impl Driver {
             fold,
             model,
             turn_policy,
+            state.output_recovery_ordinal,
             stop,
         )
         .await
@@ -415,6 +416,7 @@ impl Driver {
         fold: &mut ModelContextState,
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
+        mut recovery_ordinal: u64,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
@@ -470,6 +472,43 @@ impl Driver {
                 }
                 ModelAttempt::Retry => {
                     retry_attempt = retry_attempt.saturating_add(1);
+                    continue;
+                }
+                ModelAttempt::Incomplete(effect_id) => {
+                    if stop.is_cancelled() {
+                        return Err(DriveFailure::Stopped);
+                    }
+                    if cancellation.is_cancelled() {
+                        return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+                    }
+                    let limit = claim
+                        .header()
+                        .settings()
+                        .turn_budget()
+                        .maximum_output_recoveries();
+                    if recovery_ordinal >= limit {
+                        return Err(DriveFailure::Turn(TurnOutcome::BudgetExceeded {
+                            dimension: BudgetDimension::OutputRecoveries,
+                            consumed: recovery_ordinal,
+                            limit,
+                        }));
+                    }
+                    recovery_ordinal += 1;
+                    let facts = self
+                        .publish_apply(
+                            claim,
+                            fold,
+                            vec![SessionFactBody::ModelOutputRecovery {
+                                turn_id: claim.turn_id().clone(),
+                                source_model_effect_id: effect_id,
+                                ordinal: recovery_ordinal,
+                            }],
+                        )
+                        .await?;
+                    self.flush_last(claim, &facts).await?;
+                    // Re-enter step preparation for new input, selection and compaction;
+                    // only provider retries reset, not the Turn's recovery allowance.
+                    retry_attempt = 0;
                     continue;
                 }
                 ModelAttempt::Output(effect_id, output) => (effect_id, *output),
@@ -822,6 +861,22 @@ impl Driver {
                 "context builder changed the selected reasoning effort",
             ));
         }
+        let expected_cap = match &purpose {
+            rsi_agent_session_protocol::ModelPurpose::Conversation => claim
+                .header()
+                .settings()
+                .output_budgets()
+                .cap(&selection.model),
+            rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) => {
+                Some(plan.maximum_output_tokens)
+            }
+        };
+        if request.settings().max_output_tokens() != expected_cap {
+            return Err(failed(
+                "context.settings",
+                "context builder changed the selected output cap",
+            ));
+        }
         let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
         let capture = evidence::Capture::new(&request, profile)?;
         let prepared = match self
@@ -1009,6 +1064,9 @@ impl Driver {
                 combined.cancel();
                 return match assembler.finish() {
                     Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
+                    Err(LanguageAssemblyError::Incomplete { .. }) => {
+                        Ok(ModelAttempt::Incomplete(effect_id.clone()))
+                    }
                     Err(LanguageAssemblyError::Provider { error, .. }) => {
                         self.retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
                             .await

@@ -1,7 +1,11 @@
 use super::*;
 use rsi_agent_turn_protocol::TurnClaim;
 
-async fn flush_bodies(kernel: &AgentKernel, claim: &TurnClaim, bodies: Vec<SessionFactBody>) {
+pub(super) async fn flush_bodies(
+    kernel: &AgentKernel,
+    claim: &TurnClaim,
+    bodies: Vec<SessionFactBody>,
+) {
     let facts = kernel.publish(claim, bodies).await.unwrap().published();
     kernel
         .flush(claim, facts.last().unwrap().seq())

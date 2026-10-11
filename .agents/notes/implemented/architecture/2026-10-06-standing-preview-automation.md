@@ -15,8 +15,12 @@ committed assertion failure can issue a live, restricted Goal. The product owns
 this issuer, queue and dedicated SQLite ledger; Agent keeps canonical Session
 and Goal durability. A bounded opaque protection scope in the immutable Header
 lets product adapters narrow all public reads independently of artifact TTL or
-ledger health. Public protected handles cannot mutate execution. Ordinary Agent
-history and reference callers cannot convert Local execution into view authority.
+ledger health. Protection was introduced in Session format 20 and remains part
+of the current immutable Header fingerprint; the
+[output recovery decision](../bug-fix/2026-10-10-model-output-recovery.md) owns the
+subsequent format change. Public protected handles cannot mutate execution.
+Ordinary Agent history and reference callers cannot convert Local execution into
+view authority.
 
 Browser owns a separate resource scope with Chromium sandbox, isolated PID/net
 and mounts, cgroup limits, CDP pipes and broker-only public egress. Private MCP
@@ -177,10 +181,10 @@ while forgetting the original uncertain result. Domain validation of a mutation
 response therefore preserves uncertainty too. Linux CI cleanup records preexisting
 resources before setup instead of stopping an operator's existing user manager.
 
-Header protection belongs to Session format 20. Its incompatible shape changes
-Header fingerprints and invalidates derived context checkpoints; the allocation
-golden intentionally binds the new fingerprint while retaining its existing
-payload/envelope formats. No compatibility rewriting is introduced.
+Header protection participates in the complete Session Header fingerprint.
+Changing that shape invalidates derived context checkpoints; the allocation
+golden binds the complete fingerprint and requires intentional review. The
+Session contract owns accepted formats. No compatibility rewriting is introduced.
 
 Redirect refusal withholds escaped page snapshots, assertions and screenshots.
 Exploration policy coordinates come from private CDP target metadata, not MCP

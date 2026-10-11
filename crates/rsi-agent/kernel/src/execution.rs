@@ -993,6 +993,17 @@ fn turn_is_ending(turn: &TurnControl) -> bool {
 }
 
 fn validate_publication_gate(turn: &TurnControl, bodies: &[SessionFactBody]) -> TurnResult<()> {
+    if bodies
+        .iter()
+        .filter(|body| matches!(body, SessionFactBody::ModelOutputRecovery { .. }))
+        .take(2)
+        .count()
+        > 1
+    {
+        return Err(TurnError::Invalid(
+            "executor publication admits at most one output recovery marker".into(),
+        ));
+    }
     if turn_is_ending(turn)
         && !bodies
             .iter()
