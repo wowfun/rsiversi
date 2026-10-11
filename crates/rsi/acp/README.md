@@ -41,6 +41,28 @@ operation explicitly; they are not silently omitted. Text and ResourceLink
 prompt blocks become native text; links remain references and grant no filesystem
 authority. Only allow-once and reject-once are offered for native approvals.
 
+Session setup and model configuration return complete configOptions. The product
+SessionOwner supplies the bounded model directory and exact selection command;
+the adapter retains per-Session operation admission and mutation ownership even
+after the requesting handler disappears. The `model` choice is canonical compact
+ModelRef JSON, not a slash-separated identity. Current unavailable models remain
+advertised with an explanatory description; selection revalidates an active
+Language route and does not fall back. Current selection reads use the immutable
+model-selection projection, not the usage-advancing metrics read. Initial creation
+still requires an explicitly configured default model. Unpublished setup failures
+retire their draft/private resources before releasing resident admission.
+Directory enumeration reads committed route pages without describing every route.
+An assignment enumerates once, describes only its chosen route, and returns those
+choices with the authoritative post-command selection. Responses retain exact
+encoded envelope admission; mutable catalogs are not cached across operations.
+The model-only assignment requests the target adapter's default reasoning effort,
+as defined by the Agent model-selection contract; it does not retain an explicit
+effort from the previous selection. ACP currently advertises no separate effort
+option. Assignment admission bounds the advertised configuration before mutation,
+then builds only the authoritative post-command response.
+Configuration tasks await their update notification's flush before releasing
+operation admission; the connection router owns the response drain barrier.
+
 Tests using a supplied Session owner establish this adapter's behavior only.
 Application composition, private MCP, independent SDK interoperability and live
 provider evidence require their separate product acceptance tests.

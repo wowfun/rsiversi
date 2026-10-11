@@ -84,6 +84,15 @@ pub trait AgentBackend: std::fmt::Debug + Send + Sync + 'static {
         request: schema::PromptRequest,
         peer: PeerHandle,
     ) -> Result<schema::PromptResponse, Failure>;
+    /// Sets one exact advertised option under native operation admission.
+    /// The router drains preceding notifications before sending the response.
+    async fn set_config_option(
+        &self,
+        _request: schema::SetSessionConfigOptionRequest,
+        _peer: PeerHandle,
+    ) -> Result<schema::SetSessionConfigOptionResponse, Failure> {
+        Err(Failure::Unsupported)
+    }
     /// Cancels native work. The outstanding prompt responds only after settlement.
     async fn cancel(&self, request: schema::CancelNotification) -> Result<(), Failure>;
     /// Closes one owned Session and its session-scoped resources.
@@ -142,6 +151,10 @@ async fn dispatch(
         "session/list" => {
             rsi_acp_protocol::validate_list(&params).map_err(|_| Failure::Parameters)?;
         }
+        "session/set_config_option" => {
+            rsi_acp_protocol::validate_set_config_option(&params)
+                .map_err(|_| Failure::Parameters)?;
+        }
         _ => {}
     }
     let operation = async {
@@ -154,6 +167,13 @@ async fn dispatch(
             }
             "session/resume" => encode(&backend.resume(parse(params)?).await?),
             "session/list" => encode(&backend.list(parse(params)?).await?),
+            "session/set_config_option" => {
+                let response = backend
+                    .set_config_option(parse(params)?, peer.clone())
+                    .await?;
+                peer.drain().await.map_err(|_| Failure::Backend)?;
+                encode(&response)
+            }
             "session/prompt" => encode(&backend.prompt(parse(params)?, peer).await?),
             "session/close" => encode(&backend.close(parse(params)?).await?),
             _ => Err(Failure::Unsupported),

@@ -2,6 +2,11 @@
 use crate::Error;
 use serde::{Deserialize, Serialize};
 
+/// Maximum UTF-8 bytes in an exact configuration option identifier.
+pub const MAX_CONFIG_ID_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in an exact advertised string choice.
+pub const MAX_CONFIG_VALUE_BYTES: usize = 2048;
+
 /// One exact advertised ACP select-option assignment, applied in list order.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,9 +28,12 @@ pub fn validate(selections: &[ConfigSelection]) -> Result<(), Error> {
     let mut ids = std::collections::BTreeSet::new();
     for selection in selections {
         if !ids.insert(&selection.id)
-            || [&selection.id, &selection.value]
-                .iter()
-                .any(|text| text.is_empty() || text.len() > 256 || text.contains('\0'))
+            || selection.id.is_empty()
+            || selection.id.len() > MAX_CONFIG_ID_BYTES
+            || selection.id.contains('\0')
+            || selection.value.is_empty()
+            || selection.value.len() > MAX_CONFIG_VALUE_BYTES
+            || selection.value.contains('\0')
         {
             return Err(Error::Parameters);
         }

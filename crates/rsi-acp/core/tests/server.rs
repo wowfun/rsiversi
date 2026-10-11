@@ -18,6 +18,7 @@ fn dto<T: DeserializeOwned>(value: Value) -> T {
 #[derive(Debug, Default)]
 struct Backend {
     new_calls: AtomicUsize,
+    configuration_calls: AtomicUsize,
     stopped: AtomicBool,
     active: AtomicBool,
     cancel_early: AtomicBool,
@@ -82,6 +83,18 @@ impl AgentBackend for Backend {
         self.cancelled.notify_one();
         Ok(())
     }
+    async fn set_config_option(
+        &self,
+        request: schema::SetSessionConfigOptionRequest,
+        peer: PeerHandle,
+    ) -> Result<schema::SetSessionConfigOptionResponse, Failure> {
+        self.configuration_calls.fetch_add(1, Ordering::SeqCst);
+        let request = serde_json::to_value(request).unwrap();
+        let options = json!([{"id":"model","name":"Model","type":"select","currentValue":request["value"],"options":[{"value":"a","name":"A"},{"value":"b","name":"B"}]}]);
+        peer.notify("session/update", &json!({"sessionId":"fixture","update":{"sessionUpdate":"config_option_update","configOptions":options}}))
+            .await.map_err(|_| Failure::Backend)?;
+        Ok(dto(json!({"configOptions":options})))
+    }
     async fn close(
         &self,
         _: schema::CloseSessionRequest,
@@ -95,7 +108,7 @@ impl AgentBackend for Backend {
 }
 
 #[tokio::test]
-async fn raw_validation_precedes_backend_and_load_drains_complete_replay() {
+async fn raw_validation_precedes_backend_and_responses_follow_complete_updates() {
     let (left, right) = tokio::io::duplex(65536);
     let (read, write) = tokio::io::split(left);
     let mut client = Peer::start(StreamTransport::new(read, write));
@@ -166,6 +179,37 @@ async fn raw_validation_precedes_backend_and_load_drains_complete_replay() {
         assert_eq!(params["update"]["content"]["text"], index.to_string());
     }
     load.await.unwrap().result().unwrap();
+    assert_eq!(
+        request(
+            "session/set_config_option",
+            json!({"sessionId":"fixture","configId":"model","value":true})
+        )
+        .await
+        .result()
+        .unwrap_err()["code"],
+        -32602
+    );
+    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 0);
+    let configured = request(
+        "session/set_config_option",
+        json!({"sessionId":"fixture","configId":"model","value":"b"}),
+    )
+    .await;
+    assert_eq!(
+        configured.result().unwrap()["configOptions"][0]["currentValue"],
+        "b"
+    );
+    let event = client.next().await.unwrap();
+    let Message::Notification { method, params } = event.message else {
+        panic!("configuration update")
+    };
+    assert_eq!(method, "session/update");
+    assert_eq!(params["update"]["sessionUpdate"], "config_option_update");
+    assert_eq!(
+        &params["update"]["configOptions"],
+        &configured.result().unwrap()["configOptions"]
+    );
+    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         request("fs/read_text_file", json!({}))
             .await

@@ -23,7 +23,7 @@ async fn request(port: &PeerHandle, method: &str, params: Value) -> Value {
     .unwrap()
     .unwrap()
     .result()
-    .unwrap()
+    .unwrap_or_else(|error| panic!("ACP {method} failed: {error}"))
     .clone()
 }
 
@@ -53,12 +53,30 @@ async fn start(fixture: &CliFixture) -> (tokio::process::Child, Peer) {
         child.stdout.take().unwrap(),
         child.stdin.take().unwrap(),
     ));
-    request(
-        &peer.handle(),
-        "initialize",
-        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    let initialized = tokio::time::timeout(
+        Duration::from_secs(40),
+        peer.handle().request(
+            "initialize",
+            &json!({"protocolVersion":1,"clientCapabilities":{}}),
+            CancellationToken::new(),
+        ),
     )
     .await;
+    if !matches!(&initialized, Ok(Ok(response)) if response.result().is_ok()) {
+        let status = child.try_wait().unwrap();
+        let _ = child.kill().await;
+        let mut stderr = String::new();
+        if let Some(mut stream) = child.stderr.take() {
+            use tokio::io::AsyncReadExt as _;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut stderr))
+                    .await;
+        }
+        panic!(
+            "ACP initialize failed: {initialized:?}; child status: {status:?}; stderr: {}",
+            stderr.chars().take(4096).collect::<String>()
+        );
+    }
     (child, peer)
 }
 
@@ -127,6 +145,14 @@ fn contains_secret(path: &std::path::Path) -> bool {
                     .any(|bytes| bytes == b"private-mcp-secret-fixture")
         }
     })
+}
+
+async fn effort_chat(
+    State(requests): State<Arc<std::sync::Mutex<Vec<Value>>>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    requests.lock().unwrap().push(body);
+    chat().await
 }
 
 async fn truncated_chat(
@@ -405,33 +431,93 @@ async fn private_mcp_executes_with_permission_and_cold_restore_requires_exact_ma
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
-    let (endpoint, provider) = provider().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/v1/chat/completions", post(effort_chat))
+        .with_state(requests.clone());
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let fixture = CliFixture::new(&endpoint);
+    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let mut settings: Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["rsi.agent"]["default_reasoning_effort"] = json!("high");
+    std::fs::write(settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let host = fixture
+        .temporary
+        .path()
+        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+    let mut contents: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&host).unwrap()).unwrap();
+    let config = &mut contents["steps"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|step| step["id"].as_str() == Some("fixture-provider"))
+        .unwrap()["config"];
+    let second_profile = config["language_models"]["fixture-model"].clone();
+    config["language_models"]
+        .as_table_mut()
+        .unwrap()
+        .insert("second".into(), second_profile);
+    config.as_table_mut().unwrap().insert("reasoning_efforts".into(), toml::from_str("[fixture-model]\nsupported=[\"low\",\"high\"]\ndefault=\"low\"\n[second]\nsupported=[\"low\",\"high\"]\ndefault=\"low\"\n").unwrap());
+    std::fs::write(host, toml::to_string(&contents).unwrap()).unwrap();
     profile(&fixture);
-    let mut child = fixture
-        .tokio_command()
-        .args(["--profile", "test-acp"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut peer = Peer::start(StreamTransport::new(
-        child.stdout.take().unwrap(),
-        child.stdin.take().unwrap(),
-    ));
+    let (child, mut peer) = start(&fixture).await;
     let port = peer.handle();
-    let initialized = request(
-        &port,
-        "initialize",
-        json!({"protocolVersion":1,"clientCapabilities":{}}),
-    )
-    .await;
-    assert_eq!(initialized["protocolVersion"], 1);
-    assert_eq!(initialized["agentCapabilities"]["loadSession"], true);
     let setup = json!({"cwd":fixture.workspace,"mcpServers":[]});
     let draft = request(&port, "session/new", setup.clone()).await;
+    let model = "{\"deployment\":\"fixture\",\"model\":\"fixture-model\"}";
+    assert_eq!(draft["configOptions"][0]["currentValue"], model);
+    assert_eq!(
+        draft["configOptions"][0]["options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let second = "{\"deployment\":\"fixture\",\"model\":\"second\"}";
+    let selected = request(
+        &port,
+        "session/set_config_option",
+        json!({"sessionId":draft["sessionId"],"configId":"model","value":second}),
+    )
+    .await;
+    assert_eq!(selected["configOptions"][0]["currentValue"], second);
+    assert_eq!(
+        update(&mut peer).await["configOptions"][0]["currentValue"],
+        second
+    );
+    let configured = request(
+        &port,
+        "session/set_config_option",
+        json!({"sessionId":draft["sessionId"],"configId":"model","value":model}),
+    )
+    .await;
+    assert_eq!(configured["configOptions"][0]["currentValue"], model);
+    let configured_update = update(&mut peer).await;
+    assert_eq!(configured_update["sessionUpdate"], "config_option_update");
+    for (config_id, value) in [("invalid", second), ("model", "fixture/fixture-model")] {
+        let invalid = port
+            .request(
+                "session/set_config_option",
+                &json!({"sessionId":draft["sessionId"],"configId":config_id,"value":value}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.result().unwrap_err()["code"], -32602);
+    }
+    let unchanged = request(
+        &port,
+        "session/resume",
+        json!({"sessionId":draft["sessionId"],"cwd":fixture.workspace,"mcpServers":[]}),
+    )
+    .await;
+    assert_eq!(unchanged["configOptions"][0]["currentValue"], model);
     request(
         &port,
         "session/close",
@@ -439,25 +525,86 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     )
     .await;
     let created = request(&port, "session/new", setup.clone()).await;
+    assert_eq!(created["configOptions"][0]["currentValue"], model);
     let id = created["sessionId"].clone();
-    let result = request(
+    let initial = request(
         &port,
         "session/prompt",
-        json!({"sessionId":id,"prompt":[{"type":"text","text":"stdio round trip"}]}),
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"explicit initial effort"}]}),
     )
     .await;
+    assert_eq!(initial["stopReason"], "end_turn");
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "hello from daemon"
+    );
+    request(
+        &port,
+        "session/set_config_option",
+        json!({"sessionId":id,"configId":"model","value":second}),
+    )
+    .await;
+    assert_eq!(
+        update(&mut peer).await["sessionUpdate"],
+        "config_option_update"
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(40),
+        port.request(
+            "session/prompt",
+            &json!({"sessionId":id,"prompt":[{"type":"text","text":"stdio round trip"}]}),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let result = match response.result() {
+        Ok(result) => result.clone(),
+        Err(error) => {
+            // Join the owned application before reporting its native diagnostics.
+            peer.close().await.unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(40), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            panic!(
+                "ACP session/prompt failed: {error}; stderr: {}; owner log: {}",
+                String::from_utf8_lossy(&output.stderr),
+                fixture.owner_log()
+            );
+        }
+    };
     assert_eq!(result["stopReason"], "end_turn");
     let message = update(&mut peer).await;
     assert_eq!(message["sessionUpdate"], "agent_message_chunk");
     assert_eq!(message["content"]["text"], "hello from daemon");
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["model"], "fixture-model");
+        assert_eq!(requests[0]["reasoning_effort"], "high");
+        assert_eq!(requests[1]["model"], "second");
+        assert_eq!(requests[1]["reasoning_effort"], "low");
+    }
     let restore = json!({"cwd":fixture.workspace,"mcpServers":[],"sessionId":id});
-    request(&port, "session/load", restore.clone()).await;
+    let loaded = request(&port, "session/load", restore.clone()).await;
+    assert_eq!(loaded["configOptions"][0]["currentValue"], second);
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "explicit initial effort"
+    );
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "hello from daemon"
+    );
     let user = update(&mut peer).await;
     let assistant = update(&mut peer).await;
     assert_eq!(user["sessionUpdate"], "user_message_chunk");
     assert_eq!(user["content"]["text"], "stdio round trip");
     assert_eq!(assistant["content"]["text"], "hello from daemon");
-    request(&port, "session/resume", restore).await;
+    let resumed = request(&port, "session/resume", restore).await;
+    assert_eq!(resumed["configOptions"][0]["currentValue"], second);
     // The following response is a wire barrier after resume: no replay may precede it.
     let listed = request(&port, "session/list", json!({})).await;
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);

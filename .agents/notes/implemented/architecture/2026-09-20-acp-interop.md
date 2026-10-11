@@ -29,6 +29,16 @@ must agree, including earlier selections after a later option changes. This keep
 model/effort startup policy with the operator without adding arbitrary remote
 configuration or command authority to model Tools and detached UI controllers.
 
+Native server model choices use compact `ModelRef` JSON as opaque select values.
+The server reads the existing model-selection projection and invokes its ordinary
+revision-checked command under retained ACP Session admission, including drafts.
+No usage-setting mutation or alternate model-selection store is introduced.
+An exact deployment/model identity avoids ambiguous flattened names. The ordinary
+command owns catalog membership and revision conflicts; ACP refreshes its reply
+from the authoritative projection, including effort defaults after model changes.
+Shared select bounds admit JSON escaping without granting arbitrary configuration
+authority; the protocol contract owns the byte and assignment limits.
+
 ## Alternatives considered
 
 The full SDK transport would introduce independent queues and runtime ownership.
@@ -41,6 +51,10 @@ the requested effort: an actual installed peer starts the selected Muse model
 at `minimal`. Stable ACP configuration, confirmed before a prompt, avoids vendor
 variant flags and silent default substitution. Automatic retry after a failed
 business prompt cannot prove that the peer performed no effects and is excluded.
+
+A separate ACP model-selection store would bypass native revisions and diverge
+after restore. Joining deployment and model with a delimiter cannot represent
+every legal identifier unambiguously.
 
 ## Consequences
 

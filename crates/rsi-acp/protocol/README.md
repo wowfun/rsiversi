@@ -22,6 +22,14 @@ bounded, ordered string assignments; endpoint launch authority remains with Host
 Malformed capability objects or known flags reject initialization; unsupported
 nonempty additional-directory requests reject setup instead of being ignored.
 List cursors and Session identities are bounded before backend dispatch.
+Agent-side session/set_config_option accepts exact select strings only. Its
+configuration ID/value byte bounds and operator startup assignment bounds share
+the constants in [`configuration`](src/configuration.rs). Select values allow
+2048 bytes so opaque compact `ModelRef` JSON can encode two 256-byte identifiers,
+including JSON escaping (1052 bytes at the maximum). Startup and live selection
+share this bound; the eight-assignment and independent frame limits still apply.
+Session IDs retain
+their independent wire identity bound.
 Prompts accept bounded text and resource links. Links are references, not automatic
 filesystem or network reads. Permission choices retain the peer's exact IDs and
 all four standard kinds; selecting allow-always never creates local authority.

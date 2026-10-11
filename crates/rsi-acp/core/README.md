@@ -1,5 +1,10 @@
 # rsi-acp
 
+The AgentBackend configuration method dispatches validated select assignments,
+with the native owner retaining mutation and cleanup lifetime. Returned full
+configuration state and preceding notifications cross the router-owned writer
+drain barrier; a configuration backend need not add another barrier.
+
 This ordinary connection driver consumes the validated ACP wire contract. Each
 peer owns at most 32 pending requests, 8,192 queued incoming messages and independent
 8 MiB encoded-payload budgets for each direction (16 MiB combined). Incoming

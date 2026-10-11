@@ -29,6 +29,7 @@ pub(crate) fn backend(running: &crate::RunningRsi) -> crate::Result<Arc<dyn Agen
             "Agent Store",
         )?,
         inputs: crate::required_local::<InputsContract>(&running.host, "ACP private inputs")?,
+        models: running.language_models()?,
         attached: Mutex::new(BTreeSet::new()),
     });
     Ok(Arc::new(rsi_acp_agent::NativeAgent::new(
@@ -46,6 +47,7 @@ struct Owner {
     workspaces: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     store: Arc<dyn SessionStore>,
     inputs: Arc<PrivateInputs>,
+    models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     attached: Mutex<BTreeSet<SessionId>>,
 }
 #[async_trait]
@@ -229,6 +231,19 @@ impl rsi_acp_agent::SessionOwner for Owner {
             })
             .collect();
         Ok(schema::ListSessionsResponse::new(sessions).next_cursor(next))
+    }
+    async fn config_options(
+        &self,
+        session: &dyn SessionHandle,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
+        crate::acp_configuration::options(session, self.models.as_ref()).await
+    }
+    async fn set_config_option(
+        &self,
+        session: &dyn SessionHandle,
+        request: schema::SetSessionConfigOptionRequest,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
+        crate::acp_configuration::set(session, self.models.as_ref(), request).await
     }
     async fn close(&self, session: &SessionId) -> Result<(), Failure> {
         if !self

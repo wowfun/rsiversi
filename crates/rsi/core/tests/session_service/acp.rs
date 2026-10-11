@@ -43,6 +43,7 @@ struct Owner {
     stopped: AtomicBool,
     next: std::sync::atomic::AtomicUsize,
     preparing: Mutex<Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>>,
+    config_failure: AtomicBool,
 }
 #[async_trait]
 impl SessionOwner for Owner {
@@ -102,6 +103,23 @@ impl SessionOwner for Owner {
     ) -> Result<schema::ListSessionsResponse, Failure> {
         Ok(dto(json!({"sessions":[]})))
     }
+    async fn config_options(
+        &self,
+        _: &dyn SessionHandle,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
+        if self.config_failure.load(Ordering::Acquire) {
+            Err(Failure::Backend)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+    async fn set_config_option(
+        &self,
+        _: &dyn SessionHandle,
+        _: schema::SetSessionConfigOptionRequest,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
+        Err(Failure::Unsupported)
+    }
     async fn close(&self, session: &SessionId) -> Result<(), Failure> {
         self.owned.lock().unwrap().remove(session.as_str());
         Ok(())
@@ -148,6 +166,7 @@ async fn boot(fixture: &Fixture) -> (RunningRsi, Arc<NativeAgent>, Arc<Owner>) {
         stopped: AtomicBool::new(false),
         next: std::sync::atomic::AtomicUsize::new(0),
         preparing: Mutex::new(None),
+        config_failure: AtomicBool::new(false),
     });
     let backend = Arc::new(NativeAgent::new(
         owner.clone(),
@@ -190,6 +209,45 @@ async fn many_chunks(Json(_request): Json<Value>) -> Response {
         .header("content-type", "text/event-stream")
         .body(Body::from(body))
         .unwrap()
+}
+
+#[tokio::test]
+async fn configuration_failure_cleans_new_setup_and_preserves_existing_attachment() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let (running, backend, owner) = boot(&fixture).await;
+    let request = json!({"cwd":fixture.workspace,"mcpServers":[]});
+    owner.config_failure.store(true, Ordering::Release);
+    assert!(matches!(
+        backend.new_session(dto(request.clone())).await,
+        Err(Failure::Backend)
+    ));
+    assert!(owner.owned.lock().unwrap().is_empty());
+    owner.config_failure.store(false, Ordering::Release);
+    let created = backend.new_session(dto(request)).await.unwrap();
+    let request = json!({"sessionId":created.session_id,"cwd":fixture.workspace,"mcpServers":[]});
+    let (client, server) = peers();
+    owner.config_failure.store(true, Ordering::Release);
+    assert!(matches!(
+        backend.resume(dto(request.clone())).await,
+        Err(Failure::Backend)
+    ));
+    assert!(matches!(
+        backend.load(dto(request.clone()), server.handle()).await,
+        Err(Failure::Backend)
+    ));
+    assert_eq!(owner.owned.lock().unwrap().len(), 1);
+    owner.config_failure.store(false, Ordering::Release);
+    backend.resume(dto(request.clone())).await.unwrap();
+    backend.load(dto(request), server.handle()).await.unwrap();
+    backend
+        .close(schema::CloseSessionRequest::new(created.session_id))
+        .await
+        .unwrap();
+    assert!(owner.owned.lock().unwrap().is_empty());
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+    backend.shutdown().await.unwrap();
+    assert!(running.shutdown().await.is_clean());
 }
 
 #[tokio::test]

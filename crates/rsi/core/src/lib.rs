@@ -52,6 +52,8 @@ mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::{probe_service_host, workflow_restart_impact};
 #[cfg(target_os = "linux")]
+mod acp_configuration;
+#[cfg(target_os = "linux")]
 mod acp_inputs;
 #[cfg(target_os = "linux")]
 mod acp_owner;

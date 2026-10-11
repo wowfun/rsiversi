@@ -195,6 +195,20 @@ pub fn validate_session_id(params: &Value) -> Result<(), Error> {
     text(params.get("sessionId"), 256).map(|_| ())
 }
 
+/// Validates exact select-option input before permissive DTO conversion.
+///
+/// # Errors
+/// Rejects invalid identities, non-string values and unsupported option types.
+pub fn validate_set_config_option(params: &Value) -> Result<(), Error> {
+    validate_session_id(params)?;
+    text(params.get("configId"), configuration::MAX_CONFIG_ID_BYTES)?;
+    text(params.get("value"), configuration::MAX_CONFIG_VALUE_BYTES)?;
+    if params.get("type").is_some_and(|value| value != "select") {
+        return Err(Error::Parameters);
+    }
+    Ok(())
+}
+
 /// Validates bounded optional cursor and absolute cwd list filters.
 ///
 /// # Errors

@@ -179,10 +179,35 @@ fn startup_configuration_bounds_and_response_validation_are_exact() {
         (String::new(), "choice".into()),
         ("model".into(), String::new()),
         ("a".repeat(257), "choice".into()),
-        ("model".into(), "a".repeat(257)),
+        ("model".into(), "a".repeat(2049)),
         ("model".into(), "bad\0choice".into()),
     ] {
         assert!(validate(&[ConfigSelection { id, value }]).is_err());
+    }
+    assert!(
+        validate(&[ConfigSelection {
+            id: "model".into(),
+            value: "a".repeat(2048)
+        }])
+        .is_ok()
+    );
+    for (id, value) in [
+        ("model".to_owned(), "a".repeat(2048)),
+        ("i".repeat(256), "choice".to_owned()),
+    ] {
+        assert!(
+            rsi_acp_protocol::validate_set_config_option(
+                &json!({"sessionId":"s","configId":id,"value":value})
+            )
+            .is_ok()
+        );
+    }
+    for invalid in [
+        json!({"sessionId":"s","configId":"i".repeat(257),"value":"choice"}),
+        json!({"sessionId":"s","configId":"model","value":"v".repeat(2049)}),
+        json!({"sessionId":"s","configId":"model","value":false}),
+    ] {
+        assert!(rsi_acp_protocol::validate_set_config_option(&invalid).is_err());
     }
     for invalid in [
         serde_json::json!({}),
@@ -199,5 +224,30 @@ fn startup_configuration_bounds_and_response_validation_are_exact() {
             &serde_json::json!({"configOptions":[]})
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn escaped_maximum_model_identity_fits_startup_and_live_selection_bounds() {
+    use rsi_acp_protocol::configuration::{ConfigSelection, validate};
+    // ModelRef accepts 256 printable ASCII bytes per identifier, including
+    // quotes and backslashes; both need escaping inside its opaque JSON value.
+    let identifier = "\\\"".repeat(128);
+    assert_eq!(identifier.len(), 256);
+    let model = json!({"deployment":identifier,"model":identifier});
+    let value = serde_json::to_string(&model).unwrap();
+    assert_eq!(value.len(), 1052);
+    validate(&[ConfigSelection {
+        id: "model".into(),
+        value: value.clone(),
+    }])
+    .unwrap();
+    let request = json!({"sessionId":"s","configId":"model","value":value});
+    rsi_acp_protocol::validate_set_config_option(&request).unwrap();
+    let encoded = serde_json::to_vec(&request).unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(decoded["value"].as_str().unwrap()).unwrap(),
+        model
     );
 }

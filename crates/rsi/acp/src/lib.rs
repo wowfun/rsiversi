@@ -22,7 +22,7 @@ use rsi_acp_protocol::schema;
 use rsi_agent_session_protocol::SessionId;
 use rsi_agent_turn_protocol::TurnService;
 use rsi_session_protocol::SessionHandle;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +33,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const MAX_SESSIONS: usize = 256;
 const SETTLEMENT: std::time::Duration = std::time::Duration::from_secs(30);
+type PreparedSession = (Arc<Attached>, Vec<schema::SessionConfigOption>);
 
 /// Product authority preparing private MCP and an ACP-only native composition.
 #[async_trait]
@@ -52,6 +53,17 @@ pub trait SessionOwner: std::fmt::Debug + Send + Sync + 'static {
         &self,
         request: schema::ListSessionsRequest,
     ) -> Result<schema::ListSessionsResponse, Failure>;
+    /// Reads complete bounded configuration without advancing usage state.
+    async fn config_options(
+        &self,
+        session: &dyn SessionHandle,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure>;
+    /// Commits an exact advertised assignment using the product command owner.
+    async fn set_config_option(
+        &self,
+        session: &dyn SessionHandle,
+        request: schema::SetSessionConfigOptionRequest,
+    ) -> Result<Vec<schema::SessionConfigOption>, Failure>;
     /// Retires the exact private resources after controlled work has settled.
     async fn close(&self, session: &SessionId) -> Result<(), Failure>;
     /// Releases all remaining prepared inputs and stops future admission.
@@ -179,7 +191,7 @@ impl NativeAgent {
     async fn restore(
         &self,
         request: schema::ResumeSessionRequest,
-    ) -> Result<Arc<Attached>, Failure> {
+    ) -> Result<PreparedSession, Failure> {
         self.accepting()?;
         // The owner validates the caller's complete setup even for a resident Session.
         let existing = self
@@ -208,7 +220,7 @@ impl NativeAgent {
         mut setup: SetupAdmission,
         operation: Option<OwnedMutexGuard<()>>,
         existing: Option<Arc<Attached>>,
-    ) -> Result<Arc<Attached>, Failure> {
+    ) -> Result<PreparedSession, Failure> {
         let (send, receive) = tokio::sync::oneshot::channel();
         let admission = self.sessions.lock().expect("ACP attachments");
         self.accepting()?;
@@ -216,22 +228,55 @@ impl NativeAgent {
         let stopped = self.stopped.clone();
         let sessions = self.sessions.clone();
         let task = self.tasks.spawn(async move {
-            let close_abandoned=existing.is_none();
-            let prepare=async {
-                let handle=work.await?;
-                if let Some(existing)=existing {return Ok(existing);}
-                let header=handle.header().await.map_err(|_|Failure::Backend)?;
-                let id=header.session_id().clone();
-                let entry=Arc::new(Attached{id:id.clone(),_resident:setup.resident.take().expect("reserved attachment"),handle,operation:Arc::default(),active:Mutex::new(None),settled:std::sync::atomic::AtomicBool::new(true),closed:std::sync::atomic::AtomicBool::new(false)});
-                let mut sessions=sessions.lock().expect("ACP attachments");
-                if sessions.contains_key(id.as_str()) {return Err(Failure::Busy);}
-                sessions.insert(id.to_string(),entry.clone());Ok(entry)
+            let close_abandoned = existing.is_none();
+            let prepare = async {
+                let handle = work.await?;
+                let header = handle.header().await.map_err(|_| Failure::Backend)?;
+                let id = header.session_id().clone();
+                let options = match owner.config_options(handle.as_ref()).await {
+                    Ok(options) => options,
+                    Err(error) => {
+                        if close_abandoned {
+                            owner.close(&id).await?;
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Some(existing) = existing {
+                    return Ok((existing, options));
+                }
+                let entry = Arc::new(Attached {
+                    id: id.clone(),
+                    _resident: setup.resident.take().expect("reserved attachment"),
+                    handle,
+                    operation: Arc::default(),
+                    active: Mutex::new(None),
+                    settled: std::sync::atomic::AtomicBool::new(true),
+                    closed: std::sync::atomic::AtomicBool::new(false),
+                });
+                let mut sessions = sessions.lock().expect("ACP attachments");
+                if sessions.contains_key(id.as_str()) {
+                    return Err(Failure::Busy);
+                }
+                sessions.insert(id.to_string(), entry.clone());
+                Ok((entry, options))
             };
-            let result=tokio::select!{biased;()=stopped.cancelled()=>Err(Failure::Backend),result=prepare=>result};
-            if let Err(Ok(entry))=send.send(result) && close_abandoned && owner.close(&entry.id).await.is_ok() {
-                sessions.lock().expect("ACP abandoned attachment").remove(entry.id.as_str());
+            let result = tokio::select! {
+                biased;
+                () = stopped.cancelled() => Err(Failure::Backend),
+                result = prepare => result,
+            };
+            if let Err(Ok((entry, _))) = send.send(result)
+                && close_abandoned
+                && owner.close(&entry.id).await.is_ok()
+            {
+                sessions
+                    .lock()
+                    .expect("ACP abandoned attachment")
+                    .remove(entry.id.as_str());
             }
-            drop(operation);drop(setup);
+            drop(operation);
+            drop(setup);
         });
         drop(admission);
         let result = receive.await.map_err(|_| Failure::Backend)?;
@@ -251,10 +296,6 @@ impl Drop for NativeAgent {
 pub(crate) fn dto<T: DeserializeOwned>(value: Value) -> Result<T, Failure> {
     serde_json::from_value(value).map_err(|_| Failure::Backend)
 }
-pub(crate) fn encode(value: &impl Serialize) -> Result<Value, Failure> {
-    serde_json::to_value(value).map_err(|_| Failure::Backend)
-}
-
 #[async_trait]
 impl AgentBackend for NativeAgent {
     async fn initialize(
@@ -273,7 +314,7 @@ impl AgentBackend for NativeAgent {
         self.accepting()?;
         let setup = self.setup(None, false)?;
         let owner = self.owner.clone();
-        let session = self
+        let (session, options) = self
             .owned_setup(
                 async move { owner.create(request).await },
                 setup,
@@ -281,25 +322,29 @@ impl AgentBackend for NativeAgent {
                 None,
             )
             .await?;
-        Ok(schema::NewSessionResponse::new(session.id.to_string()))
+        Ok(schema::NewSessionResponse::new(session.id.to_string()).config_options(options))
     }
     async fn load(
         &self,
         request: schema::LoadSessionRequest,
         peer: PeerHandle,
     ) -> Result<schema::LoadSessionResponse, Failure> {
-        let session = self.restore(dto(encode(&request)?)?).await?;
+        let mut restore = schema::ResumeSessionRequest::new(request.session_id, request.cwd);
+        restore.mcp_servers = request.mcp_servers;
+        restore.additional_directories = request.additional_directories;
+        restore.meta = request.meta;
+        let (session, options) = self.restore(restore).await?;
         let _operation = session.admit()?;
         replay::history(&session, &peer).await?;
         peer.drain().await.map_err(|_| Failure::Backend)?;
-        dto(json!({}))
+        Ok(schema::LoadSessionResponse::new().config_options(options))
     }
     async fn resume(
         &self,
         request: schema::ResumeSessionRequest,
     ) -> Result<schema::ResumeSessionResponse, Failure> {
-        self.restore(request).await?;
-        dto(json!({}))
+        let (_, options) = self.restore(request).await?;
+        Ok(schema::ResumeSessionResponse::new().config_options(options))
     }
     async fn list(
         &self,
@@ -325,6 +370,29 @@ impl AgentBackend for NativeAgent {
         self.tasks.spawn(async move {
             let result = prompt::run(&session, turns.as_ref(), content, &peer, cancellation).await;
             session.active.lock().expect("ACP active prompt").take();
+            drop(operation);
+            let _ = send.send(result);
+        });
+        drop(admission);
+        receive.await.map_err(|_| Failure::Backend)?
+    }
+    async fn set_config_option(
+        &self,
+        request: schema::SetSessionConfigOptionRequest,
+        peer: PeerHandle,
+    ) -> Result<schema::SetSessionConfigOptionResponse, Failure> {
+        let session = self.attached(request.session_id.0.as_ref())?;
+        let operation = session.admit()?;
+        let admission = self.sessions.lock().expect("ACP attachments");
+        self.accepting()?;
+        let owner = self.owner.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.tasks.spawn(async move {
+            let result = async {
+                let options = owner.set_config_option(session.handle.as_ref(), request).await?;
+                peer.notify("session/update", &json!({"sessionId":session.id.as_str(),"update":{"sessionUpdate":"config_option_update","configOptions":options}})).await.map_err(|_| Failure::Backend)?;
+                Ok(schema::SetSessionConfigOptionResponse::new(options))
+            }.await;
             drop(operation);
             let _ = send.send(result);
         });
