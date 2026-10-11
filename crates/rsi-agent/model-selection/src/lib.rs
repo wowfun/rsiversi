@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 pub const DOMAIN: &str = "rsi.model-selection";
 /// Ordinary command contribution identity used by application model pickers.
 pub const COMMAND: &str = "rsi.model-selection.command";
+/// Command name advertised to application model pickers.
+pub const COMMAND_NAME: &str = "model-selection";
 /// Projection producer identity.
 pub const VIEW: &str = "rsi.model-selection.view";
 
@@ -160,7 +162,7 @@ impl PluginFactory for ModelSelectionFactory {
         let command = ContributionId::new(COMMAND).expect("static command");
         let descriptor = SessionCommandDescriptor::new(
             command.clone(),
-            "model-selection",
+            COMMAND_NAME,
             "Select the model and effort for the next assembled request",
             true,
         )

@@ -47,6 +47,7 @@ getrandom.workspace = true
 ratatui.workspace = true
 hex.workspace = true
 rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-agent-model-selection = { path = "../../crates/rsi-agent/model-selection" }
 rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
 rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }

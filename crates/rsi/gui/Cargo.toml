@@ -41,6 +41,7 @@ rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
 rsi-session-protocol = { path = "../session-protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }

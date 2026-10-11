@@ -991,7 +991,12 @@ impl Client {
             )
             .map_err(error)?;
             command
-                .execute(&controller, "model-selection", arguments, id)
+                .execute(
+                    &controller,
+                    rsi_agent_model_selection::COMMAND_NAME,
+                    arguments,
+                    id,
+                )
                 .await
                 .map_err(error)?;
             Ok(Update::ModelSelected(selection))
@@ -2232,7 +2237,7 @@ async fn run_inner(
                             client.live_fact(&fact);
                         },
                         CliRenderMessage::Event(CliEvent::Projections { snapshot }) => {
-                            if let Some(value) = snapshot.snapshot().entries().iter().find(|entry| entry.producer().as_str() == "rsi.model-selection.view").and_then(|entry| entry.view())
+                            if let Some(value) = snapshot.snapshot().entries().iter().find(|entry| entry.producer().as_str() == rsi_agent_model_selection::VIEW).and_then(|entry| entry.view())
                                 && let Ok(selection) = serde_json::from_value::<rsi_agent_session_protocol::ModelSelection>(value.value().clone()) {
                                     client.state.model = Some(selection.model);
                                     client.state.reasoning_effort = selection.reasoning_effort;

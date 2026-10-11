@@ -13,7 +13,7 @@ impl Attachment {
                     .snapshot()
                     .entries()
                     .iter()
-                    .find(|entry| entry.producer().as_str() == "rsi.model-selection.view")
+                    .find(|entry| entry.producer().as_str() == rsi_agent_model_selection::VIEW)
             })
             .and_then(|entry| entry.view())
             .and_then(|view| serde_json::from_value(view.value().clone()).ok())
@@ -48,7 +48,12 @@ impl GuiApplication {
         let result = attached
             .submission
             .model_command
-            .execute(&attached.controller, "model-selection", arguments, id)
+            .execute(
+                &attached.controller,
+                rsi_agent_model_selection::COMMAND_NAME,
+                arguments,
+                id,
+            )
             .await;
         if result.is_ok() {
             *attached.model.lock().expect("model selection poisoned") = selection;
