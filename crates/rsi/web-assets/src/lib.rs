@@ -16,6 +16,11 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+type AssetDirectory = File;
+#[cfg(not(unix))]
+type AssetDirectory = PathBuf;
+
 mod pairing;
 pub use pairing::{PairedWebAssetsFactory, pairing_receipt};
 mod publication;
@@ -218,7 +223,7 @@ fn io_error(_: std::io::Error) -> AssetError {
 }
 
 #[cfg(unix)]
-fn open_directory(path: &Path) -> std::io::Result<File> {
+fn open_directory(path: &Path) -> std::io::Result<AssetDirectory> {
     use rustix::fs::{Mode, OFlags, open};
     Ok(File::from(open(
         path,
@@ -227,7 +232,7 @@ fn open_directory(path: &Path) -> std::io::Result<File> {
     )?))
 }
 #[cfg(unix)]
-fn open_file(directory: &File, _: &Path, name: &str) -> std::io::Result<File> {
+fn open_file(directory: &AssetDirectory, _: &Path, name: &str) -> std::io::Result<File> {
     use rustix::fs::{Mode, OFlags, openat};
     Ok(File::from(openat(
         directory,
@@ -237,7 +242,7 @@ fn open_file(directory: &File, _: &Path, name: &str) -> std::io::Result<File> {
     )?))
 }
 #[cfg(not(unix))]
-fn open_directory(path: &Path) -> std::io::Result<PathBuf> {
+fn open_directory(path: &Path) -> std::io::Result<AssetDirectory> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.is_symlink() || !metadata.is_dir() {
         return Err(std::io::ErrorKind::InvalidInput.into());
@@ -245,7 +250,7 @@ fn open_directory(path: &Path) -> std::io::Result<PathBuf> {
     Ok(path.to_owned())
 }
 #[cfg(not(unix))]
-fn open_file(_: &Path, path: &Path, name: &str) -> std::io::Result<File> {
+fn open_file(_: &AssetDirectory, path: &Path, name: &str) -> std::io::Result<File> {
     let path = path.join(name);
     if std::fs::symlink_metadata(&path)?.is_symlink() {
         return Err(std::io::ErrorKind::InvalidInput.into());

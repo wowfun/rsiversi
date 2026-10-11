@@ -1,12 +1,15 @@
 //! Product-only bootstrap admission; renderer publication remains independent.
-use super::{AssetError, AssetResult, Config, WebAssetsFactory, open_file, publication::BOOTSTRAP};
+use super::{
+    AssetDirectory, AssetError, AssetResult, Config, WebAssetsFactory, open_file,
+    publication::BOOTSTRAP,
+};
 use async_trait::async_trait;
 use rsi_api_http::HttpAsset;
 use rsi_application::{ApplicationDiagnostic, RsiError};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeMap, fs::File, io::Read as _, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, io::Read as _, path::Path, sync::Mutex};
 
 const RECEIPT: &str = "rsi-build.json";
 const MAXIMUM_RECEIPT_BYTES: u64 = 32 * 1024;
@@ -83,7 +86,7 @@ impl PluginFactory for PairedWebAssetsFactory {
 }
 
 pub(super) fn verify(
-    directory: &File,
+    directory: &AssetDirectory,
     path: &Path,
     expected: &str,
     files: &BTreeMap<String, HttpAsset>,
