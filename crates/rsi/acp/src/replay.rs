@@ -40,6 +40,58 @@ pub(super) async fn history(session: &Attached, peer: &PeerHandle) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_acp::{Peer, StreamTransport};
+    use rsi_acp_protocol::Message;
+
+    #[tokio::test]
+    async fn rejected_tool_update_preserves_identity_and_explanation() {
+        let fact: SessionFact = serde_json::from_value(json!({
+            "seq": 1, "timestamp_ms": 1, "type": "tool_rejected", "turn_id": "turn",
+            "effect_id": "rejected", "origin": {"kind": "model", "effect_id": "model"},
+            "program_role": "callable",
+            "identity": {
+                "owner_id": "owner", "invocation_id": "invocation", "call_id": "call",
+                "request_sha256": "a".repeat(64)
+            },
+            "name": "bash", "arguments": {"command": "false"},
+            "rejection": {
+                "type": "policy_denied", "contribution_id": "policy", "reason": "fixture denied"
+            }
+        }))
+        .unwrap();
+        let (left, right) = tokio::io::duplex(65536);
+        let (lr, lw) = tokio::io::split(left);
+        let (rr, rw) = tokio::io::split(right);
+        let mut client = Peer::start(StreamTransport::new(lr, lw));
+        let server = Peer::start(StreamTransport::new(rr, rw));
+        fact_update("session", &fact, &server.handle(), false)
+            .await
+            .unwrap();
+        server.handle().drain().await.unwrap();
+        let event = client.next().await.unwrap();
+        let Message::Notification { params, .. } = event.message else {
+            panic!("expected notification")
+        };
+        let update = &params["update"];
+        assert_eq!(update["name"], "bash");
+        assert_eq!(update["rawInput"]["command"], "false");
+        assert_eq!(update["status"], "failed");
+        assert_eq!(update["rawOutput"]["is_error"], true);
+        assert_eq!(update["rawOutput"]["rejection"]["reason"], "fixture denied");
+        assert!(
+            update["content"][0]["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("fixture denied")
+        );
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+}
+
 async fn update(id: &str, peer: &PeerHandle, update: Value) -> Result<(), Failure> {
     peer.notify("session/update", &json!({"sessionId":id,"update":update}))
         .await
@@ -100,7 +152,16 @@ pub(super) async fn fact_update(
             arguments,
             ..
         } => {
-            update(id, peer, json!({"sessionUpdate":"tool_call","toolCallId":effect_id.as_str(),"title":name,"kind":"other","status":"pending","rawInput":arguments})).await?;
+            update(
+                id,
+                peer,
+                json!({
+                    "sessionUpdate": "tool_call", "toolCallId": effect_id.as_str(),
+                    "name": name, "title": name, "kind": "other", "status": "pending",
+                    "rawInput": arguments
+                }),
+            )
+            .await?;
         }
         SessionFactBody::ToolStarted { effect_id, .. } => {
             update(id, peer, json!({"sessionUpdate":"tool_call_update","toolCallId":effect_id.as_str(),"status":"in_progress"})).await?;
@@ -109,9 +170,24 @@ pub(super) async fn fact_update(
             effect_id,
             name,
             arguments,
+            rejection,
             ..
         } => {
-            update(id, peer, json!({"sessionUpdate":"tool_call","toolCallId":effect_id.as_str(),"title":name,"kind":"other","status":"failed","rawInput":arguments})).await?;
+            let explanation = serde_json::to_string(rejection).map_err(|_| Failure::Backend)?;
+            update(
+                id,
+                peer,
+                json!({
+                    "sessionUpdate": "tool_call", "toolCallId": effect_id.as_str(),
+                    "name": name, "title": name, "kind": "other", "status": "failed",
+                    "rawInput": arguments,
+                    "content": [
+                        {"type": "content", "content": {"type": "text", "text": explanation}}
+                    ],
+                    "rawOutput": {"rejection": rejection, "is_error": true}
+                }),
+            )
+            .await?;
         }
         SessionFactBody::ToolResult {
             effect_id, result, ..

@@ -63,6 +63,11 @@ then builds only the authoritative post-command response.
 Configuration tasks await their update notification's flush before releasing
 operation admission; the connection router owns the response drain barrier.
 
+ToolIntent and ToolRejected expose standard programmatic name independently of
+display title. Rejected calls retain input, rejection text and rawOutput in live
+and replayed events. Native ToolResult outcomes retain their own semantics: a
+completed background submission is not a claim that its job finished.
+
 Tests using a supplied Session owner establish this adapter's behavior only.
 Application composition, private MCP, independent SDK interoperability and live
 provider evidence require their separate product acceptance tests.

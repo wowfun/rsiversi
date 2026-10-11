@@ -38,6 +38,10 @@ command owns catalog membership and revision conflicts; ACP refreshes its reply
 from the authoritative projection, including effort defaults after model changes.
 Shared select bounds admit JSON escaping without granting arbitrary configuration
 authority; the protocol contract owns the byte and assignment limits.
+Canonical Tool `name` remains separate from presentation `title`; rejected calls
+retain structured denial and standard text content in live output and replay.
+This preserves machine identity for consumers while allowing readable labels,
+and makes a denied Tool visible without misrepresenting it as executed.
 
 ## Alternatives considered
 
@@ -54,7 +58,9 @@ business prompt cannot prove that the peer performed no effects and is excluded.
 
 A separate ACP model-selection store would bypass native revisions and diverge
 after restore. Joining deployment and model with a delimiter cannot represent
-every legal identifier unambiguously.
+every legal identifier unambiguously. Reusing a display title as Tool identity
+would make presentation changes alter machine routing; dropping rejection content
+would leave clients without the denial evidence retained by the native Session.
 
 ## Consequences
 
