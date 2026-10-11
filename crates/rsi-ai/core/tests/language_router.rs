@@ -569,6 +569,73 @@ async fn provider_compatibility_precedes_credential_resolution() {
 }
 
 #[tokio::test]
+async fn exact_model_output_capacity_is_checked_before_missing_credentials() {
+    let runtime = Runtime::default();
+    let credentials = runtime
+        .root()
+        .apply(
+            linked("rsi.credentials.memory", Arc::new(MemoryCredentialsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let router = runtime
+        .root()
+        .apply(
+            linked("rsi.ai.language", Arc::new(LanguageRouterFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let calls = runtime
+        .root()
+        .lookup_local::<LanguageCallContract>()
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<LanguageRegistrarContract>()
+        .unwrap();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let registration = Arc::new(
+        ProviderRegistration::builder("cap", "scripted")
+            .unwrap()
+            .with_config_generation(1)
+            .with_credential(CredentialRef::new("provider", "missing").unwrap())
+            .with_language(Adapter {
+                starts: starts.clone(),
+                reject_request: false,
+                misreport_checkpoint: false,
+            })
+            .build()
+            .unwrap(),
+    );
+    let gate = RegistrationGate::new();
+    let lease = registrar
+        .register_language(registration, gate.clone())
+        .unwrap();
+    gate.commit();
+    let request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()])
+        .unwrap()
+        .with_settings(
+            rsi_ai_protocol::LanguageSettings::default()
+                .with_max_output_tokens(1025)
+                .unwrap(),
+        )
+        .unwrap();
+    let error = calls
+        .prepare(ModelRef::new("cap", "model").unwrap(), request)
+        .await
+        .expect_err("over-cap request");
+    assert!(error.to_string().contains("output capacity"));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    drop(lease);
+    drop(registrar);
+    drop(calls);
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
+}
+
+#[tokio::test]
 async fn route_visibility_is_gate_atomic_and_prepared_call_pins_provider_generation() {
     let runtime = Runtime::default();
     let credentials = runtime

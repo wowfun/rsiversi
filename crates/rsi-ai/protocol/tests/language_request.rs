@@ -92,6 +92,50 @@ fn model_profiles_own_identifier_uniqueness_and_capacity_bounds() {
         "language_model_profiles.too_many"
     );
 }
+
+#[test]
+fn input_capacity_accounts_for_output_reserve_and_rejects_invalid_caps() {
+    let profile = LanguageProfile::new(
+        128_000,
+        4_096,
+        16_384,
+        rsi_ai_protocol::ToolDialect::Responses,
+        false,
+        rsi_ai_protocol::ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap();
+    for (cap, capacity) in [
+        (None, 123_904),
+        (Some(1), 123_904),
+        (Some(4_096), 123_904),
+        (Some(8_192), 119_808),
+        (Some(16_384), 111_616),
+    ] {
+        assert_eq!(profile.input_capacity_tokens(cap).unwrap(), capacity);
+    }
+    for cap in [0, 16_385, u32::MAX] {
+        assert_eq!(
+            profile.input_capacity_tokens(Some(cap)).unwrap_err().code(),
+            "request.invalid_settings"
+        );
+    }
+    let large = LanguageProfile::new(
+        2_000_002,
+        4_096,
+        2_000_001,
+        rsi_ai_protocol::ToolDialect::Responses,
+        false,
+        rsi_ai_protocol::ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        large.input_capacity_tokens(Some(1_000_000)).unwrap(),
+        1_000_002
+    );
+    assert!(large.input_capacity_tokens(Some(1_000_001)).is_err());
+}
 use serde_json::json;
 
 fn image() -> MediaDescriptor {

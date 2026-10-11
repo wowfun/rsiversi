@@ -96,6 +96,12 @@ impl Router {
             .language()
             .expect("route checked its Language facet")
             .validate_request(model.model(), request)?;
+        registration
+            .language()
+            .expect("validated language facet")
+            .describe(model.model())?
+            .validate_output_cap(request.settings())
+            .map_err(|error| invalid(error.to_string()))?;
         let media_admission_bytes = language_media_admission_bytes(request)?;
         validate_media_admission_bytes(media_admission_bytes)
             .map_err(|error| artifact(error.to_string()))?;

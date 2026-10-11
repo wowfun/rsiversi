@@ -1,5 +1,10 @@
 # rsi-ai-protocol
 
+`LanguageProfile::input_capacity_tokens` validates the finite generation cap and
+the exact model limit, then owns the request input-window calculation:
+the context window minus the larger of the default output reserve and the explicit
+request output cap.
+
 This package is the authoritative provider-neutral semantic contract for the
 Language and Image `rsi-ai` capabilities. It defines closed validated requests, normalized
 events and results, strict assemblers, safe provider errors, locator-free media

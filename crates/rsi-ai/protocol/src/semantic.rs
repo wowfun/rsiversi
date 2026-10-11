@@ -361,6 +361,31 @@ impl LanguageProfile {
         self.max_output_reserve_tokens
     }
 
+    /// Validates explicit request output policy against this exact model capacity.
+    pub fn validate_output_cap(&self, settings: &LanguageSettings) -> Result<(), SemanticError> {
+        self.input_capacity_tokens(settings.max_output_tokens())
+            .map(|_| ())
+    }
+
+    /// Input tokens available after the effective request output reserve.
+    pub fn input_capacity_tokens(&self, output_cap: Option<u32>) -> Result<u32, SemanticError> {
+        if !valid_output_cap(output_cap)
+            || output_cap.is_some_and(|cap| cap > self.max_output_reserve_tokens)
+        {
+            return Err(SemanticError::new(
+                "request.invalid_settings",
+                "max_output_tokens",
+                "exceeds the selected model output capacity",
+            ));
+        }
+        // Validated profiles require max reserve < window; the cap check above
+        // proves subtraction is safe at this public boundary.
+        Ok(self.context_window_tokens
+            - self
+                .default_output_reserve_tokens
+                .max(output_cap.unwrap_or(0)))
+    }
+
     pub const fn tool_dialect(&self) -> ToolDialect {
         self.tool_dialect
     }
@@ -921,10 +946,7 @@ impl LanguageSettings {
 
     /// Revalidates all optional generation controls and aggregate stop bounds.
     pub fn validate(&self) -> Result<(), SemanticError> {
-        if self.max_output_tokens == Some(0)
-            || self
-                .max_output_tokens
-                .is_some_and(|value| value > 1_000_000)
+        if !valid_output_cap(self.max_output_tokens)
             || self
                 .temperature
                 .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
@@ -946,6 +968,10 @@ impl LanguageSettings {
         }
         Ok(())
     }
+}
+
+fn valid_output_cap(cap: Option<u32>) -> bool {
+    cap.is_none_or(|cap| (1..=1_000_000).contains(&cap))
 }
 
 impl ResponseFormat {
