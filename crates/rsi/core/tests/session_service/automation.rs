@@ -1022,7 +1022,7 @@ async fn unavailable_runtime_refuses_activation_without_publishing_automation_au
                 .iter()
                 .any(|instance| {
                     instance.id().as_str() == "fixture-automation"
-                        && instance.state() == rsi_host::ProfileInstanceState::Failed
+                        && *instance.state() == rsi_host::ProfileInstanceState::Failed
                 });
             if failed {
                 break;
