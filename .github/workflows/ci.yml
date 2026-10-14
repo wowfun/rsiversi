@@ -1010,6 +1010,117 @@ jobs:
         run: cargo xtask rsi-meta conformance
         timeout-minutes: 45
 
+  windows-rsi-checks:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 5
+      - id: native_architecture
+        name: Verify runner architecture
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+            throw "expected an x86_64 runner, found $env:PROCESSOR_ARCHITECTURE"
+          }
+      - id: native_toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        timeout-minutes: 5
+        with:
+          toolchain: 1.97.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        timeout-minutes: 5
+        with:
+          workspaces: . -> target
+      - name: Compile every Windows workspace target
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 60
+        run: cargo check --locked --workspace --all-targets --keep-going
+      - name: Lint every Windows workspace target
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 60
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
+      - name: Verify native Windows read-only directory capabilities
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 10
+        run: cargo test --locked -p rsi-files-native-fs --all-targets
+      - name: Test native Windows Process, Files, Credentials and ACP behavior
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-process-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
+      - name: Test Automation portable behavior and native admission boundaries
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-automation --all-targets --no-fail-fast
+      - name: Test private owners and their unsupported platform boundaries
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-storage-json -p rsi-storage-sqlite -p rsi-settings-local -p rsi-media-local --all-targets --no-fail-fast
+      - name: Test Agent Store pure invariants and native admission boundaries
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-agent-store-sqlite --all-targets --no-fail-fast
+      - name: Test Windows CLI parsing and built binary admission boundaries
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 30
+        run: cargo test --locked -p rsi-cli --all-targets --no-fail-fast
+      - name: Test the standard product default Windows targets
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 40
+        run: cargo test --locked -p rsi --all-targets --no-fail-fast
+      - name: Verify portable unsupported capability error projections
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 10
+        run: cargo test --locked -p rsi-storage-domain -p rsi-settings-api -p rsi-media-api --all-targets --no-fail-fast
+      - name: Test terminal portable behavior and native input admission
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-terminal --all-targets --no-fail-fast
+      - name: Test Serve portable behavior and native signal admission
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 15
+        run: cargo test --locked -p rsi-serve --all-targets --no-fail-fast
+      - name: Test native Desktop protocol and lifecycle boundaries
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 10
+        run: cargo test --locked -p rsi-desktop --all-targets --no-fail-fast
+      - name: Test Session portable behavior and error projections
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 10
+        run: cargo test --locked -p rsi-session --all-targets --no-fail-fast
+
+  windows-repository-tools:
+    runs-on: windows-2025
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 5
+      - id: native_architecture
+        name: Verify runner architecture
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+            throw "expected an x86_64 runner, found $env:PROCESSOR_ARCHITECTURE"
+          }
+      - id: native_toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        timeout-minutes: 5
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        timeout-minutes: 5
+        with:
+          workspaces: . -> target
+      - name: Test repository tooling and Windows CI coverage invariants
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo test --locked -p rsi-xtask --all-targets --no-fail-fast
+
   rsi-ssh-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 173
@@ -1157,6 +1268,8 @@ jobs:
       - repository-tools
       - dependency-audit
       - windows-rsi-meta
+      - windows-rsi-checks
+      - windows-repository-tools
     runs-on: ubuntu-24.04
     steps:
       - name: Require every CI contract

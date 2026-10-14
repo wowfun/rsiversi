@@ -168,6 +168,143 @@ fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
 }
 
 #[test]
+fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks() {
+    let workflow: serde_json::Value = yaml_serde::from_str(
+        &fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap(),
+    )
+    .unwrap();
+    let job = &workflow["jobs"]["windows-rsi-checks"];
+    assert_eq!(job["runs-on"], "windows-2025");
+    let commands = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .map(|command| command.split_whitespace().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert!(commands.iter().any(|command| {
+        command.starts_with(&["cargo", "check"])
+            && ["--locked", "--workspace", "--all-targets", "--keep-going"]
+                .iter()
+                .all(|flag| command.contains(flag))
+    }));
+    assert!(commands.iter().any(|command| {
+        command.starts_with(&["cargo", "clippy"])
+            && command.contains(&"--workspace")
+            && whole_package_command(command, "clippy")
+            && command.contains(&"--all-targets")
+            && command.ends_with(&["--", "-D", "warnings"])
+    }));
+    assert!(
+        commands.iter().any(|command| {
+            whole_package_command(command, "test")
+                && cargo_packages(command).contains("rsi-files-native-fs")
+        }),
+        "missing Windows native filesystem behavior target"
+    );
+    for package in [
+        "rsi",
+        "rsi-cli",
+        "rsi-agent-store-sqlite",
+        "rsi-storage-json",
+        "rsi-storage-sqlite",
+        "rsi-settings-local",
+        "rsi-process-local",
+        "rsi-files",
+        "rsi-credentials-local",
+        "rsi-acp-application",
+        "rsi-media-local",
+        "rsi-media-api",
+        "rsi-settings-api",
+        "rsi-storage-domain",
+        "rsi-automation",
+        "rsi-terminal",
+        "rsi-serve",
+        "rsi-desktop",
+        "rsi-session",
+    ] {
+        assert!(
+            commands.iter().any(|command| {
+                command.starts_with(&["cargo", "test"])
+                    && cargo_packages(command).contains(package)
+                    && command.contains(&"--all-targets")
+                    && command.contains(&"--no-fail-fast")
+                    && whole_package_command(command, "test")
+            }),
+            "{package} must execute unfiltered default targets"
+        );
+    }
+    assert!(!commands.iter().any(|command| {
+        command.starts_with(&["cargo", "test"]) && command.contains(&"--workspace")
+    }));
+    let tools = &workflow["jobs"]["windows-repository-tools"];
+    assert_eq!(tools["runs-on"], "windows-2025");
+    for gate in [job, tools] {
+        assert_windows_architecture_admission(gate);
+    }
+    assert_native_fs_test_budget(job);
+    assert!(tools["steps"].as_array().unwrap().iter().any(|step| {
+        let Some(command) = step["run"].as_str() else {
+            return false;
+        };
+        let command = command.split_whitespace().collect::<Vec<_>>();
+        whole_package_command(&command, "test")
+            && command.contains(&"--no-fail-fast")
+            && cargo_packages(&command).contains("rsi-xtask")
+    }));
+    for step in job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["run"].is_string() && step["id"] != "native_architecture")
+    {
+        assert_eq!(
+            step["if"],
+            "${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}"
+        );
+        assert!(step["timeout-minutes"].as_u64().is_some());
+    }
+}
+
+fn assert_native_fs_test_budget(job: &serde_json::Value) {
+    let native = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("-p rsi-files-native-fs"))
+        })
+        .unwrap();
+    assert!(native["timeout-minutes"].as_u64().unwrap() >= 10);
+}
+
+fn assert_windows_architecture_admission(job: &serde_json::Value) {
+    let steps = job["steps"].as_array().unwrap();
+    let architecture = steps
+        .iter()
+        .position(|step| step["id"] == "native_architecture")
+        .expect("Windows native checks must verify runner architecture");
+    let toolchain = steps
+        .iter()
+        .position(|step| step["id"] == "native_toolchain")
+        .unwrap();
+    assert!(architecture < toolchain);
+    assert_eq!(steps[architecture]["shell"], "pwsh");
+    let command = steps[architecture]["run"].as_str().unwrap();
+    assert!(command.contains("if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64')"));
+    assert!(command.contains("throw "));
+}
+
+fn cargo_packages<'a>(command: &[&'a str]) -> BTreeSet<&'a str> {
+    command
+        .windows(2)
+        .filter_map(|pair| (pair[0] == "-p").then_some(pair[1]))
+        .collect()
+}
+
+#[test]
 fn every_workspace_package_belongs_to_one_ci_failure_domain() {
     #[derive(Deserialize)]
     struct Workflow {
@@ -286,12 +423,7 @@ fn cargo_package_patterns(command: &str, check: &str) -> Vec<String> {
         .lines()
         .flat_map(|line| {
             let tokens = line.split_whitespace().collect::<Vec<_>>();
-            if !tokens.windows(2).any(|pair| pair == ["cargo", check])
-                || !tokens.contains(&"--all-targets")
-                || tokens
-                    .iter()
-                    .any(|token| matches!(*token, "--no-run" | "--ignored" | "--test" | "--doc"))
-            {
+            if !whole_package_command(&tokens, check) {
                 return Vec::new();
             }
             tokens
@@ -301,6 +433,31 @@ fn cargo_package_patterns(command: &str, check: &str) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+fn whole_package_command(command: &[&str], check: &str) -> bool {
+    if !command.starts_with(&["cargo", check]) || !command.contains(&"--all-targets") {
+        return false;
+    }
+    let mut arguments = &command[2..];
+    while let Some((argument, rest)) = arguments.split_first() {
+        match *argument {
+            "--locked" | "--offline" | "--all-targets" | "--all-features" | "--no-fail-fast"
+            | "--keep-going" | "--workspace" => arguments = rest,
+            "-p" | "--package" | "--features" | "--manifest-path" => {
+                let Some((value, tail)) = rest.split_first() else {
+                    return false;
+                };
+                if value.starts_with('-') {
+                    return false;
+                }
+                arguments = tail;
+            }
+            "--" if check == "clippy" => return rest == ["-D", "warnings"],
+            _ => return false,
+        }
+    }
+    true
 }
 #[test]
 fn targeted_preflight_does_not_reassign_whole_package_ci_ownership() {
@@ -322,6 +479,14 @@ fn whole_package_coverage_requires_execution_and_the_matching_check() {
     for command in [
         "cargo test -p rsi-execution --all-targets --no-run",
         "cargo test -p rsi-execution --all-targets -- --ignored",
+        "cargo test -p rsi-execution --all-targets -- --list",
+        "cargo test -p rsi-execution --all-targets -- --skip filtered",
+        "cargo test -p rsi-execution --all-targets filtered",
+        "cargo test -p rsi-execution --all-targets --lib",
+        "cargo test -p rsi-execution --all-targets --help",
+        "cargo test -p rsi-execution --all-targets --version",
+        "cargo test -p rsi-execution --all-targets --target wasm32-unknown-unknown",
+        "echo cargo test -p rsi-execution --all-targets",
         "cargo clippy -p rsi-execution --all-targets -- -D warnings",
     ] {
         assert!(cargo_package_patterns(command, "test").is_empty());

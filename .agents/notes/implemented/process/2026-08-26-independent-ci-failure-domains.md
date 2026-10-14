@@ -29,6 +29,29 @@ failure affects notes only; product lint does not suppress unrelated tests.
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, lockfile consistency, and Windows `rsi-meta`.
+An independent Windows Server job separates whole-workspace compilation from
+native product lint and behavior checks. Supported native mechanics and explicit
+unsupported boundaries both require executed tests, including a built CLI's
+preservation of old data. Their independent outcomes remain required by the
+aggregate; compilation alone cannot substitute for either boundary. The
+[workflow](../../../../.github/workflows/ci.yml) owns the package selectors and
+step budgets. This gate does not establish Windows 11, ordinary-user application,
+GUI or sandbox support; foundation conformance remains with the existing Windows
+conformance job.
+The Windows gate executes unfiltered targets of affected packages. Native-backend
+fixtures are admitted only on their implemented platforms; pure SQL, parser and
+cache tests remain portable. Focused refusal preflights cannot replace those
+default suites. Structural selector tests reject compile-only commands, target
+selectors and trailing test-harness arguments without freezing test counts.
+Windows lint covers all workspace targets, independently of the executed package
+suites. Baseline receipts use LF on every host.
+Windows repository-tool tests have a separate required job, keeping default
+coverage and timeout headroom without shaving product-check deadlines to fit the
+hosted runner's limit.
+Both product and repository-tool Windows jobs verify AMD64 before admitting the
+native toolchain. Native filesystem behavior has at least ten minutes of step
+budget; the owning workflow retains aggregate setup headroom within the hosted
+runner limit. These are deadlines, not claims about measured remote CI time.
 SSH native lifecycle, cache/execution, watchdog, source-reader and actual-SSH
 checks have independent steps after their shared toolchain, helper and native
 prerequisites. The native manager/namespace preflight does not require the helper
