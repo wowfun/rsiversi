@@ -4,6 +4,7 @@ use super::callback_gate::{
 };
 use super::host::{HostLease, HostState};
 use super::host_channel::{ProviderBridge, pump_provider};
+use super::library_mapping::load_library;
 #[cfg(test)]
 use super::module_teardown::TeardownJob;
 use super::module_teardown::{FinalResources, ModuleTeardownQueue};
@@ -81,7 +82,7 @@ impl ModuleControl {
         let path = resources.artifact().loader_path();
         // SAFETY: Caller explicitly trusts execution of the verified staging
         // file, which remains retained by `resources` through mapping lifetime.
-        let library = unsafe { Library::new(&path) }?;
+        let library = unsafe { load_library(&path) }?;
         let queue = ModuleTeardownQueue::new(executor.clone(), finalizer);
         let catalog = resources.catalog();
         // SAFETY: Symbol name and function type are the complete ABI v3 entry

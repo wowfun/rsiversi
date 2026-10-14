@@ -3,6 +3,7 @@ mod callback_gate;
 mod cap_table;
 mod host;
 mod host_channel;
+mod library_mapping;
 mod lifecycle;
 mod module_teardown;
 mod output_table;

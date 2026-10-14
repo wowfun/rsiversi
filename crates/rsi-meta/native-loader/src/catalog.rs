@@ -53,6 +53,12 @@ impl CatalogOptions {
     }
 
     fn validate(&self) -> Result<(), LoaderError> {
+        #[cfg(windows)]
+        if !self.cache_directory.is_absolute() {
+            return Err(LoaderError::InvalidInput(
+                "Windows native catalog cache directory must be absolute".into(),
+            ));
+        }
         if self.callback_timeout.is_zero()
             || self.callback_timeout > MAX_CALLBACK_TIMEOUT
             || std::time::Instant::now()
@@ -687,6 +693,74 @@ impl StagedArtifact {
 
     fn reopen(&self) -> Result<File, LoaderError> {
         self.temporary.reopen()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_configuration_rejects_non_absolute_spelling_without_io() {
+        let root = tempfile::tempdir().unwrap();
+        CatalogOptions::new(root.path().join("missing"))
+            .validate()
+            .unwrap();
+        for path in ["", "relative", r"C:relative", r"\relative"] {
+            assert!(
+                matches!(
+                    CatalogOptions::new(path).validate(),
+                    Err(LoaderError::InvalidInput(_))
+                ),
+                "{path:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn catalog_refuses_relative_cache_before_filesystem_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .current_dir(root.path())
+            .args([
+                "--exact",
+                "catalog::windows_cache_tests::relative_cache_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[ignore = "subprocess harness with an isolated parent-owned working directory"]
+    fn relative_cache_child() {
+        use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+        let cwd = std::env::current_dir().unwrap();
+        let prefix = cwd.as_os_str().encode_wide().take(2).collect::<Vec<_>>();
+        assert_eq!(prefix[1], u16::from(b':'));
+        let drive_relative = std::ffi::OsString::from_wide(&prefix)
+            .to_string_lossy()
+            .to_string()
+            + "relative-cache";
+        for path in ["relative-cache", drive_relative.as_str()] {
+            assert!(
+                matches!(
+                    NativeCatalog::new(CatalogOptions::new(path)),
+                    Err(LoaderError::InvalidInput(_))
+                ),
+                "{path:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(cwd).unwrap().count(), 0);
     }
 }
 
