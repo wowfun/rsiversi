@@ -1,11 +1,11 @@
-use cap_std::fs::{Dir, MetadataExt as _};
 use rsi_directory_picker_api::{
     CreateRequest, Created, Entry, Failure, ListRequest, Listing, MAXIMUM_ENTRIES, MAXIMUM_REPLY,
     Result, validate_name, validate_path,
 };
 use rsi_files_native_fs::{
-    create_directory_no_follow, directory_entries, open_absolute_directory_no_follow,
+    Directory as Dir, create_directory_no_follow, open_absolute_directory_no_follow,
 };
+use std::os::unix::fs::MetadataExt as _;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -89,7 +89,7 @@ pub(super) fn list(
     let mut entries = BTreeMap::<String, (Entry, usize)>::new();
     let mut bytes = base;
     check(&stop)?;
-    for entry in directory_entries(&directory).map_err(io)? {
+    for entry in directory.entries().map_err(io)? {
         check(&stop)?;
         let entry = entry.map_err(io)?;
         check(&stop)?;

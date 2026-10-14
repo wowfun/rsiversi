@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use async_trait::async_trait;
 use rsi_api_protocol::{
     ApiClient, ApiClientContract, ApiDispatch, ApiDispatchContract, ApiError, ApiOutput,

@@ -730,7 +730,7 @@ struct AvailableWorkspace {
 impl AvailableWorkspace {
     fn at(path: &Path) -> Self {
         Self {
-            path: path.canonicalize().unwrap(),
+            path: rsi_workspace_protocol::canonical_native_path(path.canonicalize().unwrap()),
             available: std::sync::atomic::AtomicBool::new(true),
             reads: AtomicUsize::new(0),
         }
@@ -1366,7 +1366,9 @@ async fn concurrent_images_reject_a_draft_expired_by_the_first_publication() {
 async fn assert_competing_image_publication(concurrent: bool) {
     let store = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-conflicting-image-publication").unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = rsi_workspace_protocol::canonical_native_path(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+    );
     let turns = Arc::new(CompetingImagePublicationTurns {
         store: store.clone(),
         competing_header: SessionHeader::new_local(
@@ -1445,12 +1447,11 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
     let header = SessionHeader::new_local(
         session_id.clone(),
         1,
-        std::env::current_dir()
-            .unwrap()
-            .canonicalize()
-            .unwrap()
-            .to_str()
-            .unwrap(),
+        rsi_workspace_protocol::canonical_native_path(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )
+        .to_str()
+        .unwrap(),
         AgentPresetId::new("image-preset").unwrap(),
         test_settings(),
     )
@@ -1576,7 +1577,9 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
     let store = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-failing-resume-preset").unwrap();
     let turn_id = TurnId::new("turn-existing-resume-preset").unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = rsi_workspace_protocol::canonical_native_path(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+    );
     let header = SessionHeader::new_local(
         session_id.clone(),
         1,
@@ -1664,7 +1667,9 @@ async fn attach_and_history_need_only_the_durable_store() {
     let store = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-store-only-attach").unwrap();
     let turn_id = TurnId::new("turn-existing").unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = rsi_workspace_protocol::canonical_native_path(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+    );
     let header = SessionHeader::new_local(
         session_id.clone(),
         1,
@@ -1755,7 +1760,9 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
     let store = Arc::new(MemoryStore::new());
     let root = SessionId::new("session-approval-root").unwrap();
     let child = SessionId::new("session-approval-child").unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = rsi_workspace_protocol::canonical_native_path(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+    );
     let header = SessionHeader::new_local(
         root.clone(),
         1,

@@ -50,18 +50,8 @@ impl NativeAddonBuild {
     pub fn reopen(&self) -> Result<Self> {
         self.check_root().map_err(|_| NativeAddonError::Conflict)?;
         let next = Self::open(&self.source.path)?;
-        let original = self
-            .source
-            .directory
-            .try_clone()?
-            .into_std_file()
-            .metadata()?;
-        let current = next
-            .source
-            .directory
-            .try_clone()?
-            .into_std_file()
-            .metadata()?;
+        let original = self.source.directory.dir_metadata()?;
+        let current = next.source.directory.dir_metadata()?;
         if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
             return Err(NativeAddonError::Conflict);
         }
@@ -110,20 +100,27 @@ impl NativeAddonBuild {
             let spelling = path.as_os_str().as_encoded_bytes();
             hash.update((spelling.len() as u64).to_le_bytes());
             hash.update(spelling);
-            let metadata = match self.source.directory.symlink_metadata(&path) {
+            let file = match rsi_files_native_fs::open_relative_file_no_follow(
+                &self.source.directory,
+                &path,
+            ) {
                 Ok(value) => value,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     hash.update(b"missing");
                     continue;
                 }
+                Err(error)
+                    if rsi_files_native_fs::is_link_rejection(&error)
+                        || error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) =>
+                {
+                    return Err(NativeAddonError::Invalid("regular build inputs required"));
+                }
                 Err(error) => return Err(error.into()),
             };
+            let metadata = file.metadata()?;
             if metadata.is_dir() {
                 hash.update(b"directory");
-                let directory = rsi_files_native_fs::open_relative_directory_no_follow(
-                    &self.source.directory,
-                    &path,
-                )?;
+                let directory = rsi_files_native_fs::Directory::from_opened_file(file)?;
                 let mut children = Vec::new();
                 for entry in directory.entries()? {
                     if visited.len() + pending.len() + children.len() >= MAXIMUM_INPUT_ENTRIES {
@@ -135,11 +132,6 @@ impl NativeAddonBuild {
                 pending.extend(children);
             } else if metadata.is_file() {
                 hash.update(b"file");
-                let file = rsi_files_native_fs::open_relative_file_no_follow(
-                    &self.source.directory,
-                    &path,
-                )?;
-                let metadata = file.metadata()?;
                 hash.update(metadata.mode().to_le_bytes());
                 let maximum = MAXIMUM_INPUT_FILE_BYTES.min(MAXIMUM_INPUT_BYTES - bytes);
                 if metadata.len() > maximum {
@@ -224,12 +216,7 @@ impl NativeAddonBuild {
             rsi_files_native_fs::open_absolute_directory_no_follow(manifest_parent)?
                 .into_std_file()
                 .metadata()?;
-        let original_manifest = self
-            .source
-            .manifest_directory
-            .try_clone()?
-            .into_std_file()
-            .metadata()?;
+        let original_manifest = self.source.manifest_directory.dir_metadata()?;
         if (current_manifest.dev(), current_manifest.ino())
             != (original_manifest.dev(), original_manifest.ino())
         {
@@ -238,12 +225,7 @@ impl NativeAddonBuild {
         let current = rsi_files_native_fs::open_absolute_directory_no_follow(self.cwd())?
             .into_std_file()
             .metadata()?;
-        let original = self
-            .source
-            .directory
-            .try_clone()?
-            .into_std_file()
-            .metadata()?;
+        let original = self.source.directory.dir_metadata()?;
         if (current.dev(), current.ino()) != (original.dev(), original.ino()) {
             return Err(NativeAddonError::Conflict);
         }

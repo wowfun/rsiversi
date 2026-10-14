@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageContent,
     AgentMessageSource, AgentPath, AgentPresetId, EMPTY_CONTROL_PREFIX_DIGEST,
@@ -1056,7 +1058,7 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE facts SET fact_json = printf('%.*c', ?1, 'x')
+            "UPDATE facts SET fact_json = json_quote(printf('%.*c', ?1, 'x'))
              WHERE session_id = ?2 AND seq = 1",
             rusqlite::params![
                 i64::try_from(MAXIMUM_SESSION_FACT_BYTES + 1).unwrap(),
@@ -2349,7 +2351,7 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
     connection.execute("UPDATE sessions SET last_activity_ms = 60, header_json = 'not json' WHERE session_id = 'activity-a'", []).unwrap();
     connection
         .execute(
-            "UPDATE facts SET fact_json = 'not json' WHERE session_id = 'activity-a'",
+            "UPDATE facts SET fact_json = '\"not a Fact\"' WHERE session_id = 'activity-a'",
             [],
         )
         .unwrap();

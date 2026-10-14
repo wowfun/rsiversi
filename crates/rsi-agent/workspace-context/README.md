@@ -27,6 +27,12 @@ Every source entry receives the current execution lease. Local-only embeddings m
 omit it. Native jobs retain its operation admission inside the blocking task, so a
 cancelled waiter cannot release admission while filesystem work is still running.
 
+Unix project reads use retained native directory handles and atomic no-follow
+component opens. The non-Unix cap-std fallback uses ambient path acquisition and
+a best-effort metadata precheck before opening a regular file. That precheck does
+not close the replacement race or establish retained-handle confinement through
+reparse parents. It is outside the native Files capability guarantee.
+
 The target adapter invokes the receipt-verified helper's fixed project-context
 entry under a ReadOnly plan from that same lease. The request contains only bounded
 selection names and remaining budgets; cwd comes from the confined process. It

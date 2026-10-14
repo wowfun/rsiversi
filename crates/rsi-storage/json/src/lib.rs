@@ -59,7 +59,7 @@ impl JsonStorageConfig {
                 "maximum_document_bytes must be within 1..={DEFAULT_MAXIMUM_DOCUMENT_BYTES}"
             )));
         }
-        Ok(())
+        require_native_platform()
     }
 }
 
@@ -343,9 +343,10 @@ impl PluginFactory for JsonStorageFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: JsonStorageConfig = serde_json::from_value(desired.clone())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        config
-            .validate()
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        config.validate().map_err(|error| match error {
+            StorageError::Unsupported(_) => MetaError::Activation(error.to_string()),
+            _ => MetaError::InvalidInput(error.to_string()),
+        })?;
         let retained = config.name.len() + config.path.as_os_str().len() + 64;
         Ok(
             PreparedActivation::with_state(desired.clone(), config, retained)
@@ -478,7 +479,7 @@ fn sync_parent_directory(parent: &Path) -> Result<(), StorageError> {
 
 #[cfg(not(unix))]
 fn sync_parent_directory(_parent: &Path) -> Result<(), StorageError> {
-    Ok(())
+    require_native_platform()
 }
 
 fn create_temporary_file(parent: &Path, file_name: &str) -> Result<(PathBuf, File), StorageError> {
@@ -512,7 +513,50 @@ fn set_file_permissions(file: &File) -> Result<(), StorageError> {
 
 #[cfg(not(unix))]
 fn set_file_permissions(_file: &File) -> Result<(), StorageError> {
-    Ok(())
+    require_native_platform()
+}
+
+fn require_native_platform() -> Result<(), StorageError> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
+        Err(StorageError::Unsupported(
+            "JSON Storage native filesystem protection is unsupported on this platform".into(),
+        ))
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn acquisition_rejects_before_creating_parents_or_reading_an_existing_document() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            root.path().join("missing/document.json"),
+            root.path().join("existing.json"),
+        ] {
+            if path.file_name().unwrap() == "existing.json" {
+                std::fs::write(&path, b"retained").unwrap();
+            }
+            let config = JsonStorageConfig {
+                name: "test".into(),
+                path,
+                maximum_document_bytes: 1024,
+            };
+            assert!(matches!(
+                JsonBackend::open(config),
+                Err(StorageError::Unsupported(_))
+            ));
+        }
+        assert!(!root.path().join("missing").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("existing.json")).unwrap(),
+            b"retained"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -526,6 +570,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn cancelled_publication_keeps_the_file_slot_until_memory_and_disk_agree() {
         use std::{
             future::Future,
@@ -590,6 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn post_replace_failure_fences_all_domains_until_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().join("state.json"));
@@ -643,6 +689,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn rejected_encoding_preserves_file_and_admission() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = config(directory.path().join("state.json"));
@@ -666,6 +713,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn accepted_depth_survives_real_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().join("state.json"));
@@ -735,6 +783,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn absent_deletes_preserve_snapshot_identity_and_schema_checks() {
         let directory = tempfile::tempdir().unwrap();
         let backend = JsonBackend::open(config(directory.path().join("state.json"))).unwrap();
@@ -750,5 +799,26 @@ mod tests {
             backend.delete("domain", 2, "absent").await,
             Err(StorageError::Corrupt(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod factory_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_distinguishes_invalid_input_from_unavailable_native_capability() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            JsonStorageFactory.prepare(&serde_json::json!({"name":"test","path":"relative.json"})),
+            Err(MetaError::InvalidInput(_))
+        ));
+        let result = JsonStorageFactory.prepare(&serde_json::json!({"name":"test","path":root.path().join("missing/state.json"),"maximum_document_bytes":1024}));
+        if cfg!(unix) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

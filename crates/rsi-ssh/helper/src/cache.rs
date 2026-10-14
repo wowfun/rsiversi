@@ -1,4 +1,4 @@
-use cap_std::fs::Dir;
+use rsi_files_native_fs::Directory as Dir;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

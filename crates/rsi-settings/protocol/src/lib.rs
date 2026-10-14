@@ -30,6 +30,9 @@ pub type SettingsDocument = BTreeMap<String, Value>;
 /// Closed Settings failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SettingsError {
+    /// The provider or platform cannot supply a required capability before admission.
+    #[error("settings capability unsupported: {0}")]
+    Unsupported(String),
     /// API connection failure retained by a remote Settings projection.
     #[error(transparent)]
     Api(rsi_api_protocol::ApiError),

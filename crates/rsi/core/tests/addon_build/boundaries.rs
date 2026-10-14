@@ -23,10 +23,16 @@ fn fingerprint_captures_missing_and_nested_inputs_and_rejects_changed_authority(
     assert_ne!(first, build.fingerprint().unwrap());
     fs::remove_file(root.join("source/missing")).unwrap();
     symlink("input", root.join("source/missing")).unwrap();
-    assert!(build.fingerprint().is_err());
+    assert!(matches!(
+        build.fingerprint(),
+        Err(NativeAddonError::Invalid("regular build inputs required"))
+    ));
     fs::remove_file(root.join("source/missing")).unwrap();
     let socket = UnixListener::bind(root.join("source/missing")).unwrap();
-    assert!(build.fingerprint().is_err());
+    assert!(matches!(
+        build.fingerprint(),
+        Err(NativeAddonError::Invalid("regular build inputs required"))
+    ));
     drop(socket);
     fs::remove_file(root.join("source/missing")).unwrap();
     fs::write(&path, format!("{text}\n# revised\n")).unwrap();

@@ -1,19 +1,32 @@
 # rsi-media-local
 
+Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
+and reports unavailable native capability as `MetaError::Activation`, the Meta
+category for plugin preparation and activation failure.
+
 This ordinary backend plugin owns one explicit local immutable CAS root. Each
 object is one bounded envelope below a digest-sharded directory. Publication
 writes and syncs a private temporary file, closes its writable handle, atomically links that exact inode
 into place without replacement and removes the temporary name. Unix also syncs
 the shard and its `objects` parent before acknowledging publication, including
 retries of an existing identity. Activation syncs the CAS directory ancestry so
-newly created roots also have durable namespace entries. Other platforms acknowledge file sync and atomic namespace
-publication without promising directory durability across power loss. Failure
+newly created roots also have durable namespace entries. Windows requires exact
+local NTFS no-reparse paths, creates private objects atomically, and flushes each
+changed directory through retained handles. Its private CAS root retains a
+NamespaceLease through every admitted blocking operation. The `objects` directory
+and each writing shard retain their own namespace pins; child creation, immutable
+link publication, staging cleanup and synchronization use these retained parents.
+Existing shards must already be private; their permissions are not repaired. Higher existing
+ancestors remain unchanged. Other platforms reject before filesystem effects. Failure
 after linking, or loss of the put worker's result, returns the common API
 `OutcomeUnknown`; an already published object is retained. A retry of the same
 identity validates it and establishes a new publication receipt.
 The backend revalidates caller-supplied bytes before writing;
 existing or concurrently published identities are accepted only when their
 metadata and bytes match exactly.
+Configuration absolute-root syntax is checked without I/O before platform
+admission: malformed configuration returns `InvalidInput`, while valid
+configuration on an unsupported platform returns `Unsupported`.
 
 Every read opens an unchanged regular file without following its final
 symlink, then revalidates the envelope, reference, length, and SHA-256 digest.

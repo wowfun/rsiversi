@@ -12,7 +12,9 @@ use rsi_settings_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use std::time::Duration;
 const DEFAULT_MAXIMUM_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 const LOCK_ATTEMPTS: usize = 100;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+#[cfg(not(windows))]
 const MAXIMUM_TEMPORARY_NAME_ATTEMPTS: usize = 64;
 static NEXT_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -54,7 +57,10 @@ impl LocalSettingsConfig {
                 "maximum_document_bytes must be within 1..={DEFAULT_MAXIMUM_DOCUMENT_BYTES}"
             )));
         }
-        Ok(())
+        #[cfg(windows)]
+        rsi_files_native_fs::resolve_absolute_root_alias(&self.path, true)
+            .map_err(|e| SettingsError::InvalidInput(e.to_string()))?;
+        require_native_platform()
     }
 }
 
@@ -121,9 +127,10 @@ impl PluginFactory for LocalSettingsFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: LocalSettingsConfig = serde_json::from_value(desired.clone())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        config
-            .validate()
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        config.validate().map_err(|error| match error {
+            SettingsError::Unsupported(_) => MetaError::Activation(error.to_string()),
+            _ => MetaError::InvalidInput(error.to_string()),
+        })?;
         let retained = config.path.as_os_str().len() + 32;
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -133,6 +140,7 @@ impl PluginFactory for LocalSettingsFactory {
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
+        require_native_platform().map_err(|error| MetaError::Activation(error.to_string()))?;
         let config = plan.take_state::<LocalSettingsConfig>()?;
         let provider = LocalProvider { config };
         provider
@@ -156,6 +164,7 @@ impl PluginFactory for LocalSettingsFactory {
 }
 
 fn read_document(config: &LocalSettingsConfig) -> Result<SettingsDocument> {
+    config.validate()?;
     let bytes = match read_file_bounded(&config.path, config.maximum_document_bytes) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -183,7 +192,22 @@ fn read_document(config: &LocalSettingsConfig) -> Result<SettingsDocument> {
 }
 
 fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u8>> {
+    #[cfg(not(windows))]
     let file = File::open(path)?;
+    #[cfg(windows)]
+    let file = {
+        let parent = rsi_files_native_fs::open_absolute_directory_no_follow(
+            path.parent()
+                .ok_or_else(|| std::io::Error::other("Settings path has no parent"))?,
+        )?;
+        rsi_files_native_fs::open_relative_file_no_follow(
+            &parent,
+            Path::new(
+                path.file_name()
+                    .ok_or_else(|| std::io::Error::other("Settings path has no name"))?,
+            ),
+        )?
+    };
     if file.metadata()?.len() > maximum_bytes as u64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -203,6 +227,7 @@ fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u
 }
 
 fn write_document(config: &LocalSettingsConfig, document: &SettingsDocument) -> Result<()> {
+    config.validate()?;
     let bytes = serde_json::to_vec_pretty(document)
         .map_err(|error| SettingsError::Io(error.to_string()))?;
     if bytes.len() > config.maximum_document_bytes {
@@ -217,6 +242,8 @@ fn write_document(config: &LocalSettingsConfig, document: &SettingsDocument) -> 
 #[derive(Debug)]
 struct FileLock {
     file: File,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
 }
 
 impl Drop for FileLock {
@@ -225,7 +252,9 @@ impl Drop for FileLock {
     }
 }
 
+#[cfg(not(windows))]
 fn acquire_lock(path: &Path) -> Result<FileLock> {
+    require_native_platform()?;
     let parent = path
         .parent()
         .ok_or_else(|| SettingsError::InvalidInput("Settings path has no parent".into()))?;
@@ -274,6 +303,7 @@ fn join_error(error: &tokio::task::JoinError) -> SettingsError {
     SettingsError::Io(format!("Settings blocking task failed: {error}"))
 }
 
+#[cfg(not(windows))]
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -297,6 +327,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+#[cfg(not(windows))]
 fn reject_lock_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(SettingsError::InvalidInput(
@@ -308,6 +339,7 @@ fn reject_lock_symlink(path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(not(windows))]
 fn validate_lock_file(path: &Path, file: &File) -> Result<()> {
     let path_metadata =
         fs::symlink_metadata(path).map_err(|error| SettingsError::Io(error.to_string()))?;
@@ -342,11 +374,12 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
         .map_err(|error| SettingsError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn sync_parent_directory(_parent: &Path) -> Result<()> {
-    Ok(())
+    require_native_platform()
 }
 
+#[cfg(not(windows))]
 fn create_temporary_file(parent: &Path, name: &str) -> Result<(PathBuf, File)> {
     for _ in 0..MAXIMUM_TEMPORARY_NAME_ATTEMPTS {
         let sequence = NEXT_TEMPORARY_SEQUENCE
@@ -376,9 +409,9 @@ fn create_private_directories(path: &Path) -> Result<()> {
         .map_err(|error| SettingsError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
-fn create_private_directories(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|error| SettingsError::Io(error.to_string()))
+#[cfg(not(any(unix, windows)))]
+fn create_private_directories(_path: &Path) -> Result<()> {
+    require_native_platform()
 }
 
 #[cfg(unix)]
@@ -388,7 +421,337 @@ fn set_open_file_permissions(file: &File) -> Result<()> {
         .map_err(|error| SettingsError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_open_file_permissions(_file: &File) -> Result<()> {
-    Ok(())
+    require_native_platform()
+}
+
+fn require_native_platform() -> Result<()> {
+    if cfg!(any(unix, windows)) {
+        Ok(())
+    } else {
+        Err(SettingsError::Unsupported(
+            "Settings native filesystem protection is unsupported on this platform".into(),
+        ))
+    }
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_precedes_existing_document_reads_and_missing_writer_lock_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("existing.json");
+        fs::write(&path, b"retained").unwrap();
+        let config = LocalSettingsConfig {
+            path: path.clone(),
+            maximum_document_bytes: 1024,
+        };
+        assert!(matches!(
+            read_document(&config),
+            Err(SettingsError::Unsupported(_))
+        ));
+        assert!(matches!(
+            write_document(&config, &SettingsDocument::new()),
+            Err(SettingsError::Unsupported(_))
+        ));
+        assert!(matches!(
+            acquire_lock(&root.path().join("missing/settings.json")),
+            Err(SettingsError::Unsupported(_))
+        ));
+        assert!(
+            LocalSettingsFactory
+                .prepare(&serde_json::json!({ "path": path }))
+                .is_err()
+        );
+        assert_eq!(fs::read(path).unwrap(), b"retained");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(!root.path().join("missing").exists());
+    }
+}
+
+#[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn malformed_configuration_precedes_platform_admission() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, maximum_document_bytes) in [
+            (PathBuf::from("relative.json"), 1024),
+            (root.path().join("missing/settings.json"), 0),
+            (
+                root.path().join("missing/settings.json"),
+                DEFAULT_MAXIMUM_DOCUMENT_BYTES + 1,
+            ),
+        ] {
+            assert!(matches!(
+                LocalSettingsConfig {
+                    path,
+                    maximum_document_bytes
+                }
+                .validate(),
+                Err(SettingsError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn valid_configuration_checks_platform_without_filesystem_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let result = LocalSettingsConfig {
+            path: root.path().join("missing/settings.json"),
+            maximum_document_bytes: 1024,
+        }
+        .validate();
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(SettingsError::Unsupported(_))));
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod factory_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_distinguishes_invalid_input_from_unavailable_native_capability() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            LocalSettingsFactory.prepare(&serde_json::json!({"path":"relative.json"})),
+            Err(MetaError::InvalidInput(_))
+        ));
+        let result = LocalSettingsFactory.prepare(&serde_json::json!({"path":root.path().join("missing/settings.json"),"maximum_document_bytes":1024}));
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(windows)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Result::map_err consumes the native error."
+)]
+fn windows_error(error: std::io::Error) -> SettingsError {
+    SettingsError::Io(error.to_string())
+}
+
+#[cfg(windows)]
+fn acquire_lock(path: &Path) -> Result<FileLock> {
+    use rsi_files_native_fs as native;
+    let parent = path
+        .parent()
+        .ok_or_else(|| SettingsError::InvalidInput("Settings path has no parent".into()))?;
+    let directory =
+        native::create_absolute_directory_and_sync_no_follow(parent).map_err(windows_error)?;
+    let namespace = directory
+        .pin_namespace()
+        .map_err(|e| SettingsError::Io(format!("Settings writer namespace: {e}")))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| SettingsError::InvalidInput("Settings name must be UTF-8".into()))?;
+    let lock_name = std::path::PathBuf::from(format!(".{name}.lock"));
+    let file = match native::create_relative_private_file_no_follow(&directory, &lock_name) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            native::set_relative_private_file_permissions_no_follow(&directory, &lock_name)
+                .map_err(windows_error)?;
+            native::open_relative_private_file_no_follow(&directory, &lock_name)
+                .map_err(windows_error)?
+        }
+        Err(e) => return Err(windows_error(e)),
+    };
+    for _ in 0..LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => {
+                return Ok(FileLock {
+                    file,
+                    _namespace: namespace,
+                });
+            }
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_RETRY_DELAY),
+            Err(std::fs::TryLockError::Error(e)) => return Err(windows_error(e)),
+        }
+    }
+    Err(SettingsError::Io(
+        "timed out acquiring the Settings writer lock".into(),
+    ))
+}
+
+#[cfg(windows)]
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with_sequence(path, bytes, &NEXT_TEMPORARY_SEQUENCE)
+}
+
+#[cfg(windows)]
+fn atomic_write_with_sequence(path: &Path, bytes: &[u8], sequence: &AtomicU64) -> Result<()> {
+    use rsi_files_native_fs as native;
+    let parent = path
+        .parent()
+        .ok_or_else(|| SettingsError::InvalidInput("Settings path has no parent".into()))?;
+    let directory = native::open_absolute_directory_no_follow(parent)
+        .map_err(|e| SettingsError::Io(format!("Settings staging parent: {e}")))?;
+    let namespace = directory
+        .pin_namespace()
+        .map_err(|e| SettingsError::Io(format!("Settings staging namespace: {e}")))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| SettingsError::InvalidInput("Settings path has no name".into()))?;
+    match native::open_relative_file_no_follow(&directory, Path::new(name)) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(windows_error(e)),
+    }
+    let (staging_name, mut file) = create_windows_staging(&directory, sequence)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(windows_error);
+    drop(file);
+    let result = result
+        .and_then(|()| {
+            namespace
+                .publish_child(
+                    &staging_name,
+                    Path::new(name),
+                    native::EntryKind::File,
+                    true,
+                )
+                .map_err(|e| SettingsError::Io(format!("Settings publication: {e}")))
+        })
+        .and_then(|()| {
+            namespace
+                .sync_all()
+                .map_err(|e| SettingsError::Io(format!("Settings directory sync: {e}")))
+        });
+    if result.is_err() {
+        let _ = namespace.remove_child(&staging_name);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn create_windows_staging(
+    directory: &rsi_files_native_fs::Directory,
+    sequence: &AtomicU64,
+) -> Result<(PathBuf, File)> {
+    for _ in 0..64 {
+        let value = sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .map_err(|_| SettingsError::Io("Settings sequence exhausted".into()))?;
+        let name = PathBuf::from(format!(".settings-{}-{value}.tmp", std::process::id()));
+        match rsi_files_native_fs::create_relative_private_file_no_follow(directory, &name) {
+            Ok(file) => return Ok((name, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(SettingsError::Io(format!("Settings staging create: {e}"))),
+        }
+    }
+    Err(SettingsError::Io(
+        "Settings staging collision limit exceeded".into(),
+    ))
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn stale_staging_names_are_skipped_without_removing_their_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("private");
+        rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(&parent).unwrap();
+        let stale = parent.join(format!(".settings-{}-0.tmp", std::process::id()));
+        std::fs::write(&stale, b"another writer").unwrap();
+        let path = parent.join("settings.json");
+        atomic_write_with_sequence(&path, b"new document", &AtomicU64::new(0)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new document");
+        assert_eq!(std::fs::read(&stale).unwrap(), b"another writer");
+    }
+
+    #[test]
+    fn staging_collision_limit_preserves_the_document_and_other_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("private");
+        rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(&parent).unwrap();
+        for sequence in 0..64 {
+            std::fs::write(
+                parent.join(format!(".settings-{}-{sequence}.tmp", std::process::id())),
+                b"stale",
+            )
+            .unwrap();
+        }
+        let path = parent.join("settings.json");
+        std::fs::write(&path, b"old document").unwrap();
+        let sequence = AtomicU64::new(0);
+        assert!(atomic_write_with_sequence(&path, b"new document", &sequence).is_err());
+        assert_eq!(sequence.load(Ordering::Relaxed), 64);
+        assert_eq!(std::fs::read(path).unwrap(), b"old document");
+        for sequence in 0..64 {
+            assert_eq!(
+                std::fs::read(
+                    parent.join(format!(".settings-{}-{sequence}.tmp", std::process::id()))
+                )
+                .unwrap(),
+                b"stale"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn native_settings_cas_preserves_unloaded_namespaces_and_reopens() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("private");
+        rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(&directory).unwrap();
+        let config = LocalSettingsConfig {
+            path: directory.join("settings.json"),
+            maximum_document_bytes: 4096,
+        };
+        let provider = LocalProvider {
+            config: config.clone(),
+        };
+        provider
+            .compare_and_set("first", None, Some(&serde_json::json!({"value":1})))
+            .await
+            .unwrap();
+        provider
+            .compare_and_set("second", None, Some(&serde_json::json!({"value":2})))
+            .await
+            .unwrap();
+        assert!(matches!(
+            provider
+                .compare_and_set("first", None, Some(&serde_json::json!({})))
+                .await,
+            Err(SettingsError::ConcurrentDocumentChange)
+        ));
+        let reopened = LocalProvider { config }.load().await.unwrap();
+        assert_eq!(reopened["first"], serde_json::json!({"value":1}));
+        assert_eq!(reopened["second"], serde_json::json!({"value":2}));
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 3);
+    }
+    #[tokio::test]
+    async fn native_settings_writes_refuse_unprotected_parent_before_creating_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = LocalSettingsConfig {
+            path: temp.path().join("settings.json"),
+            maximum_document_bytes: 4096,
+        };
+        let provider = LocalProvider { config };
+        assert!(
+            provider
+                .compare_and_set("first", None, Some(&serde_json::json!({})))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
 }

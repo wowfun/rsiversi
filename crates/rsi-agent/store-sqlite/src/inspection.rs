@@ -227,7 +227,10 @@ struct Inspection<'a, V> {
 }
 impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> Inspection<'_, V> {
     fn run(&mut self) -> Result<()> {
+        #[cfg(not(any(unix, windows)))]
+        super::filesystem::require_native_platform()?;
         self.registry()?;
+        #[cfg(any(unix, windows))]
         self.directory()?;
         if self.mode == CasInspectionMode::Full {
             validation::validate_database_observed(self.connection, self)?;
@@ -388,47 +391,24 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> Inspection<'_, V> {
         add(&mut self.summary.verified_objects, 1)?;
         Ok(None)
     }
+    #[cfg(any(unix, windows))]
     fn directory(&mut self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            let directory = rsi_files_native_fs::open_absolute_directory_no_follow(self.cas)
-                .map_err(io_error)?;
-            for entry in rsi_files_native_fs::directory_entries(&directory).map_err(io_error)? {
-                self.checkpoint()?;
-                let entry = entry.map_err(io_error)?;
-                let kind = entry.file_type().map_err(io_error)?;
-                self.entry(
-                    &entry.file_name(),
-                    kind.is_file(),
-                    kind.is_dir(),
-                    kind.is_symlink(),
-                )?;
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            #[cfg(windows)]
-            let _parents = cas::pin_windows_directories(self.cas).map_err(io_error)?;
-            let metadata = fs::symlink_metadata(self.cas).map_err(io_error)?;
-            if !metadata.is_dir() || metadata.is_symlink() {
-                return Err(StoreError::Corrupt(
-                    "CAS root is not a real directory".into(),
-                ));
-            }
-            for entry in fs::read_dir(self.cas).map_err(io_error)? {
-                self.checkpoint()?;
-                let entry = entry.map_err(io_error)?;
-                let kind = entry.file_type().map_err(io_error)?;
-                self.entry(
-                    &entry.file_name(),
-                    kind.is_file(),
-                    kind.is_dir(),
-                    kind.is_symlink(),
-                )?;
-            }
+        let directory =
+            rsi_files_native_fs::open_absolute_directory_no_follow(self.cas).map_err(io_error)?;
+        for entry in directory.entries().map_err(io_error)? {
+            self.checkpoint()?;
+            let entry = entry.map_err(io_error)?;
+            let kind = entry.file_type().map_err(io_error)?;
+            self.entry(
+                &entry.file_name(),
+                kind.is_file(),
+                kind.is_dir(),
+                kind.is_symlink(),
+            )?;
         }
         Ok(())
     }
+    #[cfg(any(unix, windows))]
     fn entry(
         &mut self,
         name: &std::ffi::OsStr,
@@ -443,6 +423,12 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> Inspection<'_, V> {
             None
         } else if !regular || link {
             Some(CasInspectionIssue::UnexpectedEntry)
+        } else if cfg!(windows) && name == ".rsi-namespace-pin" {
+            match cas::open_cas_file(&self.cas.join(name)) {
+                Ok((_, metadata)) if metadata.len() == 0 => None,
+                Ok(_) => Some(CasInspectionIssue::UnexpectedEntry),
+                Err(error) => Some(file_issue(&error)),
+            }
         } else if let Some(digest) = name
             .to_str()
             .filter(|digest| validate_sha256("CAS identity", digest).is_ok())
@@ -598,6 +584,7 @@ fn add(count: &mut u64, value: u64) -> Result<()> {
         .ok_or_else(|| StoreError::Corrupt("CAS inspection count overflow".into()))?;
     Ok(())
 }
+#[cfg(any(unix, windows))]
 pub(crate) fn file_name_preview(name: &std::ffi::OsStr) -> String {
     let raw = name.as_encoded_bytes();
     // Bound allocation before lossy conversion, then bound the encoded
@@ -627,6 +614,30 @@ fn unreadable(error: &std::io::Error) -> CasInspectionIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn unsupported_inspection_precedes_registry_queries_and_visits() {
+        // No Store schema exists: querying the registry would return a SQL error.
+        let connection = Connection::open_in_memory().unwrap();
+        let cancel = CancellationToken::new();
+        let mut visitor = |_| -> ControlFlow<()> {
+            panic!("unsupported inspection must not publish observations")
+        };
+        let mut inspection = Inspection {
+            connection: &connection,
+            cas: Path::new("unused"),
+            mode: CasInspectionMode::Full,
+            cancellation: &cancel,
+            visitor: &mut visitor,
+            summary: CasInspectionSummary::default(),
+            hash_buffer: Vec::new(),
+        };
+        assert!(matches!(inspection.run(), Err(StoreError::Unsupported(_))));
+        assert_eq!(inspection.summary, CasInspectionSummary::default());
+        assert!(inspection.hash_buffer.is_empty());
+    }
+
     #[test]
     fn stopped_inspection_does_not_hide_a_fatal_error() {
         for completion in [

@@ -83,6 +83,32 @@ fn retained_root_and_child_handles_survive_path_replacement_without_following_ne
 }
 
 #[test]
+fn adopting_an_opened_directory_preserves_identity_after_name_replacement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    fs::create_dir(base.join("selected")).unwrap();
+    fs::write(base.join("selected/original"), "owned").unwrap();
+    let root = open_absolute_directory_no_follow(&base).unwrap();
+    let file = open_relative_file_no_follow(&root, Path::new("selected")).unwrap();
+    fs::rename(base.join("selected"), base.join("moved")).unwrap();
+    fs::create_dir(base.join("selected")).unwrap();
+    fs::write(base.join("selected/replacement"), "new").unwrap();
+    let directory = Directory::from_opened_file(file).unwrap();
+    let names = directory
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [std::ffi::OsString::from("original")]);
+    assert!(
+        Directory::from_opened_file(
+            open_relative_file_no_follow(&directory, Path::new("original")).unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn file_handle_is_read_only_and_fifo_open_has_nonblocking_flags() {
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path().canonicalize().unwrap();
@@ -138,7 +164,7 @@ fn creating_private_roots_rejects_traversal_before_mutation_and_never_follows_li
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    root.write("value", b"owned").unwrap();
+    fs::write(path.join("value"), b"owned").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
     drop(create_absolute_directory_no_follow(&path).unwrap());
     assert_eq!(
@@ -154,7 +180,13 @@ fn creating_private_roots_rejects_traversal_before_mutation_and_never_follows_li
     assert!(!base.join("outside/escaped").exists());
     fs::rename(&path, path.with_file_name("moved")).unwrap();
     symlink(base.join("outside"), &path).unwrap();
-    root.write("after", b"same owner").unwrap();
+    fs::write(path.with_file_name("moved").join("after"), b"same owner").unwrap();
+    let mut retained = Vec::new();
+    open_relative_file_no_follow(&root, Path::new("after"))
+        .unwrap()
+        .read_to_end(&mut retained)
+        .unwrap();
+    assert_eq!(retained, b"same owner");
     assert!(!base.join("outside/after").exists());
     assert_eq!(
         fs::read(path.with_file_name("moved").join("after")).unwrap(),
@@ -209,4 +241,30 @@ fn explicit_root_alias_resolution_preserves_unopened_and_symlinked_suffixes() {
     assert!(!absent.parent().unwrap().exists());
     assert!(resolve_absolute_root_alias(&absent, false).is_err());
     assert_eq!(resolve_absolute_root_alias(&absent, true).unwrap(), absent);
+}
+
+#[test]
+fn enumeration_retains_its_original_authority_after_root_replacement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    fs::create_dir(base.join("root")).unwrap();
+    fs::create_dir(base.join("outside")).unwrap();
+    fs::write(base.join("root/inside"), "owned").unwrap();
+    fs::write(base.join("outside/private"), "outside").unwrap();
+    symlink(base.join("outside"), base.join("root/link")).unwrap();
+    let root = open_absolute_directory_no_follow(&base.join("root")).unwrap();
+    let entries = root.entries().unwrap();
+    fs::rename(base.join("root"), base.join("moved")).unwrap();
+    symlink(base.join("outside"), base.join("root")).unwrap();
+    drop(root);
+    let observed = entries
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), entry.file_type().unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[std::ffi::OsStr::new("inside")], EntryKind::File);
+    assert_eq!(observed[std::ffi::OsStr::new("link")], EntryKind::Link);
+    assert!(!observed.contains_key(std::ffi::OsStr::new("private")));
 }

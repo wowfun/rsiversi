@@ -65,6 +65,12 @@ fn reset_and_open_progress(
         backup: None,
     };
     let result = (|| {
+        let _ = filesystem::normalized_root_path(root)?;
+        if cfg!(windows) {
+            return Err(StoreError::Unsupported(
+                "Agent Store archival reset requires Unix rename-under-lease semantics".into(),
+            ));
+        }
         let existing = match filesystem::existing_root(root) {
             Ok(root) => {
                 if is_store_reset_target(&root)? {

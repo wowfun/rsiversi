@@ -314,6 +314,7 @@ fn api_projection_preserves_commit_certainty_and_diagnostic_failures() {
         StorageError::Io("before commit".into()),
         StorageError::RecoveryRequired,
         StorageError::BackendUnavailable("retired".into()),
+        StorageError::Unsupported("native protection".into()),
     ] {
         assert_eq!(storage_error(error), ApiError::Unavailable);
     }

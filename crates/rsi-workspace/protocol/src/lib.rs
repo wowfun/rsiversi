@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
+pub use rsi_workspace_path::canonical_native_path;
 
 use async_trait::async_trait;
 pub use rsi_execution_protocol::{ExecutionCoordinates, ExecutionLocation};

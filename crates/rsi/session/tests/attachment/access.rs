@@ -65,17 +65,24 @@ impl ExecutionResolver for Access {
 #[allow(clippy::too_many_lines)] // The same retained handle and stream cross offline access and live revocation.
 async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_use() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().canonicalize().unwrap();
+    let path =
+        rsi_workspace_protocol::canonical_native_path(directory.path().canonicalize().unwrap());
     let store = Arc::new(MemoryStore::new());
     let location = ExecutionLocation::Ssh {
         target: rsi_execution::ExecutionTargetId::parse("a".repeat(32)).unwrap(),
     };
     let mut headers = Vec::new();
-    for (index, location) in [ExecutionLocation::Local, location].into_iter().enumerate() {
+    for (index, (location, path)) in [
+        (ExecutionLocation::Local, path.to_str().unwrap()),
+        (location, "/remote/workspace"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let header = SessionHeader::new(
             SessionId::new(format!("read-{index}")).unwrap(),
             index as u64 + 1,
-            rsi_execution::ExecutionCoordinates::new(location, path.to_str().unwrap()).unwrap(),
+            rsi_execution::ExecutionCoordinates::new(location, path).unwrap(),
             AgentPresetId::new("removed").unwrap(),
             test_settings(),
         )
@@ -483,7 +490,7 @@ async fn workflow_cancel_fixture(
     Arc<dyn SessionHandle>,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().canonicalize().unwrap();
+    let path = rsi_workspace_protocol::canonical_native_path(dir.path().canonicalize().unwrap());
     let store = Arc::new(MemoryStore::new());
     let header = SessionHeader::new(
         SessionId::new("admitted-workflow").unwrap(),

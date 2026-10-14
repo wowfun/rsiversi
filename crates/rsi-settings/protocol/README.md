@@ -13,6 +13,10 @@ and last committed value.
 The package contains no files, environment access, plugin lifecycle, or global
 registry.
 
+`SettingsError::Unsupported` identifies a missing provider or platform capability
+before admission, not malformed caller input. The Settings API preserves this
+category through its closed domain failure code without exposing backend text.
+
 Owning tests cover namespace syntax and bounds plus exact encoded-section byte
 admission; provider and registry suites cover the stateful uses of those pure
 validators.

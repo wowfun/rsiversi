@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_storage::{
     MAXIMUM_STORAGE_RECORDS, MAXIMUM_STORAGE_VALUE_BYTES, StorageError, StorageFactory,

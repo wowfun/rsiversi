@@ -9,7 +9,12 @@ different environments; the opaque resolved program keeps that selection intact.
 Preparation freezes that program's environment into the opaque plan. Spawn
 rejects environment substitution before backend I/O.
 
-Path canonicalization uses this machine only. The adapter cannot be constructed
+Path canonicalization uses this machine only. Canonical Windows drive paths use
+the shared native path representation from `rsi-workspace-path`, so Execution
+coordinates and durable workspace coordinates name the same canonical directory.
+Only an already canonical filesystem path is normalized; this does not admit
+UNC or device aliases into Files or private storage.
+The adapter cannot be constructed
 as an SSH backend: `provider()` always issues Local coordinates with zero target
 revision and connection epoch. Native process owners retain the
 whole provider tuple through settlement. Start admission settles at verified

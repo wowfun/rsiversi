@@ -2156,12 +2156,7 @@ impl SessionStore for SqliteStore {
         let owner = Arc::clone(&self.inner);
         let reference = self
             .with_cas_publication(move || {
-                install_cas(
-                    &owner.cas_dir,
-                    &owner.cas_staging_dir,
-                    &bytes,
-                    &owner.cas_publication,
-                )
+                install_cas(&owner.cas_dir, &bytes, &owner.cas_publication)
             })
             .await?;
         self.with_writer(move |connection| {

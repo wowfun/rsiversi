@@ -16,11 +16,17 @@ pub(super) struct OfflineStore {
     pub(super) connection: Connection,
     pub(super) root: PathBuf,
     _writer_lock: WriterLease,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
 }
 
 pub(super) fn open_offline_store(path: &Path) -> Result<OfflineStore> {
     let root = existing_root(path)?;
     let writer_lock = acquire_existing_writer_lock(&root)?;
+    #[cfg(windows)]
+    let namespace = rsi_files_native_fs::open_absolute_directory_no_follow(&root)
+        .and_then(|directory| directory.pin_namespace())
+        .map_err(io_error)?;
     reject_uncheckpointed_wal(&root)?;
     let database_path = root.join("sessions.sqlite3");
     let metadata = fs::symlink_metadata(&database_path).map_err(|error| {
@@ -49,6 +55,8 @@ pub(super) fn open_offline_store(path: &Path) -> Result<OfflineStore> {
         connection,
         root,
         _writer_lock: writer_lock,
+        #[cfg(windows)]
+        _namespace: namespace,
     })
 }
 
@@ -64,7 +72,19 @@ pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
         ));
     }
     set_directory_permissions(path)?;
-    fs::canonicalize(path).map_err(io_error)
+    #[cfg(unix)]
+    {
+        fs::canonicalize(path).map_err(io_error)
+    }
+    #[cfg(windows)]
+    {
+        Ok(path.to_owned())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        require_native_platform()?;
+        Ok(path.to_owned())
+    }
 }
 
 pub(super) fn existing_root(path: &Path) -> Result<PathBuf> {
@@ -82,15 +102,32 @@ pub(super) fn existing_root(path: &Path) -> Result<PathBuf> {
             "SQLite Agent Store root must be a real directory".into(),
         ));
     }
-    fs::canonicalize(path).map_err(io_error)
+    #[cfg(unix)]
+    {
+        fs::canonicalize(path).map_err(io_error)
+    }
+    #[cfg(windows)]
+    {
+        rsi_files_native_fs::open_absolute_directory_no_follow(path).map_err(io_error)?;
+        Ok(path.to_owned())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        require_native_platform()?;
+        Ok(path.to_owned())
+    }
 }
 
-fn normalized_root_path(path: &Path) -> Result<PathBuf> {
+pub(super) fn normalized_root_path(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() || path.as_os_str().is_empty() {
         return Err(StoreError::Invalid(
             "SQLite Agent Store root must be an absolute path".into(),
         ));
     }
+    require_native_platform()?;
+    #[cfg(windows)]
+    rsi_files_native_fs::resolve_absolute_root_alias(path, true)
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
     // A trailing separator or `.` makes lstat follow the preceding link.
     // Components remove that syntax without resolving links or collapsing `..`.
     Ok(path.components().collect())
@@ -111,13 +148,24 @@ pub(super) fn prepare_owned_directory(path: &Path, label: &str) -> Result<()> {
 
 pub(super) fn prepare_cas_staging_directory(path: &Path) -> Result<()> {
     prepare_owned_directory(path, "CAS staging directory")?;
-    for (index, entry) in fs::read_dir(path).map_err(io_error)?.enumerate() {
-        if index >= MAXIMUM_ORPHANED_CAS_STAGING_FILES {
+    let mut orphaned = 0;
+    for entry in fs::read_dir(path).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        if cfg!(windows) && entry.file_name() == ".rsi-namespace-pin" {
+            let (_, metadata) = super::cas::open_cas_file(&entry.path()).map_err(io_error)?;
+            if metadata.len() != 0 {
+                return Err(StoreError::Corrupt(
+                    "CAS staging namespace guard is not empty".into(),
+                ));
+            }
+            continue;
+        }
+        if orphaned >= MAXIMUM_ORPHANED_CAS_STAGING_FILES {
             return Err(StoreError::Corrupt(format!(
                 "CAS staging directory exceeds {MAXIMUM_ORPHANED_CAS_STAGING_FILES} orphaned files"
             )));
         }
-        let entry = entry.map_err(io_error)?;
+        orphaned += 1;
         let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
         if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
             return Err(StoreError::Corrupt(
@@ -137,9 +185,15 @@ pub(super) fn create_private_directories(path: &Path) -> Result<()> {
     builder.create(path).map_err(io_error)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(super) fn create_private_directories(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(io_error)
+    rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(path).map_err(io_error)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn create_private_directories(_path: &Path) -> Result<()> {
+    require_native_platform()
 }
 
 #[cfg(unix)]
@@ -148,9 +202,25 @@ pub(super) fn set_directory_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)
 }
 
-#[cfg(not(unix))]
-pub(super) fn set_directory_permissions(_path: &Path) -> Result<()> {
+#[cfg(windows)]
+pub(super) fn set_directory_permissions(path: &Path) -> Result<()> {
+    rsi_files_native_fs::set_private_directory_permissions_no_follow(path).map_err(io_error)?;
     Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn set_directory_permissions(_path: &Path) -> Result<()> {
+    require_native_platform()
+}
+
+pub(super) fn require_native_platform() -> Result<()> {
+    if cfg!(any(unix, windows)) {
+        Ok(())
+    } else {
+        Err(StoreError::Unsupported(
+            "Agent Store native filesystem protection is unsupported on this platform".into(),
+        ))
+    }
 }
 
 pub(super) fn reject_symlink_if_present(path: &Path, label: &str) -> Result<()> {
@@ -196,6 +266,7 @@ pub(super) fn acquire_existing_writer_lock(root: &Path) -> Result<WriterLease> {
 pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<WriterLease> {
     let path = root.join(".writer.lock");
     reject_symlink_if_present(&path, "Store writer lock")?;
+    #[cfg(not(windows))]
     let file = OpenOptions::new()
         .create(create)
         .truncate(false)
@@ -209,6 +280,14 @@ pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<WriterLease>
                 io_error(error)
             }
         })?;
+    #[cfg(windows)]
+    let file = private_file(&path, create).map_err(|error| {
+        if !create && error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::NotFound(path.display().to_string())
+        } else {
+            io_error(error)
+        }
+    })?;
     validate_open_file(&path, &file, "Store writer lock")?;
     if let Err(error) = file.try_lock() {
         let error: std::io::Error = error.into();
@@ -220,6 +299,32 @@ pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<WriterLease>
     let lease = WriterLease(file);
     validate_open_file(&path, &lease.0, "Store writer lock")?;
     Ok(lease)
+}
+
+#[cfg(windows)]
+pub(super) fn private_file(path: &Path, create: bool) -> std::io::Result<File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("private file has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("private file has no name"))?;
+    let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)?;
+    if create {
+        match rsi_files_native_fs::create_relative_private_file_no_follow(
+            &directory,
+            Path::new(name),
+        ) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    rsi_files_native_fs::set_relative_private_file_permissions_no_follow(
+        &directory,
+        Path::new(name),
+    )?;
+    rsi_files_native_fs::open_relative_private_file_no_follow(&directory, Path::new(name))
 }
 
 pub(super) fn validate_open_file(path: &Path, file: &File, label: &str) -> Result<()> {

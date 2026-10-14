@@ -1,5 +1,9 @@
 # rsi-agent-store-protocol
 
+`StoreError::Unsupported` identifies a missing provider or platform capability
+before Store admission. It is distinct from malformed caller input (`Invalid`)
+and from an uncertain durable write outcome.
+
 Activity enumeration is a metadata-only live keyset over `(last_activity_ms,
 SessionId)` descending, globally or within exact execution coordinates. It reads
 neither transcript nor complete Headers and does not mount a Session. Each page

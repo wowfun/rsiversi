@@ -448,6 +448,7 @@ pub fn storage_error(error: StorageError) -> rsi_api_protocol::ApiError {
         StorageError::OutcomeUnknown(_) => ApiError::OutcomeUnknown,
         StorageError::Io(_)
         | StorageError::RecoveryRequired
+        | StorageError::Unsupported(_)
         | StorageError::BackendUnavailable(_) => ApiError::Unavailable,
         StorageError::InvalidInput(message) => ApiError::Invalid(message),
         error @ (StorageError::DuplicateBackend(_) | StorageError::Corrupt(_)) => {

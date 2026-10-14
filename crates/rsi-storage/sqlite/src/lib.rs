@@ -69,29 +69,63 @@ impl SqliteStorageConfig {
                 "SQLite storage path must be absolute".into(),
             ));
         }
-        Ok(())
+        #[cfg(windows)]
+        rsi_files_native_fs::resolve_absolute_root_alias(&self.path, true)
+            .map_err(|error| StorageError::InvalidInput(error.to_string()))?;
+        require_native_platform()
     }
 }
 
 #[derive(Debug)]
 struct SqliteBackend {
-    connection: Arc<Mutex<Connection>>,
+    connection: Arc<Mutex<ConnectionOwner>>,
     operation: Arc<BackendOperations>,
+}
+
+#[derive(Debug)]
+struct ConnectionOwner {
+    connection: Connection,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
+    #[cfg(windows)]
+    _database: std::fs::File,
+}
+impl std::ops::Deref for ConnectionOwner {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+impl std::ops::DerefMut for ConnectionOwner {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 impl SqliteBackend {
     fn open(path: &Path) -> Result<Self, StorageError> {
+        require_native_platform()?;
         let parent = path
             .parent()
             .ok_or_else(|| StorageError::Io("database has no parent".into()))?;
         create_private_directories(parent)?;
+        #[cfg(not(windows))]
         let parent =
             std::fs::canonicalize(parent).map_err(|error| StorageError::Io(error.to_string()))?;
+        #[cfg(windows)]
+        let parent = parent.to_owned();
+        #[cfg(windows)]
+        let namespace = rsi_files_native_fs::open_absolute_directory_no_follow(&parent)
+            .and_then(|directory| directory.pin_namespace())
+            .map_err(|error| StorageError::Io(error.to_string()))?;
         let path = parent.join(
             path.file_name()
                 .ok_or_else(|| StorageError::Io("database has no file name".into()))?,
         );
+        #[cfg(not(windows))]
         ensure_private_database_file(&path)?;
+        #[cfg(windows)]
+        let database = private_windows_file(&path, true)?;
         let connection = Connection::open_with_flags(
             &path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -112,8 +146,18 @@ impl SqliteBackend {
             .execute_batch("PRAGMA journal_mode = WAL")
             .map_err(|error| sqlite_io(&error))?;
         set_sqlite_sidecar_permissions(&path)?;
+        #[cfg(windows)]
+        namespace
+            .sync_all()
+            .map_err(|error| StorageError::Io(error.to_string()))?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(Mutex::new(ConnectionOwner {
+                connection,
+                #[cfg(windows)]
+                _namespace: namespace,
+                #[cfg(windows)]
+                _database: database,
+            })),
             operation: Arc::new(BackendOperations::default()),
         })
     }
@@ -387,9 +431,10 @@ impl PluginFactory for SqliteStorageFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: SqliteStorageConfig = serde_json::from_value(desired.clone())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        config
-            .validate()
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        config.validate().map_err(|error| match error {
+            StorageError::Unsupported(_) => MetaError::Activation(error.to_string()),
+            _ => MetaError::InvalidInput(error.to_string()),
+        })?;
         let retained = config.name.len() + config.path.as_os_str().len() + 32;
         Ok(
             PreparedActivation::with_state(desired.clone(), config, retained)
@@ -764,9 +809,9 @@ fn ensure_private_database_file(path: &std::path::Path) -> Result<(), StorageErr
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn ensure_private_database_file(_path: &std::path::Path) -> Result<(), StorageError> {
-    Ok(())
+    require_native_platform()
 }
 
 #[cfg(unix)]
@@ -828,12 +873,179 @@ fn validate_and_privatize_open_file(
         .map_err(|error| StorageError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_sqlite_sidecar_permissions(_path: &std::path::Path) -> Result<(), StorageError> {
+    require_native_platform()
+}
+
+fn require_native_platform() -> Result<(), StorageError> {
+    if cfg!(any(unix, windows)) {
+        Ok(())
+    } else {
+        Err(StorageError::Unsupported(
+            "SQLite native filesystem protection is unsupported on this platform".into(),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn private_windows_file(path: &Path, create: bool) -> Result<std::fs::File, StorageError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StorageError::InvalidInput("database file has no parent".into()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| StorageError::InvalidInput("database file has no name".into()))?;
+    let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)
+        .map_err(|error| StorageError::Io(error.to_string()))?;
+    if create {
+        match rsi_files_native_fs::create_relative_private_file_no_follow(
+            &directory,
+            Path::new(name),
+        ) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(StorageError::Io(error.to_string())),
+        }
+    }
+    rsi_files_native_fs::set_relative_private_file_permissions_no_follow(
+        &directory,
+        Path::new(name),
+    )
+    .map_err(|error| StorageError::Io(error.to_string()))?;
+    rsi_files_native_fs::open_relative_private_file_no_follow(&directory, Path::new(name))
+        .map_err(|error| StorageError::Io(error.to_string()))
+}
+#[cfg(windows)]
+fn set_sqlite_sidecar_permissions(path: &Path) -> Result<(), StorageError> {
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let sidecar = PathBuf::from(name);
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(_) => {
+                private_windows_file(&sidecar, false)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StorageError::Io(error.to_string())),
+        }
+    }
     Ok(())
 }
 
+#[cfg(all(test, not(any(unix, windows))))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn acquisition_rejects_before_creating_parents_or_touching_an_existing_database() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing/database.sqlite3");
+        assert!(matches!(
+            SqliteBackend::open(&missing),
+            Err(StorageError::Unsupported(_))
+        ));
+        assert!(!missing.parent().unwrap().exists());
+        let existing = root.path().join("existing.sqlite3");
+        std::fs::write(&existing, b"retained").unwrap();
+        assert!(matches!(
+            SqliteBackend::open(&existing),
+            Err(StorageError::Unsupported(_))
+        ));
+        assert_eq!(std::fs::read(existing).unwrap(), b"retained");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+}
+
 #[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_configuration_precedes_platform_admission() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, path) in [
+            ("valid", PathBuf::from("relative.sqlite3")),
+            ("bad/name", root.path().join("missing/database.sqlite3")),
+        ] {
+            assert!(matches!(
+                SqliteStorageConfig {
+                    name: name.into(),
+                    path
+                }
+                .validate(),
+                Err(StorageError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn valid_configuration_checks_platform_without_filesystem_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let result = SqliteStorageConfig {
+            name: "valid".into(),
+            path: root.path().join("missing/database.sqlite3"),
+        }
+        .validate();
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(StorageError::Unsupported(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_private_database_persists_with_independent_connections_and_namespace_pins() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("private-storage");
+        let path = parent.join("domains.sqlite3");
+        let first = SqliteBackend::open(&path).unwrap();
+        first
+            .put("fixture", 1, "first", &serde_json::json!({"value": 21}))
+            .await
+            .unwrap();
+        let second = SqliteBackend::open(&path).unwrap();
+        second
+            .put("fixture", 1, "second", &serde_json::json!({"value": 22}))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.load("fixture").await.unwrap().unwrap().records.len(),
+            2
+        );
+        assert!(std::fs::rename(&parent, temporary.path().join("replaced")).is_err());
+        first.operation.close().await;
+        drop(first);
+        assert!(std::fs::rename(&parent, temporary.path().join("replaced")).is_err());
+        second.operation.close().await;
+        drop(second);
+        let reopened = SqliteBackend::open(&path).unwrap();
+        assert_eq!(
+            reopened.load("fixture").await.unwrap().unwrap().records["first"],
+            serde_json::json!({"value":21})
+        );
+        reopened.operation.close().await;
+        drop(reopened);
+        std::fs::rename(&parent, temporary.path().join("replaced")).unwrap();
+    }
+
+    #[test]
+    fn private_directory_admission_does_not_repair_an_unowned_parent_policy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("domains.sqlite3");
+        assert!(SqliteBackend::open(&path).is_err());
+        assert!(!path.exists());
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -987,29 +1199,6 @@ mod tests {
         assert!(matches!(SqliteBackend::open(&path),
             Err(StorageError::Corrupt(reason)) if reason.contains("domain count")));
         assert_eq!(std::fs::read(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn recomputed_record_overflow_reports_record_count() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        initialize_or_validate_schema(&connection).unwrap();
-        connection.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO rsi_storage_domains(domain,version) VALUES ('domain',1);").unwrap();
-        let transaction = connection.transaction().unwrap();
-        {
-            let mut insert = transaction.prepare("INSERT INTO rsi_storage_records(domain,key,value) VALUES ('domain',?1,X'6e756c6c')").unwrap();
-            for index in 0..=MAXIMUM_STORAGE_RECORDS {
-                insert.execute([format!("record-{index:05}")]).unwrap();
-            }
-        }
-        transaction
-            .execute(
-                "UPDATE rsi_storage_domains SET record_count=?1,record_bytes=2097152",
-                [i64::try_from(MAXIMUM_STORAGE_RECORDS).unwrap()],
-            )
-            .unwrap();
-        transaction.commit().unwrap();
-        assert!(matches!(validate_accounting(&connection),
-            Err(StorageError::Corrupt(reason)) if reason.contains("record count")));
     }
 
     #[test]
@@ -1541,5 +1730,57 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+    }
+}
+
+#[cfg(test)]
+mod portable_sql_tests {
+    use super::*;
+
+    #[test]
+    fn recomputed_record_overflow_reports_record_count() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize_or_validate_schema(&connection).unwrap();
+        connection.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO rsi_storage_domains(domain,version) VALUES ('domain',1);").unwrap();
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut insert = transaction.prepare("INSERT INTO rsi_storage_records(domain,key,value) VALUES ('domain',?1,X'6e756c6c')").unwrap();
+            for index in 0..=MAXIMUM_STORAGE_RECORDS {
+                insert.execute([format!("record-{index:05}")]).unwrap();
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE rsi_storage_domains SET record_count=?1,record_bytes=2097152",
+                [i64::try_from(MAXIMUM_STORAGE_RECORDS).unwrap()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert!(matches!(validate_accounting(&connection),
+            Err(StorageError::Corrupt(reason)) if reason.contains("record count")));
+    }
+}
+
+#[cfg(test)]
+mod factory_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_distinguishes_invalid_input_from_unavailable_native_capability() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            SqliteStorageFactory
+                .prepare(&serde_json::json!({"name":"test","path":"relative.sqlite3"})),
+            Err(MetaError::InvalidInput(_))
+        ));
+        let result = SqliteStorageFactory.prepare(
+            &serde_json::json!({"name":"test","path":root.path().join("missing/database.sqlite3")}),
+        );
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

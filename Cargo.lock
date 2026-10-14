@@ -6236,7 +6236,6 @@ name = "rsi-credentials-local"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "libc",
  "rsi-credentials-protocol",
  "rsi-files-native-fs",
@@ -6305,7 +6304,6 @@ name = "rsi-directory-picker"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "rsi-api-protocol",
  "rsi-configuration-access",
  "rsi-directory-picker-api",
@@ -6363,6 +6361,7 @@ dependencies = [
  "rsi-process-local",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-workspace-path",
  "serde_json",
  "tempfile",
  "tokio",
@@ -6385,11 +6384,11 @@ name = "rsi-files"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "hex",
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-meta",
+ "rustix 1.1.4",
  "serde_json",
  "tempfile",
  "tokio",
@@ -6814,10 +6813,10 @@ dependencies = [
  "image",
  "libc",
  "rsi-api-protocol",
+ "rsi-files-native-fs",
  "rsi-media",
  "rsi-media-protocol",
  "rsi-meta",
- "same-file",
  "serde",
  "serde_json",
  "sha2",
@@ -7560,6 +7559,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-settings",
  "rsi-settings-protocol",
@@ -7640,7 +7640,6 @@ name = "rsi-ssh-helper"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "hex",
  "rsi-execution",
  "rsi-execution-local",
@@ -7730,6 +7729,7 @@ name = "rsi-storage"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-files-native-fs",
  "rsi-meta",
  "serde",
  "serde_json",
@@ -7773,6 +7773,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-storage",
  "rsi-storage-domain",
@@ -8168,7 +8169,6 @@ name = "rsi-workspace-review"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "futures-util",
  "getrandom 0.3.4",
  "hex",

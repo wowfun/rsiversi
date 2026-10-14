@@ -32,7 +32,7 @@ pub enum PublicationPhase {
 
 #[derive(Debug, Default)]
 pub(super) struct Publication {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     crash: Mutex<Option<(PublicationStep, PublicationPhase)>>,
     #[cfg(any(test, feature = "test-support"))]
     fault: Mutex<Option<(PublicationStep, PublicationPhase)>>,
@@ -56,7 +56,7 @@ impl Publication {
 
     #[cfg(any(test, feature = "test-support"))]
     fn check(&self, step: PublicationStep, phase: PublicationPhase) -> std::io::Result<()> {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if *self.crash.lock().unwrap() == Some((step, phase)) {
             crash_child_exit(&format!("{step:?}/{phase:?}"));
         }
@@ -71,12 +71,12 @@ impl Publication {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(all(test, unix), feature = "test-support"))]
     pub(super) fn inject(&self, step: PublicationStep, phase: PublicationPhase) {
         assert!(self.fault.lock().unwrap().replace((step, phase)).is_none());
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn crash_after(&self, step: PublicationStep) {
         require_crash_child();
         assert!(
@@ -89,10 +89,10 @@ impl Publication {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) const CRASH_CHILD_EXIT_CODE: i32 = 86;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn require_crash_child() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     assert!(
@@ -104,16 +104,90 @@ pub(super) fn require_crash_child() {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn crash_child_exit(boundary: &str) -> ! {
     require_crash_child();
     eprintln!("intentional CAS crash child at {boundary}");
     std::process::exit(CRASH_CHILD_EXIT_CODE)
 }
 
+#[cfg(any(unix, windows))]
+struct PublicationDirectory {
+    directory: rsi_files_native_fs::Directory,
+    #[cfg(windows)]
+    namespace: rsi_files_native_fs::NamespaceLease,
+}
+#[cfg(any(unix, windows))]
+impl PublicationDirectory {
+    #[cfg_attr(unix, allow(clippy::unnecessary_wraps))] // Windows acquires a fallible namespace pin.
+    fn new(directory: rsi_files_native_fs::Directory) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        let namespace = directory.pin_namespace()?;
+        Ok(Self {
+            directory,
+            #[cfg(windows)]
+            namespace,
+        })
+    }
+    fn open(&self, name: &Path) -> std::io::Result<(File, fs::Metadata)> {
+        #[cfg(unix)]
+        let file = rsi_files_native_fs::open_relative_file_no_follow(&self.directory, name)?;
+        #[cfg(windows)]
+        let file =
+            rsi_files_native_fs::open_relative_private_file_no_follow(&self.directory, name)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CAS entry is not a regular file",
+            ));
+        }
+        Ok((file, metadata))
+    }
+    fn sync(&self) -> std::io::Result<()> {
+        self.directory.sync_all()
+    }
+    fn link(&self, source: &Self, name: &Path, destination: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let target = &self.directory;
+        #[cfg(windows)]
+        let target = &self.namespace;
+        target.link_child(&source.directory, name, destination)
+    }
+    fn remove(&self, name: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let target = &self.directory;
+        #[cfg(windows)]
+        let target = &self.namespace;
+        target.remove_child(name)
+    }
+}
+
+#[cfg(any(unix, windows))]
 pub(super) fn install_cas(
     cas_dir: &Path,
-    cas_staging_dir: &Path,
+    bytes: &[u8],
+    publication: &Publication,
+) -> Result<CasObjectRef> {
+    let cas = PublicationDirectory::new(
+        rsi_files_native_fs::open_absolute_directory_no_follow(cas_dir).map_err(io_error)?,
+    )
+    .map_err(io_error)?;
+    let staging = PublicationDirectory::new(
+        rsi_files_native_fs::open_relative_directory_no_follow(
+            &cas.directory,
+            Path::new("staging"),
+        )
+        .map_err(io_error)?,
+    )
+    .map_err(io_error)?;
+    install_in_namespaces(&cas, &staging, bytes, publication)
+}
+
+#[cfg(any(unix, windows))]
+fn install_in_namespaces(
+    cas: &PublicationDirectory,
+    staging: &PublicationDirectory,
     bytes: &[u8],
     publication: &Publication,
 ) -> Result<CasObjectRef> {
@@ -124,66 +198,100 @@ pub(super) fn install_cas(
     };
     reference.validate()?;
     let sha256 = &reference.sha256;
-    let target = cas_dir.join(sha256);
-    match open_cas_file_for_sync(&target) {
+    let target = Path::new(sha256);
+    match cas.open(target) {
         Ok((file, metadata)) => {
             sync_verified_existing(file, &metadata, bytes, publication)
                 .map_err(|error| cas_read_error(sha256, error))?;
             publication
-                .run(PublicationStep::NamespaceSync, || {
-                    sync_directory_io(cas_dir)
-                })
+                .run(PublicationStep::NamespaceSync, || cas.sync())
                 .map_err(io_error)?;
             return Ok(reference);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(cas_read_error(sha256, error)),
     }
-    let temporary = cas_staging_dir.join(format!(
+    let name = format!(
         ".{sha256}.{}.{}.tmp",
         std::process::id(),
         TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(io_error)?;
+    );
+    let temporary = Path::new(&name);
+    let mut file =
+        rsi_files_native_fs::create_relative_private_file_no_follow(&staging.directory, temporary)
+            .map_err(io_error)?;
     let publish = (|| -> std::io::Result<()> {
         publication.run(PublicationStep::Write, || file.write_all(bytes))?;
         publication.run(PublicationStep::FileSync, || file.sync_all())?;
         drop(file);
-        match publication.run(PublicationStep::Link, || fs::hard_link(&temporary, &target)) {
+        match publication.run(PublicationStep::Link, || {
+            cas.link(staging, temporary, target)
+        }) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                verify_existing_publication(&target, bytes, publication)?;
+                let (file, metadata) = cas.open(target)?;
+                sync_verified_existing(file, &metadata, bytes, publication)?;
             }
             Err(error) => return Err(error),
         }
         publication.run(PublicationStep::TemporaryRemoval, || {
-            fs::remove_file(&temporary)
+            staging.remove(temporary)
         })?;
-        publication.run(PublicationStep::StagingSync, || {
-            sync_directory_io(cas_staging_dir)
-        })?;
-        publication.run(PublicationStep::NamespaceSync, || {
-            sync_directory_io(cas_dir)
-        })
+        publication.run(PublicationStep::StagingSync, || staging.sync())?;
+        publication.run(PublicationStep::NamespaceSync, || cas.sync())
     })();
     if let Err(error) = publish {
-        let _ignored = fs::remove_file(&temporary);
+        let _ignored = staging.remove(temporary);
         return Err(io_error(error));
     }
     Ok(reference)
 }
 
-fn verify_existing_publication(
-    target: &Path,
-    bytes: &[u8],
-    publication: &Publication,
-) -> std::io::Result<()> {
-    let (file, metadata) = open_cas_file_for_sync(target)?;
-    sync_verified_existing(file, &metadata, bytes, publication)
+#[cfg(not(any(unix, windows)))]
+pub(super) fn install_cas(
+    _cas_dir: &Path,
+    _bytes: &[u8],
+    _publication: &Publication,
+) -> Result<CasObjectRef> {
+    filesystem::require_native_platform()?;
+    unreachable!("unsupported platforms refuse native authority")
+}
+
+#[cfg(all(test, unix))]
+mod publication_authority_tests {
+    use super::*;
+    #[test]
+    fn publication_keeps_both_opened_directories_after_parent_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("cas");
+        fs::create_dir_all(original.join("staging")).unwrap();
+        let cas = PublicationDirectory::new(
+            rsi_files_native_fs::open_absolute_directory_no_follow(&original).unwrap(),
+        )
+        .unwrap();
+        let staging = PublicationDirectory::new(
+            rsi_files_native_fs::open_relative_directory_no_follow(
+                &cas.directory,
+                Path::new("staging"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let moved = temp.path().join("moved");
+        fs::rename(&original, &moved).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &original).unwrap();
+        let result =
+            install_in_namespaces(&cas, &staging, b"retained body", &Publication::default())
+                .unwrap();
+        assert_eq!(
+            fs::read(moved.join(result.sha256)).unwrap(),
+            b"retained body"
+        );
+        assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(moved.join("staging")).unwrap().count(), 0);
+    }
 }
 
 fn sync_verified_existing(
@@ -238,19 +346,14 @@ pub(super) fn sync_directory(path: &Path) -> Result<()> {
         .map_err(io_error)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) fn sync_directory(path: &Path) -> Result<()> {
+    rsi_files_native_fs::sync_absolute_directory_no_follow(path).map_err(io_error)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn sync_directory_io(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-pub(super) fn sync_directory_io(_path: &Path) -> std::io::Result<()> {
-    Ok(())
+    super::filesystem::require_native_platform()
 }
 
 pub(super) struct ContextCheckpointProjection {
@@ -514,22 +617,9 @@ fn read_admitted_cas_body(file: &mut impl std::io::Read, length: usize) -> Resul
     Ok(bytes)
 }
 
-// Both bounded verification and admitted payload reads open the same regular-file boundary.
+// Bounded verification, payload reads and fsync share the same Unix file boundary.
+#[cfg(unix)]
 pub(super) fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
-    open_cas_file_with_access(path, false)
-}
-
-fn open_cas_file_for_sync(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
-    open_cas_file_with_access(path, true)
-}
-
-fn open_cas_file_with_access(
-    path: &Path,
-    sync_access: bool,
-) -> std::io::Result<(File, fs::Metadata)> {
-    // Windows FlushFileBuffers requires write access; Unix fsync accepts read-only handles.
-    #[cfg(not(windows))]
-    let _ = sync_access;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err(std::io::Error::new(
@@ -537,43 +627,14 @@ fn open_cas_file_with_access(
             "CAS entry is not a regular file",
         ));
     }
-    #[cfg(unix)]
-    let file = {
-        let parent = path
-            .parent()
-            .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
-        let name = path
-            .file_name()
-            .ok_or_else(|| std::io::Error::other("CAS path has no file name"))?;
-        let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)?;
-        rsi_files_native_fs::open_relative_file_no_follow(&directory, Path::new(name))?
-    };
-    #[cfg(windows)]
-    let file = {
-        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-        // BACKUP_SEMANTICS permits directory handles; OPEN_REPARSE_POINT opens
-        // each component itself. Excluding FILE_SHARE_DELETE pins every acquired
-        // parent against rename/replacement until the leaf handle is acquired.
-        let parent = path
-            .parent()
-            .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
-        let parents = pin_windows_directories(parent)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(sync_access)
-            .custom_flags(0x0020_0000)
-            .open(path)?;
-        if file.metadata()?.file_attributes() & 0x0000_0400 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "CAS leaf is a reparse point",
-            ));
-        }
-        drop(parents);
-        file
-    };
-    #[cfg(not(any(unix, windows)))]
-    let file = File::open(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("CAS path has no file name"))?;
+    let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)?;
+    let file = rsi_files_native_fs::open_relative_file_no_follow(&directory, Path::new(name))?;
     let actual = file.metadata()?;
     if !actual.file_type().is_file() || actual.file_type().is_symlink() {
         return Err(std::io::Error::new(
@@ -585,39 +646,29 @@ fn open_cas_file_with_access(
 }
 
 #[cfg(windows)]
-pub(super) fn pin_windows_directories(parent: &Path) -> std::io::Result<Vec<File>> {
-    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-    let mut prefix = PathBuf::new();
-    let mut parents = Vec::new();
-    for component in parent.components() {
-        prefix.push(component);
-        if matches!(component, std::path::Component::Prefix(_)) {
-            continue;
-        }
-        if !matches!(
-            component,
-            std::path::Component::RootDir | std::path::Component::Normal(_)
-        ) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "CAS parent is not normalized",
-            ));
-        }
-        let directory = OpenOptions::new()
-            .read(true)
-            .share_mode(0x0000_0003)
-            .custom_flags(0x0220_0000)
-            .open(&prefix)?;
-        let metadata = directory.metadata()?;
-        if !metadata.is_dir() || metadata.file_attributes() & 0x0000_0400 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "CAS parent is a reparse point or not a directory",
-            ));
-        }
-        parents.push(directory);
+pub(super) fn open_cas_file(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("CAS path has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("CAS path has no name"))?;
+    let directory = rsi_files_native_fs::open_absolute_directory_no_follow(parent)?;
+    let file =
+        rsi_files_native_fs::open_relative_private_file_no_follow(&directory, Path::new(name))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("CAS entry is not a regular file"));
     }
-    Ok(parents)
+    Ok((file, metadata))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn open_cas_file(_path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "CAS requires native Unix Store authority",
+    ))
 }
 
 fn cas_read_error(digest: &str, error: std::io::Error) -> StoreError {

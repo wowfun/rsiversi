@@ -590,6 +590,13 @@ again before source publication. Input traversal admits at most 1,024 entries,
 rejects symbolic links and special files, represents missing watched paths explicitly,
 and rejects watches that include the output artifact. These explicit inputs do
 not infer compiler dependencies or make the build hermetic.
+Fingerprinting reads inputs sequentially and does not acquire an atomic snapshot
+across files. Concurrent edits can produce a mixed observation; the before/after
+comparison cannot detect edits that restore the same bytes between observations.
+Classification, file hashing and directory enumeration use the same opened
+object. Identified links or special files are rejected as invalid build input.
+Failures opening or inspecting an input remain I/O errors when its type cannot
+be established.
 Only an exit-zero, settled, uncancelled build with unchanged captured inputs may
 install the exact opened output through the existing source-store transaction.
 A failed command never installs an old output. Installation does not enable it.

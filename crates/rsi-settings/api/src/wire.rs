@@ -72,6 +72,7 @@ pub(crate) struct Clear {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    Unsupported,
     UnknownNamespace,
     InvalidInput,
     StaleRegistration,
@@ -87,6 +88,7 @@ pub(crate) fn result<T>(
         Ok(snapshot) => Ok(snapshot),
         Err(error) => Err(match error {
             SettingsError::Api(error) => return Err(error),
+            SettingsError::Unsupported(_) => Failure::Unsupported,
             SettingsError::UnknownNamespace(_) => Failure::UnknownNamespace,
             SettingsError::InvalidInput(_) => Failure::InvalidInput,
             SettingsError::StaleRegistration(_) => Failure::StaleRegistration,
@@ -105,6 +107,7 @@ pub(crate) fn result<T>(
 impl Failure {
     pub fn into_error(self, namespace: &str, version: Option<&SettingsVersion>) -> SettingsError {
         match self {
+            Self::Unsupported => SettingsError::Unsupported("remote provider capability".into()),
             Self::UnknownNamespace => SettingsError::UnknownNamespace(namespace.into()),
             Self::InvalidInput => {
                 SettingsError::InvalidInput("remote namespace rejected input".into())
@@ -125,5 +128,33 @@ impl Failure {
             Self::ReadOnly => SettingsError::ReadOnly,
             Self::Corrupt => SettingsError::Corrupt("remote settings document is invalid".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_capability_is_distinct_from_invalid_input_and_redacts_provider_text() {
+        let failure = result::<()>(Err(SettingsError::Unsupported(
+            "private provider detail".into(),
+        )))
+        .unwrap()
+        .unwrap_err();
+        let encoded = serde_json::to_value(failure).unwrap();
+        assert_eq!(encoded, serde_json::json!({"code": "unsupported"}));
+        let decoded: Failure = serde_json::from_value(encoded).unwrap();
+        assert!(matches!(
+            decoded.into_error("test", None),
+            SettingsError::Unsupported(_)
+        ));
+        let invalid = result::<()>(Err(SettingsError::InvalidInput("bad request".into())))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            serde_json::to_value(invalid).unwrap(),
+            serde_json::json!({"code": "invalid_input"})
+        );
     }
 }

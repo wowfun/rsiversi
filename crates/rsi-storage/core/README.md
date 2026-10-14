@@ -1,5 +1,15 @@
 # rsi-storage
 
+Native directory publication creates missing private components on Unix and
+Windows. Unix synchronizes the ancestor chain. Windows retains each newly created
+directory and changed parent through no-follow NTFS handles and flushes only those
+namespace changes; existing higher ancestors
+remain unchanged and need no write permission. Sync failures prevent success.
+
+`StorageError::Unsupported` reports a missing backend or platform capability
+before admission, separately from malformed input and uncertain commit outcomes.
+The domain API projects an unsupported backend into `ApiError::Unavailable`.
+
 This package defines the bounded JSON KV backend contract and provides the
 ordinary `rsi.storage` hub plugin. A backend registration belongs to the
 registering plugin generation and disappears when its lease is dropped.

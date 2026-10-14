@@ -35,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -377,12 +379,7 @@ pub struct SqliteStoreConfig {
 
 impl SqliteStoreConfig {
     fn validate(&self) -> Result<()> {
-        if !self.root.is_absolute() || self.root.as_os_str().is_empty() {
-            return Err(StoreError::Invalid(
-                "SQLite Agent Store root must be an absolute path".into(),
-            ));
-        }
-        Ok(())
+        filesystem::normalized_root_path(&self.root).map(|_| ())
     }
 }
 
@@ -425,6 +422,10 @@ impl ForkBoundaryCache {
 struct StoreInner {
     cas_publication: cas::Publication,
     connections: DatabaseConnections,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
+    #[cfg(windows)]
+    _database: File,
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
@@ -478,7 +479,6 @@ struct StoreInner {
     cas_publication_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
-    cas_staging_dir: Arc<PathBuf>,
     _writer_lock: filesystem::WriterLease,
 }
 
@@ -583,9 +583,15 @@ impl SqliteStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = acquire_writer_lock(&root)?;
+        #[cfg(windows)]
+        let namespace = rsi_files_native_fs::open_absolute_directory_no_follow(&root)
+            .and_then(|directory| directory.pin_namespace())
+            .map_err(io_error)?;
         let cas_dir = root.join("cas");
         let cas_staging_dir = cas_dir.join("staging");
         let database_path = root.join("sessions.sqlite3");
+        #[cfg(windows)]
+        let database = filesystem::private_file(&database_path, true).map_err(io_error)?;
         reject_symlink_if_present(&database_path, "SQLite database")?;
         let may_initialize = match fs::metadata(&database_path) {
             Ok(metadata) => metadata.len() == 0,
@@ -637,6 +643,8 @@ impl SqliteStore {
         validation_connection
             .busy_timeout(Duration::from_millis(100))
             .map_err(sql_error)?;
+        #[cfg(windows)]
+        namespace.sync_all().map_err(io_error)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 cas_publication: cas::Publication::default(),
@@ -645,6 +653,10 @@ impl SqliteStore {
                     validation_reader: Mutex::new(validation_connection),
                     writer: Mutex::new(writer_connection),
                 },
+                #[cfg(windows)]
+                _namespace: namespace,
+                #[cfg(windows)]
+                _database: database,
                 writer_admission: Arc::new(Semaphore::new(1)),
                 reader_admission: Arc::new(Semaphore::new(1)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
@@ -688,7 +700,6 @@ impl SqliteStore {
                 cas_publication_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
-                cas_staging_dir: Arc::new(cas_staging_dir),
                 _writer_lock: writer_lock,
             }),
         })
@@ -978,6 +989,8 @@ pub struct SqliteStoreStartupFailure {
 /// Store-open failure facts that may cross a redacted Profile bootstrap boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SqliteStoreStartupFailureKind {
+    /// The platform lacks a required native Store capability.
+    Unsupported,
     /// The database uses an unsupported layout.
     SchemaMismatch {
         /// Schema required by this implementation.
@@ -1023,9 +1036,10 @@ impl PluginFactory for SqliteStoreFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: SqliteStoreConfig = serde_json::from_value(desired.clone())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        config
-            .validate()
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        config.validate().map_err(|error| match error {
+            StoreError::Unsupported(_) => MetaError::Activation(error.to_string()),
+            _ => MetaError::InvalidInput(error.to_string()),
+        })?;
         if let Some(reset) = &self.reset {
             reset
                 .bind(&config.root)
@@ -1060,6 +1074,7 @@ impl PluginFactory for SqliteStoreFactory {
                     }
                 }
                 StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
+                StoreError::Unsupported(_) => SqliteStoreStartupFailureKind::Unsupported,
                 StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
                 StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
                 _ => SqliteStoreStartupFailureKind::Invalid,
@@ -1087,3 +1102,156 @@ impl PluginFactory for SqliteStoreFactory {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_roots_are_invalid_at_config_and_public_acquisition_boundaries() {
+        for root in [PathBuf::new(), PathBuf::from("relative-store")] {
+            assert!(matches!(
+                SqliteStoreConfig { root: root.clone() }.validate(),
+                Err(StoreError::Invalid(_))
+            ));
+            assert!(matches!(
+                SqliteStore::open(&root),
+                Err(StoreError::Invalid(_))
+            ));
+            assert!(matches!(
+                SqliteStore::verify(&root),
+                Err(StoreError::Invalid(_))
+            ));
+            assert!(matches!(
+                SqliteStore::reset_and_open(&root).unwrap_err().source,
+                StoreError::Invalid(_)
+            ));
+            let inspection = SqliteStore::inspect_cas(
+                &root,
+                CasInspectionMode::Metadata,
+                &tokio_util::sync::CancellationToken::new(),
+                |_| std::ops::ControlFlow::Continue(()),
+            )
+            .unwrap_err();
+            assert!(matches!(inspection.source, StoreError::Invalid(_)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod factory_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_distinguishes_invalid_input_from_unavailable_native_capability() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            SqliteStoreFactory::default().prepare(&serde_json::json!({"root":"relative"})),
+            Err(MetaError::InvalidInput(_))
+        ));
+        let result = SqliteStoreFactory::default()
+            .prepare(&serde_json::json!({"root":root.path().join("missing/store")}));
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_store_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn private_native_store_publishes_cas_and_reopens_after_exclusive_owner_drops() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("private-store");
+        let store = SqliteStore::open(&root).unwrap();
+        assert!(matches!(
+            SqliteStore::open(&root),
+            Err(StoreError::WriterLocked)
+        ));
+        let body: Arc<[u8]> = Arc::from(b"native Windows immutable body".as_slice());
+        let reference = store.put_cas(body.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+                .await
+                .unwrap()
+                .as_ref(),
+            body.as_ref()
+        );
+        assert_eq!(store.put_cas(body.clone()).await.unwrap(), reference);
+        assert!(std::fs::rename(&root, temporary.path().join("replaced")).is_err());
+        drop(store);
+        let inspected = SqliteStore::inspect_cas(
+            &root,
+            CasInspectionMode::Full,
+            &tokio_util::sync::CancellationToken::new(),
+            |_| std::ops::ControlFlow::Continue(()),
+        )
+        .unwrap();
+        assert_eq!(inspected.verified_objects, 1);
+        assert_eq!(inspected.issues, 0);
+        let guard = root.join("cas/.rsi-namespace-pin");
+        std::fs::write(&guard, b"invalid guard").unwrap();
+        let inspected = SqliteStore::inspect_cas(
+            &root,
+            CasInspectionMode::Full,
+            &tokio_util::sync::CancellationToken::new(),
+            |_| std::ops::ControlFlow::Continue(()),
+        )
+        .unwrap();
+        assert_eq!(inspected.issues, 1);
+        std::fs::write(guard, b"").unwrap();
+        let reopened = SqliteStore::open(&root).unwrap();
+        let staging_guard = root.join("cas/staging/.rsi-namespace-pin");
+        assert!(staging_guard.is_file());
+        assert_eq!(
+            reopened
+                .read_cas(&reference, rsi_api_protocol::ByteBudget::default().into())
+                .await
+                .unwrap()
+                .as_ref(),
+            body.as_ref()
+        );
+        drop(reopened);
+        std::fs::write(&staging_guard, b"invalid guard").unwrap();
+        assert!(matches!(
+            SqliteStore::open(&root),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(std::fs::read(&staging_guard).unwrap(), b"invalid guard");
+        std::fs::write(staging_guard, b"").unwrap();
+        std::fs::rename(&root, temporary.path().join("replaced")).unwrap();
+    }
+
+    #[test]
+    fn native_schema_refusal_preserves_existing_cas_and_version() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("private-store");
+        drop(SqliteStore::open(&root).unwrap());
+        let path = root.join("sessions.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+        std::fs::write(root.join("cas/retained"), "must survive rejection").unwrap();
+        assert!(matches!(
+            SqliteStore::open(&root),
+            Err(StoreError::SchemaMismatch { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("cas/retained")).unwrap(),
+            "must survive rejection"
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            pragma_user_version(&connection).unwrap(),
+            AGENT_STORE_SCHEMA_VERSION + 1
+        );
+    }
+}

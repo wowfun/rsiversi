@@ -125,8 +125,8 @@ impl Manifest {
 pub(super) struct ManifestSource {
     pub(super) manifest: Manifest,
     pub(super) bytes: Vec<u8>,
-    pub(super) directory: cap_std::fs::Dir,
-    pub(super) manifest_directory: cap_std::fs::Dir,
+    pub(super) directory: rsi_files_native_fs::Directory,
+    pub(super) manifest_directory: rsi_files_native_fs::Directory,
     pub(super) root: PathBuf,
     pub(super) path: PathBuf,
 }

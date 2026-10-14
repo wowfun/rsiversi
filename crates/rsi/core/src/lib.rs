@@ -244,6 +244,7 @@ impl RunningRsi {
             store_diagnostic.take_startup_failure().map_or(error, |failure| {
                 use rsi_agent_store_sqlite::SqliteStoreStartupFailureKind as Kind;
                 let reason = match failure.kind {
+                    Kind::Unsupported => "Agent Store native filesystem protection is unsupported on this platform".into(),
                     Kind::SchemaMismatch { expected, actual } => format!(
                         "Agent Store schema mismatch: expected {expected}, actual {actual}; no automatic migration is available. Preserve the old Store and use a fresh root or a matching older build. Re-run with --reset-state to back up the Agent Store and start with empty session history."
                     ),

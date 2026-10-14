@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use image::{ImageBuffer, ImageFormat, Rgba};
 use rsi_media::MediaFactory;
 use rsi_media_local::LocalMediaBackendFactory;

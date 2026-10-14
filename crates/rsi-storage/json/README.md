@@ -1,5 +1,9 @@
 # rsi-storage-json
 
+Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
+and reports unavailable native capability as `MetaError::Activation`, the Meta
+category for plugin preparation and activation failure.
+
 This ordinary backend plugin stores all of its routed non-session domains in
 one explicit JSON file. It validates the complete bounded document at startup
 and publishes updates through a same-directory temporary file, file sync,
@@ -10,6 +14,12 @@ Startup opens an existing document without following its final symlink and
 pins one unchanged regular-file identity before reading bounded bytes.
 Newly created path components and files are private on Unix; existing
 caller-supplied parent directories retain their permissions.
+Non-Unix preparation and acquisition reject explicitly before reading the
+document or creating filesystem entries; native privacy and publication
+guarantees are not implemented there.
+Configuration syntax and bounds are checked without filesystem access; malformed
+configuration remains `InvalidInput`, while valid unsupported acquisition
+returns `Unsupported`.
 
 Each successful mutation still copies and publishes the bounded complete document;
 this backend does not promise incremental write cost.
@@ -24,8 +34,7 @@ leaves the instance usable; failure to sync the parent after replacement returns
 before replacement. On Unix, reopening an existing validated document syncs its
 parent before admission. Files are already synced before their names become
 visible. This establishes recovery within the single-writer contract, without
-claiming protection against external edits. Non-Unix directory sync remains
-subject to the platform's existing replacement guarantees.
+claiming protection against external edits.
 
 On Unix, directory creation synchronizes every ancestor entry before publishing
 backend state, including an existing ancestor left by an interrupted creation.

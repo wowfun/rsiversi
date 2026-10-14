@@ -376,6 +376,9 @@ impl fmt::Debug for StoredMedia {
 /// Closed Media failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum MediaError {
+    /// The backend or platform cannot supply a required capability before admission.
+    #[error("media capability unsupported: {0}")]
+    Unsupported(String),
     /// Common API failure, including uncertain publication outcomes.
     #[error(transparent)]
     Api(rsi_api_protocol::ApiError),

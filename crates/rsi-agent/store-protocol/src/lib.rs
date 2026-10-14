@@ -2275,6 +2275,9 @@ impl LocalContract for SessionStoreContract {
 /// Closed Store failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreError {
+    /// A required provider or platform capability is unavailable before Store admission.
+    #[error("Agent Store capability unsupported: {0}")]
+    Unsupported(String),
     /// Cold read validation refused admission; the requested durable mutation
     /// has not been admitted or applied. This is not an uncertain write outcome.
     #[error("Agent Store validation capacity is busy")]
