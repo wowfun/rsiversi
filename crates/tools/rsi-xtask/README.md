@@ -114,6 +114,10 @@ missing or orphaned locks, without updating locks. `--online` explicitly permits
 dependency fetching and is used by the independent CI lockfile gate.
 Offline failure diagnostics point to `--online` when a required dependency is
 not cached; this permits fetching but still never refreshes a stale lockfile.
+CI separately audits every tracked lockfile with fetching enabled for each
+workspace, including crates absent from the root dependency graph. It collects
+all audit failures; [the audit decision](../../../.agents/notes/implemented/process/2026-10-14-independent-lockfile-audit-index.md)
+owns the registry-evidence rationale.
 
 CI prepares the exact Agent Notes baseline separately: pull-request base SHA,
 push predecessor SHA, or the resolved `origin/main` commit for manual dispatch.

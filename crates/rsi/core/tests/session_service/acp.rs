@@ -368,9 +368,18 @@ async fn native_acp_prompt_settles_and_load_replays_atomic_fragmented_output() {
             result
         }
     });
-    let updates = collect(&mut client, 1).await;
     let text: String = (0..1200).map(|index| format!("{index},")).collect();
-    assert_eq!(updates[0]["content"]["text"], text);
+    let mut observed = String::new();
+    while observed.len() < text.len() {
+        let updates = collect(&mut client, 1).await;
+        assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+        observed.push_str(updates[0]["content"]["text"].as_str().unwrap());
+        assert!(
+            text.starts_with(&observed),
+            "live output must advance without duplicate bytes"
+        );
+    }
+    assert_eq!(observed, text);
     assert_eq!(
         prompt.await.unwrap().unwrap().stop_reason,
         schema::StopReason::EndTurn
@@ -402,7 +411,8 @@ async fn native_acp_prompt_settles_and_load_replays_atomic_fragmented_output() {
     load.await.unwrap().unwrap();
     assert_eq!(replay[0]["sessionUpdate"], "user_message_chunk");
     assert_eq!(replay[0]["content"]["text"], "ancient ACP input");
-    assert_eq!(&replay[1..], updates.as_slice());
+    assert_eq!(replay[1]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(replay[1]["content"]["text"], text);
     backend
         .close(schema::CloseSessionRequest::new(created.session_id))
         .await

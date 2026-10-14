@@ -212,20 +212,6 @@ impl PrivateDescriptor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expected_descriptors_canonicalize_well_known_token_user_sids() {
-        for directory in [false, true] {
-            let descriptor = PrivateDescriptor::with_user(directory, "S-1-5-18").unwrap();
-            assert!(descriptor.policy.starts_with("O:SYD:P("));
-            assert!(!descriptor.policy.contains("S-1-5-18"));
-        }
-    }
-}
-
 fn token_user() -> io::Result<String> {
     let mut token = std::ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a borrowed pseudo-handle. TOKEN_QUERY
@@ -386,4 +372,18 @@ fn descriptor_text(descriptor: Handle) -> io::Result<String> {
         units.push(unit);
     }
     Err(io::Error::other("unterminated native descriptor string"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_descriptors_canonicalize_well_known_token_user_sids() {
+        for directory in [false, true] {
+            let descriptor = PrivateDescriptor::with_user(directory, "S-1-5-18").unwrap();
+            assert!(descriptor.policy.starts_with("O:SYD:P("));
+            assert!(!descriptor.policy.contains("S-1-5-18"));
+        }
+    }
 }

@@ -24,7 +24,7 @@ async fn stalled_error_body_settles_with_received_status_and_retry_metadata() {
     )
     .await
     .expect("error-body read has its own finite deadline");
-    assert_eq!(started.elapsed(), std::time::Duration::from_secs(300));
+    assert_eq!(started.elapsed(), std::time::Duration::from_mins(5));
     let headers = http::HeaderMap::from_iter([(
         http::header::RETRY_AFTER,
         http::HeaderValue::from_static("2"),

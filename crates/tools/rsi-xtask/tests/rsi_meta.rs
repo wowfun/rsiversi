@@ -561,7 +561,7 @@ fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
 
 #[test]
 #[cfg(unix)]
-fn ci_audit_selects_only_tracked_lockfiles_and_fetches_advisories_once() {
+fn ci_audit_selects_only_tracked_lockfiles_and_fetches_each_dependency_graph() {
     use std::os::unix::fs::PermissionsExt;
 
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
@@ -634,12 +634,7 @@ fn ci_audit_selects_only_tracked_lockfiles_and_fetches_advisories_once() {
         calls,
         vec![
             vec!["audit", "--file", "Cargo.lock"],
-            vec![
-                "audit",
-                "--no-fetch",
-                "--file",
-                "nested with spaces/Cargo.lock"
-            ],
+            vec!["audit", "--file", "nested with spaces/Cargo.lock"],
         ]
     );
 }
@@ -1300,8 +1295,8 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
             fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(),
             [
                 "audit --file ./Cargo.lock",
-                "audit --no-fetch --file one/Cargo.lock",
-                "audit --no-fetch --file two/Cargo.lock",
+                "audit --file one/Cargo.lock",
+                "audit --file two/Cargo.lock",
             ]
         );
     }
