@@ -156,7 +156,10 @@ max_output_reserve_tokens = 16384
 
     #[cfg(not(target_os = "linux"))]
     fn owner_log(&self) -> String {
-        "embedded Session service has no daemon log".to_owned()
+        format!(
+            "embedded Session service has no daemon log (fixture: {})",
+            self.temporary.path().display()
+        )
     }
 
     #[cfg(target_os = "linux")]
