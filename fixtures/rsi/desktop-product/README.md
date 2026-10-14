@@ -26,6 +26,10 @@ Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
+The history scenario resets its isolated workspace index and inspects the selected
+source's coverage before and after discovery. Query/discovery progress does not
+stand in for per-source indexing coverage; the [History API](../../../crates/rsi/history-api/README.md)
+owns those separate results.
 Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
 After scenarios close a dialog, the final composer geometry check waits for the
