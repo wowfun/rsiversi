@@ -971,7 +971,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.first().unwrap()["type"], "message");
-    assert_eq!(lines.first().unwrap()["version"], 5);
+    assert_eq!(lines.first().unwrap()["version"], 6);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
@@ -2262,7 +2262,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
             "--session-id",
             "backpressure",
             "--output",
-            "jsonl",
+            "text",
         ])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -2320,8 +2320,8 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     })
     .await
     .unwrap();
-    if let Some(count) = deltas {
-        wait_for_completed_output(&fixture, count).await;
+    if deltas.is_some() {
+        wait_for_completed_output(&fixture).await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(child.try_wait().unwrap().is_none());
@@ -2344,7 +2344,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     let _ = server.await;
 }
 
-async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
+async fn wait_for_completed_output(fixture: &Fixture) {
     use std::time::Duration;
     // Read-only WAL visibility proves completion without acquiring the running
     // Store's exclusive writer lease or unblocking the product's output pipe.
@@ -2359,7 +2359,7 @@ async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
                     "SELECT count(*), coalesce(sum(fact_kind = 'terminal'), 0) FROM facts WHERE session_id = ?1",
                     ["backpressure"], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).unwrap();
-                if terminal > 0 { assert!(facts > i64::try_from(count).unwrap()); break; }
+                if terminal > 0 { assert!(facts > 0 && facts < 64, "stream fragmentation must not create durable Facts"); break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();

@@ -329,7 +329,7 @@ async fn acp_resume_releases_admission_before_waking_the_next_operation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_acp_prompt_settles_and_load_replays_beyond_the_last_1024_facts() {
+async fn native_acp_prompt_settles_and_load_replays_atomic_fragmented_output() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let provider = tokio::spawn(async move {
@@ -368,9 +368,9 @@ async fn native_acp_prompt_settles_and_load_replays_beyond_the_last_1024_facts()
             result
         }
     });
-    let updates = collect(&mut client, 1200).await;
-    assert_eq!(updates.first().unwrap()["content"]["text"], "0,");
-    assert_eq!(updates.last().unwrap()["content"]["text"], "1199,");
+    let updates = collect(&mut client, 1).await;
+    let text: String = (0..1200).map(|index| format!("{index},")).collect();
+    assert_eq!(updates[0]["content"]["text"], text);
     assert_eq!(
         prompt.await.unwrap().unwrap().stop_reason,
         schema::StopReason::EndTurn
@@ -384,7 +384,10 @@ async fn native_acp_prompt_settles_and_load_replays_beyond_the_last_1024_facts()
         .clone();
     let horizon = handle.history_before(None, 1).await.unwrap().durable_seq;
     eprintln!("native ACP horizon: {horizon}");
-    assert!(horizon > 1024);
+    assert!(
+        horizon > 0 && horizon < 1024,
+        "provider fragmentation must not create durable Facts"
+    );
     let request = json!({"sessionId":created.session_id,"cwd":fixture.workspace,"mcpServers":[]});
     backend.resume(dto(request.clone())).await.unwrap();
     let load = tokio::spawn({
@@ -395,7 +398,7 @@ async fn native_acp_prompt_settles_and_load_replays_beyond_the_last_1024_facts()
             result
         }
     });
-    let replay = collect(&mut client, 1201).await;
+    let replay = collect(&mut client, 2).await;
     load.await.unwrap().unwrap();
     assert_eq!(replay[0]["sessionUpdate"], "user_message_chunk");
     assert_eq!(replay[0]["content"]["text"], "ancient ACP input");

@@ -333,7 +333,13 @@ pub(super) fn rename_child(
     )?;
     check_opened(&file, source, directory)?;
     security::PrivateDescriptor::new(directory)?.verify(&file)?;
-    set_child_name(&file, parent, destination, replace, 10)
+    set_child_name(
+        &file,
+        parent,
+        destination,
+        replace,
+        if replace && !directory { 65 } else { 10 },
+    )
 }
 
 fn set_child_name(
@@ -365,7 +371,13 @@ fn set_child_name(
     // least size bytes. The FileRenameInformation header uses native pointer
     // alignment; the exact UTF-16 suffix starts immediately after FileNameLength.
     let bytes = unsafe { std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), size) };
-    bytes[0] = u8::from(replace);
+    if class == 65 {
+        // FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS. Existing
+        // delete-sharing readers keep their object; private writer pins still block.
+        bytes[..4].copy_from_slice(&3_u32.to_ne_bytes());
+    } else {
+        bytes[0] = u8::from(replace);
+    }
     bytes[root_offset..length_offset]
         .copy_from_slice(&(parent.as_raw_handle() as usize).to_ne_bytes());
     bytes[length_offset..name_offset].copy_from_slice(&name_bytes.to_ne_bytes());
@@ -374,8 +386,10 @@ fn set_child_name(
     }
     let mut status = StatusBlock::default();
     // SAFETY: Both owned native handles and the aligned bounded rename buffer
-    // remain live through the synchronous call. Rename (10) and link (11) use the retained
-    // RootDirectory and a single relative name, without an absolute path reopen.
+    // remain live through the synchronous call. Rename (10), extended rename (65)
+    // and link (11) use the retained RootDirectory and a single relative name,
+    // without an absolute path reopen. The extended header uses a four-byte Flags
+    // field in the same aligned union as ordinary ReplaceIfExists.
     nt_result(unsafe {
         NtSetInformationFile(
             file.as_raw_handle(),

@@ -94,6 +94,10 @@ pub(super) struct PrivateDescriptor {
 impl PrivateDescriptor {
     pub(super) fn new(directory: bool) -> io::Result<Self> {
         let user = token_user()?;
+        Self::with_user(directory, &user)
+    }
+
+    fn with_user(directory: bool, user: &str) -> io::Result<Self> {
         let inherit = if directory { "OICI" } else { "" };
         let policy = format!(
             "O:{user}D:P(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)(A;{inherit};FA;;;{user})"
@@ -114,10 +118,9 @@ impl PrivateDescriptor {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self {
-            allocation: Allocation(descriptor),
-            policy,
-        })
+        let allocation = Allocation(descriptor);
+        let policy = descriptor_text(allocation.0)?;
+        Ok(Self { allocation, policy })
     }
 
     pub(super) fn as_ptr(&self) -> *const c_void {
@@ -206,6 +209,20 @@ impl PrivateDescriptor {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_descriptors_canonicalize_well_known_token_user_sids() {
+        for directory in [false, true] {
+            let descriptor = PrivateDescriptor::with_user(directory, "S-1-5-18").unwrap();
+            assert!(descriptor.policy.starts_with("O:SYD:P("));
+            assert!(!descriptor.policy.contains("S-1-5-18"));
+        }
     }
 }
 
@@ -330,13 +347,17 @@ pub(super) fn observed(file: &File) -> io::Result<String> {
             "private DACL is not protected",
         ));
     }
+    descriptor_text(descriptor.0)
+}
+
+fn descriptor_text(descriptor: Handle) -> io::Result<String> {
     let mut text = std::ptr::null_mut();
     let mut wchar_count = 0;
     // SAFETY: The owned descriptor remains valid during conversion. Success
     // returns a NUL-terminated LocalAlloc string and its allocation size in WCHARs.
     let ok = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor.0,
+            descriptor,
             1,
             5,
             &raw mut text,

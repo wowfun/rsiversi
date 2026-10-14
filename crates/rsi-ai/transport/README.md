@@ -81,6 +81,9 @@ provider error token contract; invalid codes cannot panic error mapping.
 HTTP rejection errors preserve the actual dispatch status and bounded
 `Retry-After` metadata (seconds or HTTP date). Retry decisions belong to the
 frozen language policy, never the transport.
+Error-body collection has a 64 KiB byte limit and a five-minute absolute read
+deadline, including for streaming transports. An unreadable, oversized or timed-out
+error body falls back to the safe summary while preserving the received HTTP status.
 Cancellation is observed both before response headers and while the response
 body is being consumed. Bearer headers are constructed through temporary
 zeroizing storage and marked sensitive before entering the request header map.

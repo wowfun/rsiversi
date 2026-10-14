@@ -23,10 +23,14 @@ fn fingerprint_captures_missing_and_nested_inputs_and_rejects_changed_authority(
     assert_ne!(first, build.fingerprint().unwrap());
     fs::remove_file(root.join("source/missing")).unwrap();
     symlink("input", root.join("source/missing")).unwrap();
-    assert!(matches!(
-        build.fingerprint(),
-        Err(NativeAddonError::Invalid("regular build inputs required"))
-    ));
+    let error = build.fingerprint().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            NativeAddonError::Invalid("regular build inputs required")
+        ),
+        "symlink rejection: {error:?}"
+    );
     fs::remove_file(root.join("source/missing")).unwrap();
     let socket = UnixListener::bind(root.join("source/missing")).unwrap();
     assert!(matches!(

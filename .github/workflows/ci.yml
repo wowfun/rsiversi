@@ -984,7 +984,7 @@ jobs:
           status=0
           cargo audit --file ./Cargo.lock || status=1
           while IFS= read -r -d '' lockfile; do
-            cargo audit --no-fetch --file "$lockfile" || status=1
+            cargo audit --file "$lockfile" || status=1
           done < <(git ls-files -z -- '**/Cargo.lock')
           exit "$status"
 
@@ -1038,11 +1038,11 @@ jobs:
           workspaces: . -> target
       - name: Compile every Windows workspace target
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
-        timeout-minutes: 60
+        timeout-minutes: 50
         run: cargo check --locked --workspace --all-targets --keep-going
       - name: Lint every Windows workspace target
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
-        timeout-minutes: 60
+        timeout-minutes: 50
         run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
       - name: Verify native Windows read-only directory capabilities
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}

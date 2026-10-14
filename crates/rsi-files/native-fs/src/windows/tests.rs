@@ -156,9 +156,20 @@ fn retained_namespace_publishes_files_and_directories_with_explicit_replacement(
             .is_err()
     );
     assert_eq!(fs::read(root_path.join("final")).unwrap(), b"first");
+    let guarded = open_relative_private_file_no_follow(&root, Path::new("final")).unwrap();
+    assert!(
+        namespace
+            .publish_child(Path::new("two"), Path::new("final"), EntryKind::File, true)
+            .is_err()
+    );
+    drop(guarded);
+    let mut reader = open_relative_file_no_follow(&root, Path::new("final")).unwrap();
     namespace
         .publish_child(Path::new("two"), Path::new("final"), EntryKind::File, true)
         .unwrap();
+    let mut original = Vec::new();
+    reader.read_to_end(&mut original).unwrap();
+    assert_eq!(original, b"first");
     assert_eq!(fs::read(root_path.join("final")).unwrap(), b"second");
     let stage = create_absolute_directory_and_sync_no_follow(&root_path.join("stage")).unwrap();
     let mut file = create_relative_private_file_no_follow(&stage, Path::new("body")).unwrap();
@@ -194,7 +205,9 @@ fn retained_namespace_publishes_files_and_directories_with_explicit_replacement(
 fn privatization_changes_only_the_selected_owned_directory() {
     let temporary = tempfile::tempdir().unwrap();
     let selected = temporary.path().join("ExistingOwnedDirectory");
-    fs::create_dir(&selected).unwrap();
+    // Elevated runners may default to an Administrators owner. This fixture
+    // explicitly owns the selected directory as TokenUser.
+    drop(create_absolute_directory_no_follow(&selected).unwrap());
     let directory = set_private_directory_permissions_no_follow(&selected).unwrap();
     let policy = native::private_descriptor(&directory.0).unwrap();
     assert!(policy.contains("D:P"));

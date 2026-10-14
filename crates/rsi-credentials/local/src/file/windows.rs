@@ -60,13 +60,20 @@ fn directory(path: &Path, create: bool) -> Result<Option<native::Directory>> {
     directory.verify_private().map_err(io)?;
     Ok(Some(directory))
 }
-fn read(dir: &native::Directory, path: &Path) -> Result<Entries> {
-    let mut file = match native::open_relative_private_file_no_follow(dir, Path::new(name(path)?)) {
+fn open_read(dir: &native::Directory, path: &Path) -> Result<Option<File>> {
+    let file = match native::open_relative_file_no_follow(dir, Path::new(name(path)?)) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Entries::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io(error)),
     };
+    native::verify_private_file(&file).map_err(io)?;
     validate_file(&file)?;
+    Ok(Some(file))
+}
+fn read(dir: &native::Directory, path: &Path) -> Result<Entries> {
+    let Some(mut file) = open_read(dir, path)? else {
+        return Ok(Entries::new());
+    };
     let size = file.metadata().map_err(io)?.len();
     if size > MAX_BYTES as u64 {
         return Err(failure(Failure::TooLarge));
@@ -189,6 +196,31 @@ mod tests {
     }
     fn key(value: &str) -> SecretValue {
         SecretValue::new(value).unwrap()
+    }
+    #[test]
+    fn retained_reader_does_not_block_atomic_set_or_unset() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("private/credentials.json");
+        let store = FileSecretStore::new(&path);
+        let reference = reference("one");
+        store.set(&reference, &key("original")).unwrap();
+        let dir = directory(&path, false).unwrap().unwrap();
+        let mut old = open_read(&dir, &path).unwrap().unwrap();
+        store.set(&reference, &key("replacement")).unwrap();
+        assert_eq!(
+            store.get(&reference).unwrap().unwrap().expose_secret(),
+            "replacement"
+        );
+        let current = open_read(&dir, &path).unwrap().unwrap();
+        assert!(store.unset(&reference).unwrap());
+        assert!(store.get(&reference).unwrap().is_none());
+        let mut bytes = Zeroizing::new(Vec::new());
+        old.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            decode(&bytes).unwrap()[&reference].expose_secret(),
+            "original"
+        );
+        drop(current);
     }
     #[test]
     fn reads_are_side_effect_free_and_native_saved_entries_survive_reopen() {

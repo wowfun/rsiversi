@@ -97,8 +97,9 @@ identity receipt to compare. A replaced directory may be admitted as an existing
 directory; a reparse point or wrong type is refused. It does not validate an
 existing object's private-data policy or repair permissions. Callers must still
 enforce their own admission policy.
-Private-descriptor verification requires the exact protected owner/DACL SDDL
-emitted for newly created objects, including ACE order; the informational `AI`
+Private-descriptor verification compares the native canonical SDDL of the expected
+and observed protected owner/DACL, including ACE order and well-known SID aliases;
+the informational `AI`
 DACL flag added by Windows during a later protected-DACL assignment is ignored.
 Inherited ACE flags and every actual ACE remain exact. It fails closed rather
 than accepting every semantically equivalent ACL. Parent inheritance cannot add
@@ -117,6 +118,10 @@ receipts. A failed private-file creation may leave its created name.
 Private file handles share reads/writes while excluding name deletion/replacement
 until their owner drops them. Regular-file DACLs contain no directory inheritance
 flags; directory DACLs retain child inheritance.
+File replacement uses `FileRenameInformationEx` with replace and POSIX semantics:
+delete-sharing readers retain the old object while new opens observe the published
+file. Handles that exclude delete sharing still prevent replacement. Directory
+publication and non-replacing publication retain their ordinary rename semantics.
 The durable Windows creation entry point syncs each newly created directory and
 the retained parent whose namespace it changed. An unchanged final directory is
 not a newly published namespace; the consumer owns later child-publication flushes.

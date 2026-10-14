@@ -263,7 +263,7 @@ mod publication_authority_tests {
     #[test]
     fn publication_keeps_both_opened_directories_after_parent_replacement() {
         let temp = tempfile::tempdir().unwrap();
-        let original = temp.path().join("cas");
+        let original = temp.path().canonicalize().unwrap().join("cas");
         fs::create_dir_all(original.join("staging")).unwrap();
         let cas = PublicationDirectory::new(
             rsi_files_native_fs::open_absolute_directory_no_follow(&original).unwrap(),

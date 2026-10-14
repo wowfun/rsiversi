@@ -904,10 +904,14 @@ pub async fn provider_http_error(
     phase: ErrorPhase,
     fallback: &'static str,
 ) -> AiError {
-    let value = collect_body(body, MAX_ERROR_BODY_BYTES)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let value = tokio::time::timeout(
+        DEFAULT_REQUEST_TIMEOUT,
+        collect_body(body, MAX_ERROR_BODY_BYTES),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     let provider = value
         .as_ref()
         .map(|value| value.get("error").unwrap_or(value));

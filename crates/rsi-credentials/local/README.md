@@ -66,6 +66,8 @@ the waiter was dropped. A resolution started after completion cannot join a pre-
 old lookup's cleanup cannot remove a newer flight. A resolve overlapping a write
 may still finish with the earlier value, as may a provider call that already
 froze that value. Rotation does not revoke already issued secret values.
+Windows readers retain a validated read-only handle with delete sharing, so
+atomic credential replacement can complete while a reader decodes the earlier file.
 
 `FileSecretStore::new` uses strict no-follow acquisition. Explicit owners may use
 `with_trusted_root_alias` to resolve only the first component beneath `/` before

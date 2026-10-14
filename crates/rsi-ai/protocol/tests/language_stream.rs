@@ -67,9 +67,9 @@ fn token_limit_is_incomplete_for_empty_text_reasoning_and_tool_arguments() {
             reason: FinishReason::MaxTokens,
             replay: None
         })
-        .unwrap_err()
-        .code(),
-        "stream.content_still_open"
+        .map(|()| open.finish().unwrap_err().code().to_owned())
+        .unwrap(),
+        "stream.incomplete"
     );
 }
 

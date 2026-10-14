@@ -88,7 +88,7 @@ fn deferred_checkpoint_wire_is_stable_while_clones_share_immutable_state() {
     assert_eq!(
         encoded,
         concat!(
-            r#"{"call":{"call_id":"call-1","deployment_id":"deployment","provider_family":"provider","capability":"language","model":"model","protocol":"protocol","transport":"transport","endpoint_fingerprint":"endpoint","config_generation":1,"credential_source":null,"retry_policy":{"max_retries":2,"retryable_kinds":["rate_limited","server","timeout","transport","output_validation"],"initial_delay_ms":500,"max_delay_ms":10000,"jitter_per_mille":100},"request_sha256":"#,
+            r#"{"call":{"call_id":"call-1","deployment_id":"deployment","provider_family":"provider","capability":"language","model":"model","protocol":"protocol","transport":"transport","endpoint_fingerprint":"endpoint","config_generation":1,"credential_source":null,"retry_policy":{"max_retries":2,"retryable_kinds":["rate_limited","server","timeout","transport","output_validation"],"initial_delay_ms":500,"max_delay_ms":10000,"jitter_per_mille":100,"allow_language_regeneration":false},"request_sha256":"#,
             "\"",
             "0000000000000000000000000000000000000000000000000000000000000000",
             r#"","language_settings":null},"operation_id":"operation-1","status":"in_progress","event_stream_terminal":false,"sequence_number":null,"provider_state":{"namespace":"fixture","version":1,"value":{"cursor":7}}}"#,

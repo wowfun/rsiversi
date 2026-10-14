@@ -317,6 +317,11 @@ impl SessionHandle for Handle {
             ))
         }
     }
+    async fn observe_models(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+        Ok(Box::pin(futures_util::stream::pending()))
+    }
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
