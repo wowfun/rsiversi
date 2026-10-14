@@ -1,23 +1,32 @@
 use async_trait::async_trait;
 use rsi_api_protocol::{
-    ApiClient, ApiClientContract, ApiDispatch, ApiDispatchContract, ApiError, ApiMessage,
-    ApiOutput, ByteBudget, CallOrigin, ConnectionDescription, EndpointId, HostEpoch,
-    OperationClass, OperationSpec, RetainedBytes,
+    ApiClient, ApiDispatchContract, ApiError, ApiMessage, ApiOutput, ByteBudget,
+    ConnectionDescription, EndpointId, HostEpoch, OperationClass, OperationSpec, RetainedBytes,
 };
-use rsi_meta::{
-    ActivationPlan, PluginFactory, PreparedActivation, ResolvedFactory, Runtime, UpdateMode,
-};
-use rsi_process::{ProcessContract, ProcessError, ProcessOutputCache, ProcessOutputCacheContract};
-use rsi_process_output_api::{OutputApiFactory, OutputClient, OutputClientFactory};
+#[cfg(unix)]
+use rsi_api_protocol::{ApiClientContract, ApiDispatch, CallOrigin};
+#[cfg(unix)]
+use rsi_meta::{ActivationPlan, PreparedActivation};
+use rsi_meta::{PluginFactory, ResolvedFactory, Runtime, UpdateMode};
+#[cfg(unix)]
+use rsi_process::{ProcessContract, ProcessOutputCacheContract};
+use rsi_process::{ProcessError, ProcessOutputCache};
+#[cfg(unix)]
+use rsi_process_output_api::OutputApiFactory;
+use rsi_process_output_api::OutputClient;
+#[cfg(unix)]
+use rsi_process_output_api::OutputClientFactory;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct Connection {
     dispatch: Arc<dyn ApiDispatch>,
     description: ConnectionDescription,
     operations: Vec<OperationSpec>,
 }
+#[cfg(unix)]
 #[async_trait]
 impl ApiClient for Connection {
     fn description(&self) -> &ConnectionDescription {
@@ -40,8 +49,10 @@ impl ApiClient for Connection {
             .await
     }
 }
+#[cfg(unix)]
 #[derive(Debug)]
 struct ConnectionFactory(Arc<dyn ApiClient>);
+#[cfg(unix)]
 #[async_trait]
 impl PluginFactory for ConnectionFactory {
     fn prepare(&self, _: &Value) -> rsi_meta::Result<PreparedActivation> {
@@ -72,6 +83,7 @@ fn description() -> ConnectionDescription {
         host_epoch: HostEpoch::from_bytes([2; 16]),
     }
 }
+#[cfg(unix)]
 async fn client_runtime(api: Arc<dyn ApiClient>) -> Runtime {
     let runtime = Runtime::default();
     for (name, factory) in [

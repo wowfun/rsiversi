@@ -40,7 +40,19 @@ observation makes `wait` return `SettlementTimeout`; the provider releases the
 active slot only after aborting and joining its pipe tasks. This is an honest
 failure, not a claim that the kernel removed an unkillable task.
 
-On non-Unix targets the package compiles but rejects spawn as unsupported. The
+Windows pipe execution requires an explicit native executable. Batch-file paths
+are refused; callers must explicitly select `cmd.exe` to execute a batch script.
+It starts the executable suspended, assigns an
+unnamed non-inheritable Job Object before any user code can run, then resumes its
+validated primary thread. The Job forbids breakaway and uses kill-on-close.
+Termination forcibly closes the whole Job; Windows advertises no Unix TERM or
+console-control delivery. Direct-child reaping, zero active Job members and pipe
+joins precede settlement. A naturally exited leader with surviving descendants
+also closes the Job before publishing its outcome. Startup and retirement retain
+the same active/capture admission budgets; failures are not cleanup receipts.
+Windows currently provides native unconfined pipe plans; PTY/restricted plans and
+the optional completed-output cache remain separate capabilities.
+Other non-Unix targets compile but reject spawn as unsupported. The
 provider does not claim to contain a descendant that deliberately leaves the
 managed process group; restricted Bubblewrap execution provides the stronger
 PID-namespace boundary when native behavior tests establish it. The same

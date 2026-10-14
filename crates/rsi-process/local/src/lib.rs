@@ -31,6 +31,8 @@ use tokio::sync::Notify;
 
 mod duplex;
 mod pty;
+#[cfg(windows)]
+mod windows;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 #[cfg(unix)]
@@ -114,6 +116,8 @@ impl ProcessLocalConfig {
 
 #[derive(Debug)]
 struct Service {
+    #[cfg(windows)]
+    windows: Arc<windows::Service>,
     #[cfg(unix)]
     cache: Option<Arc<output_cache::Cache>>,
     #[cfg(unix)]
@@ -525,7 +529,11 @@ impl Process for Service {
                 .map_err(|_| ProcessError::Spawn("Tokio runtime is unavailable".into()))?;
             self.spawn_unix(spec, &runtime)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.windows.spawn(spec).await
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = spec;
             Err(ProcessError::Unsupported)
@@ -984,7 +992,11 @@ impl PluginFactory for ProcessLocalFactory {
             }
             Arc::new(service)
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let service = Arc::new(Service {
+            windows: windows::Service::new(plan.take_state::<ProcessLocalConfig>()?),
+        });
+        #[cfg(not(any(unix, windows)))]
         let service = {
             let _: ProcessLocalConfig = plan.take_state()?;
             Arc::new(Service {})
@@ -1015,7 +1027,13 @@ impl PluginFactory for ProcessLocalFactory {
                 Box::pin(async move {
                     #[cfg(unix)]
                     let result = service.shutdown().await.map_err(|error| error.to_string());
-                    #[cfg(not(unix))]
+                    #[cfg(windows)]
+                    let result = service
+                        .windows
+                        .shutdown()
+                        .await
+                        .map_err(|error| error.to_string());
+                    #[cfg(not(any(unix, windows)))]
                     let result = Ok(());
                     drop(service);
                     drop(supply);

@@ -1,4 +1,4 @@
-//! Linux Bash capability plugins.
+//! Native Linux and Windows Bash capability plugins.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -6,11 +6,11 @@
 
 use async_trait::async_trait;
 use rsi_jobs::JobsContract;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_jobs::JobsError;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_process::ProcessContract;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_process::ProcessError;
 use rsi_tools_protocol::{ToolError, ToolRegistrarContract};
 use serde_json::Value;
@@ -30,7 +30,7 @@ pub const BASH_TERMINATION_GRACE_MS: u64 = 3_000;
 /// Outer timeout for the model-facing Bash tool.
 pub const BASH_TOOL_TIMEOUT_MS: u64 = 600_000;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const BASH_PRODUCER: &str = "rsi.coding.bash";
 
 /// Captures and scrubs an explicit child-environment snapshot.
@@ -223,35 +223,35 @@ impl PluginFactory for BashToolFactory {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn activate_producer(plan: ActivationPlan) -> rsi_meta::Result<()> {
-    linux::activate_producer(plan)
+    native::activate_producer(plan)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn activate_producer(mut plan: ActivationPlan) -> rsi_meta::Result<()> {
     let (): () = plan.take_state()?;
     Err(MetaError::Activation(
-        "Bash Jobs require Linux process-group settlement semantics".into(),
+        "Bash Jobs require native Linux or Windows process settlement".into(),
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn activate_tool(plan: ActivationPlan, factory: &BashToolFactory) -> rsi_meta::Result<()> {
-    linux::activate_tool(plan, factory)
+    native::activate_tool(plan, factory)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn activate_tool(mut plan: ActivationPlan, factory: &BashToolFactory) -> rsi_meta::Result<()> {
     let (): () = plan.take_state()?;
     let _ = factory;
     Err(MetaError::Activation(
-        "the Bash tool requires Linux process-group settlement semantics".into(),
+        "the Bash tool requires native Linux or Windows process settlement".into(),
     ))
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", windows))]
+mod native {
     use super::{
         ActivationPlan, BASH_PRODUCER, BASH_STREAM_CAPTURE_BYTES, BASH_TERMINATION_GRACE_MS,
         BASH_TOOL_TIMEOUT_MS, BashToolFactory, DEFAULT_BASH_TIMEOUT_MS, JobsContract, JobsError,

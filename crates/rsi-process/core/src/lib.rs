@@ -328,7 +328,7 @@ pub trait ProcessControl: fmt::Debug + Send + Sync + 'static {
     fn stdout(&self) -> Arc<dyn ProcessOutput>;
     /// Returns the stderr tail reader.
     fn stderr(&self) -> Arc<dyn ProcessOutput>;
-    /// Starts the idempotent TERM-to-KILL group escalation.
+    /// Starts idempotent native process-tree termination; the provider owns escalation.
     fn terminate(&self);
     /// Waits for the direct child outcome after both captured pipes settle or hit their drain bound.
     async fn wait(&self) -> Result<ProcessOutcome>;
