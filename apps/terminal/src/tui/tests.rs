@@ -228,25 +228,54 @@ async fn expanding_a_process_preserves_its_visible_row_even_when_content_overflo
                         &SessionFact::new(
                             2,
                             2,
-                            SessionFactBody::ModelEvent {
+                            SessionFactBody::ModelAttemptSettled {
                                 turn_id: rsi_agent_session_protocol::TurnId::new("fold").unwrap(),
                                 effect_id: rsi_agent_session_protocol::EffectId::new("request")
                                     .unwrap(),
                                 purpose:
                                     rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                                    index: 0,
-                                    delta: rsi_ai_protocol::ContentDelta::Reasoning(output.clone()),
-                                },
+                                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                                    [
+                                        rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                            index: 0,
+                                            content: rsi_ai_protocol::ContentStart::Reasoning,
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                            index: 0,
+                                            delta: rsi_ai_protocol::ContentDelta::Reasoning(
+                                                output.clone(),
+                                            ),
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::ContentFinished {
+                                            index: 0,
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::Finished {
+                                            reason: rsi_ai_protocol::FinishReason::Stop,
+                                            replay: None,
+                                        },
+                                    ]
+                                    .into_iter()
+                                    .map(|event| (0, event)),
+                                    true,
+                                )
+                                .unwrap(),
                             },
                         )
                         .unwrap(),
                     );
                 }
-                let block = client.state.transcript.blocks.last_mut().unwrap();
-                block.role = role;
+                let block = client
+                    .state
+                    .transcript
+                    .blocks
+                    .iter_mut()
+                    .find(|block| block.role == role)
+                    .unwrap();
                 block.title = "Process to expand".into();
-                block.completed = true;
+                assert!(
+                    block.completed,
+                    "the settled Fact completes the projected process"
+                );
                 let mut terminal =
                     ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                         .unwrap();
@@ -353,16 +382,33 @@ async fn thinking_click_uses_acknowledged_sources_and_never_copies_the_header() 
         &SessionFact::new(
             1,
             1,
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id: rsi_agent_session_protocol::TurnId::new("thinking").unwrap(),
                 effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
                 purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: rsi_ai_protocol::ContentDelta::Reasoning(
-                        "first row\nsecond row\nthird row".into(),
-                    ),
-                },
+                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    [
+                        rsi_ai_protocol::LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: rsi_ai_protocol::ContentStart::Reasoning,
+                        },
+                        rsi_ai_protocol::LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::Reasoning(
+                                "first row\nsecond row\nthird row".into(),
+                            ),
+                        },
+                        rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                        rsi_ai_protocol::LanguageEvent::Finished {
+                            reason: rsi_ai_protocol::FinishReason::Stop,
+                            replay: None,
+                        },
+                    ]
+                    .into_iter()
+                    .map(|event| (0, event)),
+                    true,
+                )
+                .unwrap(),
             },
         )
         .unwrap(),

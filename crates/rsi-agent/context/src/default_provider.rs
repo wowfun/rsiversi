@@ -54,6 +54,13 @@ struct DefaultCursor {
     limits: ContextLimits,
 }
 impl ModelContextCursor for DefaultCursor {
+    fn raw_pressure(&self) -> Option<crate::RawContextPressure> {
+        Some(crate::RawContextPressure {
+            messages: self.fold.retained_messages,
+            bytes: self.fold.retained_message_bytes,
+        })
+    }
+
     fn ingest(&mut self, page: ContextPage<'_>) -> Result<()> {
         match page {
             ContextPage::Canonical(facts) => self.fold.apply(facts),

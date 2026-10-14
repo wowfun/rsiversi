@@ -1254,21 +1254,9 @@ mod tests {
     }
 
     fn delta(state: &mut State, seq: u64, text: &str) {
-        let fact = SessionFact::new(
-            seq,
-            seq,
-            SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                turn_id: TurnId::new("turn").unwrap(),
-                effect_id: EffectId::new("effect").unwrap(),
-                event: LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text(text.into()),
-                },
-            },
-        )
-        .unwrap();
-        state.transcript.apply(&fact);
+        state
+            .transcript
+            .test_span(seq, "turn", "effect", 0, ContentDelta::Text(text.into()));
     }
 
     fn user(state: &mut State, seq: u64, text: &str) {
@@ -1317,24 +1305,38 @@ mod tests {
             },
         )
         .unwrap();
-        let text = SessionFact::new(
-            3,
-            1100,
-            SessionFactBody::ModelEvent {
-                turn_id: TurnId::new("turn").unwrap(),
-                effect_id: EffectId::new("effect").unwrap(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: LanguageEvent::ContentDelta {
+        let mut builder = rsi_agent_session_protocol::ModelAttemptBuilder::new();
+        builder
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: rsi_ai_protocol::ContentStart::Text,
+                },
+            )
+            .unwrap();
+        builder
+            .push(
+                100,
+                &LanguageEvent::ContentDelta {
                     index: 0,
                     delta: ContentDelta::Text("Answer body".into()),
                 },
-            },
-        )
-        .unwrap();
+            )
+            .unwrap();
+        let text = rsi_agent_turn_protocol::ModelLiveSnapshot {
+            session_id: rsi_agent_session_protocol::SessionId::new("session").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("effect").unwrap(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            revision: 1,
+            prefix: builder.prefix(),
+            status: rsi_agent_turn_protocol::ModelLiveStatus::Streaming,
+        };
         let mut state = state();
         user(&mut state, 1, "Question");
         state.transcript.apply(&start);
-        state.transcript.apply(&text);
+        state.transcript.model(&text);
         assert_eq!(
             state
                 .transcript
@@ -1343,13 +1345,6 @@ mod tests {
                 .map(|b| b.role)
                 .collect::<Vec<_>>(),
             vec![Role::User, Role::Assistant, Role::Metadata]
-        );
-        let mut history = Transcript::default();
-        history.apply(&text);
-        history.apply_history(&start);
-        assert_eq!(
-            history.blocks.iter().map(|b| b.role).collect::<Vec<_>>(),
-            vec![Role::Assistant, Role::Metadata]
         );
         let mut before = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
         before
@@ -1367,23 +1362,32 @@ mod tests {
                 .collect::<String>()
                 .contains("Request ·")
         );
-        let finished = SessionFact::new(
-            4,
-            1250,
-            SessionFactBody::ModelEvent {
-                turn_id: TurnId::new("turn").unwrap(),
-                effect_id: EffectId::new("effect").unwrap(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: LanguageEvent::Finished {
+        builder
+            .push(250, &LanguageEvent::ContentFinished { index: 0 })
+            .unwrap();
+        builder
+            .push(
+                250,
+                &LanguageEvent::Finished {
                     reason: rsi_ai_protocol::FinishReason::Stop,
                     replay: None,
                 },
+            )
+            .unwrap();
+        let finished = SessionFact::new(
+            3,
+            1250,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("effect").unwrap(),
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                attempt: builder.finish(true).unwrap(),
             },
         )
         .unwrap();
         state.transcript.apply(&finished);
         let mut reverse = Transcript::default();
-        for fact in [&finished, &text, &start] {
+        for fact in [&finished, &start] {
             reverse.apply_history(fact);
         }
         let backfilled = reverse
@@ -1678,19 +1682,9 @@ mod tests {
             (2, 0, ContentDelta::Reasoning(body.into())),
             (3, 1, ContentDelta::Text("Answer".into())),
         ] {
-            state.transcript.apply(
-                &SessionFact::new(
-                    seq,
-                    seq,
-                    SessionFactBody::ModelEvent {
-                        turn_id: TurnId::new("turn").unwrap(),
-                        effect_id: EffectId::new("effect").unwrap(),
-                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                        event: LanguageEvent::ContentDelta { index, delta },
-                    },
-                )
-                .unwrap(),
-            );
+            state
+                .transcript
+                .test_span(seq, "turn", "effect", index, delta);
         }
         for completed in [false, true] {
             for collapsed in [false, true] {
@@ -1872,21 +1866,12 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        state.transcript.apply(
-            &SessionFact::new(
-                1,
-                1,
-                SessionFactBody::ModelEvent {
-                    turn_id: TurnId::new("turn").unwrap(),
-                    effect_id: EffectId::new("effect").unwrap(),
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    event: LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: ContentDelta::Reasoning(body.clone()),
-                    },
-                },
-            )
-            .unwrap(),
+        state.transcript.test_span(
+            1,
+            "turn",
+            "effect",
+            0,
+            ContentDelta::Reasoning(body.clone()),
         );
         let mut cache = LayoutCache::default();
         let visible = rows(&state.transcript, &mut cache, None, None, 42, 20);
@@ -1900,19 +1885,8 @@ mod tests {
             selected_visible(&state.transcript, a, block.anchor(6).unwrap(), 42).unwrap(),
             "line 0"
         );
-        state.transcript.apply(
-            &SessionFact::new(
-                2,
-                2,
-                SessionFactBody::ModelEvent {
-                    turn_id: TurnId::new("turn").unwrap(),
-                    effect_id: EffectId::new("effect").unwrap(),
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    event: LanguageEvent::ContentFinished { index: 0 },
-                },
-            )
-            .unwrap(),
-        );
+        // Renderer fixture: lifecycle projection is checked by transcript settlement tests.
+        state.transcript.blocks[0].completed = true;
         assert_eq!(
             rows(&state.transcript, &mut cache, None, None, 42, 20).len(),
             1
@@ -2033,23 +2007,13 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let delta = |seq, text| {
-            SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::ModelEvent {
-                    turn_id: TurnId::new("turn").unwrap(),
-                    effect_id: EffectId::new("effect").unwrap(),
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    event: LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: ContentDelta::Reasoning(text),
-                    },
-                },
-            )
-            .unwrap()
-        };
-        state.transcript.apply(&delta(1, text.clone()));
+        state.transcript.test_span(
+            1,
+            "turn",
+            "effect",
+            0,
+            ContentDelta::Reasoning(text.clone()),
+        );
         let mut screen = ratatui::Terminal::new(TestBackend::new(42, 20)).unwrap();
         let mut view = View::default();
         screen.draw(|frame| view = draw(frame, &state)).unwrap();
@@ -2063,9 +2027,13 @@ mod tests {
             "line 7\nline 8\nline 9"
         );
         assert!(view.selected_source(&state.transcript, first, b).is_err());
-        state
-            .transcript
-            .apply(&delta(2, "\nline 10\nline 11\nline 12".into()));
+        state.transcript.test_span(
+            2,
+            "turn",
+            "effect",
+            0,
+            ContentDelta::Reasoning("\nline 10\nline 11\nline 12".into()),
+        );
         assert!(
             selected_visible(&state.transcript, a, b, 42).is_err(),
             "the new fold has hidden the old tail"

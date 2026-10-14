@@ -212,8 +212,7 @@ async fn jobs_panel_pages_the_same_current_scope_and_cancels_closed_reads() {
 async fn goal_rejection_survives_disarmed_then_delayed_settlement_projection() {
     let (runtime, backend, app) = prepared().await;
     let goal_id = DomainRequestId::new("delayed-settlement-goal").unwrap();
-    let header = backend.header().await.unwrap();
-    let budget = header.settings().turn_budget();
+    let default_rounds = 256;
     {
         let mut state = backend.task_panels.state.lock().unwrap();
         state
@@ -222,15 +221,15 @@ async fn goal_rejection_survives_disarmed_then_delayed_settlement_projection() {
                     id: goal_id.clone(),
                     objective: "Finish the fixed task".into(),
                     constraints: String::new(),
-                    max_rounds: 3,
+                    max_rounds: Some(3),
                 },
-                budget,
+                default_rounds,
                 true,
             )
             .unwrap();
         state.goal.as_mut().unwrap().reserve().unwrap();
         state
-            .apply(GoalAction::Pause { id: goal_id }, budget, true)
+            .apply(GoalAction::Pause { id: goal_id }, default_rounds, true)
             .unwrap();
     }
     backend.task_panels.changed.send_replace(2);

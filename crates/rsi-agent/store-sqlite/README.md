@@ -1,5 +1,11 @@
 # rsi-agent-store-sqlite
 
+The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
+directly from canonical Fact JSON for ModelIntent, ModelStarted and
+ModelAttemptSettled. It is schema-validated on open and enforced by both append
+paths; no separate mutable identity projection is trusted.
+The same index answers Kernel's pre-publication durable intent lookup.
+
 Public Store preparation and open require native filesystem protection on Unix
 or fixed local Windows NTFS. Windows validates exact no-reparse paths, private
 TokenUser owner/protected DACLs, handle-based directory publication and a retained
@@ -24,7 +30,7 @@ Windows native acceptance covers private publication, exclusive writer ownership
 CAS integrity, schema refusal and reopen; Unix-only process-crash and descriptor
 tests remain distinct.
 
-Schema 32 holds exact execution-coordinate and activity projections on each Session
+Schema 33 holds exact execution-coordinate and activity projections on each Session
 row. Global activity, location activity/membership, coordinate activity and coordinate membership each have a
 dedicated index. Append updates the projection in the same transaction as canonical
 records, using the Store protocol's closed activity whitelist. Activity and complete

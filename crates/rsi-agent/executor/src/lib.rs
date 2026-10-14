@@ -17,8 +17,8 @@ use futures_util::{FutureExt as _, StreamExt as _, future::join_all};
 use rsi_agent_composition_protocol::AgentCompositionPin;
 use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::{
-    BudgetDimension, EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact,
-    SessionFactBody, SessionId, TurnId, TurnOutcome,
+    EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact, SessionFactBody, SessionId,
+    TurnId, TurnOutcome,
 };
 use rsi_agent_turn_protocol::{
     PublishAttempt, TurnClaim, TurnError, TurnExecution, TurnExecutionContract, TurnFinalization,
@@ -48,7 +48,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -57,7 +56,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 const EXECUTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+const STOPPED_DRIVE_GRACE: Duration =
+    EXECUTOR_SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_secs(1));
 const MAXIMUM_DURABILITY_WAIT_MS: u64 = 5 * 60 * 1_000;
 const MAXIMUM_FINALIZATION_WAIT_MS: u64 = 5 * 60 * 1_000;
 const MAXIMUM_RETAINED_TOOL_WAIT_MS: u64 = 5 * 60 * 1_000;
@@ -137,6 +137,9 @@ impl ToolLaneParkingService for ExecutorLaneParking {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
+    /// Independent optional evidence allowance for each Tool invocation.
+    #[serde(default = "default_optional_tool_evidence_bytes")]
+    pub optional_tool_evidence_bytes: usize,
     /// Require and await the explicitly composed execution observer.
     #[serde(default)]
     pub observe_execution: bool,
@@ -160,6 +163,10 @@ pub struct ExecutorConfig {
     /// Maximum background wait for a retained Tool to settle after terminal durability.
     #[serde(default = "default_retained_tool_wait_ms")]
     pub retained_tool_wait_ms: u64,
+}
+
+const fn default_optional_tool_evidence_bytes() -> usize {
+    32 * 1024
 }
 
 const fn default_context_messages() -> usize {
@@ -188,6 +195,11 @@ const fn default_retained_tool_wait_ms() -> u64 {
 
 impl ExecutorConfig {
     fn validate(&self) -> Result<()> {
+        if self.optional_tool_evidence_bytes > 1024 * 1024 {
+            return Err(ExecutorError::Invalid(
+                "optional_tool_evidence_bytes exceeds 1 MiB".into(),
+            ));
+        }
         rsi_agent_session_protocol::validate_identifier("executor", &self.executor_id)
             .map_err(|error| ExecutorError::Invalid(error.to_string()))?;
         if self.maximum_active_turns == 0
@@ -284,18 +296,16 @@ async fn select_drive_or_stop(
     stop: &CancellationToken,
     drive: impl Future<Output = std::result::Result<(), DriveFailure>>,
 ) -> std::result::Result<(), DriveFailure> {
+    tokio::pin!(drive);
     tokio::select! {
         biased;
-        result = drive => result,
-        () = stop.cancelled() => Err(DriveFailure::Stopped),
+        result = &mut drive => result,
+        () = stop.cancelled() => {
+            // Controlled shutdown lets a started attempt settle its accepted prefix.
+            // A stuck external component still cannot prevent bounded host shutdown.
+            tokio::time::timeout(STOPPED_DRIVE_GRACE, drive).await.unwrap_or(Err(DriveFailure::Stopped))
+        },
     }
-}
-
-const fn elapsed_deadline_wins(
-    deadline_fired: bool,
-    drive: &std::result::Result<(), DriveFailure>,
-) -> bool {
-    deadline_fired && matches!(drive, Err(DriveFailure::Stopped))
 }
 
 mod contributions;
@@ -310,18 +320,19 @@ use execution_support::{
     apply_finalization_failure, bounded, combine_cancellation, context_failure, failed,
     failure_outcome, fatal, image_ai_failure, image_operation_failure, next_effect_id,
     prepare_tool_effect, publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay,
-    run_executor_pool, settled_tool_budget, should_retry, tool_failure,
+    run_executor_pool, should_retry, tool_failure,
 };
 
 #[derive(Debug)]
 enum ModelAttempt {
     Output(EffectId, Box<rsi_ai_protocol::LanguageOutput>),
-    Incomplete(EffectId),
+    Incomplete,
     Retry,
     ContextLimit,
 }
 
 struct ModelStreamContext<'a> {
+    live: Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>,
     purpose: rsi_agent_session_protocol::ModelEventPurpose,
     claim: &'a TurnClaim,
     effect_id: &'a EffectId,
@@ -353,8 +364,6 @@ struct ScannedTurn {
     concluded: bool,
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
-    budget_exhausted: Option<(BudgetDimension, u64, u64)>,
-    output_recovery_ordinal: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,63 +479,47 @@ fn scan_turn(
                 };
                 *started = true;
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
-                event,
+                attempt,
                 ..
-            } if turn_id == claim.turn_id()
-                && matches!(
-                    event,
-                    LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
-                ) =>
-            {
+            } if turn_id == claim.turn_id() => {
                 let Some(index) = state.effects.iter().position(
-                    |effect| matches!(effect, ResumeEffect::Model { effect_id: current, .. } if current == effect_id),
-                ) else {
-                    return Err("model terminal event lacks exact start");
-                };
+                    |effect| matches!(effect, ResumeEffect::Model { effect_id: current, started: true, .. } if current == effect_id),
+                ) else { return Err("model settlement lacks exact start"); };
                 state.effects.remove(index);
                 state.completed_model_without_successor = true;
-                if state.conversation_source.as_ref() == Some(effect_id)
-                    && matches!(
-                        event,
+                if state.conversation_source.as_ref() == Some(effect_id) {
+                    for item in attempt.events() {
+                        match item.map_err(|_| "invalid model attempt evidence")?.1 {
+                            LanguageEvent::ContentStarted {
+                                index,
+                                content: rsi_ai_protocol::ContentStart::ToolCall { id, .. },
+                            } => {
+                                state.pending_model_calls.insert(index, (id, false));
+                            }
+                            LanguageEvent::ContentFinished { index } => {
+                                if let Some((_, complete)) =
+                                    state.pending_model_calls.get_mut(&index)
+                                {
+                                    *complete = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if matches!(
+                        attempt.terminal(),
                         LanguageEvent::Finished {
                             reason: FinishReason::ToolCalls,
                             ..
                         }
-                    )
-                    && state
-                        .pending_model_calls
-                        .values()
-                        .any(|(_, complete)| *complete)
-                {
-                    state.completed_model_source = Some(effect_id.clone());
-                }
-            }
-            SessionFactBody::ModelEvent {
-                turn_id,
-                effect_id,
-                event,
-                ..
-            } if turn_id == claim.turn_id()
-                && state.conversation_source.as_ref() == Some(effect_id) =>
-            {
-                match event {
-                    LanguageEvent::ContentStarted {
-                        index,
-                        content: rsi_ai_protocol::ContentStart::ToolCall { id, .. },
-                    } => {
-                        state
-                            .pending_model_calls
-                            .insert(*index, (id.clone(), false));
+                    ) {
+                        state.completed_model_source = Some(effect_id.clone());
+                    } else {
+                        state.pending_model_calls.clear();
                     }
-                    LanguageEvent::ContentFinished { index } => {
-                        if let Some((_, complete)) = state.pending_model_calls.get_mut(index) {
-                            *complete = true;
-                        }
-                    }
-                    _ => {}
                 }
             }
             SessionFactBody::ToolCallsSuperseded {
@@ -607,19 +600,6 @@ fn scan_turn(
                 state.completed_model_without_successor = false;
                 state.effects.clear();
             }
-            SessionFactBody::ModelOutputRecovery {
-                turn_id, ordinal, ..
-            } if turn_id == claim.turn_id() => {
-                state.output_recovery_ordinal = *ordinal;
-            }
-            SessionFactBody::BudgetExhausted {
-                turn_id,
-                dimension,
-                consumed,
-                limit,
-            } if turn_id == claim.turn_id() => {
-                state.budget_exhausted = Some((*dimension, *consumed, *limit));
-            }
             SessionFactBody::TurnAccepted { .. }
             | SessionFactBody::MessageTurnAccepted { .. }
             | SessionFactBody::StepStarted { .. }
@@ -628,14 +608,12 @@ fn scan_turn(
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ImageRequested { .. }
             | SessionFactBody::CancelRequested { .. }
-            | SessionFactBody::ModelOutputRecovery { .. }
-            | SessionFactBody::BudgetExhausted { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
             | SessionFactBody::ImageStarted { .. }
             | SessionFactBody::ImageOutput { .. }
-            | SessionFactBody::ModelEvent { .. }
+            | SessionFactBody::ModelAttemptSettled { .. }
             | SessionFactBody::ToolIntent { .. }
             | SessionFactBody::ToolRejected { .. }
             | SessionFactBody::ToolStarted { .. }

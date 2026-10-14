@@ -840,13 +840,10 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     assert!(first_durable_seq >= first_facts.last().unwrap().seq());
     assert!(first_facts.iter().any(|fact| matches!(
         fact.body(),
-        SessionFactBody::ModelEvent {
-            event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                delta: rsi_ai_protocol::ContentDelta::Text(text),
-                ..
-            },
-            ..
-        } if text == "hello"
+        SessionFactBody::ModelAttemptSettled { attempt, .. }
+            if attempt.events().any(|event| matches!(event, Ok((_, rsi_ai_protocol::LanguageEvent::ContentDelta {
+                delta: rsi_ai_protocol::ContentDelta::Text(text), ..
+            })) if text == "hello"))
     )));
     let first_history = first_handle.history_before(None, 64).await.unwrap();
     assert!(first_history.facts.iter().any(|fact| matches!(

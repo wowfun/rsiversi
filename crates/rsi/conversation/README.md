@@ -1,5 +1,11 @@
 # rsi-conversation
 
+Assistant source fields address the ordered text, reasoning or Tool-argument
+deltas of one ModelAttemptSettled Fact. Field windows stream the compact log and
+retain only the requested UTF-8 window. Request and metric reducers read usage
+and terminal timing from that same attempt; one settlement advances the Fact
+cursor once, irrespective of its original fragment count.
+
 Metrics reduction receives the Session-frozen exact-model output budget table.
 Each last-context observation binds its reported input to the prepared profile
 and that route's explicit cap. Its input capacity follows
@@ -137,3 +143,5 @@ Fact cursor; they do not clone completed request metadata or cost totals.
 Tool metadata retains the recorded Model or Program origin. Program calls are
 labeled explicitly in shared titles; loading only a result never invents its
 origin. Bounded provenance bytes participate in retained-memory accounting.
+
+Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.

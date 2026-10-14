@@ -553,11 +553,11 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
             ..
         }
     )));
-    publish_model_source(
+    super::super::publish_model_calls_named(
         &f.kernel,
         &notice,
-        "successor",
-        "fixture_workflow",
+        "successor-model",
+        &[("successor", "fixture_workflow")],
         &snapshot(),
     )
     .await;
@@ -568,7 +568,7 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
             notice.turn_id(),
             "successor",
             ToolOrigin::Model {
-                effect_id: EffectId::new("source-model").unwrap(),
+                effect_id: EffectId::new("successor-model").unwrap(),
             },
             "fixture_workflow",
             ToolProgramRole::Workflow,

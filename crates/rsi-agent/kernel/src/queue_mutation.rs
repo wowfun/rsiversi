@@ -122,7 +122,6 @@ impl AgentKernel {
                         turn.activation_id.is_some()
                             && turn.terminal.is_none()
                             && !turn.cancel_requested
-                            && turn.budget_exhausted.is_none()
                     }) =>
                 {
                     Some(Rejection::StaleTurn)

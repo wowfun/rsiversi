@@ -231,10 +231,8 @@ default="off"
     assert!(facts.iter().any(|fact|matches!(fact.body(),rsi_agent_session_protocol::SessionFactBody::ToolIntent {name,..} if name=="todo_write")));
     assert!(facts.iter().any(|fact| matches!(
         fact.body(),
-        rsi_agent_session_protocol::SessionFactBody::ModelEvent {
-            event: rsi_ai_protocol::LanguageEvent::Usage { .. },
-            ..
-        }
+        rsi_agent_session_protocol::SessionFactBody::ModelAttemptSettled { attempt, .. }
+            if attempt.events().any(|event| matches!(event, Ok((_, rsi_ai_protocol::LanguageEvent::Usage { .. }))))
     )));
     if let Ok(directory) = std::env::var("RSI_TUI_PTY_REPORT") {
         let report = serde_json::json!({"model":model,"protocol":"deepseek-responses","requests":snapshots.len(),"efforts":efforts,"todo_tool":true,"request_evidence":true,"sizes":[[110,35],[80,24],[42,12],[28,9]],"platform":"Linux PTY","native_windows_macos":false});

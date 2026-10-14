@@ -1,5 +1,14 @@
 # rsi-agent-store-protocol
 
+Model intent, start and settlement coordinates are unique by Session/Turn/effect/role
+across the complete stored history. Append and atomic Agent commit enforce this
+mechanical uniqueness in the same transaction as the Facts. Kernel validates
+lifecycle ordering and exact Turn/purpose; it does not retain a set of every
+completed model identity in a live Turn. A durable intent existence query supplies
+the historical input for Kernel admission; providers may implement it through
+bounded pages or their canonical-Fact index. Reusing an effect in a different
+Turn is valid. A new intent must commit before dispatch.
+
 `StoreError::Unsupported` identifies a missing provider or platform capability
 before Store admission. It is distinct from malformed caller input (`Invalid`)
 and from an uncertain durable write outcome.
@@ -11,7 +20,9 @@ and its newest cursor share one read snapshot. Activity commits atomically with
 the owning append and never regresses under wall-clock rollback. Header creation,
 new human MessageAccepted controls (excluding same-commit queue successors),
 TurnAccepted, ImageRequested, CancelRequested, ImageOutput, ToolResult,
-ToolRejected and Conversation ContentDelta/Source/Finished/Failed events count.
+ToolRejected and Conversation model settlements count. Every settlement contains
+its qualifying Finished or Failed terminal event, including tool-only and
+reasoning-only attempts; Context-compaction settlements do not count.
 Other control and Fact kinds do not count.
 
 Complete ordering membership is a separate single-snapshot query returning at

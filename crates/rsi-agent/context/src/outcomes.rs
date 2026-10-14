@@ -955,8 +955,7 @@ mod tests {
         let (mut fold, turn) = fold();
         full(&mut fold, &turn);
         let effect = EffectId::new("model").unwrap();
-        let mut assembler = rsi_ai_protocol::LanguageAssembler::new();
-        for event in [
+        let mut events = vec![
             LanguageEvent::ContentStarted {
                 index: 0,
                 content: ContentStart::ToolCall {
@@ -970,9 +969,11 @@ mod tests {
                 delta: ContentDelta::ToolArguments("{}".into()),
             },
             LanguageEvent::ContentFinished { index: 0 },
-        ] {
-            assembler.push(&event).unwrap();
-        }
+        ];
+        events.push(LanguageEvent::Finished {
+            reason: FinishReason::ToolCalls,
+            replay: None,
+        });
         fold.assemblers.insert(
             effect.clone(),
             crate::ActiveAssembler {
@@ -987,17 +988,18 @@ mod tests {
                 model: ModelRef::new("test", "model").unwrap(),
                 eligible_summary: false,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                assembler,
+                assembler: rsi_ai_protocol::LanguageAssembler::new(),
             },
         );
-        let body = SessionFactBody::ModelEvent {
+        let body = SessionFactBody::ModelAttemptSettled {
             turn_id: turn.clone(),
             effect_id: effect,
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            event: LanguageEvent::Finished {
-                reason: FinishReason::ToolCalls,
-                replay: None,
-            },
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                events.into_iter().map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
         };
         assert_eq!(fold.apply_body(&body, 1), Err(ContextError::TooLarge));
         assert!(!fold.checkpointable_prefix);

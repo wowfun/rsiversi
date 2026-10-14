@@ -5183,6 +5183,7 @@ dependencies = [
 name = "rsi-agent-session-protocol"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "hex",
  "jsonschema",
  "rsi-ai-protocol",
@@ -6225,6 +6226,7 @@ version = "0.0.1"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
  "rsi-process",
@@ -7870,6 +7872,7 @@ dependencies = [
  "ratatui",
  "rsi-agent-session-protocol",
  "rsi-agent-todo",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-conversation",
  "rsi-media-protocol",

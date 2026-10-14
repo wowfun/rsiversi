@@ -140,7 +140,7 @@ pub fn operations() -> Vec<OperationSpec> {
 }
 fn spec(name: &str) -> OperationSpec {
     OperationSpec {
-        id: OperationId::new("automation", name, 1).expect("static automation operation"),
+        id: OperationId::new("automation", name, 2).expect("static automation operation"),
         access: OperationAccess::Authenticated,
         class: if matches!(name, "cancel" | "resume" | "set_policy") {
             OperationClass::Control
@@ -580,7 +580,6 @@ fn rule_reply(value: &Value) -> Result<()> {
             "explore_on_failure",
             "authorized_catalog_digest",
             "model",
-            "turn_budget",
             "max_rounds",
         ],
     )?;
@@ -602,17 +601,6 @@ fn rule_reply(value: &Value) -> Result<()> {
     let model: rsi_ai_protocol::ModelRef =
         serde_json::from_value(value["model"].clone()).map_err(|_| invalid_reply())?;
     model.validate().map_err(|_| invalid_reply())?;
-    let budget: rsi_agent_session_protocol::TurnBudget =
-        serde_json::from_value(value["turn_budget"].clone()).map_err(|_| invalid_reply())?;
-    budget.validate().map_err(|_| invalid_reply())?;
-    if budget.maximum_elapsed_ms() > 120_000
-        || budget.maximum_provider_attempts() > 8
-        || budget.maximum_tool_calls() > 16
-        || budget.maximum_generated_records() > 256
-        || budget.maximum_generated_record_bytes() > 1_048_576
-    {
-        return Err(invalid_reply());
-    }
     positive(&value["max_rounds"], 2)?;
     fields(&value["checks"], &["entry_identity", "assertions"])?;
     bounded_text(&value["checks"]["entry_identity"], 1024)?;
@@ -779,7 +767,7 @@ mod tests {
         serde_json::json!({
             "id":"1", "task_id":"1", "created_ms":"1800000000000", "state":"failed", "may_cancel":false, "may_resume":true, "current_rule_revision":"1", "session_id":null, "report":null, "exploration":"not_started",
             "deployment":{"repository_id":7,"deployment_id":1,"status_id":1,"deployment_created_ms":1_800_000_000_000_u64,"status_created_ms":1_800_000_000_000_u64,"environment":"preview","sha":"a".repeat(40),"url":"https://preview.example/"},
-            "rule":{"id":"preview","revision":1,"enabled":true,"repository_id":7,"environment":"preview","preview_host_suffix":"example","path_prefix":"/","dependency_hosts":[],"checks":{"entry_identity":"Preview","assertions":[{"kind":"text_visible","text":"Ready"}]},"explore_on_failure":true,"authorized_catalog_digest":"0".repeat(64),"model":{"deployment":"fixture","model":"fixture-model"},"turn_budget":{"maximum_elapsed_ms":120_000,"maximum_provider_attempts":8,"maximum_tool_calls":16,"maximum_generated_records":256,"maximum_generated_record_bytes":1_048_576},"max_rounds":2},
+            "rule":{"id":"preview","revision":1,"enabled":true,"repository_id":7,"environment":"preview","preview_host_suffix":"example","path_prefix":"/","dependency_hosts":[],"checks":{"entry_identity":"Preview","assertions":[{"kind":"text_visible","text":"Ready"}]},"explore_on_failure":true,"authorized_catalog_digest":"0".repeat(64),"model":{"deployment":"fixture","model":"fixture-model"},"max_rounds":2},
             "result":{"outcome":"assertion_failed","final_url":"https://preview.example/","assertions":[{"assertion":{"kind":"text_visible","text":"Ready"},"passed":false,"detail":"absent"}],"snapshot":"", "dialogs_dismissed":0,"evidence_error":null}
         })
     }

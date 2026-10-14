@@ -67,40 +67,43 @@ fn rejection_recovery_facts(turn: &TurnId, with_source: bool) -> Vec<SessionFact
             .unwrap(),
         );
         facts.push(model_started_fact(3, turn, &effect));
-        for event in [
-            LanguageEvent::ContentStarted {
-                index: 0,
-                content: rsi_ai_protocol::ContentStart::ToolCall {
-                    id: "call".into(),
-                    name: "read".into(),
-                    kind: rsi_ai_protocol::ToolCallKind::Function,
+        facts.push(
+            SessionFact::new(
+                4,
+                4,
+                SessionFactBody::ModelAttemptSettled {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                    attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                        [
+                            LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: rsi_ai_protocol::ContentStart::ToolCall {
+                                    id: "call".into(),
+                                    name: "read".into(),
+                                    kind: rsi_ai_protocol::ToolCallKind::Function,
+                                },
+                            },
+                            LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+                            },
+                            LanguageEvent::ContentFinished { index: 0 },
+                            LanguageEvent::Finished {
+                                reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                                replay: None,
+                            },
+                        ]
+                        .into_iter()
+                        .map(|event| (0, event)),
+                        true,
+                    )
+                    .unwrap(),
                 },
-            },
-            LanguageEvent::ContentDelta {
-                index: 0,
-                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
-            },
-            LanguageEvent::ContentFinished { index: 0 },
-            LanguageEvent::Finished {
-                reason: rsi_ai_protocol::FinishReason::ToolCalls,
-                replay: None,
-            },
-        ] {
-            let seq = facts.len() as u64 + 1;
-            facts.push(
-                SessionFact::new(
-                    seq,
-                    seq,
-                    SessionFactBody::ModelEvent {
-                        turn_id: turn.clone(),
-                        effect_id: effect.clone(),
-                        event,
-                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    },
-                )
-                .unwrap(),
-            );
-        }
+            )
+            .unwrap(),
+        );
     }
     let seq = facts.len() as u64 + 1;
     facts.push(
@@ -437,144 +440,38 @@ async fn recovery_preserves_a_durable_cancellation_classification() {
 }
 
 #[tokio::test]
-async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
-    let overused = Arc::new(MemoryStore::new());
-    let session = SessionId::new("session-recovery-budget-usage").unwrap();
-    let turn = TurnId::new("turn-recovery-budget-usage").unwrap();
-    let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
-    let bounded_header = SessionHeader::new_local(
-        session.clone(),
-        1,
-        "/workspace",
-        AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentSettings::new_with_budget(
-            "default",
-            "system",
-            ModelRef::new("deployment", "model").unwrap(),
-            SandboxMode::WorkspaceWrite,
-            false,
-            budget,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    overused
-        .append(AppendBatch {
-            session_id: session,
-            expected_seq: 0,
-            header: Some(bounded_header),
-            facts: ({
-                let first = EffectId::new("effect-one").unwrap();
-                let second = EffectId::new("effect-two").unwrap();
-                vec![
-                    accepted_fact(1, &turn),
-                    model_intent_fact(2, &turn, &first),
-                    model_started_fact(3, &turn, &first),
-                    model_finished_fact(4, &turn, &first),
-                    model_intent_fact(5, &turn, &second),
-                ]
-            })
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        })
-        .await
-        .unwrap();
-    let overused_store: Arc<dyn SessionStore> = overused;
-    assert!(
-        AgentKernel::recover_with_clock(overused_store, composition(), Arc::new(FixedClock),)
-            .await
-            .is_err(),
-        "recovery must apply the immutable provider-attempt limit"
-    );
-
-    let mismatched = Arc::new(MemoryStore::new());
-    let session = SessionId::new("session-recovery-budget-marker").unwrap();
-    let turn = TurnId::new("turn-recovery-budget-marker").unwrap();
-    mismatched
-        .append(AppendBatch {
-            session_id: session.clone(),
-            expected_seq: 0,
-            header: Some(header(session.as_str())),
-            facts: (vec![
-                accepted_fact(1, &turn),
-                budget_fact(2, &turn, BudgetDimension::ProviderAttempts, 1, 1),
-            ])
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        })
-        .await
-        .unwrap();
-    let mismatched_store: Arc<dyn SessionStore> = mismatched;
-    assert!(
-        AgentKernel::recover_with_clock(mismatched_store, composition(), Arc::new(FixedClock),)
-            .await
-            .is_err(),
-        "a durable exhaustion marker must match the immutable budget"
-    );
-}
-
-#[tokio::test]
-async fn recovery_preserves_a_valid_durable_budget_classification() {
+async fn recovery_preserves_a_durable_max_tokens_terminal() {
     let store = Arc::new(MemoryStore::new());
-    let session = SessionId::new("session-recovery-valid-budget").unwrap();
-    let turn = TurnId::new("turn-recovery-valid-budget").unwrap();
-    let effect = EffectId::new("effect-recovery-valid-budget").unwrap();
-    let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
-    let bounded_header = SessionHeader::new_local(
-        session.clone(),
-        1,
-        "/workspace",
-        AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentSettings::new_with_budget(
-            "default",
-            "system",
-            ModelRef::new("deployment", "model").unwrap(),
-            SandboxMode::WorkspaceWrite,
-            false,
-            budget,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    store
-        .append(AppendBatch {
-            session_id: session.clone(),
-            expected_seq: 0,
-            header: Some(bounded_header),
-            facts: (vec![
-                accepted_fact(1, &turn),
-                model_intent_fact(2, &turn, &effect),
-                model_started_fact(3, &turn, &effect),
-                model_finished_fact(4, &turn, &effect),
-                budget_fact(5, &turn, BudgetDimension::ProviderAttempts, 2, 1),
-            ])
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        })
+    let initial = kernel(store.clone()).await;
+    let workers = initial.start_workers();
+    submit(&initial, "recovery-max-tokens", "work").await;
+    let lease = initial.register("worker".into()).unwrap();
+    let claim = initial
+        .claim("worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = claim.session_id().clone();
+    let turn = claim.turn_id().clone();
+    for body in super::model_attempts::source_bodies(&turn) {
+        tool_origin::flush_bodies(&initial, &claim, vec![body]).await;
+    }
+    initial
+        .finish_turn(&claim, &TurnOutcome::MaxTokens)
         .await
         .unwrap();
-
-    let kernel = kernel(store.clone()).await;
-    let expected = TurnOutcome::BudgetExceeded {
-        dimension: BudgetDimension::ProviderAttempts,
-        consumed: 2,
-        limit: 1,
-    };
+    drop(lease);
+    initial.shutdown(workers).await.unwrap();
+    drop(initial);
+    let restored = kernel(store.clone()).await;
     assert_eq!(
-        kernel.outcome(&session, &turn).await.unwrap(),
-        Some(expected.clone())
+        restored.outcome(&session, &turn).await.unwrap(),
+        Some(TurnOutcome::MaxTokens)
     );
-    assert!(matches!(
-        store.read_facts(&session, 5, 8).await.unwrap().facts.as_slice(),
-        [fact]
-            if matches!(
-                fact.body(),
-                SessionFactBody::TurnTerminal { outcome, .. } if outcome == &expected
-            )
-    ));
+    assert_eq!(
+        store.read_facts(&session, 0, 16).await.unwrap().facts.len(),
+        5
+    );
 }
 
 #[tokio::test]

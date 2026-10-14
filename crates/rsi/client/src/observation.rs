@@ -34,6 +34,8 @@ impl ObservationFailure {
 pub enum ObservationKind {
     /// Durable Fact/control replay.
     Facts,
+    /// Transient model prefixes, independent of durable replay.
+    Models,
     /// Live interaction replacement snapshots.
     Interactions,
     /// Pure extension-state replacement snapshots, including fresh drafts.
@@ -45,6 +47,13 @@ pub enum ObservationKind {
 pub trait ObservationSink: std::fmt::Debug + Send + Sync {
     /// Delivers a record before the controller advances its replay cursor.
     async fn observation(&self, update: SessionObservation) -> Result<(), ObservationFailure>;
+    /// Delivers a transient model snapshot. Sinks without text presentation may ignore it.
+    async fn model(
+        &self,
+        _snapshot: rsi_agent_turn_protocol::ObservedModel,
+    ) -> Result<(), ObservationFailure> {
+        Ok(())
+    }
     /// Delivers a replacement interaction snapshot.
     async fn interactions(&self, snapshot: InteractionSnapshot) -> Result<(), ObservationFailure>;
     /// Delivers a complete replacement and its final-clone retention lease.
@@ -196,6 +205,31 @@ pub(crate) async fn projection_updates(
         if let Err(error) = result {
             retry
                 .after(error, ObservationKind::Projections, sink, execution)
+                .await?;
+        }
+    }
+}
+
+/// Follows coalesced model prefixes; retries resynchronize without replaying durable cursors.
+pub async fn observe_models(
+    handle: &dyn SessionHandle,
+    sink: &dyn ObservationSink,
+    execution: &Execution,
+) -> Result<(), ObservationFailure> {
+    let mut retry = Retry::default();
+    loop {
+        let result: Result<(), ObservationFailure> = async {
+            let mut stream = handle.observe_models().await?;
+            while let Some(snapshot) = stream.next().await {
+                sink.model(snapshot?).await?;
+                retry = Retry::default();
+            }
+            Err(ObservationFailure::Ended)
+        }
+        .await;
+        if let Err(error) = result {
+            retry
+                .after(error, ObservationKind::Models, sink, execution)
                 .await?;
         }
     }

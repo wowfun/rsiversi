@@ -150,7 +150,7 @@ async fn exercise(scenario: Scenario) {
                         id: DomainRequestId::new("selection-goal").unwrap(),
                         objective: "Verify model selection".into(),
                         constraints: String::new(),
-                        max_rounds: 2,
+                        max_rounds: Some(2),
                     },
                 })
                 .await

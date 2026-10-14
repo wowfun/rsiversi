@@ -45,7 +45,6 @@ struct Parked {
     kernel: AgentKernel,
     mutation: super::mutation::WaitMutationLease,
     caller: AgentCallerAuthority,
-    elapsed: Option<Arc<elapsed::ElapsedState>>,
     tree_lane: Arc<TreeClaimLane>,
     executor: Option<ParkedToolLane>,
     released_tree: bool,
@@ -124,7 +123,7 @@ impl AgentKernel {
         let kernel = self.clone();
         self.owned_commit(async move {
             let mutation = kernel.admit_wait_mutation(&caller)?;
-            let (elapsed, tree_lane, turn_cancellation, boundary) = {
+            let (tree_lane, turn_cancellation, boundary) = {
                 let state = lock_state(&kernel.inner);
                 let turn = kernel.validate_claim(&state, caller.claim())?;
                 if turn.terminal.is_some() {
@@ -139,22 +138,7 @@ impl AgentKernel {
                         "Agent wait requires an activation-owned Turn with an open Step".into(),
                     ));
                 }
-                let elapsed = if kind == WaitKind::HumanInteraction {
-                    turn.elapsed.pause(
-                        turn.accepted_at_ms,
-                        kernel.inner.clock.now_ms(),
-                        caller
-                            .header()
-                            .settings()
-                            .turn_budget()
-                            .maximum_elapsed_ms(),
-                    )?;
-                    Some(turn.elapsed.clone())
-                } else {
-                    None
-                };
                 (
-                    elapsed,
                     turn.claim
                         .as_ref()
                         .expect("validated claim")
@@ -168,7 +152,6 @@ impl AgentKernel {
                 kernel: kernel.clone(),
                 mutation,
                 caller,
-                elapsed,
                 tree_lane,
                 executor: None,
                 released_tree: false,
@@ -397,14 +380,6 @@ fn capacity_timeout(since: &mut Option<Instant>, error: &WaitControlError) -> bo
         // Each non-capacity retry interrupts the interval, even if it did not commit.
         *since = None;
         false
-    }
-}
-
-impl Drop for Parked {
-    fn drop(&mut self) {
-        if let Some(elapsed) = &self.elapsed {
-            elapsed.resume(self.kernel.inner.clock.now_ms());
-        }
     }
 }
 

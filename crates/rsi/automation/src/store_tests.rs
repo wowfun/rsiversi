@@ -2,7 +2,6 @@ use super::*;
 use rsi_browser::{Assertion, AssertionResult, CheckOutcome, CheckResult, CheckSpec};
 const NOW: u64 = 1_800_000_000_000;
 
-#[cfg(unix)]
 #[test]
 fn ledger_and_policy_reject_symlinked_parents_before_creating_state() {
     let root = crate::test_directory();
@@ -490,8 +489,6 @@ pub(crate) fn rule() -> AutomationRule {
         explore_on_failure: true,
         authorized_catalog_digest: "0".repeat(64),
         model: rsi_ai_protocol::ModelRef::new("fixture", "fixture-model").unwrap(),
-        turn_budget: rsi_agent_session_protocol::TurnBudget::new(120_000, 8, 16, 256, 1_048_576)
-            .unwrap(),
         max_rounds: 2,
     }
 }

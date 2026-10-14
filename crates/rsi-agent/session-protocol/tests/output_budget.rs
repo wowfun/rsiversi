@@ -1,7 +1,5 @@
 use rsi_agent_session_protocol::{
-    BudgetDimension, EffectId, FrozenAgentSettings, MAXIMUM_TURN_OUTPUT_RECOVERIES,
-    ModelOutputBudget, ModelSelection, OutputBudgetTable, SessionFact, SessionFactBody, TurnBudget,
-    TurnId, TurnOutcome,
+    FrozenAgentSettings, ModelOutputBudget, ModelSelection, OutputBudgetTable,
 };
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
@@ -120,68 +118,4 @@ fn frozen_output_policy_is_independent_of_selection_and_validated_on_decode() {
         invalid["output_budgets"][0]["max_output_tokens"] = json!(cap);
         assert!(serde_json::from_value::<FrozenAgentSettings>(invalid).is_err());
     }
-}
-
-#[test]
-fn output_recovery_ordinals_are_bounded_at_fact_construction() {
-    for ordinal in [
-        0,
-        1,
-        MAXIMUM_TURN_OUTPUT_RECOVERIES,
-        MAXIMUM_TURN_OUTPUT_RECOVERIES + 1,
-        u64::MAX,
-    ] {
-        let fact = SessionFact::new(
-            1,
-            42,
-            SessionFactBody::ModelOutputRecovery {
-                turn_id: TurnId::new("turn").unwrap(),
-                source_model_effect_id: EffectId::new("source").unwrap(),
-                ordinal,
-            },
-        );
-        assert_eq!(
-            fact.is_ok(),
-            (1..=MAXIMUM_TURN_OUTPUT_RECOVERIES).contains(&ordinal)
-        );
-    }
-}
-
-#[test]
-fn zero_recovery_limit_is_valid_only_for_output_exhaustion() {
-    assert_eq!(TurnBudget::default().maximum_output_recoveries(), 2);
-    for limit in [0, 2, 16] {
-        let budget = TurnBudget::default()
-            .with_maximum_output_recoveries(limit)
-            .unwrap();
-        assert_eq!(
-            serde_json::from_value::<TurnBudget>(serde_json::to_value(budget).unwrap())
-                .unwrap()
-                .maximum_output_recoveries(),
-            limit
-        );
-    }
-    assert!(
-        TurnBudget::default()
-            .with_maximum_output_recoveries(17)
-            .is_err()
-    );
-    assert!(
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::OutputRecoveries,
-            consumed: 0,
-            limit: 0
-        }
-        .validate()
-        .is_ok()
-    );
-    assert!(
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::ProviderAttempts,
-            consumed: 0,
-            limit: 0
-        }
-        .validate()
-        .is_err()
-    );
 }

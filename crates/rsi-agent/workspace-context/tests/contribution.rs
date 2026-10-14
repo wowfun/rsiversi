@@ -775,35 +775,36 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
             effect_id: model_effect.clone(),
         }],
     ];
-    batches.push(
-        [
-            rsi_ai_protocol::LanguageEvent::ContentStarted {
-                index: 0,
-                content: rsi_ai_protocol::ContentStart::ToolCall {
-                    id: "spawn-call".into(),
-                    name: "fixture_spawn".into(),
-                    kind: rsi_ai_protocol::ToolCallKind::Function,
+    batches.push(vec![SessionFactBody::ModelAttemptSettled {
+        turn_id: parent.turn_id().clone(),
+        effect_id: model_effect.clone(),
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+            [
+                rsi_ai_protocol::LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: rsi_ai_protocol::ContentStart::ToolCall {
+                        id: "spawn-call".into(),
+                        name: "fixture_spawn".into(),
+                        kind: rsi_ai_protocol::ToolCallKind::Function,
+                    },
                 },
-            },
-            rsi_ai_protocol::LanguageEvent::ContentDelta {
-                index: 0,
-                delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
-            },
-            rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
-            rsi_ai_protocol::LanguageEvent::Finished {
-                reason: rsi_ai_protocol::FinishReason::ToolCalls,
-                replay: None,
-            },
-        ]
-        .into_iter()
-        .map(|event| SessionFactBody::ModelEvent {
-            turn_id: parent.turn_id().clone(),
-            effect_id: model_effect.clone(),
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            event,
-        })
-        .collect(),
-    );
+                rsi_ai_protocol::LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+                },
+                rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                rsi_ai_protocol::LanguageEvent::Finished {
+                    reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                    replay: None,
+                },
+            ]
+            .into_iter()
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap(),
+    }]);
     batches.push(vec![SessionFactBody::ToolIntent {
         turn_id: parent.turn_id().clone(),
         effect_id: tool_effect.clone(),

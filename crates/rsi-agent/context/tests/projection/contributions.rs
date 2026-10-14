@@ -43,33 +43,36 @@ fn contribution_history() -> Vec<SessionFact> {
             effect_id: model.clone(),
         },
     ];
-    bodies.extend(
-        [
-            LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::ToolCall {
-                    id: "call".into(),
-                    name: "bash".into(),
-                    kind: ToolCallKind::Function,
+    bodies.push(SessionFactBody::ModelAttemptSettled {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        turn_id: turn.clone(),
+        effect_id: model.clone(),
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::ToolCall {
+                        id: "call".into(),
+                        name: "bash".into(),
+                        kind: ToolCallKind::Function,
+                    },
                 },
-            },
-            LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::ToolArguments("{}".into()),
-            },
-            LanguageEvent::ContentFinished { index: 0 },
-            LanguageEvent::Finished {
-                reason: FinishReason::ToolCalls,
-                replay: None,
-            },
-        ]
-        .map(|event| SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn.clone(),
-            effect_id: model.clone(),
-            event,
-        }),
-    );
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::ToolArguments("{}".into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                    replay: None,
+                },
+            ]
+            .into_iter()
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap(),
+    });
     bodies.push(SessionFactBody::ToolRejected {
         origin: rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: model.clone(),

@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v11_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -136,11 +136,11 @@ fn full_builder_preserves_v11_payload_and_v6_envelope_without_a_third_full_copy(
     assert_eq!(metadata["builder"]["semantic_version"], "2.9.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v11\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v12\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 11);
+    assert_eq!(decoded["version"], 12);
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
     assert!(
         decoded["turns"]
@@ -151,7 +151,7 @@ fn full_builder_preserves_v11_payload_and_v6_envelope_without_a_third_full_copy(
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "61a7fb18845b5145c51db715d9eee4fe3bdf5eca46d0acfc64ee1595b222cfc3"
+        "416486284f335fcf9c089485cffcaa3158f4c5e4c21a03ff6fa180733abd4209"
     );
     assert!(
         additional < 3 * bytes.len(),
@@ -239,7 +239,7 @@ fn assert_installation_allocations(state: &mut ModelContextState) {
             effect_id: effect.clone(),
         },
     );
-    for event in [
+    let mut events = [
         LanguageEvent::ContentStarted {
             index: 0,
             content: ContentStart::Text,
@@ -249,29 +249,27 @@ fn assert_installation_allocations(state: &mut ModelContextState) {
             delta: ContentDelta::Text("brief factual summary".into()),
         },
         LanguageEvent::ContentFinished { index: 0 },
-    ] {
-        ingest(
-            state,
-            SessionFactBody::ModelEvent {
-                purpose: ModelEventPurpose::ContextCompaction,
-                turn_id: turn.clone(),
-                effect_id: effect.clone(),
-                event,
-            },
-        );
-    }
+    ]
+    .to_vec();
     let allocated_before = ALLOCATED.load(Ordering::Relaxed);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     ingest(
         state,
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: ModelEventPurpose::ContextCompaction,
-            turn_id: turn,
+            turn_id: turn.clone(),
             effect_id: effect.clone(),
-            event: LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: None,
+            attempt: {
+                events.push(LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                });
+                rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    events.into_iter().map(|event| (0, event)),
+                    true,
+                )
+                .unwrap()
             },
         },
     );

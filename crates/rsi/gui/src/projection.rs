@@ -8,7 +8,6 @@ use rsi_agent_session_protocol::{
     TurnId,
 };
 use rsi_agent_turn_protocol::SessionObservation;
-use rsi_ai_protocol::{ContentDelta, LanguageEvent};
 use rsi_conversation::{BlockIdentity, FactField, FieldWindow, SourceIndex, SourceRef, ToolState};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
@@ -133,6 +132,8 @@ pub(crate) struct Transcript {
     pub active: Option<TurnId>,
     pub status: String,
     pub seq: u64,
+    live_model: rsi_conversation::LiveModelPreview,
+    live_keys: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -150,6 +151,79 @@ impl Serialize for Transcript {
     }
 }
 impl Transcript {
+    #[cfg(test)]
+    pub(crate) fn test_source(&mut self, key: String, source: SourceRef, text: &str) {
+        self.put_source(key, "assistant", "Assistant", source, text);
+    }
+    pub fn model(&mut self, snapshot: &rsi_agent_turn_protocol::ModelLiveSnapshot) {
+        if !self
+            .live_model
+            .update(snapshot, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some((turn, effect, purpose, preview)) = self.live_model.view() else {
+            self.blocks
+                .retain(|block| !self.live_keys.contains(&block.key) || !block.sources.is_empty());
+            self.live_keys.clear();
+            self.trim();
+            return;
+        };
+        let turn = turn.clone();
+        let effect = effect.clone();
+        let parts: Vec<_> = preview
+            .blocks()
+            .map(|part| {
+                (
+                    BlockIdentity::Model {
+                        turn: &turn,
+                        effect: &effect,
+                        index: u32::from(part.index),
+                    }
+                    .key(),
+                    part.clone(),
+                )
+            })
+            .collect();
+        self.blocks.retain(|block| {
+            !self.live_keys.contains(&block.key)
+                || !block.sources.is_empty()
+                || parts.iter().any(|(key, _)| key == &block.key)
+        });
+        self.live_keys.clear();
+        for (key, part) in parts {
+            if self
+                .blocks
+                .iter()
+                .any(|block| block.key == key && !block.sources.is_empty())
+            {
+                continue;
+            }
+            let (role, title) =
+                if purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction {
+                    ("status", "Context compaction")
+                } else if matches!(part.field, FactField::ModelReasoning { .. }) {
+                    ("reasoning", "Thinking")
+                } else {
+                    ("assistant", "Assistant")
+                };
+            self.add(key.clone(), role, title, &part.window.text, false);
+            if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                block.clipped = part.window.more;
+            }
+            self.live_keys.push(key);
+        }
+        self.turns.live(
+            &turn,
+            &effect,
+            purpose,
+            &self.live_keys,
+            &self.blocks,
+            self.seq,
+        );
+        self.trim();
+    }
     pub(crate) fn view<B, T>(&self, blocks: B, turns: T) -> TranscriptView<'_, B, T> {
         TranscriptView {
             blocks,
@@ -456,6 +530,9 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
     pub fn fact(&mut self, fact: &SessionFact) {
+        if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
+            self.live_model.started(fact.seq(), effect_id);
+        }
         self.fact_blocks(fact);
         self.turns.observe(fact, &self.blocks);
     }
@@ -542,40 +619,44 @@ impl Transcript {
                     &image.label(),
                 );
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
-                event: LanguageEvent::ContentDelta { index, delta },
                 purpose,
+                attempt,
             } => {
-                let (role, title, text, field) = match delta {
-                    ContentDelta::Text(text) => {
-                        ("assistant", "Assistant", text, FactField::ModelText)
-                    }
-                    ContentDelta::Reasoning(text) => {
-                        ("reasoning", "Reasoning", text, FactField::ModelReasoning)
-                    }
-                    ContentDelta::ToolArguments(_) => return,
-                };
-                let (role, title) = if *purpose
-                    == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
-                {
-                    ("status", "Context compaction")
-                } else {
-                    (role, title)
-                };
-                self.put_source(
-                    BlockIdentity::Model {
+                self.live_model.settle(fact.seq(), effect_id);
+                let preview =
+                    rsi_conversation::model_previews(attempt, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2);
+                for part in preview.blocks() {
+                    let (role, title) = if *purpose
+                        == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                    {
+                        ("status", "Context compaction")
+                    } else if matches!(part.field, FactField::ModelReasoning { .. }) {
+                        ("reasoning", "Reasoning")
+                    } else {
+                        ("assistant", "Assistant")
+                    };
+                    let key = BlockIdentity::Model {
                         turn: turn_id,
                         effect: effect_id,
-                        index: *index,
+                        index: u32::from(part.index),
                     }
-                    .key(),
-                    role,
-                    title,
-                    source(field),
-                    text,
-                );
+                    .key();
+                    self.put_source(
+                        key.clone(),
+                        role,
+                        title,
+                        source(part.field),
+                        &part.window.text,
+                    );
+                    if part.window.more
+                        && let Some(block) = self.blocks.iter_mut().find(|block| block.key == key)
+                    {
+                        block.clipped = true;
+                    }
+                }
             }
             SessionFactBody::TurnTerminal {
                 turn_id, outcome, ..
@@ -596,11 +677,10 @@ impl Transcript {
                     rsi_agent_session_protocol::TurnOutcome::Interrupted { reason, .. } => {
                         ("Interrupted", short(reason, 4096).into())
                     }
-                    rsi_agent_session_protocol::TurnOutcome::BudgetExceeded {
-                        consumed,
-                        limit,
-                        ..
-                    } => ("Budget exceeded", format!("{consumed} / {limit}")),
+                    rsi_agent_session_protocol::TurnOutcome::MaxTokens => (
+                        "Output limit",
+                        "Model output reached its token limit".into(),
+                    ),
                 };
                 if latest && self.active.as_ref().is_none_or(|active| active == turn_id) {
                     self.active = None;
@@ -637,13 +717,9 @@ impl Transcript {
             turn_id: turn,
             effect_id: effect,
         }
-        | SessionFactBody::ModelEvent {
+        | SessionFactBody::ModelAttemptSettled {
             turn_id: turn,
             effect_id: effect,
-            event:
-                LanguageEvent::Usage { .. }
-                | LanguageEvent::Finished { .. }
-                | LanguageEvent::Failed { .. },
             ..
         }) = fact.body()
         else {

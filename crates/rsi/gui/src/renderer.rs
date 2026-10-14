@@ -43,7 +43,7 @@ impl RenderState {
     }
     fn notice_mut(&mut self, kind: ObservationKind) -> &mut String {
         match kind {
-            ObservationKind::Facts => &mut self.fact_notice,
+            ObservationKind::Facts | ObservationKind::Models => &mut self.fact_notice,
             ObservationKind::Interactions => &mut self.interaction_notice,
             ObservationKind::Projections => &mut self.projection_notice,
         }
@@ -142,6 +142,20 @@ impl ObservationSink for Renderer {
         }
         state.transcript.observation(&update);
         state.fact_notice.clear();
+        drop(state);
+        self.changed();
+        Ok(())
+    }
+    async fn model(
+        &self,
+        snapshot: rsi_agent_turn_protocol::ObservedModel,
+    ) -> Result<(), ObservationFailure> {
+        self.ready().await?;
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        state.transcript.model(snapshot.as_ref());
         drop(state);
         self.changed();
         Ok(())

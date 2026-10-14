@@ -144,26 +144,6 @@ impl Driver {
             }
         };
         let claim_stop = stop.child_token();
-        let deadline_fired = Arc::new(AtomicBool::new(false));
-        let elapsed_budget = match self.turns.elapsed_budget(&claim) {
-            Ok(budget) => budget,
-            Err(error) => {
-                self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
-                    .await;
-                return;
-            }
-        };
-        let limit = claim.header().settings().turn_budget().maximum_elapsed_ms();
-        let deadline_task = tokio::spawn({
-            let elapsed_budget = Arc::clone(&elapsed_budget);
-            let deadline_fired = Arc::clone(&deadline_fired);
-            let claim_stop = claim_stop.clone();
-            async move {
-                elapsed_budget.exhausted().await;
-                deadline_fired.store(true, Ordering::Release);
-                claim_stop.cancel();
-            }
-        });
         let limits = self.context_limits();
         let mut fold = match ModelContextState::open(
             composition.context_builder(),
@@ -173,7 +153,6 @@ impl Driver {
         ) {
             Ok(fold) => fold,
             Err(error) => {
-                deadline_task.abort();
                 let _ignored = self
                     .finish(
                         &claim,
@@ -202,25 +181,6 @@ impl Driver {
             ),
         )
         .await;
-        deadline_task.abort();
-        if elapsed_deadline_wins(deadline_fired.load(Ordering::Acquire), &drive) {
-            let consumed = elapsed_budget.consumed_ms().max(limit);
-            if self
-                .finish_budget(
-                    &claim,
-                    job_scope.as_ref(),
-                    BudgetDimension::Elapsed,
-                    consumed,
-                    limit,
-                )
-                .await
-                .is_ok()
-            {
-                self.request_checkpoint(&claim, &composition);
-                self.retire_tracked_tools(&claim, stop);
-            }
-            return;
-        }
         self.settle_drive(&claim, &composition, job_scope.as_ref(), drive, stop)
             .await;
     }
@@ -273,59 +233,6 @@ impl Driver {
                     self.retire_tracked_tools(claim, stop);
                 }
             }
-            Err(DriveFailure::Budget {
-                dimension,
-                consumed,
-                limit,
-            }) => {
-                if self
-                    .finish_budget(claim, job_scope, dimension, consumed, limit)
-                    .await
-                    .is_ok()
-                {
-                    self.request_checkpoint(claim, composition);
-                    self.retire_tracked_tools(claim, stop);
-                }
-            }
-            Err(DriveFailure::DurableBudget {
-                dimension,
-                consumed,
-                limit,
-            }) => {
-                if publish_terminal(
-                    self.turns.as_ref(),
-                    &self.config,
-                    claim,
-                    TurnOutcome::BudgetExceeded {
-                        dimension,
-                        consumed,
-                        limit,
-                    },
-                )
-                .await
-                .is_ok()
-                {
-                    self.request_checkpoint(claim, composition);
-                    self.retire_tracked_tools(claim, stop);
-                }
-            }
-            Err(DriveFailure::SettledToolBudget {
-                dimension,
-                consumed,
-                limit,
-                identity,
-            }) => {
-                if self
-                    .finish_budget(claim, job_scope, dimension, consumed, limit)
-                    .await
-                    .is_ok()
-                {
-                    self.request_checkpoint(claim, composition);
-                    let _ignored = composition.tools().commit(&identity);
-                    self.clear_tracked_tool(claim, &identity);
-                    self.retire_tracked_tools(claim, stop);
-                }
-            }
             Err(DriveFailure::Fatal(message)) => {
                 if self
                     .finish(
@@ -357,13 +264,6 @@ impl Driver {
         let state = self.load_claim(claim, fold).await?;
         if state.terminal {
             return Ok(());
-        }
-        if let Some((dimension, consumed, limit)) = state.budget_exhausted {
-            return Err(DriveFailure::DurableBudget {
-                dimension,
-                consumed,
-                limit,
-            });
         }
         if state.concluded {
             return Err(DriveFailure::Turn(TurnOutcome::Completed));
@@ -401,7 +301,6 @@ impl Driver {
             fold,
             model,
             turn_policy,
-            state.output_recovery_ordinal,
             stop,
         )
         .await
@@ -416,7 +315,6 @@ impl Driver {
         fold: &mut ModelContextState,
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
-        mut recovery_ordinal: u64,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
@@ -474,43 +372,7 @@ impl Driver {
                     retry_attempt = retry_attempt.saturating_add(1);
                     continue;
                 }
-                ModelAttempt::Incomplete(effect_id) => {
-                    if stop.is_cancelled() {
-                        return Err(DriveFailure::Stopped);
-                    }
-                    if cancellation.is_cancelled() {
-                        return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
-                    }
-                    let limit = claim
-                        .header()
-                        .settings()
-                        .turn_budget()
-                        .maximum_output_recoveries();
-                    if recovery_ordinal >= limit {
-                        return Err(DriveFailure::Turn(TurnOutcome::BudgetExceeded {
-                            dimension: BudgetDimension::OutputRecoveries,
-                            consumed: recovery_ordinal,
-                            limit,
-                        }));
-                    }
-                    recovery_ordinal += 1;
-                    let facts = self
-                        .publish_apply(
-                            claim,
-                            fold,
-                            vec![SessionFactBody::ModelOutputRecovery {
-                                turn_id: claim.turn_id().clone(),
-                                source_model_effect_id: effect_id,
-                                ordinal: recovery_ordinal,
-                            }],
-                        )
-                        .await?;
-                    self.flush_last(claim, &facts).await?;
-                    // Re-enter step preparation for new input, selection and compaction;
-                    // only provider retries reset, not the Turn's recovery allowance.
-                    retry_attempt = 0;
-                    continue;
-                }
+                ModelAttempt::Incomplete => return Err(DriveFailure::Turn(TurnOutcome::MaxTokens)),
                 ModelAttempt::Output(effect_id, output) => (effect_id, *output),
             };
             if cancellation.is_cancelled()
@@ -866,7 +728,8 @@ impl Driver {
                 .header()
                 .settings()
                 .output_budgets()
-                .cap(&selection.model),
+                .cap(&selection.model)
+                .or(profile.default_output_tokens()),
             rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) => {
                 Some(plan.maximum_output_tokens)
             }
@@ -879,11 +742,12 @@ impl Driver {
         }
         let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
         let capture = evidence::Capture::new(&request, profile)?;
-        let prepared = match self
-            .language
-            .prepare(selection.model.clone(), request)
-            .await
-        {
+        let prepared_result = tokio::select! { biased;
+            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+            result = self.language.prepare(selection.model.clone(), request) => result,
+        };
+        let prepared = match prepared_result {
             Ok(prepared) => prepared,
             Err(error)
                 if error.kind() == ErrorKind::ContextLimit
@@ -895,6 +759,25 @@ impl Driver {
         };
         let snapshot = prepared.snapshot().clone();
         let effect_id = next_effect_id().map_err(fatal)?;
+        let reservation_cancel = combine_cancellation(cancellation, stop);
+        let mut live = self
+            .turns
+            .reserve_model_attempt(
+                claim,
+                effect_id.clone(),
+                purpose.event_purpose(),
+                reservation_cancel.token(),
+            )
+            .await
+            .map_err(|error| {
+                if stop.is_cancelled() {
+                    DriveFailure::Stopped
+                } else if cancellation.is_cancelled() {
+                    DriveFailure::Turn(TurnOutcome::Cancelled)
+                } else {
+                    failed("model_output.admission", error.to_string())
+                }
+            })?;
         let mut evidence = capture.finish(&snapshot)?;
         self.warm_evidence(claim).await?;
         self.evidence
@@ -938,27 +821,17 @@ impl Driver {
             )
             .await?;
         self.flush_last(claim, &started).await?;
+        live.started().map_err(fatal)?;
 
         let combined = combine_cancellation(cancellation, stop);
-        let stream = match prepared.start(combined.token()).await {
+        let started_stream = tokio::select! { biased;
+            () = stop.cancelled() => Err(model_cancelled()),
+            () = cancellation.cancelled() => Err(model_cancelled()),
+            result = prepared.start(combined.token()) => result,
+        };
+        let stream = match started_stream {
             Ok(stream) => stream,
-            Err(error) => {
-                combined.cancel();
-                if stop.is_cancelled() {
-                    return Err(DriveFailure::Stopped);
-                }
-                self.record_model_failure(
-                    claim,
-                    fold,
-                    &effect_id,
-                    purpose.event_purpose(),
-                    error.clone(),
-                )
-                .await?;
-                return self
-                    .retry_or_fail(&snapshot, &error, retry_attempt, cancellation, stop)
-                    .await;
-            }
+            Err(error) => futures_util::stream::once(async move { Err(error) }).boxed(),
         };
         let result = self
             .consume_model_stream(
@@ -972,6 +845,7 @@ impl Driver {
                     cancellation,
                     stop,
                     combined,
+                    live,
                 },
                 stream,
             )
@@ -997,6 +871,7 @@ impl Driver {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_lines)] // Stream admission, cancellation and durable settlement share one owner.
     pub(super) async fn consume_model_stream(
         &self,
         fold: &mut ModelContextState,
@@ -1012,70 +887,142 @@ impl Driver {
             cancellation,
             stop,
             combined,
+            mut live,
         } = attempt;
         let mut assembler = LanguageAssembler::new();
-        let mut last_flush = tokio::time::Instant::now();
+        let mut evidence = rsi_agent_session_protocol::ModelAttemptBuilder::new();
+        let mut last_live = tokio::time::Instant::now();
+        let mut live_bytes = 0_usize;
+        let mut capacity = false;
         loop {
-            let event = match stream.next().await {
-                Some(Ok(event)) => event,
-                Some(Err(error)) => {
-                    combined.cancel();
-                    if stop.is_cancelled() {
-                        return Err(DriveFailure::Stopped);
-                    }
-                    self.record_model_failure(claim, fold, effect_id, purpose, error.clone())
-                        .await?;
-                    return self
-                        .retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
-                        .await;
+            let received = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => Err(model_cancelled()),
+                () = stop.cancelled() => Err(model_cancelled()),
+                () = tokio::time::sleep_until(last_live + Duration::from_millis(50)), if live_bytes > 0 => {
+                    live.publish(evidence.prefix()).map_err(fatal)?;
+                    last_live = tokio::time::Instant::now();
+                    live_bytes = 0;
+                    continue;
                 }
-                None => {
-                    combined.cancel();
-                    return Err(failed(
-                        "provider.missing_terminal",
-                        "Language stream ended without a terminal event",
-                    ));
-                }
+                next = stream.next() => match next {
+                    Some(value) => value,
+                    None => Err(model_stream_error("Language stream ended without a terminal event")),
+                },
             };
-            assembler
-                .push(&event)
-                .map_err(|error| failed(error.code(), error.to_string()))?;
+            let mut event = received.unwrap_or_else(|error| LanguageEvent::Failed {
+                error,
+                replay: None,
+            });
+            let elapsed = live.elapsed_ms();
+            if let Err(error) = assembler.push(&event) {
+                event = LanguageEvent::Failed {
+                    error: model_stream_error(&error.to_string()),
+                    replay: None,
+                };
+            }
+            if let Err(error) = evidence.push(elapsed, &event) {
+                combined.cancel();
+                capacity = true;
+                let failure = rsi_ai_protocol::AiError::new(
+                    ErrorKind::OutputValidation,
+                    rsi_ai_protocol::ErrorPhase::Assemble,
+                    DispatchStatus::Dispatched,
+                    bounded(&error.to_string()),
+                )
+                .map_err(fatal)?
+                .with_provider_code("model_output.capacity")
+                .map_err(fatal)?;
+                event = LanguageEvent::Failed {
+                    error: failure,
+                    replay: None,
+                };
+                evidence.push(elapsed, &event).map_err(fatal)?;
+            }
+            live_bytes = live_bytes.saturating_add(match &event {
+                LanguageEvent::ContentDelta { delta, .. } => match delta {
+                    rsi_ai_protocol::ContentDelta::Text(value)
+                    | rsi_ai_protocol::ContentDelta::Reasoning(value)
+                    | rsi_ai_protocol::ContentDelta::ToolArguments(value) => value.len(),
+                },
+                _ => 0,
+            });
             let terminal = matches!(
                 event,
                 LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
             );
+            if terminal
+                || !matches!(event, LanguageEvent::ContentDelta { .. })
+                || live_bytes >= 32 * 1024
+                || last_live.elapsed() >= Duration::from_millis(50)
+            {
+                live.publish(evidence.prefix()).map_err(fatal)?;
+                last_live = tokio::time::Instant::now();
+                live_bytes = 0;
+            }
+            if !terminal {
+                continue;
+            }
+            combined.cancel();
+            let output = assembler.finish();
+            let retain_context = match &event {
+                LanguageEvent::Failed { error, .. } => {
+                    !should_retry(snapshot, error, retry_attempt)
+                        || cancellation.is_cancelled()
+                        || stop.is_cancelled()
+                }
+                _ => true,
+            };
+            let attempt = evidence.finish(retain_context).map_err(fatal)?;
             let facts = self
                 .publish_apply(
                     claim,
                     fold,
-                    vec![SessionFactBody::ModelEvent {
+                    vec![SessionFactBody::ModelAttemptSettled {
                         purpose,
                         turn_id: claim.turn_id().clone(),
                         effect_id: effect_id.clone(),
-                        event,
+                        attempt: attempt.clone(),
                     }],
                 )
                 .await?;
-            if terminal || last_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
-                self.flush_last(claim, &facts).await?;
-                last_flush = tokio::time::Instant::now();
+            self.flush_last(claim, &facts).await?;
+            live.committed(
+                facts
+                    .last()
+                    .ok_or_else(|| fatal("missing model settlement"))?
+                    .seq(),
+            )
+            .await
+            .map_err(fatal)?;
+            if capacity {
+                return Err(failed(
+                    "model_output.capacity",
+                    "Model attempt evidence exceeded its finite capacity; accepted prefix is durable",
+                ));
             }
-            if terminal {
-                combined.cancel();
-                return match assembler.finish() {
-                    Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
-                    Err(LanguageAssemblyError::Incomplete { .. }) => {
-                        Ok(ModelAttempt::Incomplete(effect_id.clone()))
-                    }
-                    Err(LanguageAssemblyError::Provider { error, .. }) => {
-                        self.retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
-                            .await
-                    }
-                    Err(LanguageAssemblyError::Protocol(error)) => {
-                        Err(failed(error.code(), error.to_string()))
-                    }
-                };
+            if stop.is_cancelled() {
+                return Err(DriveFailure::Stopped);
             }
+            if cancellation.is_cancelled() {
+                return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+            }
+            if let LanguageEvent::Failed { error, .. } = event {
+                return self
+                    .retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
+                    .await;
+            }
+            return match output {
+                Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
+                Err(LanguageAssemblyError::Incomplete { .. }) => Ok(ModelAttempt::Incomplete),
+                Err(LanguageAssemblyError::Provider { error, .. }) => {
+                    self.retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
+                        .await
+                }
+                Err(LanguageAssemblyError::Protocol(error)) => {
+                    Err(failed(error.code(), error.to_string()))
+                }
+            };
         }
     }
 
@@ -1579,10 +1526,7 @@ impl Driver {
             conclusion: settlement.conclusion,
         };
         let returned = if settlement.domains.is_empty() {
-            let facts = self
-                .publish_apply(claim, fold, vec![body])
-                .await
-                .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
+            let facts = self.publish_apply(claim, fold, vec![body]).await?;
             self.flush_last(claim, &facts).await?;
             facts.into_iter().next().expect("one Tool result")
         } else {
@@ -1601,8 +1545,7 @@ impl Driver {
                     },
                 )
                 .await
-                .map_err(crate::execution_support::turn_failure)
-                .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
+                .map_err(crate::execution_support::turn_failure)?;
             let span = receipt
                 .commit()
                 .fact_span()
@@ -1776,9 +1719,13 @@ impl Driver {
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let combined = combine_cancellation(cancellation, stop);
         let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
-        let mut extensions =
-            crate::execution_support::tool_start_extensions(self.turns.as_ref(), claim, effect_id)
-                .map_err(fatal)?;
+        let mut extensions = crate::execution_support::tool_start_extensions(
+            self.turns.as_ref(),
+            claim,
+            effect_id,
+            self.config.optional_tool_evidence_bytes,
+        )
+        .map_err(fatal)?;
         if scheduling == ToolScheduling::ExclusiveFinal
             && let Ok(parking) = EXECUTOR_LANE_PARKING.try_with(Clone::clone)
         {
@@ -1789,7 +1736,9 @@ impl Driver {
         if let Some(program) = program {
             extensions = extensions.with(Arc::new(program)).map_err(fatal)?;
         }
-        let result = prepared
+        let result = tokio::select! {
+            biased;
+            result = prepared
             .start(ToolStart {
                 cancellation: combined.token(),
                 policy: ToolExecutionPolicy {
@@ -1801,7 +1750,10 @@ impl Driver {
                 job_scope: job_scope.cloned(),
                 extensions,
             })
-            .await;
+            => result,
+            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+        };
         combined.cancel();
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
@@ -1890,7 +1842,13 @@ impl Driver {
         };
         let tools = composition.tools();
         self.track_tool(claim, composition.clone(), identity.clone());
-        let retained = tools.wait(identity, stop.clone()).await;
+        let cancellation = self.turns.cancellation(claim).map_err(fatal)?;
+        let retained = tokio::select! {
+            biased;
+            result = tools.wait(identity, stop.clone()) => result,
+            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+        };
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
         }
@@ -1941,32 +1899,6 @@ impl Driver {
                 "Tool Runtime wait returned before the retained invocation settled",
             )),
         }
-    }
-
-    pub(super) async fn record_model_failure(
-        &self,
-        claim: &TurnClaim,
-        fold: &mut ModelContextState,
-        effect_id: &EffectId,
-        purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        error: rsi_ai_protocol::AiError,
-    ) -> std::result::Result<(), DriveFailure> {
-        let facts = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ModelEvent {
-                    purpose,
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    event: LanguageEvent::Failed {
-                        error,
-                        replay: None,
-                    },
-                }],
-            )
-            .await?;
-        self.flush_last(claim, &facts).await
     }
 
     pub(super) async fn wait_retry(
@@ -2047,29 +1979,6 @@ impl Driver {
                 true,
             ),
         }
-    }
-
-    pub(super) async fn finish_budget(
-        &self,
-        claim: &TurnClaim,
-        job_scope: Option<&JobScopeAuthority>,
-        dimension: BudgetDimension,
-        consumed: u64,
-        limit: u64,
-    ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
-        let outcome = self
-            .resolve_outcome(
-                claim,
-                job_scope,
-                TurnOutcome::BudgetExceeded {
-                    dimension,
-                    consumed,
-                    limit,
-                },
-            )
-            .await;
-        let terminal = publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await?;
-        Ok(vec![terminal])
     }
 
     pub(super) const fn context_limits(&self) -> ContextLimits {
@@ -2317,4 +2226,23 @@ fn tool_approval_review(
             .to_owned(),
         request_sha256: identity.request_sha256().to_owned(),
     })
+}
+
+fn model_cancelled() -> rsi_ai_protocol::AiError {
+    rsi_ai_protocol::AiError::new(
+        ErrorKind::Cancelled,
+        rsi_ai_protocol::ErrorPhase::Stream,
+        DispatchStatus::Dispatched,
+        "Model attempt cancelled with its accepted prefix retained",
+    )
+    .expect("static model cancellation")
+}
+fn model_stream_error(message: &str) -> rsi_ai_protocol::AiError {
+    rsi_ai_protocol::AiError::new(
+        ErrorKind::Protocol,
+        rsi_ai_protocol::ErrorPhase::Stream,
+        DispatchStatus::Dispatched,
+        bounded(message),
+    )
+    .expect("bounded model error")
 }

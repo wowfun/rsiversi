@@ -109,6 +109,19 @@ provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
 
+Stream fragments settle into one model-attempt Fact. Reopening a completed
+180-fragment response retains its first fragment and one exact source reference;
+fragment count does not manufacture history or source pagination. Settings checks
+use the current output-cap array, preserving exact JSON when the typed form cannot
+represent an integer. The document-only schema fixture covers numeric controls.
+
+`RSI_WEB_REPORT=/absolute/new/report node fixtures/rsi/web-product/settlement.mjs`
+uses the paired publication in Chromium to observe a gated Unicode stream,
+explicitly reconnect and reopen it after document refresh, then settle with `MaxTokens`. Desktop and
+narrow screenshots cover both preview and durable output. It verifies one source
+reference, no duplicate text, the visible stop reason and no automatic second
+model request. This fixture uses the isolated deterministic provider.
+
 The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
 clean document before recording success. Product notices fail the live check;
 successful model output alone does not establish visual acceptance.

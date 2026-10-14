@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-ui-protocol = { path = "../ui-protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }

@@ -211,3 +211,38 @@ pub(super) async fn export(
         verifier.finish()?;
     }))
 }
+
+pub(super) async fn models(
+    handle: &Handle,
+) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+    let handle = handle.frozen();
+    let operation = Operation::ModelObserve;
+    let mut source = open(&handle, operation, ()).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        let mut decoder = rsi_agent_turn_protocol::ModelLiveDecoder::default();
+        let mut reservation = None;
+        let mut last = None;
+        // The decoder shares prefix blocks between revisions; keep their credit alive.
+        let mut retained_prefix = None;
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let page: rsi_agent_turn_protocol::ModelLivePage = decode(&handle, operation, &message)?;
+            if page.session_id != handle.target().session_id { Err(client::malformed(operation))?; }
+            if page.index == 0 {
+                if reservation.is_some() { Err(client::malformed(operation))?; }
+                reservation = Some(handle.state.observations.reserve_model_decode(page.encoded_bytes).map_err(|error| retention_error(&error))?);
+            }
+            if let Some(snapshot) = decoder.push(page).map_err(|_| client::malformed(operation))? {
+                if last.as_ref().is_some_and(|(effect, revision)| effect == &snapshot.effect_id && *revision >= snapshot.revision) {
+                    Err(client::malformed(operation))?;
+                }
+                last = Some((snapshot.effect_id.clone(), snapshot.revision));
+                let snapshot = reservation.take().ok_or_else(|| client::malformed(operation))?.retain(snapshot).map_err(|error| retention_error(&error))?;
+                drop(retained_prefix.replace(snapshot.clone()));
+                drop(message);
+                yield snapshot;
+            }
+        }
+        decoder.finish().map_err(|_| client::malformed(operation))?;
+    }))
+}

@@ -55,6 +55,69 @@ impl FieldWindow {
             more: end < text.len(),
         })
     }
+    /// Reads concatenated UTF-8 parts without materializing the entire source.
+    ///
+    /// # Errors
+    /// Rejects invalid window limits, offset overflow and failed source parts.
+    pub fn text_parts(
+        parts: impl Iterator<Item = Result<String, WindowError>>,
+        start: usize,
+        maximum: usize,
+    ) -> Result<Self, WindowError> {
+        limit(maximum)?;
+        let mut position = 0_usize;
+        let mut selected_start = None;
+        let mut text = String::new();
+        for part in parts {
+            let part = part?;
+            let length = part.len();
+            if position.saturating_add(length) <= start {
+                position += length;
+                continue;
+            }
+            if text.len() == maximum && !part.is_empty() {
+                let start = selected_start.unwrap_or(position);
+                return Ok(Self {
+                    end: start + text.len(),
+                    start,
+                    text,
+                    more: true,
+                });
+            }
+            let mut begin = start.saturating_sub(position).min(length);
+            while !part.is_char_boundary(begin) {
+                begin += 1;
+            }
+            let mut end = begin + (maximum - text.len()).min(length - begin);
+            while !part.is_char_boundary(end) {
+                end -= 1;
+            }
+            if begin < length {
+                selected_start.get_or_insert(position + begin);
+            }
+            text.push_str(&part[begin..end]);
+            if end < length {
+                let start = selected_start.unwrap_or(position + begin);
+                return Ok(Self {
+                    end: start + text.len(),
+                    start,
+                    text,
+                    more: true,
+                });
+            }
+            position = position
+                .checked_add(length)
+                .ok_or_else(|| WindowError::Serialization("field offset overflow".into()))?;
+        }
+        let start = selected_start.unwrap_or(position);
+        Ok(Self {
+            end: start + text.len(),
+            start,
+            text,
+            more: false,
+        })
+    }
+
     /// Serializes through a bounded prefix-skipping writer and stops after the window.
     ///
     /// # Errors
@@ -102,6 +165,7 @@ struct Slice {
     capacity: usize,
     complete: bool,
 }
+
 impl Write for Slice {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let skip = self.start.saturating_sub(self.position).min(bytes.len());
@@ -126,5 +190,28 @@ impl Write for Slice {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    #[test]
+    fn fragmented_unicode_windows_match_contiguous_source() {
+        let parts = ["ab界", "🙂c", "def", "中文", "end"];
+        let whole = parts.concat();
+        for start in 0..whole.len() + 4 {
+            for maximum in 4..20 {
+                assert_eq!(
+                    super::FieldWindow::text_parts(
+                        parts.iter().map(|part| Ok((*part).to_owned())),
+                        start,
+                        maximum
+                    )
+                    .unwrap(),
+                    super::FieldWindow::text(&whole, start, maximum).unwrap(),
+                    "start={start}, max={maximum}"
+                );
+            }
+        }
     }
 }

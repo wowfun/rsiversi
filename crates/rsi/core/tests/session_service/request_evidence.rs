@@ -210,7 +210,7 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn optional_evidence_budget_fallback_still_dispatches_exactly_one_request() {
+async fn request_evidence_above_former_turn_budget_is_retained_and_dispatches_once() {
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = requests.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -231,7 +231,6 @@ async fn optional_evidence_budget_fallback_still_dispatches_exactly_one_request(
     let settings = running.settings_access().unwrap();
     let current = settings.read("rsi.agent").await.unwrap();
     let mut value = current.value.clone();
-    value["turn_budget"]["maximum_generated_record_bytes"] = serde_json::json!(16_384);
     value["system_prompt"] = serde_json::json!("fixture ".repeat(4096));
     settings
         .replace("rsi.agent", &current.version(), value)
@@ -264,9 +263,7 @@ async fn optional_evidence_budget_fallback_still_dispatches_exactly_one_request(
     assert!(matches!(
         intents[0].body(),
         SessionFactBody::ModelIntent {
-            evidence: RequestEvidence::Unavailable {
-                reason: rsi_agent_session_protocol::EvidenceUnavailable::Budget
-            },
+            evidence: RequestEvidence::Available { .. },
             ..
         }
     ));
@@ -289,9 +286,7 @@ async fn optional_evidence_budget_fallback_still_dispatches_exactly_one_request(
         .unwrap();
     assert!(matches!(
         response.content,
-        EvidencePageContent::Unavailable {
-            reason: rsi_agent_session_protocol::EvidenceUnavailable::Budget
-        }
+        EvidencePageContent::Available { total_bytes, .. } if total_bytes > 16_384
     ));
     assert!(running.shutdown().await.is_clean());
     server.abort();

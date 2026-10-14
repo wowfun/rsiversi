@@ -65,6 +65,7 @@ struct MemoryState {
 
 #[derive(Clone, Debug)]
 struct MemorySession {
+    model_coordinates: BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>,
     last_activity_ms: u64,
     header: SessionHeader,
     facts: Vec<Arc<SessionFact>>,

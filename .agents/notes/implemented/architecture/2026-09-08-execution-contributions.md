@@ -2,6 +2,9 @@
 name: Ordered execution contributions preserve durable input and policy provenance
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Cumulative allowances are superseded; contribution ordering and atomic publication remain authoritative.
+
 ## Problem
 
 Workspace interpretation inside Kernel prevents built-in behavior from using

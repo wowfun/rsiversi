@@ -163,7 +163,7 @@ impl AgentKernel {
         program: Option<&EffectId>,
     ) -> TurnResult<&'a TurnControl> {
         let turn = self.validate_claim(state, claim)?;
-        if turn.cancel_requested || turn.terminal.is_some() || turn.budget_exhausted.is_some() {
+        if turn.cancel_requested || turn.terminal.is_some() {
             return Err(TurnError::Invalid(
                 "contribution capture follows cancellation or the Turn ending boundary".into(),
             ));
@@ -186,17 +186,6 @@ impl AgentKernel {
             }
         } else {
             turn_state::ensure_no_active_effect(turn)?;
-        }
-        let consumed = turn
-            .elapsed
-            .consumed(turn.accepted_at_ms, self.inner.clock.now_ms());
-        let limit = claim.header().settings().turn_budget().maximum_elapsed_ms();
-        if consumed >= limit {
-            return Err(TurnError::BudgetExceeded {
-                dimension: BudgetDimension::Elapsed,
-                consumed,
-                limit,
-            });
         }
         Ok(turn)
     }

@@ -23,6 +23,7 @@ struct RetentionState {
     retained: AtomicUsize,
 }
 
+#[derive(Debug)]
 struct ByteReservation {
     state: Arc<RetentionState>,
     bytes: usize,
@@ -47,7 +48,41 @@ impl Drop for ByteReservation {
     }
 }
 
+/// Reserved live decoder capacity; transferred to the delivered immutable observation.
+#[derive(Debug)]
+pub struct ModelObservationReservation(ByteReservation);
+impl ModelObservationReservation {
+    /// Transfers already-reserved capacity after canonical decoding.
+    pub fn retain(self, value: crate::ModelLiveSnapshot) -> Result<ObservedModel> {
+        if value.encoded_len() != self.0.bytes {
+            return Err(TurnError::Invalid(
+                "live model decode reservation differs".into(),
+            ));
+        }
+        Ok(ObservedModel(Arc::new(Retained {
+            value: Arc::new(value),
+            _lease: self.0,
+        })))
+    }
+}
 impl ObservationRetention {
+    /// Reserves a bounded complete snapshot before materializing remote pages.
+    pub fn reserve_model_decode(&self, bytes: usize) -> Result<ModelObservationReservation> {
+        if !(4096..=32 * 1024 * 1024 + 4096).contains(&bytes) {
+            return Err(TurnError::Capacity);
+        }
+        self.reserve(bytes).map(ModelObservationReservation)
+    }
+
+    /// Charges an immutable model snapshot through its final observed clone.
+    pub fn retain_model(&self, value: Arc<crate::ModelLiveSnapshot>) -> Result<ObservedModel> {
+        let lease = self.reserve(value.encoded_len())?;
+        Ok(ObservedModel(Arc::new(Retained {
+            value,
+            _lease: lease,
+        })))
+    }
+
     /// Creates a pool within the standard maximum, large enough for any valid Fact.
     pub fn new(maximum: usize) -> Result<Self> {
         if !(MAXIMUM_SESSION_FACT_BYTES..=DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES)
@@ -191,6 +226,12 @@ observed_handle!(
     ObservedControl,
     AgentControlRecord,
     "Immutable observed control retaining its byte reservation through the last clone."
+);
+
+observed_handle!(
+    ObservedModel,
+    crate::ModelLiveSnapshot,
+    "Immutable live model snapshot retaining observer byte credits through all clones."
 );
 
 #[cfg(test)]

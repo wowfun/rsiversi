@@ -93,30 +93,33 @@ pub(super) fn intent(effect: &str, evidence: RequestEvidence) -> SessionFactBody
         evidence,
     }
 }
-fn event(effect: &str, event: LanguageEvent) -> SessionFactBody {
-    SessionFactBody::ModelEvent {
+fn settlement(effect: &str, events: impl IntoIterator<Item = LanguageEvent>) -> SessionFactBody {
+    SessionFactBody::ModelAttemptSettled {
         turn_id: turn(),
         effect_id: EffectId::new(effect).unwrap(),
-        event,
         purpose: ModelEventPurpose::Conversation,
+        attempt: ModelAttemptLog::from_events(events.into_iter().map(|event| (0, event)), true)
+            .unwrap(),
     }
 }
-fn delta(effect: &str, text: &str) -> SessionFactBody {
-    event(
+fn answer(effect: &str, text: &str) -> SessionFactBody {
+    settlement(
         effect,
-        LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text(text.into()),
-        },
-    )
-}
-fn finished(effect: &str) -> SessionFactBody {
-    event(
-        effect,
-        LanguageEvent::Finished {
-            reason: FinishReason::Stop,
-            replay: None,
-        },
+        [
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text(text.into()),
+            },
+            LanguageEvent::ContentFinished { index: 0 },
+            LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: None,
+            },
+        ],
     )
 }
 pub(super) async fn append(
@@ -184,32 +187,37 @@ async fn sections_are_exact_redacted_unicode_and_same_in_both_encodings() {
         vec![
             accepted("你好 🦀"),
             intent("one", evidence()),
-            event(
+            settlement(
                 "one",
-                LanguageEvent::ContentStarted {
-                    index: 1,
-                    content: ContentStart::Reasoning,
-                },
+                [
+                    LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: ContentStart::Reasoning,
+                    },
+                    LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: ContentDelta::Reasoning("private readable thought".into()),
+                    },
+                    LanguageEvent::ContentFinished { index: 0 },
+                    LanguageEvent::ContentStarted {
+                        index: 1,
+                        content: ContentStart::Text,
+                    },
+                    LanguageEvent::ContentDelta {
+                        index: 1,
+                        delta: ContentDelta::Text(("visible ").into()),
+                    },
+                    LanguageEvent::ContentDelta {
+                        index: 1,
+                        delta: ContentDelta::Text(("answer").into()),
+                    },
+                    LanguageEvent::ContentFinished { index: 1 },
+                    LanguageEvent::Finished {
+                        reason: FinishReason::Stop,
+                        replay: None,
+                    },
+                ],
             ),
-            event(
-                "one",
-                LanguageEvent::ContentDelta {
-                    index: 1,
-                    delta: ContentDelta::Reasoning("private readable thought".into()),
-                },
-            ),
-            event("one", LanguageEvent::ContentFinished { index: 1 }),
-            event(
-                "one",
-                LanguageEvent::ContentStarted {
-                    index: 0,
-                    content: ContentStart::Text,
-                },
-            ),
-            delta("one", "visible "),
-            delta("one", "answer"),
-            event("one", LanguageEvent::ContentFinished { index: 0 }),
-            finished("one"),
         ],
     )
     .await;
@@ -300,9 +308,12 @@ async fn cut_is_fixed_before_lazy_consumption_and_partial_generation_does_not_re
         vec![
             accepted("original"),
             intent("completed", evidence()),
-            finished("completed"),
+            answer("completed", "done"),
             intent("partial", evidence()),
-            delta("partial", "partial record"),
+            SessionFactBody::ModelStarted {
+                turn_id: turn(),
+                effect_id: EffectId::new("partial").unwrap(),
+            },
         ],
     )
     .await;
@@ -315,28 +326,23 @@ async fn cut_is_fixed_before_lazy_consumption_and_partial_generation_does_not_re
     )
     .await
     .unwrap();
-    append(
-        &store,
-        &header,
-        end,
-        vec![delta("partial", "AFTER CUT"), finished("partial")],
-    )
-    .await;
+    append(&store, &header, end, vec![answer("partial", "AFTER CUT")]).await;
     let mut bytes = Vec::new();
     write_stream(source, &mut bytes).await.unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(!text.contains("AFTER CUT"));
-    assert!(text.contains("partial record"));
+    assert!(!text.contains("partial record"));
     let value: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["last_provider_request"]["effect_id"], "completed");
     assert_eq!(value["last_provider_response"]["effect_id"], "completed");
-    assert!(
-        value["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["partial"] == true)
-    );
+    let assistant: Vec<_> = value["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["role"] == "assistant")
+        .collect();
+    assert!(assistant.iter().all(|r| r["effect_id"] == "completed"));
+    assert_eq!(assistant.last().unwrap()["partial"], false);
 }
 
 #[tokio::test]
@@ -403,7 +409,7 @@ async fn empty_history_and_missing_evidence_have_explicit_availability() {
                     reason: EvidenceUnavailable::Budget,
                 },
             ),
-            finished("one"),
+            answer("one", "done"),
         ],
     )
     .await;
@@ -424,10 +430,13 @@ async fn complete_history_over_32_mib_is_read_lazily_in_bounded_pages() {
     let store = Arc::new(MemoryStore::new());
     let header = header();
     let text = "界🦀".repeat(32_768);
-    let mut bodies = vec![accepted("large"), intent("one", evidence())];
-    bodies.extend((0..160).map(|_| delta("one", &text)));
-    bodies.push(finished("one"));
-    append(&store, &header, 0, bodies).await;
+    let mut bodies = vec![accepted("large")];
+    for index in 0..40 {
+        let effect = format!("large-{index}");
+        bodies.push(intent(&effect, evidence()));
+        bodies.push(answer(&effect, &text.repeat(5)));
+    }
+    let end = append(&store, &header, 0, bodies).await;
     store.take_fact_read_cursors();
     let mut source = export(
         store.clone(),
@@ -466,13 +475,13 @@ async fn complete_history_over_32_mib_is_read_lazily_in_bounded_pages() {
         }
     }
     assert!(verifier.finish().unwrap() > 32 * 1024 * 1024);
-    assert_eq!(reads, vec![0, 32, 64, 96, 128, 160]);
+    assert_eq!(reads, vec![0, 32, 64]);
     assert!(chunks > 500);
     append(
         &store,
         &header,
-        163,
-        vec![intent("next", evidence()), finished("next")],
+        end,
+        vec![intent("next", evidence()), answer("next", "done")],
     )
     .await;
     let diagnostic: Value =
@@ -582,7 +591,7 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
             },
             accepted("selected"),
             intent("selected-call", evidence()),
-            finished("selected-call"),
+            answer("selected-call", "done"),
             SessionFactBody::TurnTerminal {
                 turn_id: turn(),
                 outcome: TurnOutcome::Completed,
@@ -694,39 +703,32 @@ async fn tools_media_usage_and_provider_private_replay_are_projected_without_pay
         vec![
             accepted("tools"),
             intent("one", evidence()),
-            event(
+            settlement(
                 "one",
-                LanguageEvent::ContentStarted {
-                    index: 0,
-                    content: ContentStart::ToolCall {
-                        id: "call".into(),
-                        name: "lookup".into(),
-                        kind: ToolCallKind::Function,
+                [
+                    LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: ContentStart::ToolCall {
+                            id: "call".into(),
+                            name: "lookup".into(),
+                            kind: ToolCallKind::Function,
+                        },
                     },
-                },
-            ),
-            event(
-                "one",
-                LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::ToolArguments(
-                        "{\"replay\":\"ordinary tool data\"}".into(),
-                    ),
-                },
-            ),
-            event("one", LanguageEvent::ContentFinished { index: 0 }),
-            event(
-                "one",
-                LanguageEvent::Usage {
-                    usage: TokenUsage::new(10, 20, None, None, None).unwrap(),
-                },
-            ),
-            event(
-                "one",
-                LanguageEvent::Finished {
-                    reason: FinishReason::ToolCalls,
-                    replay: Some(replay),
-                },
+                    LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: ContentDelta::ToolArguments(
+                            "{\"replay\":\"ordinary tool data\"}".into(),
+                        ),
+                    },
+                    LanguageEvent::ContentFinished { index: 0 },
+                    LanguageEvent::Usage {
+                        usage: TokenUsage::new(10, 20, None, None, None).unwrap(),
+                    },
+                    LanguageEvent::Finished {
+                        reason: FinishReason::ToolCalls,
+                        replay: Some(replay),
+                    },
+                ],
             ),
             SessionFactBody::ToolIntent {
                 turn_id: turn(),
@@ -783,16 +785,24 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
     let mut bodies = vec![
         accepted(&"original task ".repeat(5000)),
         intent("conversation", evidence()),
-        event(
+        settlement(
             "conversation",
-            LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::Text,
-            },
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text((&"original answer ".repeat(7000)).into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            ],
         ),
-        delta("conversation", &"original answer ".repeat(7000)),
-        event("conversation", LanguageEvent::ContentFinished { index: 0 }),
-        finished("conversation"),
         SessionFactBody::TurnTerminal {
             turn_id: turn(),
             outcome: TurnOutcome::Completed,
@@ -845,16 +855,24 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
         .plan;
     let mut summary = vec![
         intent("summary", evidence()),
-        event(
+        settlement(
             "summary",
-            LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::Text,
-            },
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text(("INTERNAL SUMMARY").into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            ],
         ),
-        delta("summary", "INTERNAL SUMMARY"),
-        event("summary", LanguageEvent::ContentFinished { index: 0 }),
-        finished("summary"),
     ];
     for body in &mut summary {
         match body {
@@ -864,7 +882,7 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
                 *turn_id = current.clone();
                 *purpose = ModelPurpose::ContextCompaction(Box::new(plan.clone()));
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id, purpose, ..
             } => {
                 *turn_id = current.clone();
@@ -1066,7 +1084,7 @@ fn program_tool_exports_preserve_exact_origin_and_internal_evidence() {
     .unwrap();
     let mut projection = projection::Projection::default();
     let record = projection
-        .record(header().session_id(), &fact, false, None)
+        .record(header().session_id(), &fact, None)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1106,7 +1124,7 @@ fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
     )
     .unwrap();
     let record = projection::Projection::default()
-        .record(header().session_id(), &fact, false, None)
+        .record(header().session_id(), &fact, None)
         .unwrap()
         .unwrap();
     assert_eq!(record["source"], serde_json::to_value(source).unwrap());
@@ -1125,7 +1143,7 @@ async fn diagnostic_export_uses_shared_admission_and_releases_on_stream_drop() {
         vec![
             accepted("bounded diagnostic"),
             intent("completed", evidence()),
-            finished("completed"),
+            answer("completed", "done"),
         ],
     )
     .await;
@@ -1191,7 +1209,7 @@ async fn reconstruction_capacity_is_reported_after_initial_diagnostic_admission(
         vec![
             accepted(&"x".repeat(64 * 1024)),
             intent("completed", evidence()),
-            finished("completed"),
+            answer("completed", "done"),
         ],
     )
     .await;

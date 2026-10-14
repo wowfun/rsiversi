@@ -488,20 +488,28 @@ mod workspace_tests {
     use std::path::Path;
     #[test]
     fn home_abbreviation_uses_path_components_and_preserves_workspace_authority() {
-        let home = Some(Path::new("/home/kevin"));
-        assert_eq!(workspace_label("/home/kevin", home), "~");
-        assert_eq!(
-            workspace_label("/home/kevin/Projects/你好", home),
-            "~/Projects/你好"
-        );
-        assert_eq!(
-            workspace_label("/home/kevin2/project", home),
-            "/home/kevin2/project"
-        );
-        assert_eq!(workspace_label("/work/project", home), "/work/project");
-        assert_eq!(
-            workspace_label("/home/kevin/project", None),
-            "/home/kevin/project"
-        );
+        let (home, child, label, sibling, unrelated) = if cfg!(windows) {
+            (
+                r"C:\home\kevin",
+                r"C:\home\kevin\Projects\你好",
+                "~/Projects\\你好",
+                r"C:\home\kevin2\project",
+                r"C:\work\project",
+            )
+        } else {
+            (
+                "/home/kevin",
+                "/home/kevin/Projects/你好",
+                "~/Projects/你好",
+                "/home/kevin2/project",
+                "/work/project",
+            )
+        };
+        let selected_home = Some(Path::new(home));
+        assert_eq!(workspace_label(home, selected_home), "~");
+        assert_eq!(workspace_label(child, selected_home), label);
+        assert_eq!(workspace_label(sibling, selected_home), sibling);
+        assert_eq!(workspace_label(unrelated, selected_home), unrelated);
+        assert_eq!(workspace_label(child, None), child);
     }
 }

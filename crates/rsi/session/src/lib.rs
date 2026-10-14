@@ -1325,6 +1325,17 @@ impl SessionHandle for LocalSessionHandle {
         })
     }
 
+    async fn observe_models(&self) -> Result<rsi_session_protocol::ModelLiveStream> {
+        use futures_util::StreamExt as _;
+        let _admission = self.admit()?;
+        let source = self
+            .turns
+            .observe_models(self.session_id())
+            .await
+            .map_err(map_turn_error)?;
+        Ok(self.guard_stream(source.map(|item| item.map_err(map_turn_error))))
+    }
+
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
         use futures_util::StreamExt as _;
         let _admission = self.admit()?;

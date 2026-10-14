@@ -11,9 +11,7 @@ pub(super) async fn repair_unfinished_session(
         return Ok(());
     }
     store.validate_session(session_id).await?;
-    let header = store.header(session_id).await?;
-    let (durable_seq, turns, turn_order) =
-        load_control_state(store, None, session_id, header.settings().turn_budget()).await?;
+    let (durable_seq, turns, turn_order) = load_control_state(store, None, session_id).await?;
     if turns.len() != turn_order.len()
         || turn_order
             .iter()
@@ -47,12 +45,6 @@ pub(super) async fn repair_unfinished_session(
         let mut repair = Vec::with_capacity(2);
         let outcome = if turn.cancel_requested {
             TurnOutcome::Cancelled
-        } else if let Some((dimension, consumed, limit)) = turn.budget_exhausted {
-            TurnOutcome::BudgetExceeded {
-                dimension,
-                consumed,
-                limit,
-            }
         } else {
             let effect = turn.effects.values().find_map(|effect| match effect {
                 ActiveEffect::Model { started: true, .. } => Some(EffectKind::Model),
@@ -272,7 +264,6 @@ pub(super) async fn load_control_state(
     store: &Arc<dyn SessionStore>,
     admission: Option<&KernelInner>,
     session_id: &SessionId,
-    budget: &TurnBudget,
 ) -> Result<(u64, BTreeMap<TurnId, TurnControl>, Vec<TurnId>)> {
     let evidence_cache = Mutex::default();
     let header = store.header(session_id).await?;
@@ -333,7 +324,7 @@ pub(super) async fn load_control_state(
                     .map_err(|error| KernelError::Invariant(error.to_string()))?;
                     super::execution::validate_intent_price(&header, fact.body())
                         .map_err(|error| KernelError::Invariant(error.to_string()))?;
-                    apply_recovered_fact(&mut turns, &mut order, budget, &header, fact)?;
+                    apply_recovered_fact(&mut turns, &mut order, &header, fact)?;
                     turn_cursor = fact.seq();
                 }
                 if !turn_page.has_more {
@@ -345,20 +336,11 @@ pub(super) async fn load_control_state(
                     ));
                 }
             }
-            let turn = turns.get_mut(&open_turn.turn_id).ok_or_else(|| {
-                KernelError::Invariant(
-                    "Store open-turn index selected a terminal Fact stream".into(),
-                )
-            })?;
-            restore_domain_usage(
-                store.as_ref(),
-                session_id,
-                &open_turn.turn_id,
-                page.durable_seq,
-                budget,
-                turn,
-            )
-            .await?;
+            if !turns.contains_key(&open_turn.turn_id) {
+                return Err(KernelError::Invariant(
+                    "Store selected a terminal Fact stream".into(),
+                ));
+            }
             open_cursor = open_turn.accepted_seq;
         }
         if !page.has_more {
@@ -370,25 +352,6 @@ pub(super) async fn load_control_state(
             ));
         }
     }
-}
-
-async fn restore_domain_usage(
-    store: &dyn SessionStore,
-    session: &SessionId,
-    turn_id: &TurnId,
-    expected_fact_seq: u64,
-    budget: &TurnBudget,
-    turn: &mut TurnControl,
-) -> Result<()> {
-    let usage = store.read_turn_domain_usage(session, turn_id).await?;
-    if usage.durable_fact_seq != expected_fact_seq {
-        return Err(KernelError::Invariant(
-            "Store Fact watermark changed during domain usage load".into(),
-        ));
-    }
-    turn_state::add_generated_usage(&mut turn.budget_usage, usage.records, usage.bytes)
-        .map_err(kernel_turn_error)?;
-    turn_state::check_budget_usage(budget, turn.budget_usage).map_err(kernel_turn_error)
 }
 
 pub(super) async fn read_stored_outcome(

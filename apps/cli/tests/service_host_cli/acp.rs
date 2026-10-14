@@ -286,7 +286,7 @@ async fn truncated_chat(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
+async fn output_limit_reports_max_tokens_without_continuation_over_stdio() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -301,11 +301,6 @@ async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
     let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
     let mut settings: Value =
         serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-    settings["rsi.agent"]["turn_budget"] = json!(
-        rsi_agent_session_protocol::TurnBudget::default()
-            .with_maximum_output_recoveries(0)
-            .unwrap()
-    );
     settings["rsi.agent"]["output_budgets"] = json!([{
         "model":{"deployment":"fixture","model":"fixture-model"}, "max_output_tokens":8192
     }]);
@@ -328,7 +323,7 @@ async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
         assert_eq!(
             requests.len(),
             1,
-            "zero recovery allowance must not dispatch another request"
+            "output limit must stop without dispatching another request"
         );
         assert_eq!(requests[0]["max_tokens"], 8192);
     }

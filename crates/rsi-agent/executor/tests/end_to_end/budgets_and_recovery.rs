@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn elapsed_budget_bounds_a_provider_prepare_that_never_returns() {
+async fn cancellation_bounds_a_provider_prepare_that_never_returns() {
     let stack = BaseStack::activate().await;
     let fixture = Arc::new(PendingLanguage {
         entered: Arc::new(Notify::new()),
@@ -14,33 +14,30 @@ async fn elapsed_budget_bounds_a_provider_prepare_that_never_returns() {
                 "test.language.pending-prepare",
                 "language",
                 UpdateMode::Replayable,
-                Arc::new(PendingLanguageFactory { fixture }),
+                Arc::new(PendingLanguageFactory {
+                    fixture: fixture.clone(),
+                }),
             ),
             Value::Null,
         )
         .await
         .unwrap();
     let executor_fiber = stack.activate_executor("executor-elapsed-budget").await;
-    let budget = TurnBudget::new(20, 64, 256, 65_536, 67_108_864).unwrap();
 
-    let (_, outcome) = stack
-        .submit_and_wait_with_header("never prepare", None, header_with_budget(budget))
-        .await;
-
-    assert!(matches!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            consumed,
-            limit: 20,
-        } if consumed >= 20
-    ));
+    let (result, ()) = tokio::join!(
+        stack.submit_and_wait_with_header("never prepare", None, header()),
+        async {
+            fixture.entered.notified().await;
+            stack.cancel_current().await;
+        }
+    );
+    assert_eq!(result.1, TurnOutcome::Cancelled);
     stack.dispose(language_fiber, executor_fiber).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)] // Keep admission, terminal eviction, retained settlement, and final generation release in one public scenario.
-async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
+async fn cancellation_retires_an_admitted_tool_after_it_settles() {
     let stack = BaseStack::activate().await;
     let (observer, observer_owner) = observation::install(&stack).await;
     observer.release.cancel();
@@ -73,8 +70,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
             json!({"executor_id":"executor-elapsed-tool","observe_execution":true}),
         )
         .await;
-    let budget = TurnBudget::new(50, 64, 256, 65_536, 67_108_864).unwrap();
-    let fresh = stack.fresh(header_with_budget(budget)).await;
+    let fresh = stack.fresh(header()).await;
     let tool_runtime = stack.tool_runtime();
 
     let turn = tokio::spawn({
@@ -108,19 +104,13 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
         }
     });
     entered.notified().await;
+    stack.cancel_current().await;
     drop(stack.composition.pin.lock().unwrap().take());
     let (submitted, outcome) = tokio::time::timeout(std::time::Duration::from_secs(2), turn)
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            limit: 50,
-            ..
-        }
-    ));
+    assert!(matches!(outcome, TurnOutcome::Cancelled));
     assert_eq!(
         stack.composition.owner_drops.load(Ordering::Acquire),
         0,
@@ -150,7 +140,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     assert_eq!(
         work.status(),
         rsi_agent_turn_protocol::ControlledWorkStatus::Running,
-        "durable elapsed terminal precedes retained Tool settlement"
+        "durable cancelled terminal precedes retained Tool settlement"
     );
 
     assert!(
@@ -176,7 +166,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
         }
     })
     .await
-    .expect("elapsed terminal must retire the later-settled retained Tool identity");
+    .expect("cancelled terminal must retire the later-settled retained Tool identity");
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while stack.composition.owner_drops.load(Ordering::Acquire) != 1 {
             tokio::task::yield_now().await;
@@ -202,7 +192,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)] // Keep executor replacement, durable recovery, terminal eviction, and generation ownership in one scenario.
-async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirement() {
+async fn recovered_pending_tool_keeps_its_generation_pin_through_cancelled_retirement() {
     let stack = BaseStack::activate().await;
     let tools = Arc::clone(&stack.tool_registrar);
     let entered = Arc::new(Notify::new());
@@ -229,7 +219,6 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         .activate_language("test.language.recovered-tool", fixture)
         .await;
     let first_executor = stack.activate_executor("executor-before-recovery").await;
-    let budget = TurnBudget::new(2_000, 64, 256, 65_536, 67_108_864).unwrap();
     let turns = stack
         .runtime
         .root()
@@ -239,7 +228,7 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         .submit(SubmitTurn {
             reasoning_effort: None,
             turn_id: client_turn_id(),
-            session: stack.fresh(header_with_budget(budget)).await,
+            session: stack.fresh(header()).await,
             text: "recover the pending tool".into(),
             model: None,
             sandbox: None,
@@ -248,11 +237,12 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
         .await
-        .expect("the Tool did not start before its elapsed recovery fixture deadline");
+        .expect("the Tool did not start before its fixture deadline");
     assert!(first_executor.dispose().await.is_clean());
 
     let second_executor = stack.activate_executor("executor-after-recovery").await;
     let tool_runtime = stack.tool_runtime();
+    stack.cancel_current().await;
     drop(stack.composition.pin.lock().unwrap().take());
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
@@ -267,15 +257,8 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         }
     })
     .await
-    .expect("the inherited elapsed deadline did not terminate recovery");
-    assert!(matches!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            limit: 2_000,
-            ..
-        }
-    ));
+    .expect("the inherited cancellation did not terminate recovery");
+    assert!(matches!(outcome, TurnOutcome::Cancelled));
     assert_eq!(
         stack.composition.owner_drops.load(Ordering::Acquire),
         0,
@@ -434,7 +417,6 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
             "retained_tool_wait_ms":200
         }))
         .await;
-    let budget = TurnBudget::new(50, 64, 256, 65_536, 67_108_864).unwrap();
 
     let first = tokio::spawn({
         let turns = stack
@@ -442,7 +424,7 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
             .root()
             .lookup_local::<TurnServiceContract>()
             .unwrap();
-        let fresh = stack.fresh(header_with_budget(budget)).await;
+        let fresh = stack.fresh(header()).await;
         async move {
             let submitted = turns
                 .submit(SubmitTurn {
@@ -468,14 +450,9 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
         }
     });
     entered.notified().await;
+    stack.cancel_current().await;
     let (submitted, first_outcome) = first.await.unwrap();
-    assert!(matches!(
-        first_outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            ..
-        }
-    ));
+    assert!(matches!(first_outcome, TurnOutcome::Cancelled));
 
     let (_, second_outcome) = stack
         .resume_and_wait("the next claim must run", submitted.session_id)

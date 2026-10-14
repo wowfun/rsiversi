@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, DomainStateView,
-    EffectId, ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
+    ActivationId, AgentControlRecord, AgentMessage, AgentPath, DomainStateView, EffectId,
+    ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
     SessionHeader, SessionId, StepId, TurnId, TurnOutcome, validate_identifier,
     validate_safe_diagnostic,
 };
@@ -57,10 +57,13 @@ pub use projection::{
 pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;
 pub use command::{SessionCommands, SessionCommandsContract};
+mod model_live;
 mod observation;
 pub use domain::{DomainMutation, DomainMutationReceipt, DomainReadGuard};
+pub use model_live::*;
 pub use observation::{
-    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
+    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ModelObservationReservation, ObservationRetention,
+    ObservedControl, ObservedFact, ObservedModel,
 };
 
 /// Kernel-owned issuer for exact resume admissions.
@@ -865,6 +868,13 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             "this Turn service does not support durable message claims".into(),
         ))
     }
+    /// Observes coalesced live model prefixes independently of durable cursors.
+    async fn observe_models(&self, session_id: &SessionId) -> Result<ModelLiveStream> {
+        let _ = session_id;
+        Err(TurnError::Invalid(
+            "live model observation is unsupported".into(),
+        ))
+    }
     /// Observes durable control and Fact streams after independent cursors.
     async fn observe_session(
         &self,
@@ -1222,19 +1232,10 @@ pub struct ContextCheckpoint {
     pub bytes: rsi_api_protocol::RetainedBytes,
 }
 
-/// Read-only Kernel-owned execution elapsed budget.
-#[async_trait]
-pub trait ElapsedBudget: fmt::Debug + Send + Sync + 'static {
-    /// Consumed execution milliseconds, excluding Kernel-authorized human waits.
-    fn consumed_ms(&self) -> u64;
-    /// Waits until the shared elapsed budget is irreversibly exhausted.
-    async fn exhausted(&self) -> u64;
-}
-
 /// Single-use human wait ownership, including both released execution permits.
 #[async_trait]
 pub trait HumanWait: fmt::Debug + Send + 'static {
-    /// Reacquires permits and resumes the shared clock; cancellation closes the wait.
+    /// Reacquires permits ; cancellation closes the wait.
     /// A one-minute durability timeout stops this waiter; owned cleanup continues
     /// until the parked activation's durable resume is confirmed.
     async fn resume(self: Box<Self>, cancellation: CancellationToken) -> Result<()>;
@@ -1243,6 +1244,15 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Reserves one bounded attempt before its dispatch, cancelled with this stage.
+    async fn reserve_model_attempt(
+        &self,
+        claim: &TurnClaim,
+        effect_id: EffectId,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        cancellation: CancellationToken,
+    ) -> Result<Box<dyn ModelAttemptLease>>;
+
     /// Publishes one exact claim's read-only controlled-work observation.
     fn publish_controlled_work(&self, claim: &TurnClaim, source: ControlledWork) -> Result<()> {
         let _ = (claim, source);
@@ -1258,9 +1268,7 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, source);
         Ok(())
     }
-    /// Returns the Kernel-owned read-only elapsed-budget watch for this exact claim.
-    fn elapsed_budget(&self, claim: &TurnClaim) -> Result<Arc<dyn ElapsedBudget>>;
-    /// Parks both execution permits and pauses elapsed time around a human interaction.
+    /// Parks both execution permits around a human interaction.
     async fn park_human_wait(
         &self,
         claim: &TurnClaim,
@@ -1736,16 +1744,6 @@ pub enum TurnError {
     /// The session's durable Agent preset cannot produce a healthy generation.
     #[error("Agent composition is unavailable: {0}")]
     Composition(String),
-    /// One frozen turn budget prevented further work admission.
-    #[error("Agent turn budget exceeded for {dimension:?}: consumed {consumed}, limit {limit}")]
-    BudgetExceeded {
-        /// Exhausted dimension.
-        dimension: BudgetDimension,
-        /// Proposed or elapsed consumption at rejection.
-        consumed: u64,
-        /// Immutable turn limit.
-        limit: u64,
-    },
     /// The caller cancelled one interruptible Agent operation.
     #[error("Agent turn operation was cancelled")]
     Cancelled,

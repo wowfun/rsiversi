@@ -29,7 +29,6 @@ async fn read_projection(
         .checked_add(1)
         .ok_or_else(|| TurnError::Invariant("reply cursor overflow".into()))?;
     let mut scanned = 0usize;
-    let mut events = Vec::new();
     for _ in 0..SCAN_PAGES {
         let (limit, bytes) = store_reads::page_limit(inner, MAXIMUM_FACTS_PER_READ);
         let (page, _permit, _lease) =
@@ -54,27 +53,21 @@ async fn read_projection(
                 continue;
             }
             match fact.body() {
-                SessionFactBody::ModelIntent {
+                SessionFactBody::ModelAttemptSettled {
                     effect_id,
-                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                    attempt,
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     ..
                 } => {
                     let mut reply = Reply::default();
                     reply.start(effect_id.clone());
-                    for fact in events.into_iter().rev() {
-                        if let SessionFactBody::ModelEvent {
-                            effect_id, event, ..
-                        } = fact
-                        {
-                            reply.event(&effect_id, &event);
-                        }
+                    for item in attempt.events() {
+                        let (_, event) =
+                            item.map_err(|error| TurnError::Invalid(error.to_string()))?;
+                        reply.event(effect_id, &event);
                     }
                     return Ok(reply.text);
                 }
-                SessionFactBody::ModelEvent {
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    ..
-                } => events.push(fact.into_body()),
                 SessionFactBody::TurnAccepted { .. } => return Ok(None),
                 _ => {}
             }

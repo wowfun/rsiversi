@@ -622,25 +622,94 @@ mod tests {
         );
     }
     #[test]
+    fn cached_scenes_render_successive_source_free_live_text() {
+        use rsi_agent_session_protocol::{EffectId, ModelAttemptBuilder, ModelEventPurpose};
+        use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus};
+        use rsi_ai_protocol::{ContentDelta, ContentStart, LanguageEvent};
+        for markdown in [false, true] {
+            let mut state = state();
+            let turn = TurnId::new("turn").unwrap();
+            let effect = EffectId::new("model").unwrap();
+            state.transcript.apply(
+                &SessionFact::new(
+                    1,
+                    1,
+                    SessionFactBody::ModelStarted {
+                        turn_id: turn.clone(),
+                        effect_id: effect.clone(),
+                    },
+                )
+                .unwrap(),
+            );
+            let mut builder = ModelAttemptBuilder::new();
+            builder
+                .push(
+                    0,
+                    &LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: ContentStart::Text,
+                    },
+                )
+                .unwrap();
+            let mut capture = SceneCapture::default();
+            let mut renderer = Renderer::default();
+            let mut expected = String::new();
+            for (revision, text) in [(1, "streaming 界"), (2, " next 🦀")] {
+                expected.push_str(text);
+                builder
+                    .push(
+                        revision,
+                        &LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: ContentDelta::Text(text.into()),
+                        },
+                    )
+                    .unwrap();
+                state.transcript.model(&ModelLiveSnapshot {
+                    session_id: state.header.session_id().clone(),
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                    purpose: ModelEventPurpose::Conversation,
+                    revision,
+                    prefix: builder.prefix(),
+                    status: ModelLiveStatus::Streaming,
+                });
+                let mut input = input(&state);
+                input.markdown = markdown;
+                let bytes = capture.capture(&input, 80, 24).unwrap().encode().unwrap();
+                let (buffer, _) = renderer
+                    .render(Scene::decode(&bytes).unwrap(), 80, 24)
+                    .unwrap();
+                let screen: String = buffer
+                    .content
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect();
+                let compact: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+                let expected: String = expected.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(compact.contains(&expected), "{screen}");
+                assert!(
+                    state
+                        .transcript
+                        .blocks
+                        .iter()
+                        .all(|block| block.sources().is_empty())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn markdown_scene_preserves_code_context_copy_and_mode_at_clipped_anchors() {
         let mut state = state();
         let raw = "# Heading\n\n**bold** &amp; 中文 👩‍💻\n\n```rust\n  first();\n  second();\n```\n";
         for (i, text) in raw.split_inclusive('\n').enumerate() {
-            state.transcript.apply(
-                &SessionFact::new(
-                    i as u64 + 1,
-                    i as u64 + 1,
-                    SessionFactBody::ModelEvent {
-                        turn_id: TurnId::new("markdown").unwrap(),
-                        effect_id: rsi_agent_session_protocol::EffectId::new("answer").unwrap(),
-                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                        event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                            index: 0,
-                            delta: rsi_ai_protocol::ContentDelta::Text(text.into()),
-                        },
-                    },
-                )
-                .unwrap(),
+            state.transcript.test_span(
+                i as u64 + 1,
+                "markdown",
+                "answer",
+                0,
+                rsi_ai_protocol::ContentDelta::Text(text.into()),
             );
         }
         let anchor = state.transcript.blocks[0]
@@ -705,25 +774,12 @@ mod tests {
                 )
                 .unwrap();
             }
-            state.transcript.apply(
-                &SessionFact::new(
-                    seq,
-                    seq,
-                    SessionFactBody::ModelEvent {
-                        turn_id: TurnId::new("reasoning-turn").unwrap(),
-                        effect_id: rsi_agent_session_protocol::EffectId::new(format!(
-                            "reasoning-effect-{}",
-                            (seq - 1) / 8
-                        ))
-                        .unwrap(),
-                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                        event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                            index: 0,
-                            delta: rsi_ai_protocol::ContentDelta::Reasoning(text),
-                        },
-                    },
-                )
-                .unwrap(),
+            state.transcript.test_span(
+                seq,
+                "reasoning-turn",
+                &format!("reasoning-effect-{}", (seq - 1) / 8),
+                0,
+                rsi_ai_protocol::ContentDelta::Reasoning(text),
             );
         }
         let block = &state.transcript.blocks[0];
@@ -1183,7 +1239,7 @@ mod application_tests {
         }
     }
     #[test]
-    fn v13_schema_rejects_stale_v12_and_completion_overflow() {
+    fn v15_schema_rejects_stale_v14_and_completion_overflow() {
         let request = crate::wire::Request {
             identity: crate::wire::Identity {
                 attachment: 0,
@@ -1196,8 +1252,8 @@ mod application_tests {
         };
         let mut model: serde_json::Value =
             serde_json::from_slice(&crate::wire::request_header(&request).unwrap()).unwrap();
-        assert_eq!(model["schema"]["version"], 13);
-        model["schema"]["version"] = serde_json::json!(12);
+        assert_eq!(model["schema"]["version"], 15);
+        model["schema"]["version"] = serde_json::json!(14);
         assert!(crate::wire::parse_header(&serde_json::to_vec(&model).unwrap()).is_err());
         let scene = Scene::from(ApplicationScene {
             completion: Some(Completion {

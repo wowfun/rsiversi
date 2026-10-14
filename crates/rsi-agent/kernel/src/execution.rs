@@ -2,6 +2,16 @@ use super::*;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    async fn reserve_model_attempt(
+        &self,
+        claim: &TurnClaim,
+        effect_id: EffectId,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        cancellation: CancellationToken,
+    ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
+        model_live::reserve(self, claim, effect_id, purpose, cancellation).await
+    }
+
     fn publish_controlled_work(
         &self,
         claim: &TurnClaim,
@@ -55,19 +65,6 @@ impl TurnExecution for AgentKernel {
         executor: rsi_tools_protocol::ToolLaneParkingAuthority,
     ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
         self.park_human(claim, executor).await
-    }
-    fn elapsed_budget(
-        &self,
-        claim: &TurnClaim,
-    ) -> TurnResult<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
-        let state = lock_state(&self.inner);
-        let turn = self.validate_claim(&state, claim)?;
-        Ok(Arc::new(elapsed::Watch {
-            elapsed: Arc::clone(&turn.elapsed),
-            clock: Arc::clone(&self.inner.clock),
-            accepted: turn.accepted_at_ms,
-            limit: claim.header().settings().turn_budget().maximum_elapsed_ms(),
-        }))
     }
     fn register(&self, executor_id: String) -> TurnResult<ExecutorLease> {
         validate_identifier("executor", &executor_id)
@@ -370,7 +367,7 @@ impl TurnExecution for AgentKernel {
         let (expected_fact_seq, activation_id, current_step, original) = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
-            if turn_is_ending(turn) || turn.cancel_requested || turn.budget_exhausted.is_some() {
+            if turn_is_ending(turn) || turn.cancel_requested {
                 return Ok(0);
             }
             let session = state
@@ -454,17 +451,10 @@ impl TurnExecution for AgentKernel {
                 .map_err(|error| TurnError::Invalid(error.to_string()))
             })
             .collect::<TurnResult<Vec<_>>>()?;
-        let budget_usage = enforce_turn_budget(
-            claim.header().settings().turn_budget(),
-            &original,
-            &facts,
-            timestamp_ms,
-        )?;
         let mut staged = original;
         for fact in &facts {
             apply_executor_body(&mut staged, fact.body())?;
         }
-        staged.budget_usage = budget_usage;
         let controls = pending
             .iter()
             .enumerate()
@@ -914,6 +904,7 @@ impl TurnExecution for AgentKernel {
                 .submission_admission
                 .acquire(claim.session_id())
                 .await?;
+            validate_model_identities(self, claim, &bodies).await?;
             let attempted = try_publish_once(self, claim, bodies)?;
             drop(admission);
             match attempted {
@@ -993,17 +984,6 @@ fn turn_is_ending(turn: &TurnControl) -> bool {
 }
 
 fn validate_publication_gate(turn: &TurnControl, bodies: &[SessionFactBody]) -> TurnResult<()> {
-    if bodies
-        .iter()
-        .filter(|body| matches!(body, SessionFactBody::ModelOutputRecovery { .. }))
-        .take(2)
-        .count()
-        > 1
-    {
-        return Err(TurnError::Invalid(
-            "executor publication admits at most one output recovery marker".into(),
-        ));
-    }
     if turn_is_ending(turn)
         && !bodies
             .iter()
@@ -1080,6 +1060,59 @@ pub(super) fn validate_executor_fact_ownership(bodies: &[SessionFactBody]) -> Tu
     Ok(())
 }
 
+// The caller holds Session submission admission through validation and publication.
+// Pending intents stay resident until their Store commit, so checking them before
+// the durable index covers a concurrent flush without retaining the Turn history.
+async fn validate_model_identities(
+    kernel: &AgentKernel,
+    claim: &TurnClaim,
+    bodies: &[SessionFactBody],
+) -> TurnResult<()> {
+    let mut identities = std::collections::BTreeSet::new();
+    for body in bodies {
+        if let SessionFactBody::ModelIntent { effect_id, .. } = body
+            && !identities.insert(effect_id)
+        {
+            return Err(TurnError::Invalid(
+                "model effect identity was reused within a Turn".into(),
+            ));
+        }
+    }
+    if identities.is_empty() {
+        return Ok(());
+    }
+    {
+        let state = lock_state(&kernel.inner);
+        kernel.validate_claim(&state, claim)?;
+        let session = state
+            .sessions
+            .get(claim.session_id())
+            .expect("validated claim session exists");
+        if session.pending.iter().any(|fact| {
+            matches!(fact.body(), SessionFactBody::ModelIntent { turn_id, effect_id, .. }
+            if turn_id == claim.turn_id() && identities.contains(effect_id))
+        }) {
+            return Err(TurnError::Invalid(
+                "model effect identity was reused within a Turn".into(),
+            ));
+        }
+    }
+    for effect in identities {
+        if kernel
+            .inner
+            .store
+            .contains_model_intent(claim.session_id(), claim.turn_id(), effect)
+            .await
+            .map_err(turn_store_error)?
+        {
+            return Err(TurnError::Invalid(
+                "model effect identity was reused within a Turn".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Staging keeps budget, intent fences, and speculative suffix mutation all-or-nothing.
 pub(super) fn try_publish_once(
     kernel: &AgentKernel,
@@ -1087,7 +1120,7 @@ pub(super) fn try_publish_once(
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {
     validate_executor_fact_ownership(&bodies)?;
-    let (original, header, base_seq) = {
+    let (original, base_seq) = {
         let state = lock_state(&kernel.inner);
         let original = kernel.validate_claim(&state, claim)?;
         validate_publication_gate(original, &bodies)?;
@@ -1104,7 +1137,6 @@ pub(super) fn try_publish_once(
         }
         (
             clone_turn_control(original),
-            Arc::clone(&session.header),
             session.live_seq().map_err(turn_kernel_error)?,
         )
     };
@@ -1116,12 +1148,6 @@ pub(super) fn try_publish_once(
         facts,
         bytes: added_bytes,
     } = stage_execution_facts(kernel, claim, &original, base_seq, bodies)?;
-    staged.budget_usage = enforce_turn_budget(
-        header.settings().turn_budget(),
-        &original,
-        &facts,
-        kernel.inner.clock.now_ms().max(1),
-    )?;
     let mut state = lock_state(&kernel.inner);
     let turn = kernel.validate_claim(&state, claim)?;
     if !terminal_publication && turn_is_ending(turn) {

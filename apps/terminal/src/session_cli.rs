@@ -110,6 +110,14 @@ impl rsi_client::ObservationSink for CliObservationSink {
             .await
             .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
     }
+    async fn model(
+        &self,
+        snapshot: rsi_agent_turn_protocol::ObservedModel,
+    ) -> Result<(), rsi_client::ObservationFailure> {
+        self.send(CliEvent::Model { snapshot })
+            .await
+            .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
+    }
     async fn interactions(
         &self,
         snapshot: rsi_session_protocol::InteractionSnapshot,
@@ -152,6 +160,7 @@ impl rsi_client::ObservationSink for CliObservationSink {
     ) {
         let name = match kind {
             rsi_client::ObservationKind::Facts => "Session",
+            rsi_client::ObservationKind::Models => "Model",
             rsi_client::ObservationKind::Interactions => "Interaction",
             rsi_client::ObservationKind::Projections => "Extension state",
         };

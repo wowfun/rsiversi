@@ -25,7 +25,6 @@ pub struct AutomationRule {
     pub explore_on_failure: bool,
     pub authorized_catalog_digest: String,
     pub model: rsi_ai_protocol::ModelRef,
-    pub turn_budget: rsi_agent_session_protocol::TurnBudget,
     pub max_rounds: u8,
 }
 impl AutomationRule {
@@ -48,16 +47,8 @@ impl AutomationRule {
             return Err("invalid automation rule".into());
         }
         digest(&self.authorized_catalog_digest)?;
-        self.turn_budget.validate().map_err(|e| e.to_string())?;
-        if self.max_rounds == 0
-            || self.max_rounds > 2
-            || self.turn_budget.maximum_elapsed_ms() > 120_000
-            || self.turn_budget.maximum_provider_attempts() > 8
-            || self.turn_budget.maximum_tool_calls() > 16
-            || self.turn_budget.maximum_generated_records() > 256
-            || self.turn_budget.maximum_generated_record_bytes() > 1_048_576
-        {
-            return Err("standing exploration budget exceeds authorized bounds".into());
+        if self.max_rounds == 0 || self.max_rounds > 2 {
+            return Err("standing exploration round limit exceeds authorized bounds".into());
         }
         self.checks.validate()?;
         self.policy(&format!(

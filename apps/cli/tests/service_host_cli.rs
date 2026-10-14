@@ -106,6 +106,10 @@ fn assert_remote_interactive_session(fixture: &CliFixture) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one daemon lifecycle and its persisted model evidence"
+)]
 async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
@@ -168,8 +172,21 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert!(lines.iter().any(|line| {
         line["type"] == "fact"
-            && line["fact"]["type"] == "model_event"
-            && line.to_string().contains("hello from daemon")
+            && serde_json::from_value::<rsi_agent_session_protocol::SessionFact>(
+                line["fact"].clone(),
+            )
+            .is_ok_and(|fact| match fact.body() {
+                rsi_agent_session_protocol::SessionFactBody::ModelAttemptSettled {
+                    attempt,
+                    ..
+                } => attempt.events().any(|item| {
+                    matches!(item,
+                            Ok((_, rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                delta: rsi_ai_protocol::ContentDelta::Text(text), ..
+                            })) if text.contains("hello from daemon"))
+                }),
+                _ => false,
+            })
     }));
     assert_eq!(lines.last().unwrap()["type"], "outcome");
 

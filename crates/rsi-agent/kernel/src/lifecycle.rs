@@ -116,6 +116,7 @@ impl AgentKernel {
         })?;
         let kernel = Self {
             inner: Arc::new(KernelInner {
+                model_live: model_live::Models::new(limits.maximum_live_model_bytes),
                 program_bytes: rsi_api_protocol::ByteBudget::default(),
                 execution_messages: execution_admission::Messages::default(),
                 tasks: TaskTracker::new(),
@@ -1148,8 +1149,7 @@ impl AgentKernel {
             return load.wait().await;
         }
         let load_guard = SessionLoadGuard::new(&self.inner, session_id.clone(), Arc::clone(&load));
-        let budget = header.settings().turn_budget().clone();
-        let loaded = load_control_state(&self.inner.store, Some(&self.inner), &session_id, &budget)
+        let loaded = load_control_state(&self.inner.store, Some(&self.inner), &session_id)
             .await
             .map_err(turn_kernel_error);
         let result = {

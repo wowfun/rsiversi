@@ -1,12 +1,12 @@
 use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, TurnId, TurnOutcome,
+    AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
+    TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, MAXIMUM_STORE_FACT_PAGE_BYTES, SessionStore, StoreError,
 };
 use rsi_agent_testkit::{MemoryStore, assert_mechanical_store_contract};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef};
+use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
 
 fn header() -> SessionHeader {
@@ -47,14 +47,31 @@ fn model_delta(seq: u64, turn_id: &TurnId, text: String) -> SessionFact {
     SessionFact::new(
         seq,
         seq,
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn_id.clone(),
-            effect_id: EffectId::new("effect").unwrap(),
-            event: LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Text(text),
-            },
+            effect_id: rsi_agent_session_protocol::EffectId::new(format!("model-{seq}")).unwrap(),
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    rsi_ai_protocol::LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: rsi_ai_protocol::ContentStart::Text,
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text(text),
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                    rsi_ai_protocol::LanguageEvent::Finished {
+                        reason: rsi_ai_protocol::FinishReason::Stop,
+                        replay: None,
+                    },
+                ]
+                .into_iter()
+                .map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
         },
     )
     .unwrap()
@@ -160,27 +177,23 @@ async fn memory_store_fact_pages_stop_before_the_aggregate_byte_bound() {
         })
         .await
         .unwrap();
-    for seq in 2..=3 {
+    for seq in 2..=4 {
         store
             .append(AppendBatch {
                 session_id: session.clone(),
                 expected_seq: seq - 1,
                 header: None,
-                facts: (vec![model_delta(
-                    seq,
-                    &turn,
-                    "x".repeat(MAX_LANGUAGE_OUTPUT_BYTES),
-                )])
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+                facts: (vec![model_delta(seq, &turn, "x".repeat(23 * 1024 * 1024))])
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             })
             .await
             .unwrap();
     }
 
     let page = store.read_facts(&session, 0, 8).await.unwrap();
-    assert_eq!(page.facts.len(), 2);
+    assert_eq!(page.facts.len(), 3);
     assert!(!page.caught_up());
     assert!(
         page.facts

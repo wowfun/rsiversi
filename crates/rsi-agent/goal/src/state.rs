@@ -1,6 +1,6 @@
 //! Bounded semantic codec and effect-free state transitions.
 
-use rsi_agent_session_protocol::{DomainRequestId, MessageId, TurnBudget, TurnId, TurnOutcome};
+use rsi_agent_session_protocol::{DomainRequestId, MessageId, TurnId, TurnOutcome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,8 +24,6 @@ pub struct Goal {
     pub constraints: String,
     /// Explicit positive maximum automatic parent rounds.
     pub max_rounds: u64,
-    /// Exact immutable Header budget shared by those rounds.
-    pub turn_budget: TurnBudget,
     /// Allocations charged atomically with message acceptance, without refunds.
     pub allocated_rounds: u64,
     /// Durable task phase; independent of live execution authorization.
@@ -125,8 +123,8 @@ pub enum RoundOutcome {
     PartialFailed,
     /// Unknown external effect after recovery.
     Interrupted,
-    /// One immutable Turn budget exhausted.
-    BudgetExceeded,
+    /// The model reached its requested output token limit.
+    MaxTokens,
 }
 
 impl From<&TurnOutcome> for RoundOutcome {
@@ -137,50 +135,25 @@ impl From<&TurnOutcome> for RoundOutcome {
             TurnOutcome::Failed { .. } => Self::Failed,
             TurnOutcome::PartialFailed { .. } => Self::PartialFailed,
             TurnOutcome::Interrupted { .. } => Self::Interrupted,
-            TurnOutcome::BudgetExceeded { .. } => Self::BudgetExceeded,
+            TurnOutcome::MaxTokens => Self::MaxTokens,
         }
     }
 }
 
-/// Checked aggregate allowances for automatic parent Turns only.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GoalAllowance {
-    /// Sum of parent elapsed-time limits in milliseconds.
-    pub elapsed_ms: u64,
-    /// Maximum parent provider attempts, including compaction.
-    pub provider_attempts: u64,
-    /// Maximum parent Tool calls.
-    pub tool_calls: u64,
-    /// Maximum parent generated records.
-    pub generated_records: u64,
-    /// Maximum parent generated record bytes.
-    pub generated_record_bytes: u64,
-}
+/// Default maximum automatic parent rounds.
+pub const DEFAULT_MAX_ROUNDS: u64 = 256;
+/// Largest integer represented exactly by all supported clients.
+pub const MAXIMUM_GOAL_ROUNDS: u64 = 9_007_199_254_740_991;
 
-impl GoalAllowance {
-    /// Checks every dimension and multiplication before any Goal allocation.
-    ///
-    /// # Errors
-    /// Rejects zero rounds, an invalid Turn budget or any aggregate overflow.
-    pub fn new(rounds: u64, budget: &TurnBudget) -> Result<Self, String> {
-        budget.validate().map_err(|error| error.to_string())?;
-        if rounds == 0 {
-            return Err("Goal max_rounds must be explicitly positive".into());
-        }
-        let multiply = |value: u64| {
-            value
-                .checked_mul(rounds)
-                .ok_or_else(|| "Goal allowance overflow".to_owned())
-        };
-        Ok(Self {
-            elapsed_ms: multiply(budget.maximum_elapsed_ms())?,
-            provider_attempts: multiply(budget.maximum_provider_attempts())?,
-            tool_calls: multiply(budget.maximum_tool_calls())?,
-            generated_records: multiply(budget.maximum_generated_records())?,
-            generated_record_bytes: multiply(budget.maximum_generated_record_bytes())?,
-        })
+/// Validates a positive safe-integer round count.
+///
+/// # Errors
+/// Rejects zero and values above the cross-client integer bound.
+pub fn validate_max_rounds(rounds: u64) -> Result<(), String> {
+    if rounds == 0 || rounds > MAXIMUM_GOAL_ROUNDS {
+        return Err("Goal max_rounds must be a positive safe integer".into());
     }
+    Ok(())
 }
 
 /// Explicit application state operations. These do not confer a live lease.
@@ -196,9 +169,10 @@ pub enum GoalAction {
         /// Additional task constraints.
         constraints: String,
         /// Explicit maximum round allocation.
-        max_rounds: u64,
+        #[serde(default)]
+        max_rounds: Option<u64>,
     },
-    /// Re-enable eligibility without resetting allocations or frozen budget.
+    /// Re-enable eligibility without resetting allocated rounds.
     Resume {
         /// Exact current Goal identity.
         id: DomainRequestId,
@@ -221,7 +195,7 @@ impl GoalState {
     /// # Errors
     /// Rejects a different codec or any invalid bounded Goal state.
     pub fn decode(snapshot: &rsi_agent_session_protocol::DomainSnapshot) -> Result<Self, String> {
-        if snapshot.identity().id() != crate::GOAL_DOMAIN || snapshot.identity().version() != 1 {
+        if snapshot.identity().id() != crate::GOAL_DOMAIN || snapshot.identity().version() != 2 {
             return Err("Goal domain codec is unavailable".into());
         }
         let state: Self = serde_json::from_value(snapshot.state().value().clone())
@@ -247,7 +221,7 @@ impl GoalState {
     pub fn apply(
         &mut self,
         action: GoalAction,
-        budget: &TurnBudget,
+        default_max_rounds: u64,
         draft: bool,
     ) -> Result<(), String> {
         let cancelling = matches!(&action, GoalAction::Cancel { .. });
@@ -267,8 +241,7 @@ impl GoalState {
                     id,
                     objective,
                     constraints,
-                    max_rounds,
-                    turn_budget: budget.clone(),
+                    max_rounds: max_rounds.unwrap_or(default_max_rounds),
                     allocated_rounds: 0,
                     phase: GoalPhase::Active,
                     reason: None,
@@ -326,7 +299,7 @@ impl Goal {
     fn validate(&self) -> Result<(), String> {
         safe_text(&self.objective, 8192, false)?;
         safe_text(&self.constraints, 4096, true)?;
-        GoalAllowance::new(self.max_rounds, &self.turn_budget)?;
+        validate_max_rounds(self.max_rounds)?;
         if self.allocated_rounds > self.max_rounds
             || (self.allocated_rounds == 0) != self.reservation.is_none()
         {

@@ -1,25 +1,27 @@
 # rsi-agent-context
 
-MaxTokens output is incomplete evidence, never an assistant message or a Tool
-batch. The fold retains its reported Conversation usage for pressure planning
-but excludes all its content and provider replay from requests. A validated
-ModelOutputRecovery marker supplies a fixed, bounded developer instruction to
-split remaining work into smaller calls without concatenating partial arguments.
-This instruction applies only to the owning live Turn's Conversation requests,
-not to compaction or subsequent Turns. Full replay and checkpoints preserve the
-same projection. Input pressure reserves the greater of the declared default
-output reserve and the explicit request cap.
-Recovery instructions reserve message and encoded-byte capacity before ordinary
-projection and canonical pressure planning. They remain outside canonical summary
-content and view digests, and cannot turn a fitting projection into a late limit.
-If protected current input and the recovery instruction cannot fit together,
-recovery fails with context.limit; it cannot discard protected input or split an
-active Turn to make room.
+Language history is projected from atomic `ModelAttemptSettled` evidence.
+Final failed, cancelled and max-token attempts contribute their safe text and
+reasoning with an explicit interruption marker; incomplete calls never enter
+Tool authority or replay state. Intermediate retry failures remain diagnostic.
+Raw retained history triggers compaction at 16 MiB or 2,048 messages toward
+8 MiB or 1,024 messages, independently of the pruned provider view. Complete
+interaction units within an active Turn are eligible. Preflight occurs before
+the next admitted unit can exceed 32 MiB or 4,096 messages; an irreducible unit
+that cannot fit fails explicitly with `context.limit`.
+While still above the target, another summary requires at least a 1% reduction
+in a dimension that was above its target before the summary, with neither
+message count nor byte weight increasing. Tiny reductions cannot prolong a
+billable recovery series; insufficient progress reports `context.limit`.
+
+Input pressure reserves the greater of the declared default output reserve and
+the explicit request cap. Full replay and checkpoints preserve the same safe
+interrupted-output projection.
 
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.9.0, Session format 21, the v11 fold
+The allocation golden binds builder 2.9.0, Session format 22, the v12 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and

@@ -4,7 +4,7 @@ use super::{
     decimal, field,
 };
 use rsi_agent_session_protocol::{AgentMessageContent, SessionFact, SessionFactBody};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+use rsi_ai_protocol::LanguageEvent;
 use rsi_conversation::{FactField, FieldWindow, SourceRef, ToolState};
 use rsi_session_protocol::SessionHandle;
 
@@ -277,7 +277,7 @@ fn title(fact: &SessionFact) -> String {
         SessionFactBody::InputMessageEntered { .. } | SessionFactBody::TurnAccepted { .. } => {
             "Input".into()
         }
-        SessionFactBody::ModelEvent { .. } => "Model output".into(),
+        SessionFactBody::ModelAttemptSettled { .. } => "Model output".into(),
         SessionFactBody::ModelIntent { .. } => "Model request".into(),
         SessionFactBody::ImageOutput { .. } => "Generated image".into(),
         SessionFactBody::ImageIntent { .. } => "Image request".into(),
@@ -303,15 +303,27 @@ fn sources(fact: &SessionFact) -> Vec<SourceRef> {
                 }
             })
             .collect(),
-        SessionFactBody::ModelEvent { event, .. } => match event {
-            LanguageEvent::ContentDelta { delta, .. } => vec![match delta {
-                ContentDelta::Text(_) => FactField::ModelText,
-                ContentDelta::Reasoning(_) => FactField::ModelReasoning,
-                ContentDelta::ToolArguments(_) => FactField::ModelToolArguments,
-            }],
-            LanguageEvent::Failed { .. } => vec![FactField::ModelFailure],
-            _ => vec![],
-        },
+        SessionFactBody::ModelAttemptSettled { attempt, .. } => {
+            let mut fields = Vec::new();
+            for (_, event) in attempt.events().filter_map(std::result::Result::ok) {
+                if let LanguageEvent::ContentStarted { index, content } = event {
+                    let index = u16::try_from(index).expect("validated model index");
+                    fields.push(match content {
+                        rsi_ai_protocol::ContentStart::Text => FactField::ModelText { index },
+                        rsi_ai_protocol::ContentStart::Reasoning => {
+                            FactField::ModelReasoning { index }
+                        }
+                        rsi_ai_protocol::ContentStart::ToolCall { .. } => {
+                            FactField::ModelToolArguments { index }
+                        }
+                    });
+                }
+            }
+            if matches!(attempt.terminal(), LanguageEvent::Failed { .. }) {
+                fields.push(FactField::ModelFailure);
+            }
+            fields
+        }
         SessionFactBody::ModelIntent { .. } | SessionFactBody::ImageIntent { .. } => {
             vec![FactField::ModelSnapshot]
         }

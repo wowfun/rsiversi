@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 const source=await readFile(new URL('../app.js',import.meta.url),'utf8');
-const context={button:(label,run)=>({label,run})};vm.runInNewContext(source.slice(source.indexOf('class Pane {'),source.indexOf('function basename('))+';this.Pane=Pane;',context);
+const context={button:(label,run)=>({label,run,dataset:{}})};vm.runInNewContext(source.slice(source.indexOf('class Pane {'),source.indexOf('function basename('))+';this.Pane=Pane;',context);
 test('protected projection clears cached queue controls and closes its active editor',()=>{
  const items=[{message_id:'queued'}];let children=1,closed=0;
  const pane=Object.assign(Object.create(context.Pane.prototype),{queueItems:items,queueGeneration:'1',queueBinding:{generation:'1'},queueList:{hidden:false,replaceChildren(){children=0;}},queueDialog:{close(){closed++;}}});

@@ -140,7 +140,7 @@ impl Ledger {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(invalid)?;
         let tables:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0)).map_err(invalid)?;
-        if (version == 0 && tables != 0) || !matches!(version, 0 | 2) {
+        if (version == 0 && tables != 0) || !matches!(version, 0 | 3) {
             return Err(invalid("unsupported Automation database format"));
         }
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA max_page_count=270336; PRAGMA journal_size_limit=8388608;
@@ -153,7 +153,7 @@ impl Ledger {
           CREATE INDEX IF NOT EXISTS receipts_body ON receipts(source,digest,rule);
           CREATE TABLE IF NOT EXISTS mutations(request TEXT PRIMARY KEY,digest TEXT NOT NULL,attempt INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS artifacts(attempt INTEGER NOT NULL REFERENCES attempts(id),ordinal INTEGER NOT NULL,created INTEGER NOT NULL,png BLOB NOT NULL,PRIMARY KEY(attempt,ordinal));
-          INSERT OR IGNORE INTO settings VALUES('floor',0); PRAGMA user_version=2;").map_err(invalid)?;
+          INSERT OR IGNORE INTO settings VALUES('floor',0); PRAGMA user_version=3;").map_err(invalid)?;
         let ledger = Arc::new(Self {
             connection: Mutex::new(connection),
             work: tokio_util::task::TaskTracker::new(),

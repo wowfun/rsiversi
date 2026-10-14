@@ -155,21 +155,14 @@ endpoint = "https://api.deepseek.com"
 protocol = "responses"
 credential = { owner = "rsi.ai.provider.deepseek", slot = "default" }
 [steps.config.language_models.deepseek-v4-flash]
-context_window_tokens = 128000
-default_output_reserve_tokens = 8192
-max_output_reserve_tokens = 16384
+context_window_tokens = 1000000
+default_output_reserve_tokens = 256000
+max_output_reserve_tokens = 256000
 TOML
 cat > "$tui_dev/config/rsi/settings.json" <<'JSON'
 {
   "rsi.agent": {
-    "default_model": {"deployment": "dev-deepseek", "model": "deepseek-v4-flash"},
-    "turn_budget": {
-      "maximum_elapsed_ms": 360000,
-      "maximum_provider_attempts": 32,
-      "maximum_tool_calls": 64,
-      "maximum_generated_records": 65536,
-      "maximum_generated_record_bytes": 67108864
-    }
+    "default_model": {"deployment": "dev-deepseek", "model": "deepseek-v4-flash"}
   }
 }
 JSON
@@ -286,7 +279,7 @@ Keep the verifier outside the writable task workspace. Require evidence that
 its assertions completed, such as an unpredictable completion marker, in
 addition to exit status. A candidate can call `exit(0)` before assertions run.
 Bound verifier runtime and output, and supervise descendant processes. A
-passing oracle with a `budget_exceeded` Turn is different from a completed
+passing oracle with a `max_tokens` Turn is different from a completed
 coding workflow; retain both facts when reporting the result.
 
 Resume the completed Session with the same binary and record that read-only

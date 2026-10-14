@@ -1370,91 +1370,29 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
             .await
             .unwrap();
     let worker = kernel.start_workers();
-    let submitted = submit(&kernel, "session-read-race", "hello").await;
+    submit(&kernel, "session-read-race", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
         .claim("executor", CancellationToken::new())
         .await
         .unwrap()
         .unwrap();
-    let effect = EffectId::new("model-read-race").unwrap();
-    let intent = kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelIntent {
-                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                },
-                price_quote: None,
-                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                turn_id: submitted.turn_id.clone(),
-                effect_id: effect.clone(),
-                snapshot: snapshot(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    kernel
-        .flush(&claim, intent.last().unwrap().seq())
-        .await
-        .unwrap();
-    let started = kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelStarted {
-                turn_id: submitted.turn_id.clone(),
-                effect_id: effect.clone(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    kernel
-        .flush(&claim, started.last().unwrap().seq())
-        .await
-        .unwrap();
+    tool_origin::flush_bodies(&kernel, &claim, vec![start_step(claim.turn_id())]).await;
+    tool_origin::flush_bodies(&kernel, &claim, vec![touched(claim.turn_id(), "start")]).await;
     worker.abort().await;
 
-    let mut first_batch = Vec::with_capacity(MAXIMUM_FACTS_PER_READ);
-    first_batch.push(SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: submitted.turn_id.clone(),
-        effect_id: effect.clone(),
-        event: LanguageEvent::ContentStarted {
-            index: 0,
-            content: ContentStart::Text,
-        },
-    });
-    first_batch.extend(
-        (1..MAXIMUM_FACTS_PER_READ).map(|_| SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: submitted.turn_id.clone(),
-            effect_id: effect.clone(),
-            event: LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Text("x".into()),
-            },
-        }),
-    );
     kernel
-        .publish(&claim, first_batch)
+        .publish(
+            &claim,
+            (0..MAXIMUM_FACTS_PER_READ)
+                .map(|_| touched(claim.turn_id(), "chunk"))
+                .collect(),
+        )
         .await
         .unwrap()
         .published();
     kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                turn_id: submitted.turn_id,
-                effect_id: effect,
-                event: LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text("tail".into()),
-                },
-            }],
-        )
+        .publish(&claim, vec![touched(claim.turn_id(), "tail")])
         .await
         .unwrap()
         .published();

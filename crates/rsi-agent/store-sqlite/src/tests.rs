@@ -1335,8 +1335,6 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
 )]
 #[cfg(unix)]
 async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
-    use rsi_agent_session_protocol::EffectId;
-    use rsi_ai_protocol::{ContentDelta, LanguageEvent};
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = SessionId::new("length-admission").unwrap();
@@ -1354,14 +1352,34 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
         let fact = SessionFact::new(
             seq,
             seq,
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: turn.clone(),
-                effect_id: EffectId::new("large-delta").unwrap(),
-                event: LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text("x".repeat(32 * 1024 * 1024)),
-                },
+                effect_id: rsi_agent_session_protocol::EffectId::new(format!("model-{seq}"))
+                    .unwrap(),
+                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    [
+                        rsi_ai_protocol::LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: rsi_ai_protocol::ContentStart::Text,
+                        },
+                        rsi_ai_protocol::LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::Text(
+                                "x".repeat(23 * 1024 * 1024),
+                            ),
+                        },
+                        rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                        rsi_ai_protocol::LanguageEvent::Finished {
+                            reason: rsi_ai_protocol::FinishReason::Stop,
+                            replay: None,
+                        },
+                    ]
+                    .into_iter()
+                    .map(|event| (0, event)),
+                    true,
+                )
+                .unwrap(),
             },
         )
         .unwrap();
@@ -1402,7 +1420,7 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
     assert_eq!(
         count(),
         1,
-        "length-only omissions never materialize any of the 32 MiB originals"
+        "length-only omissions never materialize any of the 30 MiB originals"
     );
     let window = store
         .read_fact_window(&id, 1, 256, 16 * 1024 * 1024)
@@ -1416,23 +1434,23 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
         "the first forward original obeys the caller's budget"
     );
     let page = store.read_facts(&id, 0, 8).await.unwrap();
-    assert_eq!(page.facts.len(), 2);
-    assert_eq!(count(), 2);
+    assert_eq!(page.facts.len(), 3);
+    assert_eq!(count(), 3);
     drop(page);
     let page = store.read_facts(&id, 2, 8).await.unwrap();
     assert_eq!(page.facts[0].seq(), 3);
-    assert_eq!(page.facts.len(), 1);
-    assert_eq!(count(), 1);
+    assert_eq!(page.facts.len(), 2);
+    assert_eq!(count(), 2);
     drop(page);
     let page = store.read_facts_before(&id, 0, 8).await.unwrap();
-    assert_eq!(page.facts[0].seq(), 4);
+    assert_eq!(page.facts[0].seq(), 3);
     assert!(page.has_more);
-    assert_eq!(count(), 1);
+    assert_eq!(count(), 2);
     drop(page);
     let page = store.read_turn_facts(&id, &turn, 1, 8).await.unwrap();
     assert_eq!(page.facts[0].seq(), 2);
     assert!(page.has_more);
-    assert_eq!(count(), 1);
+    assert_eq!(count(), 2);
     drop(page);
     let page = store.read_turn_facts(&id, &turn, 2, 1).await.unwrap();
     assert_eq!(page.facts[0].seq(), 3);
@@ -2126,14 +2144,34 @@ async fn seed_history(
                 SessionFact::new(
                     seq,
                     seq,
-                    SessionFactBody::ModelEvent {
+                    SessionFactBody::ModelAttemptSettled {
                         purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                         turn_id: TurnId::new("turn-1").unwrap(),
-                        effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
-                        event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                            index: 0,
-                            delta: rsi_ai_protocol::ContentDelta::Text("delta".into()),
-                        },
+                        effect_id: rsi_agent_session_protocol::EffectId::new(format!(
+                            "model-{seq}"
+                        ))
+                        .unwrap(),
+                        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                            [
+                                rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                    index: 0,
+                                    content: rsi_ai_protocol::ContentStart::Text,
+                                },
+                                rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                    index: 0,
+                                    delta: rsi_ai_protocol::ContentDelta::Text("delta".into()),
+                                },
+                                rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                                rsi_ai_protocol::LanguageEvent::Finished {
+                                    reason: rsi_ai_protocol::FinishReason::Stop,
+                                    replay: None,
+                                },
+                            ]
+                            .into_iter()
+                            .map(|event| (0, event)),
+                            true,
+                        )
+                        .unwrap(),
                     },
                 )
                 .unwrap()
@@ -2566,14 +2604,32 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
             SessionFact::new(
                 seq,
                 seq,
-                SessionFactBody::ModelEvent {
+                SessionFactBody::ModelAttemptSettled {
                     purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: TurnId::new("turn-1").unwrap(),
-                    effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
-                    event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: rsi_ai_protocol::ContentDelta::Text("x".repeat(text_bytes)),
-                    },
+                    effect_id: rsi_agent_session_protocol::EffectId::new(format!("model-{seq}"))
+                        .unwrap(),
+                    attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                        [
+                            rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: rsi_ai_protocol::ContentStart::Text,
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: rsi_ai_protocol::ContentDelta::Text("x".repeat(text_bytes)),
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                            rsi_ai_protocol::LanguageEvent::Finished {
+                                reason: rsi_ai_protocol::FinishReason::Stop,
+                                replay: None,
+                            },
+                        ]
+                        .into_iter()
+                        .map(|event| (0, event)),
+                        true,
+                    )
+                    .unwrap(),
                 },
             )
             .unwrap()

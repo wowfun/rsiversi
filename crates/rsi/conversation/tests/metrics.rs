@@ -45,14 +45,60 @@ fn intent(seq: u64, id: &str) -> SessionFact {
         },
     )
 }
-fn event(seq: u64, id: &str, event: LanguageEvent) -> SessionFact {
+fn settled(
+    seq: u64,
+    id: &str,
+    usage: Option<TokenUsage>,
+    failed: bool,
+    elapsed: u64,
+) -> SessionFact {
+    use rsi_ai_protocol::{ContentDelta, ContentStart};
+    let mut events = vec![
+        (
+            0,
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+        ),
+        (
+            1,
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text("answer".into()),
+            },
+        ),
+        (2, LanguageEvent::ContentFinished { index: 0 }),
+    ];
+    if let Some(usage) = usage {
+        events.push((elapsed, LanguageEvent::Usage { usage }));
+    }
+    let terminal = if failed {
+        LanguageEvent::Failed {
+            error: AiError::new(
+                ErrorKind::Transport,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "connection lost",
+            )
+            .unwrap(),
+            replay: None,
+        }
+    } else {
+        LanguageEvent::Finished {
+            reason: FinishReason::Stop,
+            replay: None,
+        }
+    };
+    events.push((elapsed, terminal));
     fact(
         seq,
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             turn_id: turn(),
             effect_id: effect(id),
             purpose: ModelEventPurpose::Conversation,
-            event,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true)
+                .unwrap(),
         },
     )
 }
@@ -97,20 +143,12 @@ fn captured_input_capacity_uses_frozen_caps_and_rejects_invalid_decode() {
             Some(PreparedLanguageSettings::new(profile.clone(), None).unwrap());
         for fact in [
             fact(1, body),
-            event(
+            settled(
                 2,
                 "capacity",
-                LanguageEvent::Usage {
-                    usage: TokenUsage::new(76_000, 0, None, None, None).unwrap(),
-                },
-            ),
-            event(
-                3,
-                "capacity",
-                LanguageEvent::Finished {
-                    reason: FinishReason::MaxTokens,
-                    replay: None,
-                },
+                Some(TokenUsage::new(76_000, 0, None, None, None).unwrap()),
+                false,
+                20,
             ),
         ] {
             reducer.observe(&fact).unwrap();
@@ -168,183 +206,23 @@ fn request_metadata_backfill_preserves_actual_default_effort_failed_usage_and_el
         },
     )
     .unwrap();
-    let usage = event(
+    let failure = settled(
         3,
         "actual",
-        LanguageEvent::Usage {
-            usage: TokenUsage::new(10, 4, None, None, Some(2)).unwrap(),
-        },
+        Some(TokenUsage::new(10, 4, None, None, Some(2)).unwrap()),
+        true,
+        1250,
     );
-    let failure = SessionFact::new(
-        4,
-        2250,
-        SessionFactBody::ModelEvent {
-            turn_id: turn(),
-            effect_id: effect("actual"),
-            purpose: ModelEventPurpose::Conversation,
-            event: LanguageEvent::Failed {
-                error: AiError::new(
-                    ErrorKind::Transport,
-                    ErrorPhase::Stream,
-                    DispatchStatus::Dispatched,
-                    "lost",
-                )
-                .unwrap(),
-                replay: None,
-            },
-        },
-    )
-    .unwrap();
     let mut state = rsi_conversation::RequestPresentation::default();
     state.observe(&failure);
     assert!(state.title().contains("model not loaded"));
-    assert!(state.title().contains("usage unknown"));
-    for fact in [&usage, &started, &intent, &intent] {
+    assert!(state.title().contains("10 in / 4 out"));
+    for fact in [&started, &intent, &intent] {
         state.observe(fact);
     }
     assert_eq!(state.title(), "model · max · 10 in / 4 out · 1.2s · failed");
     assert_eq!(state.intent_seq(), Some(1));
     assert!(state.owned_bytes() < 1024);
-}
-
-#[test]
-fn failed_usage_and_retry_are_counted_once_and_unknown_breakdowns_stay_unknown() {
-    let mut reducer = MetricsReducer::default();
-    reducer.observe(&intent(1, "first")).unwrap();
-    reducer
-        .observe(&fact(
-            2,
-            SessionFactBody::ModelStarted {
-                turn_id: turn(),
-                effect_id: effect("first"),
-            },
-        ))
-        .unwrap();
-    let usage = event(
-        3,
-        "first",
-        LanguageEvent::Usage {
-            usage: TokenUsage::new(10, 4, Some(3), Some(2), Some(1)).unwrap(),
-        },
-    );
-    reducer.observe(&usage).unwrap();
-    reducer.observe(&usage).unwrap();
-    reducer
-        .observe(&event(
-            4,
-            "first",
-            LanguageEvent::Failed {
-                error: AiError::new(
-                    ErrorKind::Transport,
-                    ErrorPhase::Stream,
-                    DispatchStatus::Dispatched,
-                    "connection lost",
-                )
-                .unwrap(),
-                replay: None,
-            },
-        ))
-        .unwrap();
-    assert_eq!(reducer.summary().failed_attempts, 1);
-    assert_eq!(
-        reducer.summary().last_attempt.as_ref().unwrap().elapsed_ms,
-        Some(20)
-    );
-    assert!(reducer.summary().last_context.is_none());
-    reducer.observe(&intent(5, "retry")).unwrap();
-    reducer
-        .observe(&event(
-            6,
-            "retry",
-            LanguageEvent::Usage {
-                usage: TokenUsage::new(7, 2, None, None, None).unwrap(),
-            },
-        ))
-        .unwrap();
-    reducer
-        .observe(&event(
-            7,
-            "retry",
-            LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: None,
-            },
-        ))
-        .unwrap();
-    let summary = reducer.summary();
-    summary.validate().unwrap();
-    assert_eq!(summary.attempts, 2);
-    assert_eq!(summary.reported_attempts, 2);
-    assert_eq!(summary.tokens.input_tokens(), 17);
-    assert_eq!(summary.tokens.output_tokens(), 6);
-    assert_eq!(summary.tokens.cache_read_tokens(), None);
-    assert_eq!(summary.last_attempt.as_ref().unwrap().elapsed_ms, None);
-    assert_eq!(summary.through_seq, 7);
-}
-
-#[test]
-fn sequence_and_counter_failures_do_not_advance_the_cursor() {
-    let mut reducer = MetricsReducer::default();
-    assert!(reducer.observe(&intent(2, "gap")).is_err());
-    assert_eq!(reducer.summary().through_seq, 0);
-    reducer.observe(&intent(1, "first")).unwrap();
-    assert!(
-        reducer
-            .observe(&event(
-                2,
-                "wrong",
-                LanguageEvent::Usage {
-                    usage: TokenUsage::default()
-                }
-            ))
-            .is_err()
-    );
-    assert_eq!(reducer.summary().through_seq, 1);
-    reducer
-        .observe(&event(
-            2,
-            "first",
-            LanguageEvent::Usage {
-                usage: TokenUsage::new(u64::MAX, 0, None, None, None).unwrap(),
-            },
-        ))
-        .unwrap();
-    assert!(
-        reducer
-            .observe(&event(
-                3,
-                "first",
-                LanguageEvent::Usage {
-                    usage: TokenUsage::default()
-                }
-            ))
-            .is_err()
-    );
-    assert_eq!(reducer.summary().reported_attempts, 1);
-    reducer
-        .observe(&event(
-            3,
-            "first",
-            LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: None,
-            },
-        ))
-        .unwrap();
-    reducer.observe(&intent(4, "second")).unwrap();
-    assert!(
-        reducer
-            .observe(&event(
-                5,
-                "second",
-                LanguageEvent::Usage {
-                    usage: TokenUsage::new(1, 0, None, None, None).unwrap()
-                }
-            ))
-            .is_err()
-    );
-    assert_eq!(reducer.summary().through_seq, 4);
-    assert_eq!(reducer.summary().tokens.input_tokens(), u64::MAX);
 }
 
 #[test]
@@ -378,43 +256,116 @@ fn tree_aggregation_preserves_unknown_subsets_and_rejects_overflow_atomically() 
 }
 
 #[test]
+fn failed_usage_and_retry_are_counted_once_and_unknown_breakdowns_stay_unknown() {
+    let mut reducer = MetricsReducer::default();
+    reducer.observe(&intent(1, "first")).unwrap();
+    reducer
+        .observe(&fact(
+            2,
+            SessionFactBody::ModelStarted {
+                turn_id: turn(),
+                effect_id: effect("first"),
+            },
+        ))
+        .unwrap();
+    let failure = settled(
+        3,
+        "first",
+        Some(TokenUsage::new(10, 4, Some(3), Some(2), Some(1)).unwrap()),
+        true,
+        20,
+    );
+    reducer.observe(&failure).unwrap();
+    reducer.observe(&failure).unwrap();
+    assert_eq!(reducer.summary().failed_attempts, 1);
+    assert_eq!(
+        reducer.summary().last_attempt.as_ref().unwrap().elapsed_ms,
+        Some(20)
+    );
+    assert!(reducer.summary().last_context.is_none());
+    reducer.observe(&intent(4, "retry")).unwrap();
+    reducer
+        .observe(&settled(
+            5,
+            "retry",
+            Some(TokenUsage::new(7, 2, None, None, None).unwrap()),
+            false,
+            30,
+        ))
+        .unwrap();
+    let summary = reducer.summary();
+    summary.validate().unwrap();
+    assert_eq!(summary.attempts, 2);
+    assert_eq!(summary.reported_attempts, 2);
+    assert_eq!(summary.tokens.input_tokens(), 17);
+    assert_eq!(summary.tokens.output_tokens(), 6);
+    assert_eq!(summary.tokens.cache_read_tokens(), None);
+    assert_eq!(summary.last_attempt.as_ref().unwrap().elapsed_ms, None);
+    assert_eq!(summary.through_seq, 5);
+}
+
+#[test]
+fn sequence_and_counter_failures_do_not_advance_the_cursor() {
+    let mut reducer = MetricsReducer::default();
+    assert!(reducer.observe(&intent(2, "gap")).is_err());
+    assert_eq!(reducer.summary().through_seq, 0);
+    reducer.observe(&intent(1, "first")).unwrap();
+    assert!(
+        reducer
+            .observe(&settled(2, "wrong", Some(TokenUsage::default()), false, 2))
+            .is_err()
+    );
+    assert_eq!(reducer.summary().through_seq, 1);
+    let first = settled(
+        2,
+        "first",
+        Some(TokenUsage::new(u64::MAX, 0, None, None, None).unwrap()),
+        false,
+        2,
+    );
+    reducer.observe(&first).unwrap();
+    reducer.observe(&first).unwrap();
+    assert_eq!(reducer.summary().reported_attempts, 1);
+    reducer.observe(&intent(3, "second")).unwrap();
+    let before = serde_json::to_value(&reducer).unwrap();
+    assert!(
+        reducer
+            .observe(&settled(
+                4,
+                "second",
+                Some(TokenUsage::new(1, 0, None, None, None).unwrap()),
+                false,
+                2
+            ))
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&reducer).unwrap(), before);
+    assert_eq!(reducer.summary().tokens.input_tokens(), u64::MAX);
+}
+
+#[test]
 fn configured_prices_include_failed_usage_and_preserve_partial_currency_totals() {
     let mut reducer = MetricsReducer::default();
     for (index, currency, cache) in [(0, "USD", Some(5)), (1, "CNY", Some(0)), (2, "USD", None)] {
-        let seq = index * 3 + 1;
-        let mut body = intent(seq, "priced").into_body();
+        let seq = index * 2 + 1;
+        let id = format!("priced-{index}");
+        let mut body = intent(seq, &id).into_body();
         let SessionFactBody::ModelIntent { price_quote, .. } = &mut body else {
             unreachable!()
         };
         *price_quote = Some(serde_json::from_value(serde_json::json!({"model":{"deployment":"fixture","model":"model"}, "endpoint_fingerprint":"local", "currency":currency, "input_nanos":100, "output_nanos":200,"cache_read_nanos":10})).unwrap());
         reducer.observe(&fact(seq, body)).unwrap();
-        let usage = event(
+        let failure = settled(
             seq + 1,
-            "priced",
-            LanguageEvent::Usage {
-                usage: TokenUsage::new(10, 2, cache, None, None).unwrap(),
-            },
+            &id,
+            Some(TokenUsage::new(10, 2, cache, None, None).unwrap()),
+            true,
+            20,
         );
-        reducer.observe(&usage).unwrap();
-        reducer.observe(&usage).unwrap();
-        reducer
-            .observe(&event(
-                seq + 2,
-                "priced",
-                LanguageEvent::Failed {
-                    error: AiError::new(
-                        ErrorKind::Transport,
-                        ErrorPhase::Stream,
-                        DispatchStatus::Dispatched,
-                        "connection lost",
-                    )
-                    .unwrap(),
-                    replay: None,
-                },
-            ))
-            .unwrap();
+        reducer.observe(&failure).unwrap();
+        reducer.observe(&failure).unwrap();
     }
-    reducer.observe(&intent(10, "missing-price")).unwrap();
+    reducer.observe(&intent(7, "missing-price")).unwrap();
     reducer.summary().validate().unwrap();
     let cost = &reducer.summary().configured_cost;
     assert!(!cost.is_complete());
@@ -426,7 +377,7 @@ fn configured_prices_include_failed_usage_and_preserve_partial_currency_totals()
         vec![
             rsi_conversation::CurrencyCost {
                 currency: "CNY".into(),
-                nanos: 1_400
+                nanos: 1400
             },
             rsi_conversation::CurrencyCost {
                 currency: "USD".into(),
@@ -438,54 +389,52 @@ fn configured_prices_include_failed_usage_and_preserve_partial_currency_totals()
 }
 
 #[test]
-fn content_events_preserve_summary_storage_and_reject_wrong_request_atomically() {
+fn wrong_settlement_is_atomic_and_fragment_count_does_not_change_attempt_count() {
+    use rsi_agent_session_protocol::ModelAttemptBuilder;
+    use rsi_ai_protocol::{ContentDelta, ContentStart};
     let mut reducer = MetricsReducer::default();
-    reducer.observe(&intent(1, "first")).unwrap();
-    reducer
-        .observe(&event(
-            2,
-            "first",
-            LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: None,
-            },
-        ))
-        .unwrap();
-    reducer.observe(&intent(3, "streaming")).unwrap();
-    let model = reducer
-        .summary()
-        .last_attempt
-        .as_ref()
-        .unwrap()
-        .model
-        .model()
-        .as_ptr();
-    let delta = |seq, id| {
-        event(
-            seq,
-            id,
-            LanguageEvent::ContentDelta {
+    reducer.observe(&intent(1, "streaming")).unwrap();
+    let mut builder = ModelAttemptBuilder::new();
+    builder
+        .push(
+            0,
+            &LanguageEvent::ContentStarted {
                 index: 0,
-                delta: rsi_ai_protocol::ContentDelta::Text("token".into()),
+                content: ContentStart::Text,
             },
         )
+        .unwrap();
+    for elapsed in 1..=10000 {
+        builder
+            .push(
+                elapsed,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("界".into()),
+                },
+            )
+            .unwrap();
+    }
+    builder
+        .push(
+            10001,
+            &LanguageEvent::Finished {
+                reason: FinishReason::MaxTokens,
+                replay: None,
+            },
+        )
+        .unwrap();
+    let attempt = builder.finish(true).unwrap();
+    let body = |id| SessionFactBody::ModelAttemptSettled {
+        turn_id: turn(),
+        effect_id: effect(id),
+        purpose: ModelEventPurpose::Conversation,
+        attempt: attempt.clone(),
     };
     let before = serde_json::to_value(&reducer).unwrap();
-    assert!(reducer.observe(&delta(4, "foreign")).is_err());
+    assert!(reducer.observe(&fact(2, body("foreign"))).is_err());
     assert_eq!(serde_json::to_value(&reducer).unwrap(), before);
-    for seq in 4..104 {
-        reducer.observe(&delta(seq, "streaming")).unwrap();
-        assert_eq!(
-            reducer
-                .summary()
-                .last_attempt
-                .as_ref()
-                .unwrap()
-                .model
-                .model()
-                .as_ptr(),
-            model
-        );
-    }
-    assert_eq!(reducer.summary().through_seq, 103);
+    reducer.observe(&fact(2, body("streaming"))).unwrap();
+    assert_eq!(reducer.summary().attempts, 1);
+    assert_eq!(reducer.summary().through_seq, 2);
 }

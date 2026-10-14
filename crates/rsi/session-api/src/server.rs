@@ -133,6 +133,7 @@ impl SessionApi {
         for (operation, service) in [
             Operation::Export,
             Operation::Observe,
+            Operation::ModelObserve,
             Operation::Interactions,
             Operation::Projections,
             Operation::GoalObserve,
@@ -140,6 +141,7 @@ impl SessionApi {
         ]
         .into_iter()
         .zip([
+            service.clone(),
             service.clone(),
             service.clone(),
             service.clone(),
@@ -497,20 +499,67 @@ mod tests {
             SessionFact::new(
                 sequence,
                 1,
-                SessionFactBody::ModelEvent {
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                SessionFactBody::ModelIntent {
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
-                    event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: rsi_ai_protocol::ContentDelta::Text(text),
+                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                    price_quote: None,
+                    snapshot: rsi_ai_protocol::PreparedCallSnapshot {
+                        call_id: "call".into(),
+                        deployment_id: "fixture".into(),
+                        provider_family: "fixture".into(),
+                        capability: rsi_ai_protocol::AiCapability::Language,
+                        model: "model".into(),
+                        protocol: "fixture".into(),
+                        transport: "local".into(),
+                        endpoint_fingerprint: "fixture".into(),
+                        config_generation: 1,
+                        credential_source: None,
+                        retry_policy: rsi_ai_protocol::RetryPolicy::default(),
+                        request_sha256: "a".repeat(64),
+                        language_settings: None,
+                    },
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Available {
+                        configuration: rsi_agent_session_protocol::EvidencePart::inline(
+                            "{}".into(),
+                        ),
+                        system: rsi_agent_session_protocol::EvidencePart::inline(text),
+                        tools: rsi_agent_session_protocol::EvidencePart::inline("[]".into()),
+                        manifest: vec![],
                     },
                 },
             )
             .unwrap()
         };
-        let payload = bytes - (make("x".into()).encoded_len() - 1);
-        let fact = make("\0".repeat(payload / 6) + &"x".repeat(payload % 6));
+        let mut payload = bytes - make("x".into()).encoded_len() + 1;
+        let fact = loop {
+            let text = "\0".repeat(payload / 6) + &"x".repeat(payload % 6);
+            // Measure the body first: constructing an oversized boundary Fact is forbidden.
+            let baseline = make(String::new());
+            let mut body = baseline.body().clone();
+            if let SessionFactBody::ModelIntent {
+                evidence: rsi_agent_session_protocol::RequestEvidence::Available { system, .. },
+                ..
+            } = &mut body
+            {
+                *system = rsi_agent_session_protocol::EvidencePart::inline(text);
+            }
+            let envelope = serde_json::json!({"seq":sequence,"timestamp_ms":1});
+            let mut value = serde_json::to_value(body).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(envelope.as_object().unwrap().clone());
+            let size = serde_json::to_vec(&value).unwrap().len();
+            if size == bytes {
+                break serde_json::from_value::<SessionFact>(value).unwrap();
+            }
+            payload = if size > bytes {
+                payload - (size - bytes)
+            } else {
+                payload + bytes - size
+            };
+        };
         assert_eq!(fact.encoded_len(), bytes);
         fact
     }

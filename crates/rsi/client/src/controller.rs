@@ -154,15 +154,29 @@ impl SessionController {
             return;
         }
         admission.observing = true;
-        for facts in [true, false] {
+        for kind in [
+            crate::ObservationKind::Facts,
+            crate::ObservationKind::Interactions,
+            crate::ObservationKind::Models,
+        ] {
             let controller = self.clone();
             drop(self.execution.spawn(self.tasks.track_future(async move {
                 let observing = async {
-                    if facts {
+                    if kind == crate::ObservationKind::Models {
+                        crate::observation::observe_models(
+                            controller.handle.as_ref(),
+                            controller.sink.as_ref(),
+                            &controller.execution,
+                        )
+                        .await
+                    } else if kind == crate::ObservationKind::Facts {
                         observe_session(
                             controller.handle.as_ref(),
                             cursor,
-                            &super::workflow::Sink { inner: controller.sink.clone(), changed: controller.workflow_changed.clone() },
+                            &super::workflow::Sink {
+                                inner: controller.sink.clone(),
+                                changed: controller.workflow_changed.clone(),
+                            },
                             &controller.execution,
                         )
                         .await
@@ -181,7 +195,7 @@ impl SessionController {
                         if let Err(error) = result {
                             tokio::select! { biased;
                                 () = controller.stop.cancelled() => {},
-                                () = controller.sink.stopped(if facts { crate::ObservationKind::Facts } else { crate::ObservationKind::Interactions }, &error) => {},
+                                () = controller.sink.stopped(kind, &error) => {},
                             }
                         }
                     },

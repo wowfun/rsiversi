@@ -1,13 +1,47 @@
 # rsi-agent-session-protocol
 
-Format 21 freezes `FrozenAgentSettings.output_budgets`: at most 256 unique
+Live prefix transport appends canonical base64 pages at an exact raw byte offset.
+The receiver retains immutable compact blocks and a grammar cursor, validating
+only newly appended events. Each revision ends at an event boundary and declares
+the complete event count; gaps, rewrites, malformed events and overflow fail closed.
+
+The version-1 compact attempt stream contains unsigned minimal LEB128 time gaps,
+a byte tag, an index for delta tags, a minimal LEB128 payload length and payload.
+Tag 0 carries canonical normalized event JSON; tags 1/2/3 carry UTF-8 text,
+reasoning or Tool-argument deltas. Canonical padded base64 blocks split the raw
+stream at 147,453 bytes; only the final block may be shorter. Readers enforce
+the same upper bound on the final block. Raw suffix offsets must fall within the
+validated prefix; out-of-range programmer input is rejected before indexing.
+Readers preserve the original event index and elapsed time within its single settlement Fact.
+Payload extraction copies contiguous decoded slices across block boundaries;
+it preserves the same raw cursor and canonical-record validation without a
+per-byte dispatch loop. Cross-language consumers use the Rust-owned fixtures.
+
+`ModelAttemptSettled` is the only durable language-output record. Its canonical
+version-1 compact stream preserves every accepted normalized event, original
+fragment boundary and elapsed millisecond offset. Text, reasoning and argument
+deltas use tagged UTF-8 records; other events use their exact normalized JSON.
+Unsigned integers use minimal varints. Canonical base64 blocks are at most
+256 KiB including JSON framing and are decoded incrementally. The complete
+settlement body is limited to 32 MiB, including 64 KiB reserved for a terminal
+event. Capacity failure cancels the provider and settles the accepted prefix
+with `model_output.capacity`; it never silently drops evidence or authorizes
+tools. The existing 36 MiB Fact and 64 MiB Store transaction bounds remain.
+Exactly one settlement must match a started effect, including after controlled
+cancellation, before Step/Turn termination. A crash leaves no fabricated
+settlement. Intermediate retry attempts have `retain_context: false`; final
+partial text/reasoning is retained with an interruption marker and no tool
+authority. Request, source, usage and replay evidence are projected from this
+single canonical stream.
+
+Format 22 freezes `FrozenAgentSettings.output_budgets`: at most 256 unique
 exact deployment/model entries, 64 KiB encoded, each with a validated
-`max_output_tokens`. An empty table leaves the provider request cap unspecified.
+`max_output_tokens`. An empty table uses the selected model's declared default request cap.
 Model/effort selection never changes this Session policy.
 The immutable table validates at construction and deserialization; enclosing
 settings validation trusts that typed value without reserializing it.
 Within the current format, omitted output policy means an empty output budget
-table and two output recoveries. Serialization emits both fields explicitly.
+table. Serialization emits that table explicitly.
 These policy defaults do not admit any earlier Header format.
 
 Reference envelopes use version 2. Source identity distinguishes native Header
@@ -173,29 +207,10 @@ The durable
 value records which preset a session selected; process-local composition
 generation handles are deliberately outside this format.
 
-Each immutable settings value carries a `TurnBudget`, with repository hard maxima
-of 30 elapsed minutes, 64 provider attempts, 256 Tool calls, 16 output recoveries,
-65,536 generated records, and 64 MiB of generated record bytes.
-Generated records include ordinary generated Facts and Turn-attributed domain
-controls, charged by their complete canonical envelope. Baselines and external
-commands use separate bounded admission; necessary atomic ending records retain
-the Kernel-owned ending channel. Settings may only tighten these limits.
-Budget exhaustion is itself a nonterminal Fact
-followed by the sole `budget_exceeded` terminal outcome, so interrupted
-observers and recovery can classify the stop from durable history.
-Both records validate that their frozen limit is no greater than the hard maximum
-for the named dimension; foreign history cannot widen a budget while claiming it
-was exhausted. Limits must be positive except for output recoveries.
-The budget is mandatory in the current durable header encoding; decoding never
-widens an omitted budget to repository maxima.
-
-`TurnBudget.maximum_output_recoveries` defaults to two; zero disables recovery.
-`ModelOutputRecovery` binds the next ordinal to the latest same-Turn Conversation
-effect that durably finished with MaxTokens. Its source cannot have executed any
-Tools or already authorized recovery. Kernel validates the same provenance during
-publication and replay. The marker charges `OutputRecoveries` before a new effect
-can be prepared; exhaustion uses the ordinary BudgetExhausted/BudgetExceeded pair.
-Only this dimension accepts a zero limit. Recovery counts never reset within a Turn.
+Turns have no cumulative elapsed, provider, Tool, record or byte allowance.
+Settings reject the removed `turn_budget` field. `max_tokens` is a terminal
+Step/Turn outcome and never authorizes automatic output recovery. Single
+messages, Facts, frames and storage batches retain their finite capacities.
 
 Language, Image, and Tool effects follow explicit intent/start ordering. A
 direct Image request is durable before preparation, each successfully imported

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFile, readdir} from 'node:fs/promises';
-import {relative,join} from 'node:path';
+import {relative,join,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
 
@@ -9,7 +9,7 @@ const root = new URL('../vendor/dsh/', import.meta.url);
 test('vendored DSH bytes retain their reviewed provenance', async () => {
   const manifest = JSON.parse(await readFile(new URL('provenance.json', root), 'utf8'));
   assert(manifest.files.some(file => file.path === 'LICENSE'));
-  const actual = (await readdir(root, {recursive:true,withFileTypes:true})).filter(entry => entry.isFile()).map(entry => relative(fileURLToPath(root),join(entry.parentPath,entry.name))).filter(path => path !== 'provenance.json').sort();
+  const actual = (await readdir(root, {recursive:true,withFileTypes:true})).filter(entry => entry.isFile()).map(entry => relative(fileURLToPath(root),join(entry.parentPath,entry.name)).split(sep).join('/')).filter(path => path !== 'provenance.json').sort();
   assert.deepEqual(manifest.files.map(file => file.path).sort(), actual);
   const seen = new Set();
   for (const file of manifest.files) {

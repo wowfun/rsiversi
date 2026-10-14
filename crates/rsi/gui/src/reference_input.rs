@@ -14,7 +14,7 @@ struct Input {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     History {
-        request: rsi_history_api::Request,
+        request: Box<rsi_history_api::Request>,
     },
     Capture {
         source: SessionId,
@@ -42,7 +42,7 @@ impl GuiApplication {
             let attached = app.pane(input.pane)?.attachment(&input.generation)?;
             let output = match input.operation {
                 Operation::History { request } => {
-                    if let rsi_history_api::Request::Freeze { target, .. } = &request
+                    if let rsi_history_api::Request::Freeze { target, .. } = request.as_ref()
                         && target != &attached.id
                     {
                         return Err("Reference target differs from the current pane".into());
@@ -51,7 +51,7 @@ impl GuiApplication {
                         &app.history_search
                             .as_ref()
                             .ok_or("History search is unavailable")?
-                            .call(request)
+                            .call(*request)
                             .await
                             .map_err(error)?,
                     )

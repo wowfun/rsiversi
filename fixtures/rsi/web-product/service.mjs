@@ -60,12 +60,13 @@ async function startProvider(onRequest) {
       requests.push({ prompt, completedTool, model: body.model, reasoning_effort: body.reasoning_effort ?? null, images });
       onRequest?.(body);
       response.writeHead(200, { "content-type": "text/event-stream" });
-      if (prompt.includes("UI Goal hold") || (prompt.includes("observe background job") && completedTool)) {
-        response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "Waiting for fixture release." }, finish_reason: null }] })}\n\n`);
+      if (prompt.includes("SETTLEMENT_OUTPUT_LIMIT") || prompt.includes("UI Goal hold") || (prompt.includes("observe background job") && completedTool)) {
+        const truncated = prompt.includes("SETTLEMENT_OUTPUT_LIMIT");
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: truncated ? "流式预览 🦀 · first boundary\n" : "Waiting for fixture release." }, finish_reason: null }] })}\n\n`);
         const id = requests.length;
-        const finish = () => response.end(sse({ content: "Fixture released the model stream." }));
+        const finish = () => response.end(sse({ content: truncated ? "保留的部分输出 · final boundary" : "Fixture released the model stream." }, truncated ? "length" : "stop"));
         held.set(id, { prompt, finish });
-        const timer = setTimeout(finish, 60_000);
+        const timer = setTimeout(finish, truncated ? 180_000 : 60_000);
         response.on("close", () => { clearTimeout(timer); held.delete(id); });
         return;
       }

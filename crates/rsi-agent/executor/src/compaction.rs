@@ -86,19 +86,24 @@ impl Driver {
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        let (options, _options_credit) = admitted_options(
-            &self.context_budget,
-            composition,
-            model,
-            claim.header().settings().output_budgets().cap(&model.model),
-        )
-        .map_err(DriveFailure::Turn)?;
-        self.sync_fold(claim, fold).await?;
         let profile = self
             .language
             .describe(&model.model)
             .map_err(|error| ai_failure(&error))?
             .into_profile();
+        let (options, _options_credit) = admitted_options(
+            &self.context_budget,
+            composition,
+            model,
+            claim
+                .header()
+                .settings()
+                .output_budgets()
+                .cap(&model.model)
+                .or(profile.default_output_tokens()),
+        )
+        .map_err(DriveFailure::Turn)?;
+        self.sync_fold(claim, fold).await?;
         profile
             .validate_output_cap(options.settings())
             .map_err(|error| failed("model.settings", error.to_string()))?;
@@ -177,10 +182,16 @@ impl Driver {
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut trigger = force;
-        for attempt in 0..2 {
+        let raw_pressure = fold
+            .raw_pressure()
+            .is_some_and(rsi_agent_context::RawContextPressure::requires_compaction);
+        let mut attempt = 0;
+        loop {
+            let before_pressure = fold.raw_pressure();
             let planned_result =
                 fold.plan_compaction(options, &model.model, profile, trigger.clone(), attempt > 0);
             if trigger.is_none()
+                && !raw_pressure
                 && matches!(
                     planned_result,
                     Err(rsi_agent_context::ContextError::Capacity)
@@ -224,7 +235,7 @@ impl Driver {
                 )
                 .await?
             {
-                ModelAttempt::Incomplete(_) => {
+                ModelAttempt::Incomplete => {
                     return Err(failed(
                         "context.compaction_failed",
                         "summary reached its output limit",
@@ -238,9 +249,25 @@ impl Driver {
                         .await
                         .map_err(fatal)?;
                     self.sync_fold(claim, fold).await?;
+                    if raw_pressure
+                        && let Some(after) = fold.raw_pressure()
+                        && after.exceeds_target()
+                    {
+                        if !before_pressure.is_some_and(|before| after.reduced_from(before)) {
+                            return Err(failed(
+                                "context.limit",
+                                "Raw context pressure cannot be reduced while preserving protected input",
+                            ));
+                        }
+                        trigger = Some(CompactionTrigger::CanonicalLimit);
+                        attempt = 0;
+                        continue;
+                    }
                     return Ok(());
                 }
-                ModelAttempt::ContextLimit if attempt == 0 => {}
+                ModelAttempt::ContextLimit if attempt == 0 => {
+                    attempt = 1;
+                }
                 ModelAttempt::ContextLimit | ModelAttempt::Retry => {
                     return Err(failed(
                         "context.limit",
@@ -249,10 +276,6 @@ impl Driver {
                 }
             }
         }
-        Err(failed(
-            "context.compaction_failed",
-            "summary pressure event exhausted its attempt bound",
-        ))
     }
 }
 

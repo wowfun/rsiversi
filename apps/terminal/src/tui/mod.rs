@@ -2231,6 +2231,9 @@ async fn run_inner(
                     };
                     dirty = true;
                     match event {
+                        CliRenderMessage::Event(CliEvent::Model { snapshot }) => {
+                            client.live_transcript.as_mut().unwrap_or(&mut client.state.transcript).model(snapshot.as_ref());
+                        },
                         CliRenderMessage::Event(CliEvent::Fact { fact, .. }) => {
                             client.state.model_fact(&fact);
                             match fact.body() { SessionFactBody::TurnAccepted {turn_id,..} | SessionFactBody::MessageTurnAccepted {turn_id,..} => { client.state.active = true; client.state.live_turn = Some(turn_id.clone()); }, SessionFactBody::TurnTerminal {..} => { client.state.active = false; client.state.live_turn = None; client.inspect(); }, _ => {} }

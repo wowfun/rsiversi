@@ -1,10 +1,27 @@
 # rsi-agent-kernel
 
-An executor publication contains at most one ModelOutputRecovery marker. Rejected
-output recovery work reports the already admitted count, which equals the frozen
-limit when the next single marker exhausts it; other work dimensions retain their
-attempted-work accounting. Rejection leaves all staged Facts and control state
-unchanged. The marker must be flushed before a fresh model effect is prepared.
+Live language attempts use a Kernel-owned logical reservation pool, defaulting
+to 256 MiB. `maximum_live_model_bytes` accepts positive multiples of 64 MiB and
+may be raised by the host; division by 64 MiB gives the admitted concurrency
+(four by default). Each attempt
+reserves 64 MiB before dispatch, waiting at most 60 seconds with cancellation.
+The reservation covers compact evidence, the assembler, bounded indexes and
+serialization scratch; it is not an RSS guarantee. Immutable blocks are shared
+by snapshots. Store, Context and observer payload credits remain independent.
+Transient notifications carry Session, Turn, effect and revision separately
+from durable cursors. Snapshot pages are at most 256 KiB and bind one revision;
+slow consumers resynchronize instead of stalling execution. Settlement is
+announced as durable only after its atomic Fact commit. Abandonment is explicit.
+
+Only the Executor publication lane admits model attempt settlements. Model identities are scoped to a Turn. Before admitting a new intent, Kernel
+checks the bounded pending suffix and the Store's durable intent lookup while
+holding Session admission. Reuse fails before live publication; completed
+identities do not accumulate in resident Turn state. The Store's uniqueness
+constraint independently protects direct append paths.
+
+Mixed domain commits cannot append these records or terminal Facts. Rejection leaves
+all staged Facts and domain revisions unchanged. Request evidence has a 16 MiB
+per-package capacity; repeated requests do not consume a cumulative Turn budget.
 
 Program append commits reconcile lost acknowledgements against the exact durable
 suffix. If an I/O failure cannot be reconciled, acceptance, progress and terminal
@@ -170,7 +187,7 @@ atomic ending batch: at most one current-Step closure, one required budget
 marker and the terminal Fact. Only the adjacent closure in that ending batch
 is exempt from generated-record and elapsed limits. Ordinary Step closure
 remains charged. Domain mutations cannot append ending records, Kernel-owned
-Tool supersession markers or executor-owned model output recovery markers.
+Tool supersession markers or executor-owned model attempt settlements.
 Only atomic message entry may supersede outstanding
 model calls. This prevents
 an exhausted open Step from blocking finalization without creating a reusable

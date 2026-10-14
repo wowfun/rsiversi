@@ -699,9 +699,7 @@ async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input()
     let message_id = MessageId::new("initial").unwrap();
     turns
         .submit_message(SubmitMessage {
-            session: stack
-                .fresh(header_for_session("selection-retry", TurnBudget::default()))
-                .await,
+            session: stack.fresh(header_for_session("selection-retry")).await,
             delivery: MessageDelivery::NextTurn,
             message: AgentMessage {
                 message_id: message_id.clone(),

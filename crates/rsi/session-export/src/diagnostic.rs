@@ -51,12 +51,16 @@ pub(super) async fn latest(cut: &Cut) -> Result<Option<Latest>> {
             {
                 before = fact.seq();
                 match fact.body() {
-                    SessionFactBody::ModelEvent {
+                    SessionFactBody::ModelAttemptSettled {
                         effect_id,
-                        event: LanguageEvent::Finished { .. },
+                        attempt,
                         purpose: ModelEventPurpose::Conversation,
                         ..
-                    } if completed.is_none() => completed = Some((effect_id.clone(), fact.seq())),
+                    } if completed.is_none()
+                        && matches!(attempt.terminal(), LanguageEvent::Finished { .. }) =>
+                    {
+                        completed = Some((effect_id.clone(), fact.seq()));
+                    }
                     SessionFactBody::ModelIntent { effect_id, .. }
                         if completed.as_ref().is_some_and(|(id, _)| id == effect_id) =>
                     {

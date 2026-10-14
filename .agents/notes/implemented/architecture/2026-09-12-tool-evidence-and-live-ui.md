@@ -2,6 +2,9 @@
 name: Bounded operation evidence and live GUI ownership
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Per-fragment model Facts and live rendering are superseded by atomic attempts and an independent transient channel.
+
 ## Problem
 
 The apply-patch helper owns the only exact preflight bytes and committed effect

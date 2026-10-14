@@ -55,7 +55,7 @@ async fn cancel_uncharged_draft_or_published_goal_without_provider_spend() {
             id: DomainRequestId::new(goal).unwrap(),
             objective: "Verify task".into(),
             constraints: String::new(),
-            max_rounds: 1,
+            max_rounds: Some(1),
         };
         handle
             .execute_command(SessionCommandInvocation {
@@ -115,7 +115,7 @@ async fn start(handle: &Arc<dyn SessionHandle>, rounds: u64) -> rsi_goal::GoalCo
                 id: DomainRequestId::new("test-goal").unwrap(),
                 objective: "Produce a verified task result".into(),
                 constraints: "Use only the fixture workspace".into(),
-                max_rounds: rounds,
+                max_rounds: Some(rounds),
             },
         })
         .await
@@ -143,7 +143,7 @@ async fn ordinary_draft_publication_then_restart_resume_allocates_first_goal_rou
                     id: DomainRequestId::new("test-goal").unwrap(),
                     objective: "Verify the task".into(),
                     constraints: String::new(),
-                    max_rounds: 1,
+                    max_rounds: Some(1),
                 })
                 .unwrap(),
             )

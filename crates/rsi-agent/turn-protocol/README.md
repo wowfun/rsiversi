@@ -1,5 +1,22 @@
 # rsi-agent-turn-protocol
 
+`reserve_model_attempt` admits a 64 MiB live working set before dispatch. The
+Kernel owns its cancellation-aware 60-second wait, exact claim identity and clock.
+The lease publishes immutable compact prefixes and releases capacity on drop.
+`observe_models` is a separate coalescing stream: revisions are local to an effect,
+never durable cursors. Each delivered snapshot retains observation byte credits;
+slow readers receive the latest complete prefix. Snapshot pages are at most
+256 KiB including identity and framing. A committed status includes the exact
+settlement Fact sequence only after the Kernel verifies its durable identity;
+dropping an unsettled lease publishes abandoned, never committed.
+
+Consumers admit a live prefix only after observing its exact durable
+`ModelStarted`. Ordered Facts advance that admission through settlement and the
+next attempt; unrelated or stale snapshots cannot reset the delivered event
+cursor. This bounds deduplication to one attempt even when the two observation
+streams arrive in different orders. A missed live prefix is filled from the
+settlement, without replaying already delivered events.
+
 Finite Session resource reads carry the current caller's optional execution lease
 through generation selection to the reader. This lease is not recovered from a
 prior Turn or from durable coordinates. Remote reads require it; Local-only
@@ -197,7 +214,7 @@ codecs. An indeterminate commit whose receipt also cannot be read closes Session
 execution until durable recovery establishes its state.
 
 `finish_turn` owns the durable ending transaction for direct and mailbox Turns,
-including any open-Step closure, required budget marker and tree settlement.
+including any open-Step closure and tree settlement.
 The executor supplies the resolved outcome and waits for that terminal receipt;
 it does not independently publish an intermediate ending prefix. Ordinary
 `close_current_step` remains charged business publication.
@@ -315,14 +332,10 @@ non-success outcome; a blocker replaces only `Completed` or `PartialFailed`.
 Blocker messages use the durable diagnostic byte and NUL/DEL safety contract.
 Finalizer-owned reaping must outlive a dropped executor wait.
 
-The executor reads its deadline through the Kernel's read-only `ElapsedBudget`
-watch. A watch reports consumed execution milliseconds and waits for exhaustion;
-it confers no authority to pause, extend, or reset a Turn budget.
-
 `park_human_wait` consumes an explicit generic Tool lane-parking authority and
 returns one single-use `HumanWait`. The Kernel owns the complete park/resume
 sequence, including its tree permit, the caller's opaque executor permit, and
-the budget clock. Dropping a resume waiter does not cancel the admitted cleanup
+their lifetime. Dropping a resume waiter does not cancel the admitted cleanup
 operation. No executor implementation or semaphore crosses this interface.
 A human wait is owned by a Kernel task from admission through cleanup. Dropping
 its handle only closes a channel and is safe outside a Tokio runtime. Claim

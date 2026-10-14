@@ -285,7 +285,7 @@ impl UiAction for GoalAction {
                                     id,
                                     objective: input.fields["objective"].clone(),
                                     constraints: input.fields["constraints"].clone(),
-                                    max_rounds,
+                                    max_rounds: Some(max_rounds),
                                 },
                             })
                             .await

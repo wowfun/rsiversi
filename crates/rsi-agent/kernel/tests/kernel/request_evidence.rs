@@ -48,15 +48,11 @@ async fn publish_close(
     let facts = kernel
         .publish(
             claim,
-            vec![SessionFactBody::ModelEvent {
-                turn_id: claim.turn_id().clone(),
-                effect_id: EffectId::new(id).unwrap(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: LanguageEvent::Finished {
-                    reason: rsi_ai_protocol::FinishReason::Stop,
-                    replay: None,
-                },
-            }],
+            vec![
+                model_finished_fact(1, claim.turn_id(), &EffectId::new(id).unwrap())
+                    .body()
+                    .clone(),
+            ],
         )
         .await
         .unwrap()
@@ -196,7 +192,8 @@ async fn evidence_references_require_original_inline_bytes_in_the_same_session()
 }
 
 #[tokio::test]
-async fn inline_budget_rejects_before_publication_and_recovery_preserves_evidence() {
+#[allow(clippy::too_many_lines)] // One recovery scenario checks independent request evidence before and after reopening.
+async fn inline_capacity_is_per_request_and_recovery_preserves_evidence() {
     let store = Arc::new(MemoryStore::new());
     let initial = kernel(store.clone()).await;
     let worker = initial.start_workers();
@@ -209,12 +206,20 @@ async fn inline_budget_rejects_before_publication_and_recovery_preserves_evidenc
         .unwrap();
     let original = package("x".repeat(8 * 1024 * 1024));
     let seq = publish_close(&initial, &claim, "large-original", original.clone()).await;
-    assert!(matches!(
+    publish_close(&initial, &claim, "second-large-original", original.clone()).await;
+    assert!(
         initial
-            .publish(&claim, vec![body(&claim, "too-large", original.clone())])
-            .await,
-        Err(TurnError::EvidenceBudget)
-    ));
+            .publish(
+                &claim,
+                vec![body(
+                    &claim,
+                    "too-large",
+                    package("x".repeat(rsi_agent_session_protocol::MAXIMUM_REQUEST_EVIDENCE_BYTES))
+                )]
+            )
+            .await
+            .is_err()
+    );
     publish_close(
         &initial,
         &claim,
@@ -272,7 +277,7 @@ async fn inline_budget_rejects_before_publication_and_recovery_preserves_evidenc
     .unwrap()
     .unwrap()
     .unwrap();
-    // A new Turn has its own budget, and can still inspect/reuse the old original.
+    // A later Turn can still inspect and reuse the original evidence.
     publish_close(&restored, &claim, "new-turn-inline", original.clone()).await;
     publish_close(
         &restored,
@@ -288,7 +293,7 @@ async fn inline_budget_rejects_before_publication_and_recovery_preserves_evidenc
             .iter()
             .filter(|fact| matches!(fact.body(), SessionFactBody::ModelIntent { .. }))
             .count(),
-        5
+        6
     );
     restored.release(&claim).unwrap();
     drop(lease);

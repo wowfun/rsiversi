@@ -1,5 +1,11 @@
 # rsi-terminal
 
+Text output retains at most one charged model snapshot that arrives before its
+matching `ModelStarted` Fact. Observing that start emits the retained prefix;
+later live revisions and settlement resume the same event cursor exactly once.
+Settlement or turn completion releases pending output. Durable replay remains
+authoritative, and a late live update cannot repeat an already settled attempt.
+
 The Plugins view displays the shared workbench last-update guidance separately from current Profile health and watcher status.
 
 `/export [PATH] [-f markdown|md|json] [-i INCLUDE]` exports the selected native

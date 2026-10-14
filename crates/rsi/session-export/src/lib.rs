@@ -216,6 +216,7 @@ fn facts(store: Arc<dyn SessionStore>, interval: Interval) -> FactStream {
     })
 }
 
+#[allow(clippy::too_many_lines)] // One demand-driven stream owns section framing and backpressure.
 fn document(cut: Arc<Cut>, options: ExportOptions) -> TextStream {
     Box::pin(async_stream::try_stream! {
         let json_format = options.format == ExportFormat::Json;
@@ -285,11 +286,25 @@ fn document(cut: Arc<Cut>, options: ExportOptions) -> TextStream {
                         let mut markdown = projection::Markdown::default();
                         while let Some(fact) = source.next().await {
                             let fact = fact?;
+                            if section != ExportInclude::ProviderInputEvidence
+                                && let rsi_agent_session_protocol::SessionFactBody::ModelAttemptSettled { effect_id, attempt,
+                                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation, .. } = fact.body() {
+                                if section == ExportInclude::LastProviderResponse && effect_id != &latest.as_ref().expect("selected attempt").effect { continue; }
+                                for (event_index, item) in attempt.events().enumerate() {
+                                    let (elapsed, event) = item.map_err(encoding)?;
+                                    if let Some(record) = projection.event(&id, &fact, effect_id, &event, reasoning, (event_index, elapsed))? {
+                                        if json_format && !first { yield ",\n".into(); }
+                                        first = false;
+                                        yield if json_format { serde_json::to_string(&record).map_err(encoding)? } else { markdown.record(&record)? };
+                                    }
+                                }
+                                continue;
+                            }
                             let record = if section == ExportInclude::ProviderInputEvidence {
                                 diagnostic::evidence_record(&*cut.store(), &id, &fact).await?
                             } else {
                                 let effect = (section == ExportInclude::LastProviderResponse).then(|| &latest.as_ref().expect("checked latest").effect);
-                                projection.record(&id, &fact, reasoning, effect)?
+                                projection.record(&id, &fact, effect)?
                             };
                             if let Some(record) = record {
                                 if json_format && !first { yield ",\n".into(); }

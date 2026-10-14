@@ -10,6 +10,8 @@ use std::{fmt, sync::Arc};
 
 const MAGIC: &[u8] = b"rsi-agent-model-context-v6\0";
 const MAXIMUM_METADATA_BYTES: usize = 2048;
+const RAW_MESSAGE_TARGET: usize = 1024;
+const RAW_BYTE_TARGET: usize = 8 * 1024 * 1024;
 
 /// Frozen semantic and configuration identity of one context builder.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -142,8 +144,41 @@ pub trait ModelContextBuilder: fmt::Debug + Send + Sync + 'static {
     fn open(&self, init: ContextInit<'_>) -> Result<Box<dyn ModelContextCursor>>;
 }
 
+/// Canonical retained source pressure, before pruning makes the provider view smaller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawContextPressure {
+    /// Messages retained for replay and summary provenance.
+    pub messages: usize,
+    /// Encoded bytes retained for replay and summary provenance.
+    pub bytes: usize,
+}
+impl RawContextPressure {
+    /// Starts pressure compaction before the 4096-message/32-MiB hard boundary.
+    pub fn requires_compaction(self) -> bool {
+        self.messages >= RAW_MESSAGE_TARGET * 2 || self.bytes >= RAW_BYTE_TARGET * 2
+    }
+    /// Hysteresis target after a raw-pressure compaction series starts.
+    pub fn exceeds_target(self) -> bool {
+        self.messages > RAW_MESSAGE_TARGET || self.bytes > RAW_BYTE_TARGET
+    }
+    /// At least 1% progress in a pressured dimension, with no count/byte growth.
+    pub fn reduced_from(self, previous: Self) -> bool {
+        self.messages <= previous.messages
+            && self.bytes <= previous.bytes
+            && ((previous.messages > RAW_MESSAGE_TARGET
+                && previous.messages - self.messages >= previous.messages.div_ceil(100))
+                || (previous.bytes > RAW_BYTE_TARGET
+                    && previous.bytes - self.bytes >= previous.bytes.div_ceil(100)))
+    }
+}
+
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
+    /// Raw retention pressure, when this builder owns semantic compaction.
+    fn raw_pressure(&self) -> Option<RawContextPressure> {
+        None
+    }
+
     /// Consumes a framework-supplied bounded page or seed completion marker.
     /// On error, discard the cursor and rebuild from its authoritative Facts.
     fn ingest(&mut self, page: ContextPage<'_>) -> Result<()>;
@@ -205,6 +240,11 @@ struct Metadata {
 }
 
 impl ModelContextState {
+    /// Returns the selected builder's independent raw-retention pressure.
+    pub fn raw_pressure(&self) -> Option<RawContextPressure> {
+        self.cursor.raw_pressure()
+    }
+
     /// Opens empty state with the selected immutable builder.
     pub fn open(
         builder: Arc<dyn ModelContextBuilder>,
@@ -399,4 +439,63 @@ impl ModelContextState {
 
 fn invalid(message: &str) -> ContextError {
     ContextError::Invalid(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RawContextPressure;
+
+    #[test]
+    fn raw_pressure_requires_material_progress_in_a_pressured_dimension() {
+        let before = RawContextPressure {
+            messages: 2048,
+            bytes: 16 * 1024 * 1024,
+        };
+        assert!(
+            !RawContextPressure {
+                messages: 2047,
+                ..before
+            }
+            .reduced_from(before)
+        );
+        assert!(
+            !RawContextPressure {
+                bytes: before.bytes - 1,
+                ..before
+            }
+            .reduced_from(before)
+        );
+        assert!(
+            RawContextPressure {
+                messages: 2027,
+                ..before
+            }
+            .reduced_from(before)
+        );
+        assert!(
+            RawContextPressure {
+                bytes: before.bytes - before.bytes.div_ceil(100),
+                ..before
+            }
+            .reduced_from(before)
+        );
+        assert!(
+            !RawContextPressure {
+                messages: 2027,
+                bytes: before.bytes + 1
+            }
+            .reduced_from(before)
+        );
+        let bytes_only = RawContextPressure {
+            messages: 10,
+            ..before
+        };
+        assert!(
+            !RawContextPressure {
+                messages: 0,
+                ..bytes_only
+            }
+            .reduced_from(bytes_only)
+        );
+    }
 }

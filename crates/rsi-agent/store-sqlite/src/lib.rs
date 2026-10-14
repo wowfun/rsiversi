@@ -273,7 +273,11 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 21] = [
+const EXPECTED_INDEXES: [(&str, &str); 22] = [
+    (
+        "model_effect_coordinates",
+        "CREATE UNIQUE INDEX model_effect_coordinates ON facts (session_id, turn_id, json_extract(fact_json, '$.effect_id'), json_extract(fact_json, '$.type')) WHERE json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')",
+    ),
     (
         "sessions_by_location_created",
         "CREATE INDEX sessions_by_location_created ON sessions (json_extract(coordinates_key, '$.location'), created_at_ms DESC, session_id DESC)",

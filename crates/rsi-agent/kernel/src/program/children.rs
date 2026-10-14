@@ -413,7 +413,7 @@ impl AgentKernel {
                 code: code.clone(),
                 message: message.clone(),
             },
-            TurnOutcome::BudgetExceeded { .. } => {
+            TurnOutcome::MaxTokens => {
                 let rsi_agent_session_protocol::ActivationOutcome::Failed { code, message } =
                     observation::activation_outcome(outcome, None)
                 else {

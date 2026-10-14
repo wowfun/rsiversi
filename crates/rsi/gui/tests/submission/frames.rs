@@ -242,14 +242,35 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
                         SessionFact::new(
                             10 + sample,
                             1,
-                            SessionFactBody::ModelEvent {
+                            SessionFactBody::ModelAttemptSettled {
                                 purpose: ModelEventPurpose::Conversation,
                                 turn_id: TurnId::new("turn").unwrap(),
-                                effect_id: EffectId::new("stream").unwrap(),
-                                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                                    index: 0,
-                                    delta: rsi_ai_protocol::ContentDelta::Text(" changed".into()),
-                                },
+                                effect_id: EffectId::new(format!("stream-{sample}")).unwrap(),
+                                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                                    [
+                                        rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                            index: 0,
+                                            content: rsi_ai_protocol::ContentStart::Text,
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                            index: 0,
+                                            delta: rsi_ai_protocol::ContentDelta::Text(
+                                                " changed".into(),
+                                            ),
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::ContentFinished {
+                                            index: 0,
+                                        },
+                                        rsi_ai_protocol::LanguageEvent::Finished {
+                                            reason: rsi_ai_protocol::FinishReason::Stop,
+                                            replay: None,
+                                        },
+                                    ]
+                                    .into_iter()
+                                    .map(|event| (0, event)),
+                                    true,
+                                )
+                                .unwrap(),
                             },
                         )
                         .unwrap(),

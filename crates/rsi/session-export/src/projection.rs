@@ -1,7 +1,5 @@
 use super::{Result, SessionFact, SessionId, Value, encoding, json, render_value};
-use rsi_agent_session_protocol::{
-    EffectId, InputMessageSource, ModelEventPurpose, SessionFactBody,
-};
+use rsi_agent_session_protocol::{EffectId, InputMessageSource, SessionFactBody};
 use rsi_ai_protocol::{ContentDelta, ContentStart, LanguageEvent};
 use std::collections::BTreeSet;
 
@@ -10,11 +8,53 @@ pub(super) struct Projection {
     reasoning: BTreeSet<u32>,
 }
 impl Projection {
+    pub(super) fn event(
+        &mut self,
+        id: &SessionId,
+        fact: &SessionFact,
+        effect_id: &EffectId,
+        event: &LanguageEvent,
+        reasoning: bool,
+        position: (usize, u64),
+    ) -> Result<Option<Value>> {
+        let (event_index, elapsed_ms) = position;
+        let event = match event {
+            LanguageEvent::ContentStarted {
+                index,
+                content: ContentStart::Reasoning,
+            } => {
+                self.reasoning.insert(*index);
+                if !reasoning {
+                    return Ok(None);
+                }
+                serde_json::to_value(event).map_err(encoding)?
+            }
+            LanguageEvent::ContentDelta {
+                delta: ContentDelta::Reasoning(_),
+                ..
+            } if !reasoning => return Ok(None),
+            LanguageEvent::ContentFinished { index }
+                if self.reasoning.remove(index) && !reasoning =>
+            {
+                return Ok(None);
+            }
+            LanguageEvent::Finished { reason, .. } => {
+                json!({"type":"finished","reason":reason})
+            }
+            LanguageEvent::Failed { error, .. } => json!({"type":"failed","error":error}),
+            _ => serde_json::to_value(event).map_err(encoding)?,
+        };
+        Ok(Some(
+            json!({"session_id":id,"seq":fact.seq().to_string(),"turn_id":fact.body().turn_id(),
+            "role":"assistant","effect_id":effect_id,"event_index":event_index,"elapsed_ms":elapsed_ms,
+            "partial":!matches!(event["type"].as_str(),Some("finished"|"failed")),"event":event}),
+        ))
+    }
+
     pub(super) fn record(
         &mut self,
         id: &SessionId,
         fact: &SessionFact,
-        reasoning: bool,
         effect: Option<&EffectId>,
     ) -> Result<Option<Value>> {
         let body = fact.body();
@@ -22,40 +62,6 @@ impl Projection {
             self.reasoning.clear();
         }
         let value = match body {
-            SessionFactBody::ModelEvent {
-                effect_id,
-                event,
-                purpose: ModelEventPurpose::Conversation,
-                ..
-            } if effect.is_none_or(|selected| selected == effect_id) => {
-                let event = match event {
-                    LanguageEvent::ContentStarted {
-                        index,
-                        content: ContentStart::Reasoning,
-                    } => {
-                        self.reasoning.insert(*index);
-                        if !reasoning {
-                            return Ok(None);
-                        }
-                        serde_json::to_value(event).map_err(encoding)?
-                    }
-                    LanguageEvent::ContentDelta {
-                        delta: ContentDelta::Reasoning(_),
-                        ..
-                    } if !reasoning => return Ok(None),
-                    LanguageEvent::ContentFinished { index }
-                        if self.reasoning.remove(index) && !reasoning =>
-                    {
-                        return Ok(None);
-                    }
-                    LanguageEvent::Finished { reason, .. } => {
-                        json!({"type":"finished","reason":reason})
-                    }
-                    LanguageEvent::Failed { error, .. } => json!({"type":"failed","error":error}),
-                    _ => serde_json::to_value(event).map_err(encoding)?,
-                };
-                json!({"role":"assistant","effect_id":effect_id,"partial": !matches!(event["type"].as_str(),Some("finished"|"failed")),"event":event})
-            }
             _ if effect.is_some() => return Ok(None),
             SessionFactBody::TurnAccepted { text, .. } => json!({"role":"user","text":text}),
             SessionFactBody::ImageRequested { request, .. } => {

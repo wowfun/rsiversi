@@ -6,6 +6,7 @@ mod intake;
 mod plugin;
 mod policy;
 mod protocol;
+mod round_deadline;
 mod service;
 mod store;
 pub use goal::{BrowserRegistryContract, BrowserToolsFactory, GoalExplorer};

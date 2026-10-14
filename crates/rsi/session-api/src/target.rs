@@ -36,6 +36,7 @@ pub(crate) fn operations(available: &[OperationSpec]) -> Result<Vec<OperationSpe
             | Operation::ReadMessage
             | Operation::Cancel
             | Operation::History
+            | Operation::ModelObserve
             | Operation::Observe
             | Operation::Interactions
             | Operation::Projections

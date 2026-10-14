@@ -38,19 +38,10 @@ fn incomplete_usage_and_explicit_reserve_drive_pressure_across_checkpoint_and_re
             "current",
             "cut",
             ModelPurpose::Conversation,
-            "discarded-incomplete-content",
+            "retained-incomplete-content",
             Some(76000),
             FinishReason::MaxTokens,
         ),
-    );
-    append(
-        &mut state,
-        &mut facts,
-        vec![SessionFactBody::ModelOutputRecovery {
-            turn_id: TurnId::new("current").unwrap(),
-            source_model_effect_id: EffectId::new("cut").unwrap(),
-            ordinal: 1,
-        }],
     );
     let options = rsi_ai_protocol::LanguageRequestOptions::new(
         vec![],
@@ -93,7 +84,8 @@ fn incomplete_usage_and_explicit_reserve_drive_pressure_across_checkpoint_and_re
             .contains("split large files")
     );
     let view = serde_json::to_string(&state.build(options.clone(), &profile()).unwrap()).unwrap();
-    assert!(!view.contains("discarded-incomplete-content"));
+    assert!(view.contains("retained-incomplete-content"));
+    assert!(view.contains("Interrupted model attempt"));
     let checkpoint = state.checkpoint().unwrap();
     let mut restored = cursor();
     restored.restore(&checkpoint).unwrap();
@@ -499,7 +491,7 @@ fn replay_rejects_a_model_event_with_a_purpose_differing_from_its_intent() {
         FinishReason::Stop,
     ));
     for body in &mut bodies {
-        if let SessionFactBody::ModelEvent { purpose, .. } = body {
+        if let SessionFactBody::ModelAttemptSettled { purpose, .. } = body {
             *purpose = rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction;
         }
     }
@@ -563,6 +555,7 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
             effect_id: effect.clone(),
         },
     ];
+    let mut events = Vec::new();
     for index in 0..2 {
         for event in [
             LanguageEvent::ContentStarted {
@@ -579,22 +572,21 @@ fn partial_tool_batch(result_index: Option<u32>) -> Vec<SessionFactBody> {
             },
             LanguageEvent::ContentFinished { index },
         ] {
-            bodies.push(SessionFactBody::ModelEvent {
-                turn_id: turn.clone(),
-                effect_id: effect.clone(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event,
-            });
+            events.push((0, event));
         }
     }
-    bodies.push(SessionFactBody::ModelEvent {
-        turn_id: turn.clone(),
-        effect_id: effect.clone(),
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        event: LanguageEvent::Finished {
+    events.push((
+        0,
+        LanguageEvent::Finished {
             reason: FinishReason::ToolCalls,
             replay: None,
         },
+    ));
+    bodies.push(SessionFactBody::ModelAttemptSettled {
+        turn_id: turn.clone(),
+        effect_id: effect.clone(),
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true).unwrap(),
     });
     if let Some(index) = result_index {
         let result = SessionFactBody::ToolResult {
@@ -944,12 +936,16 @@ pub(super) fn model_bodies(
         reason: finish,
         replay: None,
     });
-    bodies.extend(events.into_iter().map(|event| SessionFactBody::ModelEvent {
+    bodies.push(SessionFactBody::ModelAttemptSettled {
         purpose: event_purpose,
         turn_id: turn.clone(),
         effect_id: effect.clone(),
-        event,
-    }));
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+            events.into_iter().map(|event| (0, event)),
+            true,
+        )
+        .unwrap(),
+    });
     bodies
 }
 fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64) {
@@ -1025,15 +1021,6 @@ fn recovery_hint_capacity_triggers_canonical_compaction_without_usage() {
             None,
             FinishReason::MaxTokens,
         ),
-    );
-    append(
-        &mut state,
-        &mut facts,
-        vec![SessionFactBody::ModelOutputRecovery {
-            turn_id: TurnId::new("current").unwrap(),
-            source_model_effect_id: EffectId::new("cut").unwrap(),
-            ordinal: 1,
-        }],
     );
     let planned = state
         .plan_compaction(
@@ -1734,7 +1721,7 @@ fn outcome_ingestion_rejects_duplicate_results_and_reused_call_ids() {
             match &mut body {
                 SessionFactBody::ModelIntent { effect_id, .. }
                 | SessionFactBody::ModelStarted { effect_id, .. }
-                | SessionFactBody::ModelEvent { effect_id, .. } => {
+                | SessionFactBody::ModelAttemptSettled { effect_id, .. } => {
                     *effect_id = EffectId::new("second-source").unwrap();
                 }
                 _ => unreachable!(),
@@ -2438,7 +2425,7 @@ fn program_provenance_survives_compaction_remap_checkpoint_and_canonical_replay(
 }
 
 #[test]
-fn protected_input_that_fits_can_refuse_a_recovery_instruction() {
+fn protected_input_that_fits_can_refuse_retained_partial_output() {
     let mut state = ModelContextState::open(
         Arc::new(DefaultContextBuilder::default()),
         header("instructions"),
@@ -2467,15 +2454,6 @@ fn protected_input_that_fits_can_refuse_a_recovery_instruction() {
             FinishReason::MaxTokens,
         ),
     );
-    append(
-        &mut state,
-        &mut facts,
-        vec![SessionFactBody::ModelOutputRecovery {
-            turn_id: TurnId::new("current").unwrap(),
-            source_model_effect_id: EffectId::new("cut").unwrap(),
-            ordinal: 1,
-        }],
-    );
     assert!(matches!(
         state.build(options.clone(), &profile()),
         Err(ContextError::TooLarge)
@@ -2493,10 +2471,9 @@ fn protected_input_that_fits_can_refuse_a_recovery_instruction() {
 }
 
 #[test]
-fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
+fn partial_output_reserves_capacity_before_omitting_complete_turns() {
     let (_, mut history, _) = history(None);
-    let turn = TurnId::new("current").unwrap();
-    let mut bodies = model_bodies(
+    let bodies = model_bodies(
         "current",
         "cut",
         rsi_agent_session_protocol::ModelPurpose::Conversation,
@@ -2504,11 +2481,6 @@ fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
         None,
         FinishReason::MaxTokens,
     );
-    bodies.push(SessionFactBody::ModelOutputRecovery {
-        turn_id: turn,
-        source_model_effect_id: EffectId::new("cut").unwrap(),
-        ordinal: 1,
-    });
     history.extend(
         facts_after(history.len() as u64, bodies)
             .into_iter()
@@ -2520,8 +2492,8 @@ fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
     )
     .unwrap();
     fold.apply(&history).unwrap();
-    // The canonical view fits in four messages, but adding the hint requires
-    // removing the old complete Turn and admitting its omission notice first.
+    // Retained partial output requires removing the old complete Turn and
+    // admitting its omission notice before fitting the protected current Turn.
     let request = fold
         .request(
             ContextLimits::new(4, 1024 * 1024).unwrap(),
@@ -2530,7 +2502,7 @@ fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
         .unwrap();
     assert_eq!(request.messages().len(), 4);
     let wire = serde_json::to_string(&request).unwrap();
-    assert!(wire.contains("split large files"));
+    assert!(wire.contains("Interrupted model attempt: max_tokens"));
     assert!(wire.contains("original task"));
     assert!(!wire.contains("older private task"));
     let bytes = serde_json::to_vec(request.messages()).unwrap().len();
@@ -2549,4 +2521,83 @@ fn recovery_hint_reserves_capacity_before_omitting_complete_turns() {
         ),
         Err(ContextError::TooLarge)
     ));
+}
+
+#[test]
+fn raw_pressure_compacts_one_active_turn_beyond_4096_cumulative_messages() {
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header("instructions"),
+        ContextLimits::new(4096, 32 * 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    let mut facts = Vec::new();
+    append(
+        &mut state,
+        &mut facts,
+        vec![accepted("current", "Retain this task")],
+    );
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let model = ModelRef::new("deployment", "model").unwrap();
+    let mut summaries = 0;
+    for index in 0..4200 {
+        append(
+            &mut state,
+            &mut facts,
+            model_bodies(
+                "current",
+                &format!("answer-{index}"),
+                ModelPurpose::Conversation,
+                "A completed unit.",
+                None,
+                FinishReason::Stop,
+            ),
+        );
+        if state.raw_pressure().unwrap().requires_compaction() {
+            while state.raw_pressure().unwrap().exceeds_target() {
+                let before = state.raw_pressure().unwrap();
+                let planned = state
+                    .plan_compaction(&options, &model, &profile(), None, false)
+                    .unwrap()
+                    .expect("raw pressure must plan before the hard ceiling");
+                let effect = format!("raw-summary-{summaries}");
+                summaries += 1;
+                append(
+                    &mut state,
+                    &mut facts,
+                    model_bodies(
+                        "current",
+                        &effect,
+                        ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+                        "Completed units summarized.",
+                        None,
+                        FinishReason::Stop,
+                    ),
+                );
+                assert!(state.summary_installed(&EffectId::new(effect).unwrap()));
+                assert!(state.raw_pressure().unwrap().reduced_from(before));
+            }
+            let restored = state.restored(&state.checkpoint().unwrap()).unwrap();
+            assert_eq!(restored.raw_pressure(), state.raw_pressure());
+            state = restored;
+        }
+    }
+    assert!(
+        summaries >= 2,
+        "a single active Turn must compact repeatedly"
+    );
+    assert!(state.raw_pressure().unwrap().messages < 2048);
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::TurnAccepted { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }))
+    );
 }

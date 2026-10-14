@@ -549,11 +549,15 @@ impl ContextFold {
         let projected = self.projected_turns()?;
         let view = self.semantic_messages_from(&projected)?;
         let limits = crate::emission_limits(self.retention_limits.unwrap_or_default(), options)?;
-        let (limits, _hints) = self.reserve_recovery_hints(limits)?;
         let optional = force.is_none();
         let trigger = if let Some(trigger) = force {
             trigger
-        } else if view.len() > limits.max_messages
+        } else if (crate::RawContextPressure {
+            messages: self.retained_messages,
+            bytes: self.retained_message_bytes,
+        })
+        .requires_compaction()
+            || view.len() > limits.max_messages
             || state.sources.len() >= PLAN_SOURCES
             || crate::encoded_bytes(&view)? > limits.max_bytes
         {
@@ -1273,7 +1277,6 @@ mod view_tests {
                 messages,
                 message_bytes,
                 terminal: true,
-                recovery: None,
                 batches: crate::outcomes::Batches::new(),
             });
         }

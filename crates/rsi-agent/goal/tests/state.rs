@@ -1,8 +1,7 @@
 use rsi_agent_goal::{
-    GoalAction, GoalAllowance, GoalPhase, GoalReport, GoalReportKind, GoalState, RoundOutcome,
-    RoundSettlement,
+    GoalAction, GoalPhase, GoalReport, GoalReportKind, GoalState, RoundOutcome, RoundSettlement,
 };
-use rsi_agent_session_protocol::{DomainRequestId, TurnBudget, TurnId};
+use rsi_agent_session_protocol::{DomainRequestId, TurnId};
 
 fn id(value: &str) -> DomainRequestId {
     DomainRequestId::new(value).unwrap()
@@ -15,9 +14,9 @@ fn create(max_rounds: u64, draft: bool) -> GoalState {
                 id: id("task"),
                 objective: "Implement and verify the requested behavior".into(),
                 constraints: "Preserve unrelated changes".into(),
-                max_rounds,
+                max_rounds: Some(max_rounds),
             },
-            &TurnBudget::default(),
+            256,
             draft,
         )
         .unwrap();
@@ -41,11 +40,7 @@ fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
     assert!(state.goal.as_ref().unwrap().reservation.is_none());
     state
-        .apply(
-            GoalAction::Cancel { id: id("task") },
-            &TurnBudget::default(),
-            true,
-        )
+        .apply(GoalAction::Cancel { id: id("task") }, 256, true)
         .unwrap();
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
     assert!(state.goal.as_ref().unwrap().reservation.is_none());
@@ -55,9 +50,9 @@ fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
                 id: id("replacement"),
                 objective: "Different task".into(),
                 constraints: String::new(),
-                max_rounds: 1,
+                max_rounds: Some(1),
             },
-            &TurnBudget::default(),
+            256,
             true,
         )
         .unwrap();
@@ -89,11 +84,7 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     let mut reopened: GoalState = serde_json::from_slice(&encoded).unwrap();
     reopened.validate().unwrap();
     reopened
-        .apply(
-            GoalAction::Pause { id: id("task") },
-            &TurnBudget::default(),
-            false,
-        )
+        .apply(GoalAction::Pause { id: id("task") }, 256, false)
         .unwrap();
     reopened
         .goal
@@ -102,11 +93,7 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
         .settle(&reservation.message_id, RoundSettlement::Discarded)
         .unwrap();
     reopened
-        .apply(
-            GoalAction::Resume { id: id("task") },
-            &TurnBudget::default(),
-            false,
-        )
+        .apply(GoalAction::Resume { id: id("task") }, 256, false)
         .unwrap();
     let goal = reopened.goal.as_mut().unwrap();
     goal.reserve().unwrap();
@@ -121,11 +108,7 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     assert_eq!(goal.phase, GoalPhase::Blocked);
     assert!(
         reopened
-            .apply(
-                GoalAction::Resume { id: id("task") },
-                &TurnBudget::default(),
-                false
-            )
+            .apply(GoalAction::Resume { id: id("task") }, 256, false)
             .is_err()
     );
 }
@@ -156,7 +139,7 @@ fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
         RoundOutcome::Failed,
         RoundOutcome::PartialFailed,
         RoundOutcome::Interrupted,
-        RoundOutcome::BudgetExceeded,
+        RoundOutcome::MaxTokens,
     ] {
         let mut state = reserved(2);
         report(&mut state, GoalReportKind::Complete);
@@ -184,7 +167,7 @@ fn report_verification_checks_source_settlement_for_every_disposition() {
             RoundOutcome::Failed,
             RoundOutcome::PartialFailed,
             RoundOutcome::Interrupted,
-            RoundOutcome::BudgetExceeded,
+            RoundOutcome::MaxTokens,
         ] {
             for matching in [true, false] {
                 let mut state = reserved(2);
@@ -237,11 +220,7 @@ fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
     );
     assert!(
         state
-            .apply(
-                GoalAction::Resume { id: id("task") },
-                &TurnBudget::default(),
-                false
-            )
+            .apply(GoalAction::Resume { id: id("task") }, 256, false)
             .is_err()
     );
 
@@ -266,12 +245,12 @@ fn only_matching_successful_turn_verifies_completion_and_cancellation_pauses() {
 }
 
 #[test]
-fn resume_preserves_frozen_budget_and_pause_survives_no_report_success() {
+fn resume_preserves_frozen_round_count_and_pause_survives_no_report_success() {
     let mut state = reserved(3);
-    let original = state.goal.as_ref().unwrap().turn_budget.clone();
-    let tiny = TurnBudget::new(1, 1, 1, 1, 1).unwrap();
+    let original = state.goal.as_ref().unwrap().max_rounds;
+    let tiny = 1;
     state
-        .apply(GoalAction::Pause { id: id("task") }, &tiny, false)
+        .apply(GoalAction::Pause { id: id("task") }, tiny, false)
         .unwrap();
     let goal = state.goal.as_mut().unwrap();
     let message = goal.reservation.as_ref().unwrap().message_id.clone();
@@ -279,42 +258,52 @@ fn resume_preserves_frozen_budget_and_pause_survives_no_report_success() {
         .unwrap();
     assert_eq!(goal.phase, GoalPhase::Paused);
     state
-        .apply(GoalAction::Resume { id: id("task") }, &tiny, false)
+        .apply(GoalAction::Resume { id: id("task") }, tiny, false)
         .unwrap();
-    assert_eq!(state.goal.as_ref().unwrap().turn_budget, original);
+    assert_eq!(state.goal.as_ref().unwrap().max_rounds, original);
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 1);
 }
 
 #[test]
-fn all_five_allowance_dimensions_are_checked_and_zero_is_rejected() {
-    let budget = TurnBudget::new(7, 11, 13, 17, 19).unwrap();
-    assert_eq!(
-        GoalAllowance::new(3, &budget).unwrap(),
-        GoalAllowance {
-            elapsed_ms: 21,
-            provider_attempts: 33,
-            tool_calls: 39,
-            generated_records: 51,
-            generated_record_bytes: 57,
-        }
-    );
-    assert!(GoalAllowance::new(0, &budget).is_err());
-    for dimensions in [
-        [2, 1, 1, 1, 1],
-        [1, 2, 1, 1, 1],
-        [1, 1, 2, 1, 1],
-        [1, 1, 1, 2, 1],
-        [1, 1, 1, 1, 2],
+fn optional_creation_freezes_configured_default_and_rejects_unsafe_rounds() {
+    for (requested, default, expected) in [
+        (None, 256, 256),
+        (None, 17, 17),
+        (Some(9), 256, 9),
+        (Some(9_007_199_254_740_991), 256, 9_007_199_254_740_991),
     ] {
-        let budget = TurnBudget::new(
-            dimensions[0],
-            dimensions[1],
-            dimensions[2],
-            dimensions[3],
-            dimensions[4],
-        )
-        .unwrap();
-        assert!(GoalAllowance::new(u64::MAX, &budget).is_err());
+        let mut state = GoalState::default();
+        state
+            .apply(
+                GoalAction::Create {
+                    id: id("task"),
+                    objective: "Do the work".into(),
+                    constraints: String::new(),
+                    max_rounds: requested,
+                },
+                default,
+                true,
+            )
+            .unwrap();
+        assert_eq!(state.goal.unwrap().max_rounds, expected);
+    }
+    for rounds in [0, 9_007_199_254_740_992, u64::MAX] {
+        let mut state = GoalState::default();
+        assert!(
+            state
+                .apply(
+                    GoalAction::Create {
+                        id: id("task"),
+                        objective: "Do the work".into(),
+                        constraints: String::new(),
+                        max_rounds: Some(rounds)
+                    },
+                    256,
+                    true
+                )
+                .is_err()
+        );
+        assert!(state.goal.is_none());
     }
 }
 
@@ -347,11 +336,7 @@ fn stale_identity_oversized_text_and_model_control_verbs_are_rejected() {
     let mut state = create(2, false);
     assert!(
         state
-            .apply(
-                GoalAction::Pause { id: id("other") },
-                &TurnBudget::default(),
-                false
-            )
+            .apply(GoalAction::Pause { id: id("other") }, 256, false)
             .is_err()
     );
     for action in ["complete", "blocked", "reserve", "settle"] {
@@ -368,9 +353,9 @@ fn stale_identity_oversized_text_and_model_control_verbs_are_rejected() {
                     id: id("huge"),
                     objective: "x".repeat(8193),
                     constraints: String::new(),
-                    max_rounds: 1
+                    max_rounds: Some(1)
                 },
-                &TurnBudget::default(),
+                256,
                 false
             )
             .is_err()

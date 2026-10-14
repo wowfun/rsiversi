@@ -180,3 +180,5 @@ Exact queue-slot lookup borrows its indexed entry without allocating or sorting 
 The bounded queue projection exposes an immutable revision identity. Only a
 visible slot change replaces it; unrelated controls preserve it. Consumers must
 also bind displayed-Turn actions to their own current Turn identity.
+
+Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.

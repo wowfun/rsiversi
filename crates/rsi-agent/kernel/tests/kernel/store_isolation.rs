@@ -246,37 +246,14 @@ async fn shutdown_drains_the_accepted_suffix_beyond_the_inflight_batch() {
         .await
         .unwrap()
         .unwrap();
-    let effect = EffectId::new("drain-model").unwrap();
-    let intent = kernel
-        .publish(
-            &claim,
-            vec![
-                model_intent_fact(2, claim.turn_id(), &effect)
-                    .body()
-                    .clone(),
-            ],
-        )
-        .await
-        .unwrap()
-        .published();
-    kernel.flush(&claim, intent[0].seq()).await.unwrap();
+    tool_origin::flush_bodies(&kernel, &claim, vec![start_step(claim.turn_id())]).await;
     store.pause_append_at.store(3, Ordering::Release);
     kernel
         .publish(
             &claim,
             vec![
-                model_started_fact(3, claim.turn_id(), &effect)
-                    .body()
-                    .clone(),
-                SessionFactBody::ModelEvent {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect.clone(),
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    event: LanguageEvent::ContentStarted {
-                        index: 0,
-                        content: ContentStart::Text,
-                    },
-                },
+                touched(claim.turn_id(), "start"),
+                touched(claim.turn_id(), "next"),
             ],
         )
         .await
@@ -291,15 +268,7 @@ async fn shutdown_drains_the_accepted_suffix_beyond_the_inflight_batch() {
             .publish(
                 &claim,
                 (0..300)
-                    .map(|_| SessionFactBody::ModelEvent {
-                        turn_id: claim.turn_id().clone(),
-                        effect_id: effect.clone(),
-                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                        event: LanguageEvent::ContentDelta {
-                            index: 0,
-                            delta: ContentDelta::Text("suffix".into()),
-                        },
-                    })
+                    .map(|_| touched(claim.turn_id(), "suffix"))
                     .collect(),
             )
             .await

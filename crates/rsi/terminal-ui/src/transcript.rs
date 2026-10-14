@@ -1,7 +1,9 @@
 //! Partial historical projection; no model-context replay or retained observation leases.
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
 use rsi_agent_session_protocol::{SessionFact, SessionFactBody};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+#[cfg(test)]
+use rsi_ai_protocol::ContentDelta;
+use rsi_ai_protocol::LanguageEvent;
 pub use rsi_conversation::SourceRef as Source;
 use rsi_conversation::{
     BlockIdentity, FactField, FieldWindow, MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex,
@@ -275,6 +277,7 @@ pub struct Block {
     last: u64,
     request_key: Option<String>,
     pub discarded: bool,
+    transient: String,
     text_bytes: usize,
     map_bytes: usize,
     pub tool: Option<ToolState>,
@@ -375,6 +378,9 @@ impl Block {
             .and_then(rsi_conversation::RequestPresentation::intent_seq)
     }
     pub fn text(&self) -> String {
+        if !self.transient.is_empty() {
+            return self.transient.clone();
+        }
         self.pieces
             .iter()
             .map(|piece| piece.text.as_str())
@@ -433,9 +439,136 @@ impl Block {
 pub struct Transcript {
     pub blocks: Vec<Block>,
     pub earlier: bool,
+    live_model: rsi_conversation::LiveModelPreview,
+    live_keys: Vec<String>,
 }
 
 impl Transcript {
+    /// Renderer fixture: insert a source span without inventing a model Fact.
+    #[cfg(test)]
+    pub(crate) fn test_span(
+        &mut self,
+        seq: u64,
+        turn: &str,
+        effect: &str,
+        index: u32,
+        delta: ContentDelta,
+    ) {
+        let turn = rsi_agent_session_protocol::TurnId::new(turn).unwrap();
+        let effect = rsi_agent_session_protocol::EffectId::new(effect).unwrap();
+        let (role, field, text) = match delta {
+            ContentDelta::Text(text) => (
+                Role::Assistant,
+                FactField::ModelText {
+                    index: index.try_into().unwrap(),
+                },
+                text,
+            ),
+            ContentDelta::Reasoning(text) => (
+                Role::Reasoning,
+                FactField::ModelReasoning {
+                    index: index.try_into().unwrap(),
+                },
+                text,
+            ),
+            ContentDelta::ToolArguments(_) => panic!("text fixture"),
+        };
+        self.add(
+            BlockIdentity::Model {
+                turn: &turn,
+                effect: &effect,
+                index,
+            }
+            .key(),
+            if role == Role::Reasoning {
+                "Thinking"
+            } else {
+                "Assistant"
+            },
+            role,
+            Piece::new(Source { seq, field }, &text, 0, WINDOW),
+        );
+        self.blocks.sort_by_key(Block::order);
+        self.trim(false);
+    }
+    /// Updates bounded display text without inventing a durable source anchor.
+    pub fn model(&mut self, snapshot: &rsi_agent_turn_protocol::ModelLiveSnapshot) {
+        if !self
+            .live_model
+            .update(snapshot, WINDOW, MAX_TEXT / 2)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some((turn, effect, purpose, preview)) = self.live_model.view() else {
+            self.blocks
+                .retain(|block| !self.live_keys.contains(&block.key) || !block.sources.is_empty());
+            self.live_keys.clear();
+            return;
+        };
+        let turn = turn.clone();
+        let effect = effect.clone();
+        let parts: Vec<_> = preview.blocks().cloned().collect();
+        let keys: Vec<_> = parts
+            .iter()
+            .map(|part| {
+                BlockIdentity::Model {
+                    turn: &turn,
+                    effect: &effect,
+                    index: u32::from(part.index),
+                }
+                .key()
+            })
+            .collect();
+        self.blocks.retain(|block| {
+            !self.live_keys.contains(&block.key)
+                || !block.sources.is_empty()
+                || keys.contains(&block.key)
+        });
+        self.live_keys.clear();
+        let seq = self
+            .blocks
+            .iter()
+            .map(|block| block.last)
+            .max()
+            .unwrap_or(0);
+        for part in parts {
+            let key = BlockIdentity::Model {
+                turn: &turn,
+                effect: &effect,
+                index: u32::from(part.index),
+            }
+            .key();
+            if self
+                .blocks
+                .iter()
+                .any(|block| block.key == key && !block.sources.is_empty())
+            {
+                continue;
+            }
+            let (role, title) =
+                if purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction {
+                    (Role::Status, "Context compaction")
+                } else if matches!(part.field, FactField::ModelReasoning { .. }) {
+                    (Role::Reasoning, "Thinking")
+                } else {
+                    (Role::Assistant, "Assistant")
+                };
+            let index = self.block_index(key.clone(), title, role, seq);
+            let block = &mut self.blocks[index];
+            let text = crate::terminal_text(&part.window.text);
+            if block.transient != text || block.discarded != part.window.more {
+                block.transient = text;
+                block.layout_revision = std::sync::Arc::new(());
+            }
+            block.text_bytes = block.transient.capacity();
+            block.discarded = part.window.more;
+            block.request_key = Some(request_key(&turn, &effect));
+            self.live_keys.push(key);
+        }
+        self.blocks.sort_by_key(Block::order);
+        self.trim(false);
+    }
     /// Adds bounded local display text without creating a Fact or source anchor.
     #[allow(clippy::missing_panics_doc)] // The checked positive notice count proves its first index exists.
     pub fn push_notice(&mut self, id: u64, text: &str) {
@@ -486,6 +619,8 @@ impl Transcript {
                 old.role == block.role
                     && old.collapsed == block.collapsed
                     && old.markdown == block.markdown
+                    && old.transient == block.transient
+                    && old.discarded == block.discarded
                     && old.pieces == block.pieces
             }) {
                 block.layout_revision = old.layout_revision.clone();
@@ -517,28 +652,84 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One exhaustive projection owns the supported Fact payload fields.
     fn project(&mut self, fact: &SessionFact) {
-        self.project_request(fact);
+        if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
+            self.live_model.started(fact.seq(), effect_id);
+        }
+        if !matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }) {
+            self.project_request(fact);
+        }
         if BlockIdentity::tool(fact).is_some() {
             self.project_tool(fact);
             return;
         }
-        if let SessionFactBody::ModelEvent {
+        if let SessionFactBody::ModelAttemptSettled {
             turn_id,
             effect_id,
-            event: LanguageEvent::ContentFinished { index },
-            ..
+            purpose,
+            attempt,
         } = fact.body()
         {
-            let key = BlockIdentity::Model {
-                turn: turn_id,
-                effect: effect_id,
-                index: *index,
+            self.live_model.settle(fact.seq(), effect_id);
+            let preview = rsi_conversation::model_previews(attempt, WINDOW, MAX_TEXT);
+            for part in preview.blocks() {
+                let (role, title) = if *purpose
+                    == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                {
+                    (Role::Status, "Context compaction")
+                } else if matches!(part.field, FactField::ModelReasoning { .. }) {
+                    (Role::Reasoning, "Thinking")
+                } else {
+                    (Role::Assistant, "Assistant")
+                };
+                let key = BlockIdentity::Model {
+                    turn: turn_id,
+                    effect: effect_id,
+                    index: u32::from(part.index),
+                }
+                .key();
+                self.add(
+                    key.clone(),
+                    title,
+                    role,
+                    Piece::from_window(
+                        Source {
+                            seq: fact.seq(),
+                            field: part.field,
+                        },
+                        &part.window,
+                    ),
+                );
+                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                    block.completed = true;
+                    block.request_key = Some(request_key(turn_id, effect_id));
+                    block.clock.turn = Some(turn_id.clone());
+                    block.clock.started = None;
+                    block.clock.ended = None;
+                    block.clock.elapsed_ms = part
+                        .ended_ms
+                        .and_then(|ended| ended.checked_sub(part.started_ms));
+                    block.clock.running = false;
+                    block.outcome = ProcessOutcome::from_model(attempt.terminal());
+                }
             }
-            .key();
-            if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                block.completed = true;
-                block.clock.ended = Some(fact.timestamp_ms());
+            if let LanguageEvent::Failed { error, .. } = attempt.terminal() {
+                self.add(
+                    format!("error:{}", fact.seq()),
+                    "Model error",
+                    Role::Status,
+                    Piece::new(
+                        Source {
+                            seq: fact.seq(),
+                            field: FactField::ModelFailure,
+                        },
+                        &error.to_string(),
+                        0,
+                        WINDOW,
+                    ),
+                );
             }
+            self.project_request(fact);
+            return;
         }
         let seq = fact.seq();
         let mut add = |key: String, title: String, role, field, text: &str| {
@@ -658,58 +849,6 @@ impl Transcript {
                     Piece::json(source, image.media, 0),
                 );
             }
-            SessionFactBody::ModelEvent {
-                turn_id,
-                effect_id,
-                event: LanguageEvent::ContentDelta { index, delta },
-                purpose,
-            } => {
-                let (role, title, text, field) = match delta {
-                    ContentDelta::Text(text) => {
-                        (Role::Assistant, "Assistant", text, FactField::ModelText)
-                    }
-                    ContentDelta::Reasoning(text) => {
-                        (Role::Reasoning, "Thinking", text, FactField::ModelReasoning)
-                    }
-                    ContentDelta::ToolArguments(_) => return,
-                };
-                let (role, title) = if *purpose
-                    == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
-                {
-                    (Role::Status, "Context compaction")
-                } else {
-                    (role, title)
-                };
-                add(
-                    BlockIdentity::Model {
-                        turn: turn_id,
-                        effect: effect_id,
-                        index: *index,
-                    }
-                    .key(),
-                    title.into(),
-                    role,
-                    field,
-                    text,
-                );
-                if role == Role::Reasoning {
-                    let key = BlockIdentity::Model {
-                        turn: turn_id,
-                        effect: effect_id,
-                        index: *index,
-                    }
-                    .key();
-                    if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                        block.clock.turn = Some(turn_id.clone());
-                        block.clock.started = Some(
-                            block
-                                .clock
-                                .started
-                                .map_or(fact.timestamp_ms(), |old| old.min(fact.timestamp_ms())),
-                        );
-                    }
-                }
-            }
             SessionFactBody::TurnTerminal {
                 turn_id, outcome, ..
             } => {
@@ -730,36 +869,9 @@ impl Transcript {
                     ),
                 );
             }
-            SessionFactBody::ModelEvent {
-                event: LanguageEvent::Failed { error, .. },
-                ..
-            } => {
-                add(
-                    format!("error:{seq}"),
-                    "Model error".into(),
-                    Role::Status,
-                    FactField::ModelFailure,
-                    &error.to_string(),
-                );
-            }
             _ => {}
         }
         let content = match fact.body() {
-            SessionFactBody::ModelEvent {
-                turn_id,
-                effect_id,
-                event: LanguageEvent::ContentDelta { index, .. },
-                ..
-            } => Some((
-                BlockIdentity::Model {
-                    turn: turn_id,
-                    effect: effect_id,
-                    index: *index,
-                }
-                .key(),
-                turn_id,
-                effect_id,
-            )),
             SessionFactBody::ImageOutput {
                 turn_id,
                 effect_id,
@@ -825,7 +937,7 @@ impl Transcript {
             effect_id: effect,
             ..
         }
-        | SessionFactBody::ModelEvent {
+        | SessionFactBody::ModelAttemptSettled {
             turn_id: turn,
             effect_id: effect,
             ..
@@ -838,12 +950,7 @@ impl Transcript {
             fact.body(),
             SessionFactBody::ModelIntent { .. }
                 | SessionFactBody::ModelStarted { .. }
-                | SessionFactBody::ModelEvent {
-                    event: LanguageEvent::Usage { .. }
-                        | LanguageEvent::Finished { .. }
-                        | LanguageEvent::Failed { .. },
-                    ..
-                }
+                | SessionFactBody::ModelAttemptSettled { .. }
         ) && !self.blocks.iter().any(|block| block.key == key)
         {
             return;
@@ -866,8 +973,8 @@ impl Transcript {
             .any(|block| block.role == Role::Assistant && block.request_key.as_ref() == Some(&key));
         let index = self.block_index(key.clone(), "Request", Role::Metadata, fact.seq());
         let block = &mut self.blocks[index];
-        if let SessionFactBody::ModelEvent { event, .. } = fact.body()
-            && let Some(outcome) = ProcessOutcome::from_model(event)
+        if let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body()
+            && let Some(outcome) = ProcessOutcome::from_model(attempt.terminal())
         {
             block.outcome = Some(outcome);
             block.clock.ended = Some(fact.timestamp_ms());
@@ -875,11 +982,10 @@ impl Transcript {
         let request = block.request.get_or_insert_with(Default::default);
         request.observe(fact);
         block.concise |= has_tools;
-        if let SessionFactBody::ModelEvent {
-            event: LanguageEvent::Finished { reason, .. },
-            purpose,
-            ..
+        if let SessionFactBody::ModelAttemptSettled {
+            attempt, purpose, ..
         } = fact.body()
+            && let LanguageEvent::Finished { reason, .. } = attempt.terminal()
         {
             block.concise |= *reason == rsi_ai_protocol::FinishReason::ToolCalls;
             block.completed = has_answer
@@ -1073,6 +1179,7 @@ impl Transcript {
                 request: None,
                 time_ms: None,
                 discarded: false,
+                transient: String::new(),
                 text_bytes: 0,
                 map_bytes: 0,
             });
@@ -1082,6 +1189,12 @@ impl Transcript {
     fn add(&mut self, key: String, title: &str, role: Role, piece: Piece) {
         let index = self.block_index(key, title, role, piece.source.seq);
         let block = &mut self.blocks[index];
+        if !block.transient.is_empty() {
+            block.transient.clear();
+            block.transient.shrink_to_fit();
+            block.text_bytes = 0;
+            block.first = piece.source.seq;
+        }
         if block.sources.position(piece.source).is_some() {
             return;
         }
@@ -1214,19 +1327,160 @@ pub fn json_window(value: &impl serde::Serialize) -> String {
 mod tests {
     use super::*;
 
-    fn process_model_fact(seq: u64, effect: &str, event: LanguageEvent) -> SessionFact {
-        use rsi_agent_session_protocol::{EffectId, TurnId};
-        SessionFact::new(
-            seq,
-            seq * 1000,
-            SessionFactBody::ModelEvent {
-                turn_id: TurnId::new("turn").unwrap(),
-                effect_id: EffectId::new(effect).unwrap(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event,
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle crosses live updates, settlement and restored viewport.
+    fn live_unicode_preserves_manual_expansion_and_settlement_uses_relative_time() {
+        use rsi_agent_session_protocol::{
+            EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionId, TurnId,
+        };
+        use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus};
+        let turn = TurnId::new("turn").unwrap();
+        let effect = EffectId::new("model").unwrap();
+        let mut transcript = Transcript::default();
+        transcript.apply(
+            &SessionFact::new(
+                1,
+                1_000_000,
+                SessionFactBody::ModelStarted {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                },
+            )
+            .unwrap(),
+        );
+        let mut builder = ModelAttemptBuilder::new();
+        builder
+            .push(
+                5,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: rsi_ai_protocol::ContentStart::Reasoning,
+                },
+            )
+            .unwrap();
+        builder
+            .push(
+                10,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Reasoning("界🦀".into()),
+                },
+            )
+            .unwrap();
+        let mut snapshot = ModelLiveSnapshot {
+            session_id: SessionId::new("session").unwrap(),
+            turn_id: turn.clone(),
+            effect_id: effect.clone(),
+            purpose: ModelEventPurpose::Conversation,
+            revision: 1,
+            prefix: builder.prefix(),
+            status: ModelLiveStatus::Streaming,
+        };
+        transcript.model(&snapshot);
+        let first_revision = transcript.blocks[0].layout_revision.clone();
+        snapshot.revision = 2;
+        transcript.model(&snapshot);
+        assert!(std::sync::Arc::ptr_eq(
+            &first_revision,
+            &transcript.blocks[0].layout_revision
+        ));
+        assert_eq!(
+            Viewport::capture(&transcript, None, 80, 24)
+                .0
+                .restore()
+                .unwrap()
+                .blocks[0]
+                .text(),
+            "界🦀"
+        );
+        let index = transcript
+            .blocks
+            .iter()
+            .position(|b| b.role == Role::Reasoning)
+            .unwrap();
+        transcript.blocks[index].collapsed = false;
+        assert!(
+            transcript.blocks[index].anchor(0).is_none(),
+            "uncommitted text has no durable copy authority"
+        );
+        builder
+            .push(
+                20,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Reasoning(" next".into()),
+                },
+            )
+            .unwrap();
+        snapshot.revision = 3;
+        snapshot.prefix = builder.prefix();
+        transcript.model(&snapshot);
+        let block = transcript
+            .blocks
+            .iter()
+            .find(|b| b.role == Role::Reasoning)
+            .unwrap();
+        assert!(!block.collapsed);
+        assert_eq!(block.text(), "界🦀 next");
+        assert!(!std::sync::Arc::ptr_eq(
+            &first_revision,
+            &block.layout_revision
+        ));
+        let restored_live = Viewport::capture(&transcript, None, 80, 24)
+            .0
+            .restore()
+            .unwrap();
+        assert_eq!(restored_live.blocks[0].text(), "界🦀 next");
+        assert!(restored_live.blocks[0].sources().is_empty());
+        builder
+            .push(25, &LanguageEvent::ContentFinished { index: 0 })
+            .unwrap();
+        builder
+            .push(
+                30,
+                &LanguageEvent::Finished {
+                    reason: rsi_ai_protocol::FinishReason::MaxTokens,
+                    replay: None,
+                },
+            )
+            .unwrap();
+        let settled = SessionFact::new(
+            2,
+            1_000_030,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: turn,
+                effect_id: effect,
+                purpose: ModelEventPurpose::Conversation,
+                attempt: builder.finish(true).unwrap(),
             },
         )
-        .unwrap()
+        .unwrap();
+        transcript.apply(&settled);
+        transcript.model(&snapshot);
+        let block = transcript
+            .blocks
+            .iter()
+            .find(|b| b.role == Role::Reasoning)
+            .unwrap();
+        assert!(!block.collapsed);
+        assert_eq!(block.text(), "界🦀 next");
+        assert_eq!(block.clock.display(None), (Some(20), false));
+        assert_eq!(block.outcome, Some(ProcessOutcome::Interrupted));
+        assert_eq!(block.sources().len(), 1);
+        let restored = Viewport::capture(&transcript, None, 80, 24)
+            .0
+            .restore()
+            .unwrap();
+        assert_eq!(
+            restored
+                .blocks
+                .iter()
+                .find(|b| b.role == Role::Reasoning)
+                .unwrap()
+                .clock
+                .display(None),
+            (Some(20), false)
+        );
     }
 
     #[test]
@@ -1247,7 +1501,6 @@ mod tests {
             replay: None,
         };
         for (terminal, expected) in [
-            (None, None),
             (
                 Some(finished(FinishReason::Stop)),
                 Some(ProcessOutcome::Success),
@@ -1277,21 +1530,28 @@ mod tests {
                 Some(ProcessOutcome::Interrupted),
             ),
         ] {
-            let reasoning = || LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Reasoning("Private reasoning".into()),
-            };
-            let mut facts = vec![
-                process_model_fact(1, "subject", reasoning()),
-                process_model_fact(2, "subject", LanguageEvent::ContentFinished { index: 0 }),
-            ];
-            if let Some(terminal) = terminal {
-                facts.push(process_model_fact(3, "subject", terminal));
+            let terminal = terminal.unwrap();
+            let mut parts = vec![ContentDelta::Reasoning("Private reasoning".into())];
+            if matches!(
+                &terminal,
+                LanguageEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                    ..
+                }
+            ) {
+                parts.push(ContentDelta::ToolArguments("{}".into()));
             }
-            facts.extend([
-                process_model_fact(4, "other", reasoning()),
-                process_model_fact(5, "other", finished(FinishReason::Stop)),
-            ]);
+            let facts = [
+                crate::test_state::attempt_fact(1, 1000, "turn", "subject", parts, terminal),
+                crate::test_state::attempt_fact(
+                    2,
+                    2000,
+                    "turn",
+                    "other",
+                    vec![ContentDelta::Reasoning("Other reasoning".into())],
+                    finished(FinishReason::Stop),
+                ),
+            ];
             for reverse in [false, true] {
                 let mut transcript = Transcript::default();
                 let order: Vec<_> = if reverse {
@@ -1435,7 +1695,7 @@ mod tests {
         let stale = Anchor {
             source: Source {
                 seq: 0,
-                field: FactField::ModelText,
+                field: FactField::ModelText { index: 0 },
             },
             offset: 0,
         };
@@ -1465,7 +1725,7 @@ mod tests {
         Piece::new(
             Source {
                 seq,
-                field: FactField::ModelText,
+                field: FactField::ModelText { index: 0 },
             },
             text,
             0,
@@ -1658,20 +1918,17 @@ mod tests {
             },
         )
         .unwrap();
-        let finished = SessionFact::new(
+        let finished = crate::test_state::attempt_fact(
             4,
             4,
-            SessionFactBody::ModelEvent {
-                turn_id: turn.clone(),
-                effect_id: source.clone(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: LanguageEvent::Finished {
-                    reason: rsi_ai_protocol::FinishReason::ToolCalls,
-                    replay: None,
-                },
+            "turn",
+            source.as_str(),
+            vec![ContentDelta::ToolArguments("{}".into())],
+            LanguageEvent::Finished {
+                reason: rsi_ai_protocol::FinishReason::ToolCalls,
+                replay: None,
             },
-        )
-        .unwrap();
+        );
         for reverse in [false, true] {
             let mut transcript = Transcript::default();
             let mut facts = vec![&model, &unrelated, &intent, &finished];

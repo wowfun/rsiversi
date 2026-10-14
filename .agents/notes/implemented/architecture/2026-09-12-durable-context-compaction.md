@@ -2,6 +2,9 @@
 name: Durable model context compaction
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Model evidence and raw-pressure admission are superseded; completed interactions inside an active Turn can be summarized.
+
 ## Problem
 
 Evicting complete old Turns under byte/message pressure cannot reduce a long
