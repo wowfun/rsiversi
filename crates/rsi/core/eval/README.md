@@ -3,9 +3,8 @@
 The Session API Goal evaluator uses the same immutable tasks, source admission,
 oracle and Linux namespace/process supervision as the terminal evaluator. Its
 separate driver must connect to the real local Service API, freeze explicit Goal
-round allowances and record canonical API/Goal/Turn evidence. Provider and Tool
-budgets multiply across allocated parent rounds; reports distinguish them from
-elapsed task deadlines and model token Usage. Restarted processes first verify
+round allowances and record canonical API/Goal/Turn evidence. Provider and Tool starts are observed counters, without cumulative execution
+allowances; reports distinguish them from elapsed task deadlines and token Usage. Restarted processes first verify
 disarmed state and require an explicit new control. GUI smoke and API long-task
 reports are separate acceptance surfaces. Live execution requires an explicit
 opt-in, one fixed attempt per task and an unused evidence directory.
@@ -13,10 +12,11 @@ The runner records the frozen driver's SHA-256 in `binary.json` before oracle
 self-tests or task execution. CI retains that identity and the evaluation
 evidence, excluding the `session-api-eval` executable copy; the archive cannot
 restore that program for binary replay.
-The classifier compares the objective, constraints and all five canonical Turn
-budget fields to the values used to configure the run. Durable provider and Tool
-starts must fit both each Turn's allowance and the aggregate parent-round cap.
-These checks reject infrastructure drift even when the external oracle passes.
+The classifier compares the frozen objective, constraints and resolved Goal
+round maximum. The durable parent Turn count must fit that maximum. Model event
+diagnostics decode each bounded settlement without modifying canonical Facts or
+their source-chain digests; derived coordinates retain the Fact sequence, event
+index and elapsed time.
 
 Build its driver with `CARGO_BUILD_JOBS=2 cargo build -p rsi --example
 session-api-eval`. Run `python3 crates/rsi/core/eval/session_api.py --self-test
@@ -31,9 +31,7 @@ its canonical successful Tool result and restricted enforcement stamp. Configure
 files are hashed before and after every task; drift invalidates the run. Host
 state remains writable by its owning daemon so it can persist canonical Facts.
 `--live --key-file .local/dev/.env --model deepseek-flash --output
-/absolute/new-report` replaces only that provider. Each stage has two automatic
-parent rounds, 16 provider attempts and 120 seconds per round. The 48 Tool-call
-allowance is divided across all stage/round combinations. The outer task deadline
+/absolute/new-report` replaces only that provider. Each stage has two automatic parent rounds. The outer task deadline
 is eight minutes including initial and final grading. A subsequent requirement
 after restart creates an explicit new Goal in the same Session; it does not
 silently change the earlier Goal's frozen objective. Reports count compaction
@@ -55,7 +53,10 @@ decoding exceptions. Credential-bearing artifacts are refused; the failure
 report retains a redacted partial result. An unwritable report directory can
 still prevent persistence and fails the runner. The Linux runtime temporary
 directory is rooted at `/tmp` to bound the Unix socket address independently
-of ambient `TMPDIR`. Rejection of the pristine source layout, or oracle compiler
+of ambient `TMPDIR`; portable unit fixtures use the native temporary directory
+on Windows. Headless live evaluation writes agent stdout and stderr as original
+bytes and persists partial per-task and batch reports even on integrity errors.
+Rejection of the pristine source layout, or oracle compiler
 timeout/output overflow/incomplete cleanup, is infrastructure failure.
 
 `--self-test --pressure --task utf8-truncate` adds a bounded large scripted
@@ -91,10 +92,7 @@ explicitly opt-in; ordinary Cargo tests never execute this script's live mode.
 Evaluation version 10 covers a UTF-8 truncation repair, a two-module word-frequency
 feature, and interval merging with a second requirement after restarting and
 resuming the Session. Each task has one attempt, an eight-minute outer deadline,
-and 48 Tool calls. Each Turn has 32 provider attempts: a single-turn task has
-32 total, and the two-turn task has 64 total. The two-turn task splits only the
-Tool quota equally between its immutable Turn settings. Reports record the
-task-wide totals and the actual per-Turn settings. There is no task resampling.
+and no cumulative provider or Tool-call cap. Reports retain actual counters. There is no task resampling.
 
 The Agent process also runs in a fresh Bubblewrap PID and mount namespace.
 Only its private task directory, the built executable, read-only system files
@@ -108,7 +106,7 @@ namespace contains descendants even if they create a new process session.
 Agent launch failure is an infrastructure error; execution never falls back
 to a process outside this boundary.
 Agent stdout/stderr each have a separate 128 MiB operational bound, allowing
-JSONL envelopes around the 64 MiB generated-Fact budget. This bound differs
+bounded JSONL envelopes independently of durable Fact capacities. This bound differs
 from the oracle's 1 MiB streams; exceeding it invalidates the run as an
 infrastructure failure and preserves the truncated evidence.
 Incomplete process cleanup is also an infrastructure failure, even when the
