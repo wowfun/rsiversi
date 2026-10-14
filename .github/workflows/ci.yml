@@ -61,7 +61,7 @@ jobs:
               if subprocess.run(["git", "cat-file", "-e", base + "^{commit}"], capture_output=True).returncode:
                   git("fetch", "--no-tags", "origin", base)
               git("cat-file", "-e", base + "^{commit}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as output:
               output.write("base=" + base + "\n")
       - name: Verify documentation structure
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
