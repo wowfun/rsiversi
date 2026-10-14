@@ -8,7 +8,9 @@ import { downloadSession } from "./session-export.js";
 import { DocumentConnection } from "./document-connection.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
-import { NativeDocument } from "./src/native.ts";
+import { createDocumentTransport } from "./src/native.ts";
+import { isNativeDocument } from "./document-mode.js";
+const nativeDocument = isNativeDocument();
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
 import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
 import { openHistoryPicker } from "./history-picker.js";
@@ -207,7 +209,7 @@ async function makeWorker() {
   await connection?.retire();
   const table = await MountTable.open();
   let transport;
-  try { transport = location.protocol === "rsi:" ? new NativeDocument() : new Worker("/worker.js", { type: "module" }); }
+  try { transport = createDocumentTransport(); }
   catch (error) { await table.close(); throw error; }
   const current = createDocumentConnection(transport, table);
   connection = current;
@@ -277,7 +279,7 @@ $("login-form").addEventListener("submit", event => {
   if (receipt.length > 2048) { notify("Device receipt exceeds its limit"); return; }
   perform(() => connectWith(receipt));
 });
-$("dev-http-label").hidden = location.protocol !== "http:";
+$("dev-http-label").hidden = nativeDocument || location.protocol !== "http:";
 $("reconnect").hidden = !endpoint;
 $("reconnect").addEventListener("click", () => perform(() => connectWith(JSON.stringify({ endpoint_id: endpoint }))));
 async function cancelNativeCloseAfterDraftFailure(current, draftError) {
@@ -317,7 +319,7 @@ async function disconnectDocument() {
   } catch (error) {
     if (connection !== current) return;
     if (error.draftSaveFailed && !current.closing) {
-      if (location.protocol === "rsi:") {
+      if (nativeDocument) {
         if (!await cancelNativeCloseAfterDraftFailure(current, error)) return;
       }
       notify(`Draft is not saved: ${error.message}. Recover the draft before closing.`);
@@ -327,7 +329,7 @@ async function disconnectDocument() {
 
 $("sign-out").addEventListener("click", () => perform(disconnectDocument));
 window.addEventListener("rsi-native-close", () => perform(disconnectDocument));
-if(location.protocol === "rsi:")setClipboardWriter(text=>call("clipboard_write",text));
+if(nativeDocument)setClipboardWriter(text=>call("clipboard_write",text));
 
 function draftRecovery(editor, resolved = () => {}) {
   const choose = useSaved => async () => { await editor.resolve(useSaved); await resolved(); };
@@ -1564,7 +1566,7 @@ function renderUiDetail(detail, target) {
   });
 }
 
-if (location.protocol === "rsi:") {
+if (nativeDocument) {
   $("login").hidden = true;
   $("sign-out").textContent = "Close application";
   perform(() => connectWith("{}"));

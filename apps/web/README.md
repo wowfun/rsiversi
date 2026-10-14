@@ -1,5 +1,13 @@
 # Web document bridge
 
+Native document mode uses the exact local `rsi://localhost` or
+`http://rsi.localhost` location, including its scheme and authority. The latter
+is WebView2's visible Windows origin. Transport construction, automatic native
+connection, clipboard, close-drain recovery and native export share this mode
+predicate. Other HTTP origins use the Dedicated Worker and browser connection
+flow. Mode selection does not grant native authority; Desktop owns request
+admission and document IPC permissions.
+
 The standard renderer displays an optional `data.image` by reading its explicitly
 declared PNG source in bounded 64 KiB windows. Its published renderer declares
 the source capability, and reads start only after presentation activation.
@@ -97,6 +105,8 @@ replacement even if the underlying operation completes later. Waiting never
 asserts that native work was cancelled or that disconnect succeeded.
 Native transport cleanup aborts its own HTTP request after 30 seconds and retains
 that failed termination receipt for subsequent callers.
+Native private requests always use POST, including empty-body frame polling;
+the [Desktop adapter](../desktop/README.md) owns Origin and method admission.
 Native close cancellation also cancels that attempt's drain deadline; a later
 close starts a new attempt after recovery. The native close-cancellation HTTP wait also expires after 30 seconds.
 Failure to cancel native close retains the draft-save

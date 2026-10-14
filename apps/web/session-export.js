@@ -1,3 +1,5 @@
+import {isNativeDocument} from './document-mode.js';
+
 async function downloadWorker() {
   if (!navigator.serviceWorker) throw new Error("Streaming downloads require a secure browser origin with Service Workers");
   const registration = await navigator.serviceWorker.register("/download-worker.js", {scope:"/downloads/", updateViaCache:"none"});
@@ -13,7 +15,7 @@ async function downloadWorker() {
 
 // At most one 64 KiB chunk is outstanding. Never collect or Blob the artifact.
 export async function downloadSession(call, pane, generation, args, signal) {
-  if (location.protocol === "rsi:") {
+  if (isNativeDocument()) {
     const { token } = JSON.parse(await call("export_open", ""));
     let cancellation, saved = false;
     const cancel = () => cancellation ??= (async () => {

@@ -33,6 +33,9 @@ tauri = "=2.11.5"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 tauri-build = "=2.6.3"
 

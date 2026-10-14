@@ -139,15 +139,27 @@ fn validate_request(
             "Native request exceeds its limit".into(),
         ));
     }
-    if label != "main" || request.uri().host() != Some("localhost") {
+    if label != "main"
+        || request.uri().scheme_str() != Some("rsi")
+        || request
+            .uri()
+            .authority()
+            .map(tauri::http::uri::Authority::as_str)
+            != Some("localhost")
+    {
         return Err(NativeError::Invalid("Invalid native document".into()));
     }
-    let origin = request
-        .headers()
-        .get("origin")
-        .and_then(|value| value.to_str().ok());
-    if origin.is_some_and(|value| value != "rsi://localhost") {
+    let private = request.uri().path().starts_with("/_");
+    let mut origins = request.headers().get_all("origin").iter();
+    let origin = origins.next();
+    if origin.is_some_and(|value| value.to_str().ok() != Some(crate::document::ORIGIN))
+        || (private && origin.is_none())
+        || origins.next().is_some()
+    {
         return Err(NativeError::Invalid("Untrusted native origin".into()));
+    }
+    if private && request.method() != tauri::http::Method::POST {
+        return Err(NativeError::Invalid("Native inputs require POST".into()));
     }
     Ok(())
 }
@@ -174,15 +186,6 @@ pub(super) fn handle(
         respond(responder, Err(NativeError::Closed));
         return;
     };
-    if path.starts_with("/_") && path != "/_frame" && request.method() != tauri::http::Method::POST
-    {
-        drop(guard);
-        respond(
-            responder,
-            Err(NativeError::Invalid("Native inputs require POST".into())),
-        );
-        return;
-    }
     if path == "/_ack" {
         drop(guard);
         respond(
@@ -244,11 +247,15 @@ pub(super) fn handle(
         }
     };
     let tasks = bridge.tasks.clone();
-    tauri::async_runtime::spawn(tasks.track_future(respond_admitted(
+    let response = tasks.track_future(respond_admitted(
         permit,
         execute(bridge, request, path),
         move |result| respond(responder, result),
-    )));
+    ));
+    // Retirement must observe registration before this lock is released; the
+    // tracked future already owns its lifetime while scheduling happens outside.
+    drop(guard);
+    tauri::async_runtime::spawn(response);
 }
 
 async fn execute(
@@ -313,7 +320,7 @@ fn response(
     policy: &rsi_api_http::DocumentPolicy,
 ) -> tauri::http::Response<Vec<u8>> {
     let csp = policy
-        .content_security_policy("rsi://localhost")
+        .content_security_policy(crate::document::ORIGIN)
         .expect("closed product asset policy");
     let (status, bytes, mime) = match result {
         Ok((bytes, mime)) => (200, bytes, mime),
@@ -340,10 +347,122 @@ async fn respond_admitted<T>(
     handoff(result);
 }
 
+#[cfg(all(test, windows))]
+#[path = "protocol_probe.rs"]
+mod live_probe;
+
 #[cfg(test)]
 mod tests {
     use super::{Admission, NativeError, classify, respond_admitted, run_operation};
     use std::sync::Arc;
+
+    #[test]
+    fn native_requests_use_normalized_uri_and_actual_document_origin() {
+        let request = |uri: &str, origin: &str| {
+            tauri::http::Request::builder()
+                .method(tauri::http::Method::POST)
+                .uri(uri)
+                .header("origin", origin)
+                .body(Vec::new())
+                .unwrap()
+        };
+        let admitted = request("rsi://localhost/_connect", crate::document::ORIGIN);
+        assert!(super::validate_request("main", &admitted).is_ok());
+        assert!(super::validate_request("preview", &admitted).is_err());
+        for uri in [
+            "rsi://localhost:8888/_connect",
+            "rsi://user@localhost/_connect",
+            "http://rsi.localhost/_connect",
+            "https://localhost/_connect",
+            "rsi://localhost.evil/_connect",
+        ] {
+            assert!(
+                super::validate_request("main", &request(uri, crate::document::ORIGIN)).is_err()
+            );
+        }
+        for origin in [
+            "null",
+            "https://rsi.localhost",
+            "http://localhost",
+            "http://rsi.localhost.evil",
+        ] {
+            assert!(
+                super::validate_request("main", &request("rsi://localhost/_connect", origin))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn private_requests_require_post_and_an_exact_well_formed_origin() {
+        for path in ["/_frame", "/_call/connect", "/_ack"] {
+            let uri = format!("rsi://localhost{path}");
+            let request = tauri::http::Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .body(Vec::new())
+                .unwrap();
+            assert!(super::validate_request("main", &request).is_err());
+            let request = tauri::http::Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header(
+                    "origin",
+                    tauri::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+                )
+                .body(Vec::new())
+                .unwrap();
+            assert!(super::validate_request("main", &request).is_err());
+            let request = tauri::http::Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header("origin", crate::document::ORIGIN)
+                .body(Vec::new())
+                .unwrap();
+            assert!(super::validate_request("main", &request).is_err());
+        }
+        let asset = tauri::http::Request::builder()
+            .uri("rsi://localhost/")
+            .body(Vec::new())
+            .unwrap();
+        assert!(super::validate_request("main", &asset).is_ok());
+    }
+
+    #[test]
+    fn document_response_csp_uses_the_platform_origin() {
+        let response = super::response(
+            Ok((Vec::new(), "text/html")),
+            &rsi_api_http::DocumentPolicy::SandboxLocal,
+        );
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains(crate::document::ORIGIN));
+        #[cfg(windows)]
+        assert!(!csp.contains("rsi://localhost"));
+        #[cfg(not(windows))]
+        assert!(!csp.contains("http://rsi.localhost"));
+    }
+
+    #[test]
+    fn duplicate_origin_headers_are_rejected_in_any_order_even_when_equal() {
+        for path in ["/", "/_frame"] {
+            for origins in [
+                [crate::document::ORIGIN, "null"],
+                ["null", crate::document::ORIGIN],
+                [crate::document::ORIGIN, crate::document::ORIGIN],
+            ] {
+                let request = tauri::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("rsi://localhost{path}"))
+                    .header("origin", origins[0])
+                    .header("origin", origins[1])
+                    .body(Vec::new())
+                    .unwrap();
+                assert!(super::validate_request("main", &request).is_err());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn reconnect_joins_actual_frame_work_before_new_observer_admission() {

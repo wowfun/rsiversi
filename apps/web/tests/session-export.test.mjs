@@ -1,9 +1,12 @@
-import {test} from 'node:test';
+import {after, before, describe, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {downloadSession} from '../session-export.js';
 
-globalThis.location = {protocol:'rsi:'};
 const deferred = () => { let resolve; const promise = new Promise(r=>resolve=r); return {promise,resolve}; };
+for (const href of ['rsi://localhost/', 'http://rsi.localhost/']) describe(href, () => {
+  const original = globalThis.location;
+  before(() => { globalThis.location = new URL(href); });
+  after(() => { globalThis.location = original; });
 
 test('abort while reservation is pending cancels the returned token before save', async()=>{
   const opened=deferred(), controller=new AbortController(), calls=[];
@@ -44,4 +47,5 @@ test('confirmed replacement stays successful after cancellation and failed contr
     controller.abort(); return '{"filename":"saved.json"}';
   },'main',1,'-f json',controller.signal);
   assert.deepEqual(result,{filename:'saved.json'});
+});
 });
