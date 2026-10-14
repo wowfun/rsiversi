@@ -328,10 +328,10 @@ impl PeerHandle {
     }
 
     async fn flushed(&self, receive: oneshot::Receiver<()>) -> Result<(), Error> {
-        tokio::select! { biased; result = receive => result.map_err(|_| self.lost_flush()), () = self.stop.cancelled() => Err(Error::Closed) }
+        tokio::select! { biased; result = receive => result.map_err(|_| self.retire_if_open(Error::Closed)), () = self.stop.cancelled() => Err(Error::Closed) }
     }
 
-    fn lost_flush(&self) -> Error {
+    fn retire_if_open(&self, error: Error) -> Error {
         let _admission = self
             .admission
             .lock()
@@ -340,10 +340,10 @@ impl PeerHandle {
             self.failure
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get_or_insert(Error::Closed);
+                .get_or_insert(error);
             self.stop.cancel();
         }
-        Error::Closed
+        error
     }
 
     fn close_admission(&self) {
@@ -546,7 +546,7 @@ async fn write_loop(
     let writing = async {
         while let Some(write) = writes.recv().await {
             if peer.stop.is_cancelled() {
-                return Err(Error::Closed);
+                return Ok(());
             }
             match write {
                 Write::Frame {
@@ -556,7 +556,7 @@ async fn write_loop(
                 } => {
                     transport.write(&bytes).await?;
                     if peer.stop.is_cancelled() {
-                        return Err(Error::Closed);
+                        return Ok(());
                     }
                     transport.flush().await?;
                     let _ignored = written.send(());
@@ -570,7 +570,7 @@ async fn write_loop(
         Ok::<(), Error>(())
     };
     tokio::select! { biased; () = peer.stop.cancelled() => {}, result = writing => {
-        if let Err(error) = result { peer.retire(error); }
+        if let Err(error) = result { peer.retire_if_open(error); }
     } }
     peer.close_admission();
 }
@@ -593,6 +593,65 @@ impl std::io::Write for BoundedFrame {
 mod drain_tests {
     use super::*;
     use std::future::Future as _;
+
+    #[derive(Debug)]
+    struct ClosingWrites {
+        peer: std::sync::OnceLock<PeerHandle>,
+        close_during_write: bool,
+        write_result: Result<(), Error>,
+    }
+    #[async_trait::async_trait]
+    impl Transport for ClosingWrites {
+        async fn read(&self) -> Result<Vec<u8>, Error> {
+            std::future::pending().await
+        }
+        async fn write(&self, bytes: &[u8]) -> Result<(), Error> {
+            let frame: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(frame["method"], "test");
+            if self.close_during_write {
+                // Publish the same clean retirement as reader EOF while this
+                // write poll is active, before select can poll cancellation again.
+                self.peer.get().unwrap().close_admission();
+            }
+            self.write_result
+        }
+        async fn flush(&self) -> Result<(), Error> {
+            panic!("a closed write must not proceed to flush");
+        }
+        async fn close(&self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    async fn closing_write_failure(
+        close_during_write: bool,
+        write_result: Result<(), Error>,
+    ) -> Option<Error> {
+        let transport = Arc::new(ClosingWrites {
+            peer: std::sync::OnceLock::new(),
+            close_during_write,
+            write_result,
+        });
+        let peer = Peer::start(transport.clone());
+        let port = peer.handle();
+        transport.peer.set(port.clone()).unwrap();
+        assert_eq!(port.notify("test", &json!({})).await, Err(Error::Closed));
+        peer.close().await.unwrap();
+        port.failure()
+    }
+    #[tokio::test]
+    async fn clean_close_during_a_write_poll_preserves_retirement_result() {
+        for result in [Ok(()), Err(Error::Closed)] {
+            assert_eq!(closing_write_failure(true, result).await, None);
+        }
+    }
+    #[tokio::test]
+    async fn transport_write_failure_while_admission_is_open_retires_peer() {
+        assert_eq!(
+            closing_write_failure(false, Err(Error::Closed)).await,
+            Some(Error::Closed)
+        );
+    }
+
     #[tokio::test]
     async fn abort_fences_a_frame_whose_encoding_started_before_retirement() {
         struct Encoding {

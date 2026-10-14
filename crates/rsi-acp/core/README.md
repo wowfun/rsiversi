@@ -61,6 +61,10 @@ Clean EOF may cancel a handler still observing a delivered response. Its Closed
 receipt does not make retirement unhealthy when the peer has already closed
 without a driver failure. Protocol, capacity, driver and cleanup failures remain
 explicit; response delivery is never retried.
+Writer completion racing with an already published clean close preserves that
+retirement result, including transport cancellation reported as Closed. A writer
+failure while admission remains open retires the connection; transport cleanup
+failures remain observable after admission closes.
 A flush receipt lost while admission is still open retires the peer. Losing that
 observation after clean close preserves the existing retirement result.
 

@@ -154,6 +154,12 @@ max_output_reserve_tokens = 16384
         output
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn owner_log(&self) -> String {
+        "embedded Session service has no daemon log".to_owned()
+    }
+
+    #[cfg(target_os = "linux")]
     fn owner_log(&self) -> String {
         use std::io::Read as _;
         let mut log = String::new();
