@@ -253,6 +253,9 @@ which includes the standard preset and disables its human-question contribution.
 Both sources are hashed and byte-verified together. Concurrent cold publications
 converge by verifying the winner's exact bytes;
 private staging children are created relative to their retained directory.
+Windows preset staging also uses native private creation with an explicit
+TokenUser owner, independent of the token's default owner for ordinary temporary
+directories. Ordinary failure removes the owned staging directory.
 Ordinary preset catalogs
 grant authority to the exact `standard` directory only; ACP explicitly derives
 an isolated catalog for `acp-internal`, with no user roots or default override.
@@ -442,6 +445,10 @@ All index/object operations use pinned directories and no-follow regular files.
 Store directories and index/object files must belong to the effective user and
 deny group/other writes. Source manifests and build inputs retain their explicit
 caller-selected trust.
+Build fingerprints refuse links and special objects, accepting only directories
+and regular files. If a native platform refuses the open before type inspection,
+its I/O error still establishes rejection; callers must not depend on one errno
+or semantic error variant for every special object.
 Private staging is bounded and removed on ordinary failure. An immutable object
 may remain if later index publication fails. The consumed source copy determines
 its digest even when the public build output changes during copying.

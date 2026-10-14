@@ -135,7 +135,7 @@ cancellation; the helper creates no task or queue. Each underlying operation
 retains its own I/O deadline. Other errors, including unknown outcomes, return
 immediately. Mutations use their domain-specific reconciliation policy.
 
-Fact/control, interaction and projection observation share one retry policy: 250 ms initial
+Public Fact/control, model, interaction and projection observers share one retry policy: 250 ms initial
 delay, doubling to 2 seconds; successful delivery resets both delay and failure
 count. Capacity failures, including API Capacity, do not consume the five-failure
 cutoff. Other consecutive failures terminate on the fifth. Reconnection notices

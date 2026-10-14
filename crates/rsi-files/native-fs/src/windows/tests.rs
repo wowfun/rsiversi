@@ -553,10 +553,10 @@ fn creation_sets_private_owner_and_protected_dacl_without_repairing_existing_obj
     let created = create_directory_no_follow(&root, "private中文😀".as_ref()).unwrap();
     let before = native::private_descriptor(&created.0).unwrap();
     let (owner, rules) = before.split_once("D:P").unwrap();
-    let sid = owner.strip_prefix("O:S-").unwrap();
+    let user = owner.strip_prefix("O:").unwrap();
     assert!(rules.contains("(A;OICI;FA;;;SY)"));
     assert!(rules.contains("(A;OICI;FA;;;BA)"));
-    assert!(rules.contains(&format!("(A;OICI;FA;;;S-{sid})")));
+    assert!(rules.contains(&format!("(A;OICI;FA;;;{user})")));
     assert_eq!(rules.matches("(A;").count(), 3);
     assert!(
         matches!(create_directory_no_follow(&root, "private中文😀".as_ref()),

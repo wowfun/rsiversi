@@ -5855,6 +5855,8 @@ name = "rsi-app-tools"
 version = "0.0.1"
 dependencies = [
  "nix 0.29.0",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
  "rustix 1.1.4",
  "serde_json",
  "sha2",

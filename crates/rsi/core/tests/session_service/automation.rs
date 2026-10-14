@@ -367,9 +367,12 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
     .await
     .unwrap_or_else(|error| {
         panic!(
-            "exploration deadline: {error}; requests: {}; attempt: {:?}",
+            "exploration deadline: {error}; requests: {}; exploration: {:?}",
             requests.lock().unwrap().len(),
-            owner.ledger.get(receipt.attempt_id)
+            owner
+                .ledger
+                .get(receipt.attempt_id)
+                .map(|attempt| attempt.exploration)
         )
     });
     if fail_after_report {

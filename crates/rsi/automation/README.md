@@ -144,6 +144,8 @@ admission 503.
 The 32-connection admission bound also returns a bounded 503 JSON busy response.
 Exploration always closes its preview and settles failure or cancellation before
 returning an execution error; cleanup failure never overwrites the fixed verdict.
+Its round timer and live Goal observation retire before the final durable
+projection is captured; completed monitoring retains no read admission.
 Checker cleanup follows the same rule: a complete result and its evidence settle
 before reporting cleanup failure, which prevents a new exploration and remains
 visible in the bounded evidence diagnostic.

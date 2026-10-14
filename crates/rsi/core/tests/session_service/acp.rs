@@ -11,6 +11,7 @@ use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
 use rsi_session_protocol::SessionHandle;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::sync::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -368,7 +369,10 @@ async fn native_acp_prompt_settles_and_load_replays_atomic_fragmented_output() {
             result
         }
     });
-    let text: String = (0..1200).map(|index| format!("{index},")).collect();
+    let text = (0..1200).fold(String::new(), |mut text, index| {
+        write!(text, "{index},").unwrap();
+        text
+    });
     let mut observed = String::new();
     while observed.len() < text.len() {
         let updates = collect(&mut client, 1).await;
@@ -394,7 +398,7 @@ async fn native_acp_prompt_settles_and_load_replays_atomic_fragmented_output() {
     let horizon = handle.history_before(None, 1).await.unwrap().durable_seq;
     eprintln!("native ACP horizon: {horizon}");
     assert!(
-        horizon > 0 && horizon < 1024,
+        (1..1024).contains(&horizon),
         "provider fragmentation must not create durable Facts"
     );
     let request = json!({"sessionId":created.session_id,"cwd":fixture.workspace,"mcpServers":[]});

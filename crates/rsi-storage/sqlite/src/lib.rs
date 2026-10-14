@@ -126,6 +126,8 @@ impl SqliteBackend {
         ensure_private_database_file(&path)?;
         #[cfg(windows)]
         let database = private_windows_file(&path, true)?;
+        #[cfg(windows)]
+        prepare_windows_sidecars(&path)?;
         let connection = Connection::open_with_flags(
             &path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -917,6 +919,16 @@ fn private_windows_file(path: &Path, create: bool) -> Result<std::fs::File, Stor
         .map_err(|error| StorageError::Io(error.to_string()))
 }
 #[cfg(windows)]
+fn prepare_windows_sidecars(path: &Path) -> Result<(), StorageError> {
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        private_windows_file(&PathBuf::from(name), true)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn set_sqlite_sidecar_permissions(path: &Path) -> Result<(), StorageError> {
     for suffix in ["-wal", "-shm"] {
         let mut name = path.as_os_str().to_os_string();
@@ -1011,6 +1023,15 @@ mod windows_tests {
             .put("fixture", 1, "first", &serde_json::json!({"value": 21}))
             .await
             .unwrap();
+        let directory = rsi_files_native_fs::open_absolute_directory_no_follow(&parent).unwrap();
+        for sidecar in ["domains.sqlite3-wal", "domains.sqlite3-shm"] {
+            rsi_files_native_fs::open_relative_private_file_no_follow(
+                &directory,
+                Path::new(sidecar),
+            )
+            .expect("SQLite sidecars retain the exact private owner and protected DACL");
+        }
+        drop(directory);
         let second = SqliteBackend::open(&path).unwrap();
         second
             .put("fixture", 1, "second", &serde_json::json!({"value": 22}))

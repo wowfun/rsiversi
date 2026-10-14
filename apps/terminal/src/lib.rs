@@ -536,7 +536,7 @@ struct CliMessageSink {
     cancellation: CancellationToken,
     stopped: CancellationToken,
     work: ApplicationWork,
-    interactions: std::sync::Mutex<Option<session_cli::InteractionWatcher>>,
+    observations: std::sync::Mutex<Option<session_cli::MessageObservations>>,
 }
 #[async_trait::async_trait]
 impl rsi_client::MessageSink for CliMessageSink {
@@ -547,6 +547,16 @@ impl rsi_client::MessageSink for CliMessageSink {
         use rsi_client::MessageEvent;
         let terminal = matches!(event, MessageEvent::Outcome { .. });
         let claimed = matches!(event, MessageEvent::Claimed { .. });
+        if terminal {
+            let observations = self
+                .observations
+                .lock()
+                .expect("message observations poisoned")
+                .take();
+            if let Some(observations) = observations {
+                observations.close().await;
+            }
+        }
         let event = match event {
             MessageEvent::Accepted(receipt) => CliEvent::Message {
                 session_id: receipt.session_id,
@@ -590,12 +600,12 @@ impl rsi_client::MessageSink for CliMessageSink {
             .map_err(|_| rsi_client::MessageRunError::SinkStopped)?;
         if claimed && !self.stopped.is_cancelled() && !self.cancellation.is_cancelled() {
             *self
-                .interactions
+                .observations
                 .lock()
-                .expect("message interaction watcher poisoned") =
-                Some(session_cli::spawn_interactions(
-                    self.handle.clone(),
-                    self.renderer.clone(),
+                .expect("message observations poisoned") =
+                Some(session_cli::spawn_message_observations(
+                    &self.handle,
+                    &self.renderer,
                     &self.stopped,
                     &self.work,
                 ));
@@ -625,7 +635,7 @@ pub(crate) async fn drive_application_turn(
             cancellation: cancellation.clone(),
             stopped: rendering_stopped.clone(),
             work,
-            interactions: std::sync::Mutex::new(None),
+            observations: std::sync::Mutex::new(None),
         };
         rsi_client::drive_message(handle.as_ref(), request, &cancellation, &sink)
             .await

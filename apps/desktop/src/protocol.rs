@@ -153,7 +153,7 @@ fn validate_request(
     let mut origins = request.headers().get_all("origin").iter();
     let origin = origins.next();
     if origin.is_some_and(|value| value.to_str().ok() != Some(crate::document::ORIGIN))
-        || (private && origin.is_none())
+        || (private && origin.is_none() && !admits_document_referer(request))
         || origins.next().is_some()
     {
         return Err(NativeError::Invalid("Untrusted native origin".into()));
@@ -162,6 +162,22 @@ fn validate_request(
         return Err(NativeError::Invalid("Native inputs require POST".into()));
     }
     Ok(())
+}
+
+fn admits_document_referer(request: &tauri::http::Request<Vec<u8>>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let mut referers = request.headers().get_all("referer").iter();
+        referers
+            .next()
+            .is_some_and(|value| value.as_bytes() == b"rsi://localhost/")
+            && referers.next().is_none()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = request;
+        false
+    }
 }
 
 pub(super) fn handle(
@@ -426,6 +442,45 @@ mod tests {
             .body(Vec::new())
             .unwrap();
         assert!(super::validate_request("main", &asset).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webkit_same_origin_posts_require_an_exact_unique_root_referer() {
+        let request = |referer: &str| {
+            tauri::http::Request::builder()
+                .method("POST")
+                .uri("rsi://localhost/_call/connect")
+                .header("referer", referer)
+                .body(Vec::new())
+                .unwrap()
+        };
+        let root = request("rsi://localhost/");
+        assert!(super::validate_request("main", &root).is_ok());
+        assert!(super::validate_request("preview", &root).is_err());
+        for referer in [
+            "null",
+            "rsi://localhost/preview-local.html",
+            "rsi://localhost/preview-online.html",
+            "rsi://localhost.evil/",
+            "rsi://user@localhost/",
+            "rsi://localhost:8888/",
+            "https://localhost/",
+        ] {
+            assert!(super::validate_request("main", &request(referer)).is_err());
+        }
+        let mut duplicate = request("rsi://localhost/");
+        duplicate.headers_mut().append(
+            "referer",
+            tauri::http::HeaderValue::from_static("rsi://localhost/"),
+        );
+        assert!(super::validate_request("main", &duplicate).is_err());
+        let mut foreign_origin = request("rsi://localhost/");
+        foreign_origin.headers_mut().insert(
+            "origin",
+            tauri::http::HeaderValue::from_static("https://example.invalid"),
+        );
+        assert!(super::validate_request("main", &foreign_origin).is_err());
     }
 
     #[test]

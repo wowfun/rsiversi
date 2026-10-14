@@ -41,7 +41,8 @@ creates a private development environment with a deterministic native provider.
 Linux/WSL is required. `--directory ABSOLUTE_NEW_DIRECTORY` selects persistent
 state and rejects an existing destination. `--prepare-only` builds/configures and
 retains the environment without starting an application. `--smoke` instead runs a
-keyless headless request and checks its provider response and durable completion;
+keyless headless request and decodes its complete settled model attempt to check
+the provider response and matching durable completion;
 it cannot be combined with `--prepare-only`. `--no-watch` disables source watching.
 `--port PORT` selects a nonzero Web frontend port (default 8787) and is rejected
 for TUI. Unknown, missing and duplicate options fail before setup.

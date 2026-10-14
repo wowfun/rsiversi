@@ -154,8 +154,10 @@ configuration. Rendering uses the shared application/Session scene protocol.
 
 
 
-The machine-readable JSONL envelope is version 5. It retains internal model
-events with their authenticated purpose tags. Plain answer output excludes
+The machine-readable JSONL envelope is version 6. Live model observations use
+bounded pages of encoded events; durable Facts retain complete settled attempts.
+One-shot messages observe live models and interactions until completion. Plain
+answer output emits live text and only the unsettled suffix at settlement, and excludes
 context-compaction text; the TUI renders it as an internal status block.
 
 The resident application owns raw terminal modes, input decoding, the sole output

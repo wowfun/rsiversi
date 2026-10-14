@@ -17,7 +17,10 @@ requires the database and SQLite sidecars to be real regular files rather than
 symbolic links. Windows requires fixed local NTFS and exact no-reparse acquisition.
 New database files are private at creation; existing database/sidecar objects are
 privatized only after a retained native handle proves a regular file owned by
-TokenUser. Protected ACLs also inherit to SQLite-created sidecars. Native failures
+TokenUser. WAL and shared-memory sidecars are acquired or created with explicit
+TokenUser ownership before SQLite opens them, including with an elevated token
+whose default object owner is Administrators. Existing foreign-owned sidecars
+are refused. Native failures
 prevent activation. The final database directory must already have the native
 private descriptor (newly created directories do); a NamespaceLease retains it
 with the SQLite connection and every blocking worker. Existing higher ancestors

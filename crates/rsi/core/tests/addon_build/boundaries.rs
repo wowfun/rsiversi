@@ -33,10 +33,11 @@ fn fingerprint_captures_missing_and_nested_inputs_and_rejects_changed_authority(
     );
     fs::remove_file(root.join("source/missing")).unwrap();
     let socket = UnixListener::bind(root.join("source/missing")).unwrap();
-    assert!(matches!(
-        build.fingerprint(),
-        Err(NativeAddonError::Invalid("regular build inputs required"))
-    ));
+    // A socket cannot be opened as a file on every native platform. Rejection
+    // is the contract, whether it occurs at open or at the handle's type check.
+    build
+        .fingerprint()
+        .expect_err("socket build input must be refused");
     drop(socket);
     fs::remove_file(root.join("source/missing")).unwrap();
     fs::write(&path, format!("{text}\n# revised\n")).unwrap();

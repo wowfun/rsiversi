@@ -4,7 +4,7 @@ use super::*;
 async fn history_tui_discovers_saved_text_without_a_conversation_id() {
     let (endpoint, state, provider) = gated_provider("history_search").await;
     *state.arguments.lock().unwrap() = Some(
-        serde_json::json!({"conversation":{"kind":"native","id":"global-history-source"},"request":{"operation":"search","query":"GLOBAL_NEEDLE"}}),
+        serde_json::json!({"conversation":{"kind":"native","id":"global-history-source"},"operation":"discover"}),
     );
     state.release.notify_one();
     let fixture = CliFixture::new(&endpoint);
@@ -68,7 +68,7 @@ async fn history_tui_indexes_opens_selects_and_freezes_an_original_without_model
     let (endpoint, state, provider) = gated_provider("history_search").await;
     *state.arguments.lock().unwrap() = Some(serde_json::json!({
         "conversation":{"kind":"native","id":"tui-history-source"},
-        "request":{"operation":"search","query":"HISTORY_SOURCE"}
+        "operation":"discover"
     }));
     state.release.notify_one();
     let fixture = CliFixture::new(&endpoint);
@@ -139,7 +139,7 @@ async fn history_tui_indexes_opens_selects_and_freezes_an_original_without_model
         tool["content"]
             .as_str()
             .unwrap()
-            .contains("indexed_through"),
+            .contains("discovery_complete"),
         "{tool}"
     );
     provider.abort();

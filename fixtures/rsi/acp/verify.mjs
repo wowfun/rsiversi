@@ -63,6 +63,7 @@ deployment = "fixture"
 endpoint = "${endpoint}"
 ${live ? 'protocol = "chat-completions"' : 'path = "/v1/chat/completions"\nallow_image_input = false'}
 credential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }
+${live ? `[steps.config.default_output_tokens]\n${model} = 4096` : ''}
 [steps.config.language_models.${model}]
 context_window_tokens = 128000
 default_output_reserve_tokens = 4096
@@ -117,7 +118,8 @@ try {
     assert.equal(await readFile(join(workspace, 'acp-live.txt'), 'utf8'), 'acp-live-ok\n');
     assert(assistantText.includes('ACP_LIVE_VERIFIED'));
   } else {
-    assert.equal(observed.length, 1200);
+    assert(observed.length > 0);
+    assert.equal(assistantText, Array.from({length:1200},(_,index)=>`part-${index}\n`).join(''));
     assert.equal(requests, 1);
   }
   updates.length = 0;
@@ -126,7 +128,7 @@ try {
   assert(updates.some(event => event.update.sessionUpdate === 'user_message_chunk' && event.update.content.text === prompt));
   const replayText = updates.filter(event => event.update.sessionUpdate === 'agent_message_chunk').map(event => event.update.content.text ?? '').join('');
   assert.equal(replayText, assistantText);
-  if (!live) assert.equal(updates.length, 1201);
+  if (!live) assert.equal(updates.length, 2);
   report.prompt_updates = observed.length;
   report.replay_updates = updates.length;
   phase = 'resume';

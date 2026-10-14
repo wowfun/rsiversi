@@ -238,43 +238,11 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
         for scenario in ["unchanged", "single_block", "single_detail"] {
             for sample in 0..samples {
                 if scenario == "single_block" {
-                    backend.facts.lock().unwrap().push(
-                        SessionFact::new(
-                            10 + sample,
-                            1,
-                            SessionFactBody::ModelAttemptSettled {
-                                purpose: ModelEventPurpose::Conversation,
-                                turn_id: TurnId::new("turn").unwrap(),
-                                effect_id: EffectId::new(format!("stream-{sample}")).unwrap(),
-                                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
-                                    [
-                                        rsi_ai_protocol::LanguageEvent::ContentStarted {
-                                            index: 0,
-                                            content: rsi_ai_protocol::ContentStart::Text,
-                                        },
-                                        rsi_ai_protocol::LanguageEvent::ContentDelta {
-                                            index: 0,
-                                            delta: rsi_ai_protocol::ContentDelta::Text(
-                                                " changed".into(),
-                                            ),
-                                        },
-                                        rsi_ai_protocol::LanguageEvent::ContentFinished {
-                                            index: 0,
-                                        },
-                                        rsi_ai_protocol::LanguageEvent::Finished {
-                                            reason: rsi_ai_protocol::FinishReason::Stop,
-                                            replay: None,
-                                        },
-                                    ]
-                                    .into_iter()
-                                    .map(|event| (0, event)),
-                                    true,
-                                )
-                                .unwrap(),
-                            },
-                        )
-                        .unwrap(),
-                    );
+                    backend
+                        .facts
+                        .lock()
+                        .unwrap()
+                        .push(changed_model_fact(sample));
                     for action in ["live", "history"] {
                         app.command(
                             &json!({"action":action,"pane":"main","generation":generation})
@@ -336,7 +304,8 @@ fn reconstruct_changed_block(pane: &mut Value, change: &Value) {
         pane[key] = value.clone();
     }
     let transcript = &change["transcript"];
-    assert_eq!(transcript["upsert"].as_array().unwrap().len(), 1);
+    // One settled attempt adds its request card and its answer block.
+    assert_eq!(transcript["upsert"].as_array().unwrap().len(), 2);
     assert_eq!(transcript["remove"], json!([]));
     for (key, value) in transcript["fields"].as_object().unwrap() {
         pane["transcript"][key] = value.clone();
@@ -376,4 +345,39 @@ fn reconstruct_changed_block(pane: &mut Value, change: &Value) {
             .collect();
         *blocks = sorted;
     }
+}
+
+#[cfg(feature = "test-support")]
+fn changed_model_fact(sample: u64) -> SessionFact {
+    SessionFact::new(
+        10 + sample,
+        1,
+        SessionFactBody::ModelAttemptSettled {
+            purpose: ModelEventPurpose::Conversation,
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new(format!("stream-{sample}")).unwrap(),
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    rsi_ai_protocol::LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: rsi_ai_protocol::ContentStart::Text,
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text(" changed".into()),
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                    rsi_ai_protocol::LanguageEvent::Finished {
+                        reason: rsi_ai_protocol::FinishReason::Stop,
+                        replay: None,
+                    },
+                ]
+                .into_iter()
+                .map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
+        },
+    )
+    .unwrap()
 }

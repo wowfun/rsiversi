@@ -17,6 +17,34 @@ pub(super) async fn capture(
     chat().await
 }
 
+fn model_answer(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "fact")
+        .flat_map(|event| {
+            let fact: rsi_agent_session_protocol::SessionFact =
+                serde_json::from_value(event["fact"].clone()).unwrap();
+            let rsi_agent_session_protocol::SessionFactBody::ModelAttemptSettled {
+                attempt, ..
+            } = fact.body()
+            else {
+                return Vec::new();
+            };
+            attempt
+                .events()
+                .filter_map(|event| match event.unwrap().1 {
+                    rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        delta: rsi_ai_protocol::ContentDelta::Text(text),
+                        ..
+                    } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_after_restart() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -62,7 +90,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
         result(&output)["outcome"],
         json!({"kind":"draft_changed","revision":1})
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("hello from daemon"));
+    assert_eq!(model_answer(&output), "hello from daemon");
     assert_plan_request(&requests);
     let list = result(&fixture.assert_success(&[
         "--profile",

@@ -2207,21 +2207,27 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_exits_with_an_undrained_stdout_pipe() {
-    verify_undrained_stdout(None).await;
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(None, output).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_after_model_completion_still_stops_blocked_output() {
-    verify_undrained_stdout(Some(0)).await;
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(Some(0), output).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn built_binary_sigint_after_model_completion_with_a_full_renderer_queue() {
-    verify_undrained_stdout(Some(64)).await;
+async fn built_binary_sigint_after_fragmented_model_completion_stops_blocked_output() {
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(Some(64), output).await;
+    }
 }
 
 #[allow(clippy::too_many_lines)] // Bounded pipe setup, completion evidence and signal cleanup share one child.
-async fn verify_undrained_stdout(deltas: Option<usize>) {
+async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
     use std::time::Duration;
     use tokio::io::AsyncReadExt as _;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2262,7 +2268,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
             "--session-id",
             "backpressure",
             "--output",
-            "text",
+            output,
         ])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -2284,10 +2290,16 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     tokio::time::timeout(CHILD_PROVIDER_START_TIMEOUT, sent.notified())
         .await
         .unwrap();
-    // Confirm streamed model bytes reached the pipe, then retain it without draining.
+    // Text exposes live bytes; JSONL exposes live and settled encoded events.
+    // Confirm either reached the pipe, then retain it without draining.
+    let marker: &[u8] = if output == "jsonl" {
+        b"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4"
+    } else {
+        &[b'x'; 32]
+    };
     let mut stdout = child.stdout.take().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut prefix = Vec::new();
+    let mut prefix = Vec::new();
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut chunk = [0; 4096];
         loop {
             let count = stdout.read(&mut chunk).await.unwrap();
@@ -2309,7 +2321,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
                 );
             }
             prefix.extend_from_slice(&chunk[..count]);
-            if prefix.windows(32).any(|bytes| bytes == [b'x'; 32]) {
+            if prefix.windows(marker.len()).any(|bytes| bytes == marker) {
                 break;
             }
             assert!(
@@ -2318,8 +2330,13 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
             );
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        received.is_ok(),
+        "model output did not reach stdout ({} bytes): {}",
+        prefix.len(),
+        String::from_utf8_lossy(&prefix[prefix.len().saturating_sub(4096)..])
+    );
     if deltas.is_some() {
         wait_for_completed_output(&fixture).await;
     }
@@ -2359,7 +2376,7 @@ async fn wait_for_completed_output(fixture: &Fixture) {
                     "SELECT count(*), coalesce(sum(fact_kind = 'terminal'), 0) FROM facts WHERE session_id = ?1",
                     ["backpressure"], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).unwrap();
-                if terminal > 0 { assert!(facts > 0 && facts < 64, "stream fragmentation must not create durable Facts"); break; }
+                if terminal > 0 { assert!((1..64).contains(&facts), "stream fragmentation must not create durable Facts"); break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();

@@ -30,13 +30,10 @@ fn materialize_before_publish(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(boot(e)),
     }
-    let staging = tempfile::Builder::new()
-        .prefix(".staging-")
-        .tempdir_in(cache)
-        .map_err(boot)?;
-    let root = native::set_private_directory_permissions_no_follow(staging.path()).map_err(boot)?;
+    let staging = AssetStaging::create(&parent, cache)?;
+    let root = &staging.directory;
     for (name, profile, metadata) in SHIPPED_PRESETS {
-        let directory = native::create_directory_no_follow(&root, name.as_ref()).map_err(boot)?;
+        let directory = native::create_directory_no_follow(root, name.as_ref()).map_err(boot)?;
         for (name, bytes) in [("agent.profile.toml", *profile), ("preset.toml", *metadata)] {
             let mut file =
                 native::create_relative_private_file_no_follow(&directory, Path::new(name))
@@ -48,10 +45,10 @@ fn materialize_before_publish(
         directory.sync_all().map_err(boot)?;
     }
     root.sync_all().map_err(boot)?;
-    verify(&root)?;
+    verify(root)?;
     before_publish();
     match namespace.publish_child(
-        Path::new(staging.path().file_name().unwrap()),
+        Path::new(&staging.name),
         Path::new(digest),
         native::EntryKind::Directory,
         false,
@@ -65,6 +62,39 @@ fn materialize_before_publish(
         native::open_relative_directory_no_follow(&parent, Path::new(digest)).map_err(boot)?;
     verify(&published)?;
     Ok(target)
+}
+
+struct AssetStaging {
+    directory: native::Directory,
+    path: PathBuf,
+    name: String,
+}
+impl AssetStaging {
+    fn create(parent: &native::Directory, cache: &Path) -> rsi_host::Result<Self> {
+        for _ in 0..16 {
+            let mut random = [0_u8; 16];
+            getrandom::fill(&mut random).map_err(boot)?;
+            let name = format!(".staging-{}", hex::encode(random));
+            match native::create_directory_no_follow(parent, name.as_ref()) {
+                Ok(directory) => {
+                    return Ok(Self {
+                        directory,
+                        path: cache.join(&name),
+                        name,
+                    });
+                }
+                Err(native::DirectoryCreationError::NotCreated(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(boot(error)),
+            }
+        }
+        Err(boot("preset staging name collisions exceeded limit"))
+    }
+}
+impl Drop for AssetStaging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 fn verify(root: &native::Directory) -> rsi_host::Result<()> {

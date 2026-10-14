@@ -46,9 +46,13 @@ preview responses use opaque, script-enabled sandbox policies, respectively with
 external resources disabled or explicit HTTPS access; neither exposes native routes.
 Errors on those exact preview paths retain their sandbox response policy and are
 JSON with nosniff, even when the asset owner is absent or lookup fails.
-Only the main window with exactly one header naming that Origin and POST method can call
-private routes, including frame polling. Initial immutable asset GETs may omit
-Origin; a malformed, foreign or duplicate Origin is rejected. The shared
+Only the main window with a POST method can call private routes, including frame
+polling. Exactly one Origin header must name the platform document origin.
+Linux WebKitGTK omits Origin on same-origin custom-scheme POSTs; that case instead
+requires exactly one Referer naming the application root `rsi://localhost/`.
+Missing both headers, a preview-page Referer in that case, or a malformed,
+foreign or duplicate Origin is rejected. Initial immutable asset GETs may omit
+Origin. The shared
 [Web document mode](../web/README.md) selects the corresponding native transport.
 The document is granted no
 Tauri IPC command permissions. Dialog and clipboard plugins supply Rust-owned

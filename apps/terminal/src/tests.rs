@@ -349,6 +349,7 @@ pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) observations: std::sync::atomic::AtomicUsize,
     pub(crate) first_status_error: Option<SessionError>,
     pub(crate) interaction_polls: std::sync::atomic::AtomicUsize,
+    pub(crate) model_observations: std::sync::atomic::AtomicUsize,
     pub(crate) interaction_failures: std::sync::atomic::AtomicUsize,
     pub(crate) interaction_capacity: std::sync::atomic::AtomicUsize,
     pub(crate) capacity_error: Option<SessionError>,
@@ -522,6 +523,8 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn observe_models(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+        self.model_observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn observe_projections(
@@ -1555,7 +1558,7 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
 }
 
 #[tokio::test]
-async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
+async fn headless_observations_start_only_after_claimed_turn_is_admitted() {
     use rsi_client::MessageSink;
     let handle = Arc::new(UnknownThenAcceptedHandle::default());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -1566,7 +1569,7 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
         cancellation: CancellationToken::new(),
         stopped: CancellationToken::new(),
         work: ApplicationWork::default(),
-        interactions: std::sync::Mutex::new(None),
+        observations: std::sync::Mutex::new(None),
     };
     let claimed = || rsi_client::MessageEvent::Claimed {
         session_id: SessionId::new("session").unwrap(),
@@ -1584,6 +1587,12 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
         0,
         "watcher acquired the live stream before Turn admission"
     );
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     receiver.recv().await.unwrap();
     delivery.await.unwrap();
     assert!(matches!(
@@ -1596,7 +1605,14 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
             .unwrap(),
         Some(CliRenderMessage::Event(CliEvent::Interactions { .. }))
     ));
-    sink.interactions.lock().unwrap().take();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    sink.observations.lock().unwrap().take();
     sink.stopped.cancel();
     let polls = handle
         .interaction_polls
@@ -1609,5 +1625,11 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
             .load(std::sync::atomic::Ordering::SeqCst),
         polls
     );
-    assert!(sink.interactions.lock().unwrap().is_none());
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(sink.observations.lock().unwrap().is_none());
 }
