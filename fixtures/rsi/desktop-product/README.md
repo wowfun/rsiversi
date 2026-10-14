@@ -35,9 +35,11 @@ theme field before editing; reopening the dialog can temporarily retain old fiel
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
-The frame-admission probe holds one real document ACK before requesting a second
-frame, then releases that same ACK. It cannot assume the ordinary polling loop
-always occupies the frame lane or consume an unacknowledged frame itself. Terminal
+The frame-admission probe holds one real document ACK before POSTing a second
+frame request, then releases that same ACK. Request cases name their method
+explicitly; a separate GET verifies permanent pre-admission refusal. It cannot
+assume the ordinary polling loop always occupies the frame lane or consume an
+unacknowledged frame itself. Terminal
 asset checks retain completion-time read counts and wait for loaded assets and a
 live nonzero read count in one observation; polling gaps do not imply retired reads.
 Asset errors and pressure errors fail immediately, and asset requests are not replayed.
