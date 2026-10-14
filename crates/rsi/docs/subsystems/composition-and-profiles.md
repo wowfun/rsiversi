@@ -151,8 +151,11 @@ digest-addressed cache asset and prepends it before configured and writable
 user roots. Unix materialization creates, verifies, and publishes through
 no-follow directory descriptors. It accepts an operating-system alias only in
 the first component below `/`, then rejects symbolic links throughout the
-owned suffix. The portable fallback rejects observed link
-or reparse-point components before publishing. Each fresh session retains a
+owned suffix. Windows materialization uses a protected private cache namespace,
+no-reparse handles, bounded byte verification and staged directory publication;
+other platforms refuse before accessing the cache.
+pure Profile preview does not materialize assets or establish activation readiness.
+Each fresh session retains a
 process-local draft carrying the current preset generation until its first
 submission is durably accepted; a failed pre-durability attempt can therefore
 retry through the same handle without resolving a different generation.
@@ -197,9 +200,10 @@ those values explicitly into the standard composition. The Bash Job producer
 is global because Jobs identities outlive Agent generations. The model-facing
 `bash`, three Jobs controls, and `apply_patch` are separate Agent-only
 contributions activated inside an unpublished Tool catalog and atomically
-sealed with one preset generation. Other platforms omit the Linux-only Bash
-and apply-patch contributions before Runtime mutation rather than advertising
-effects whose native lifecycle guarantees were not tested.
+sealed with one preset generation. Windows exposes native Files and Git for
+Windows Bash through managed Job Object processes. Its catalog omits the Linux
+apply-patch and PTY contributions; restricted process sandbox policies continue
+to refuse when their native enforcement backend is unavailable.
 The Session Jobs finalizer cancels and reports all unfinished turn work before
 the terminal Fact; unreported background completion blocks a successful turn.
 These closure claims require the host process to remain alive through
@@ -230,8 +234,9 @@ through the existing native manager; `rsi --profile inspector native` reads that
 manager's separate status and retained resources.
 
 Standard workspace skills use project definitions by default before the RSI config
-`skills` directory and then the optional captured HOME's `.agents/skills`.
-The launcher captures HOME explicitly; `StandardComposition` never reads it.
-An absent HOME with complete XDG paths omits that optional root. Remote clients
+`skills` directory and then the optional captured personal directory's `.agents/skills`.
+The launcher captures HOME on Unix and `FOLDERID_Profile` on Windows explicitly;
+`StandardComposition` never resolves either. The [composition contract](../../core/README.md)
+owns platform default locations and optional-source omission. Remote clients
 use the owning Host's skill catalog, not their local filesystem. Explicit Profile
 workspace-context configuration retains control of its user roots.

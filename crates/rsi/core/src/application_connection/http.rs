@@ -33,7 +33,7 @@ impl HttpFactory {
         let config = serde_json::to_value(config).map_err(activation)?;
         let host = client_host(&self.0.composition, &config).map_err(activation)?;
         // Credentials is inherited explicitly; each domain and API marker is isolated by the child Host catalog.
-        let mut connection = crate::ProfileOwner::start_scoped(
+        let connection = crate::ProfileOwner::start_scoped(
             host,
             self.0.composition.paths().clone(),
             plan.context(),
@@ -41,6 +41,8 @@ impl HttpFactory {
         )
         .await
         .map_err(activation)?;
+        #[cfg(unix)]
+        let mut connection = connection;
         #[cfg(unix)]
         if let Some(staging) = self.0.composition.native_staging() {
             connection

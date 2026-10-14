@@ -2360,7 +2360,10 @@ fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
         })
     }
     #[cfg(not(unix))]
-    Ok(std::future::pending())
+    Err::<std::future::Pending<()>, _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "terminal signals require native Unix support",
+    ))
 }
 
 fn markdown_status(enabled: bool) -> &'static str {

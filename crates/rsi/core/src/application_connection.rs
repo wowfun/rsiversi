@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod acp_embedded;
 mod http;
 #[cfg(target_os = "linux")]
 mod operator;
@@ -237,6 +239,8 @@ pub const BASE_APPLICATION_PLUGINS: &[&str] = &[
     "rsi.application.service",
     #[cfg(target_os = "linux")]
     "rsi.application.acp-service",
+    #[cfg(windows)]
+    "rsi.application.acp-service",
     #[cfg(target_os = "linux")]
     "rsi.application.operator",
 ];
@@ -274,6 +278,11 @@ pub fn base_application_catalog(
         (
             "rsi.application.acp-service",
             Arc::new(service::ServiceFactory(connection.clone(), true)),
+        ),
+        #[cfg(windows)]
+        (
+            "rsi.application.acp-service",
+            Arc::new(acp_embedded::Factory(connection.clone())),
         ),
         #[cfg(target_os = "linux")]
         (

@@ -122,6 +122,7 @@ async fn retirement_keeps_native_capacity_until_the_bridge_receipt() {
     assert_eq!(slots.available_permits(), 1);
 }
 
+#[cfg(unix)]
 pub(crate) fn session_with_retirement(result: Result<(), String>) -> Arc<BrowserSession> {
     let process = ManagedDuplexProcess::new(Arc::new(ProcessReceipt::default()));
     let (_, commands) = mpsc::channel(1);
@@ -145,17 +146,17 @@ pub(crate) fn session_with_retirement(result: Result<(), String>) -> Arc<Browser
         settlement,
     })
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Debug)]
 struct UnusedNative;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl DuplexProcess for UnusedNative {
     async fn spawn(&self, _: DuplexProcessSpec) -> rsi_process::Result<ManagedDuplexProcess> {
         panic!("readiness refusal must not spawn a process")
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl Sandbox for UnusedNative {
     async fn workspace_read(
@@ -171,7 +172,7 @@ impl Sandbox for UnusedNative {
         panic!("readiness refusal must not plan a process")
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::test]
 async fn fenced_runtime_preserves_the_retained_cause_and_never_launches() {
     let root = tempfile::tempdir().unwrap();
@@ -211,7 +212,7 @@ async fn fenced_runtime_preserves_the_retained_cause_and_never_launches() {
     assert_eq!(runtime.require_ready().unwrap_err(), SETTLEMENT_FAILURE);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn full_ready_runtime() -> (Arc<NativeRuntime>, Vec<tokio::sync::OwnedSemaphorePermit>) {
     let root = tempfile::tempdir().unwrap();
     let runtime = Arc::new(
@@ -236,7 +237,7 @@ pub(crate) fn full_ready_runtime() -> (Arc<NativeRuntime>, Vec<tokio::sync::Owne
     (runtime, permits)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::test]
 async fn shared_capacity_is_a_typed_prelaunch_refusal_and_never_a_readiness_failure() {
     let (runtime, _permits) = full_ready_runtime();

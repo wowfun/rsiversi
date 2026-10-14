@@ -214,7 +214,11 @@ impl HostLaunchKey {
         if let Some(coding) = coding_tools {
             hash_component(&mut digest, b"coding-tools", b"enabled");
             hash_path(&mut digest, b"coding-bash", coding.bash);
-            hash_path(&mut digest, b"coding-apply-patch", coding.apply_patch);
+            if let Some(helper) = coding.apply_patch {
+                hash_path(&mut digest, b"coding-apply-patch", helper);
+            } else {
+                hash_component(&mut digest, b"coding-apply-patch", b"unavailable");
+            }
         } else {
             hash_component(&mut digest, b"coding-tools", b"disabled");
         }
@@ -274,7 +278,7 @@ impl fmt::Display for HostLaunchKey {
 
 pub(crate) struct CodingToolsLaunchIdentity<'a> {
     pub(crate) bash: &'a Path,
-    pub(crate) apply_patch: &'a Path,
+    pub(crate) apply_patch: Option<&'a Path>,
 }
 
 /// One deterministic catalog listing row.
@@ -705,12 +709,14 @@ fn create_private_directories(path: &Path) -> Result<(), ProfileCatalogError> {
 }
 
 fn create_private_directory(path: &Path) -> Result<(), ProfileCatalogError> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder
         .create(path)
         .map_err(|error| io("create", path, error))

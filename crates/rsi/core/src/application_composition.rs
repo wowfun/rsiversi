@@ -1,4 +1,6 @@
-use crate::{AddonScope, StandardAddonSet, StandardComposition};
+#[cfg(unix)]
+use crate::AddonScope;
+use crate::{StandardAddonSet, StandardComposition};
 
 /// One Application catalog and the independent Service composition it consumes.
 /// Application extras never participate in the Service Host launch identity.

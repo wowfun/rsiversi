@@ -111,18 +111,20 @@ fn reset_state_is_available_for_all_host_start_operations() {
 
 #[test]
 fn agent_store_verify_has_a_strict_absolute_root_contract() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("agent-store");
     let Parse::AgentStore(command) = parse(&[
         "agent-store",
         "verify",
         "--root",
-        "/tmp/rsi-agent-store",
+        root.to_str().unwrap(),
         "--output",
         "json",
     ])
     .unwrap() else {
         panic!("agent-store")
     };
-    assert_eq!(command.root, Some(PathBuf::from("/tmp/rsi-agent-store")));
+    assert_eq!(command.root, Some(root));
     assert_eq!(command.output, ManagementOutput::Json);
     assert!(parse(&["agent-store", "verify", "--root", "relative"]).is_err());
     assert!(parse(&["agent-store", "verify", "--root", "/a", "--root", "/b"]).is_err());

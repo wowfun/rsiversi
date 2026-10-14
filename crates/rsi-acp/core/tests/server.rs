@@ -15,6 +15,85 @@ use tokio_util::sync::CancellationToken;
 fn dto<T: DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).unwrap()
 }
+
+#[derive(Debug, Default)]
+struct DeliveredResponseEof {
+    read_failure: Option<rsi_acp::Error>,
+    reads: AtomicUsize,
+    written: tokio::sync::Notify,
+    eof: tokio::sync::Notify,
+    finish_close: CancellationToken,
+}
+#[async_trait]
+impl rsi_acp::Transport for DeliveredResponseEof {
+    async fn read(&self) -> Result<Vec<u8>, rsi_acp::Error> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}\n".to_vec());
+        }
+        self.eof.notified().await;
+        self.read_failure.map_or_else(|| Ok(vec![]), Err)
+    }
+    async fn write(&self, bytes: &[u8]) -> Result<(), rsi_acp::Error> {
+        // The caller has received a complete frame while the transport still owns
+        // native write settlement. EOF retires that detached observation.
+        let response: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(response["id"], 1);
+        self.written.notify_one();
+        std::future::pending().await
+    }
+    async fn flush(&self) -> Result<(), rsi_acp::Error> {
+        Ok(())
+    }
+    async fn close(&self) -> Result<(), rsi_acp::Error> {
+        self.finish_close.cancelled().await;
+        Ok(())
+    }
+}
+
+async fn delivered_response_close(
+    read_failure: Option<rsi_acp::Error>,
+) -> Result<(), rsi_acp::Error> {
+    let transport = Arc::new(DeliveredResponseEof {
+        read_failure,
+        ..DeliveredResponseEof::default()
+    });
+    let backend = Arc::new(Backend::default());
+    let owner = tokio::spawn(rsi_acp::server::run(
+        Peer::start(transport.clone()),
+        backend.clone(),
+        CancellationToken::new(),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        transport.written.notified(),
+    )
+    .await
+    .unwrap();
+    transport.eof.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !backend.stopped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    transport.finish_close.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+        .await
+        .unwrap()
+        .unwrap()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_eof_during_delivered_response_observation_still_joins_healthy_shutdown() {
+    assert_eq!(delivered_response_close(None).await, Ok(()));
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn driver_failure_during_delivered_response_observation_remains_unhealthy() {
+    assert_eq!(
+        delivered_response_close(Some(rsi_acp::Error::Closed)).await,
+        Err(rsi_acp::Error::Closed)
+    );
+}
 #[derive(Debug, Default)]
 struct Backend {
     new_calls: AtomicUsize,
@@ -107,6 +186,52 @@ impl AgentBackend for Backend {
     }
 }
 
+async fn assert_configuration_update(
+    port: &rsi_acp::PeerHandle,
+    client: &mut Peer,
+    backend: &Backend,
+) {
+    let request = |method: &'static str, params: Value| {
+        let port = port.clone();
+        async move {
+            port.request(method, &params, CancellationToken::new())
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        request(
+            "session/set_config_option",
+            json!({"sessionId":"fixture","configId":"model","value":true})
+        )
+        .await
+        .result()
+        .unwrap_err()["code"],
+        -32602
+    );
+    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 0);
+    let configured = request(
+        "session/set_config_option",
+        json!({"sessionId":"fixture","configId":"model","value":"b"}),
+    )
+    .await;
+    assert_eq!(
+        configured.result().unwrap()["configOptions"][0]["currentValue"],
+        "b"
+    );
+    let event = client.next().await.unwrap();
+    let Message::Notification { method, params } = event.message else {
+        panic!("configuration update")
+    };
+    assert_eq!(method, "session/update");
+    assert_eq!(params["update"]["sessionUpdate"], "config_option_update");
+    assert_eq!(
+        &params["update"]["configOptions"],
+        &configured.result().unwrap()["configOptions"]
+    );
+    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn raw_validation_precedes_backend_and_responses_follow_complete_updates() {
     let (left, right) = tokio::io::duplex(65536);
@@ -179,37 +304,7 @@ async fn raw_validation_precedes_backend_and_responses_follow_complete_updates()
         assert_eq!(params["update"]["content"]["text"], index.to_string());
     }
     load.await.unwrap().result().unwrap();
-    assert_eq!(
-        request(
-            "session/set_config_option",
-            json!({"sessionId":"fixture","configId":"model","value":true})
-        )
-        .await
-        .result()
-        .unwrap_err()["code"],
-        -32602
-    );
-    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 0);
-    let configured = request(
-        "session/set_config_option",
-        json!({"sessionId":"fixture","configId":"model","value":"b"}),
-    )
-    .await;
-    assert_eq!(
-        configured.result().unwrap()["configOptions"][0]["currentValue"],
-        "b"
-    );
-    let event = client.next().await.unwrap();
-    let Message::Notification { method, params } = event.message else {
-        panic!("configuration update")
-    };
-    assert_eq!(method, "session/update");
-    assert_eq!(params["update"]["sessionUpdate"], "config_option_update");
-    assert_eq!(
-        &params["update"]["configOptions"],
-        &configured.result().unwrap()["configOptions"]
-    );
-    assert_eq!(backend.configuration_calls.load(Ordering::SeqCst), 1);
+    assert_configuration_update(&port, &mut client, &backend).await;
     assert_eq!(
         request("fs/read_text_file", json!({}))
             .await

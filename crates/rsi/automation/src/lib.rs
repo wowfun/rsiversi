@@ -15,7 +15,7 @@ pub use protocol::*;
 pub use service::{AutomationService, Explorer, IngressSource, Readiness};
 pub use store::{AdmissionError, Ledger};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn test_directory() -> tempfile::TempDir {
     tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
 }
@@ -30,6 +30,7 @@ pub(crate) fn now() -> u64 {
     .unwrap_or(u64::MAX)
 }
 pub(crate) fn private_file(path: &std::path::Path) -> Result<std::fs::File, AdmissionError> {
+    require_native_platform()?;
     let mut o = std::fs::OpenOptions::new();
     o.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -62,4 +63,32 @@ pub(crate) fn private_file(path: &std::path::Path) -> Result<std::fs::File, Admi
         }
     }
     Ok(f)
+}
+
+pub(crate) fn require_native_platform() -> Result<(), AdmissionError> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
+        Err(AdmissionError::Unsupported)
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod platform_tests {
+    #[test]
+    fn private_file_rejects_before_creating_or_opening_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("private");
+        assert!(matches!(
+            super::private_file(&path),
+            Err(super::AdmissionError::Unsupported)
+        ));
+        assert!(!path.exists());
+        std::fs::write(&path, b"retained").unwrap();
+        assert!(matches!(
+            super::private_file(&path),
+            Err(super::AdmissionError::Unsupported)
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"retained");
+    }
 }

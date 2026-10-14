@@ -7,6 +7,19 @@ It is opt-in in the Linux daemon. A receipt is committed before HTTP 202;
 effects, and do not fence the ordinary Agent Store.
 Activation requires the shared Browser runtime to pass readiness; acquisition
 or confinement failure rejects activation before the ingress listener is served.
+On non-Unix hosts, factory preparation, Policy and Ledger acquisition reject with
+an explicit unsupported-platform error before creating directories, leases or
+database files. Private-file acquisition also rejects before opening a path.
+Compiling this package on Windows does not activate protected Automation or
+substitute weaker filesystem checks.
+Factory preparation parses and validates the complete static configuration before
+platform admission: directory, source count and identities, loopback listener,
+runtime paths and owner-local credential references. Malformed configuration is
+`MetaError::InvalidInput`; a valid configuration requiring unavailable native
+authority is `MetaError::Activation`. Neither preparation path performs I/O.
+Default tests execute portable transport, clock and admission cases on every
+host. Ledger and Policy fixtures run only where their native backend is admitted;
+focused refusal checks do not replace the package's unfiltered default targets.
 
 Delivery identity is source plus GitHub delivery ID. Logical task identity is
 source, repository ID, deployment ID and stable rule ID, independent of status,

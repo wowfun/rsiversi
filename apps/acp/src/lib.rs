@@ -1,6 +1,6 @@
-//! Unix ACP stdio application plugin.
+//! Native ACP stdio application plugin.
 #![deny(unsafe_code)]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod application;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use application::ApplicationFactory;

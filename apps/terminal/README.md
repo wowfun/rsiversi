@@ -353,7 +353,10 @@ close joins work. The caller owns text sanitization and the document format.
 ## Controller lifecycle and retained state
 
 Both stdin and stdout must be terminals; rejection precedes Host bootstrap.
-Native input currently requires Unix. The terminal application owns input,
+Native input currently requires Unix, including cancellable stdin reads for
+Headless and `--stdin`; non-Unix reads
+refuse before consuming process input. Native signal admission also refuses
+until its platform implementation exists. The terminal application owns
 rendering, signals and cleanup. An attached Session has one durable observer and
 one live-interaction observer. Child browsing uses finite reads and does not
 acquire execution. Switching rejects unresolved sends and queue mutations, including receipt queries,

@@ -1,12 +1,14 @@
 #[cfg(target_os = "linux")]
+use rsi::StandardServiceDaemon;
+#[cfg(target_os = "linux")]
 use rsi::probe_service_host;
 use rsi::{
     AgentPresetManager, AgentPresetSource, AgentPresetTrust, ApplicationProfileId, HostProfileId,
     ProfileCatalog, ProfileSource, RsiError, StandardComposition, capture_standard_environment,
     maybe_run_apply_patch_helper, standard_agent_preset_root, standard_paths,
 };
-#[cfg(target_os = "linux")]
-use rsi::{StandardCodingTools, StandardServiceDaemon, scrub_child_environment};
+#[cfg(any(target_os = "linux", windows))]
+use rsi::{StandardCodingTools, scrub_child_environment};
 use rsi_agent_presets::{AgentPresetHealth, AgentPresetId, AgentPresetRow, PresetError};
 use rsi_agent_store_sqlite::SqliteStore;
 #[cfg(target_os = "linux")]
@@ -50,17 +52,14 @@ fn daemon_readiness_timeout_error() -> RsiError {
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
-    let helper = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|error| {
-            RsiError::Boot(format!("failed to resolve current executable: {error}"))
-        })?;
-    let bash = std::fs::canonicalize("/bin/bash")
-        .map_err(|error| RsiError::Boot(format!("/bin/bash is unavailable: {error}")))?;
-    let environment = scrub_child_environment(std::env::vars_os());
-    StandardCodingTools::new(bash, helper, environment).map(Some)
+    StandardCodingTools::new(
+        rsi::capture_standard_bash()?,
+        std::env::current_exe().map_err(|e| RsiError::Boot(e.to_string()))?,
+        scrub_child_environment(std::env::vars_os()),
+    )
+    .map(Some)
 }
 
 mod addon_cli;

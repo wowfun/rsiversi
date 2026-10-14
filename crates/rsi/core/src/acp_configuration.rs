@@ -3,11 +3,14 @@ use futures_util::StreamExt as _;
 use rsi_acp::server::Failure;
 use rsi_acp_protocol::schema;
 use rsi_agent_session_protocol::{CommandArguments, DomainRequestId, ModelSelection};
-use rsi_ai_protocol::{LanguageModels, MAX_LANGUAGE_MODEL_PAGE, ModelRef};
+use rsi_ai_protocol::{
+    LanguageModels, MAX_LANGUAGE_MODEL_PAGE, ModelRef, ReasoningEffortId, ReasoningEffortProfile,
+};
 use rsi_session_protocol::SessionHandle;
 use serde_json::json;
 
 const MAX_MODEL_CHOICES: usize = 4096;
+const DEFAULT_EFFORT: &str = "@default";
 
 async fn selection(session: &dyn SessionHandle) -> Result<ModelSelection, Failure> {
     let mut stream = session
@@ -71,6 +74,7 @@ async fn directory(
 fn configuration(
     current: &ModelSelection,
     mut choices: Vec<schema::SessionConfigSelectOption>,
+    efforts: Option<&ReasoningEffortProfile>,
 ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
     struct FrameSize(usize);
     impl std::io::Write for FrameSize {
@@ -107,8 +111,68 @@ fn configuration(
     // Fixed setup fields and the result envelope use the remaining frame headroom.
     let option = schema::SessionConfigOption::select("model", "Model", current_value, choices)
         .category(schema::SessionConfigOptionCategory::Model);
-    serde_json::to_writer(&mut FrameSize(0), &option).map_err(|_| Failure::Busy)?;
-    Ok(vec![option])
+    let mut options = vec![option];
+    if let Some(efforts) = efforts.filter(|profile| !profile.supported().is_empty()) {
+        let default = schema::SessionConfigSelectOption::new(DEFAULT_EFFORT, "Model default")
+            .description(efforts.default_effort().map_or_else(
+                || "Provider default is unknown".to_owned(),
+                |effort| format!("Adapter default: {effort}"),
+            ));
+        let mut choices = vec![default];
+        choices.extend(efforts.supported().iter().map(|effort| {
+            schema::SessionConfigSelectOption::new(
+                effort.as_str().to_owned(),
+                effort.as_str().to_owned(),
+            )
+        }));
+        if let Some(effort) = current
+            .reasoning_effort
+            .as_ref()
+            .filter(|effort| !efforts.supported().contains(effort))
+        {
+            choices.push(
+                schema::SessionConfigSelectOption::new(
+                    effort.as_str().to_owned(),
+                    effort.as_str().to_owned(),
+                )
+                .description("Current reasoning effort is unavailable"),
+            );
+        }
+        options.push(
+            schema::SessionConfigOption::select(
+                "thought_level",
+                "Reasoning effort",
+                current
+                    .reasoning_effort
+                    .as_ref()
+                    .map_or(DEFAULT_EFFORT, ReasoningEffortId::as_str)
+                    .to_owned(),
+                choices,
+            )
+            .category(schema::SessionConfigOptionCategory::ThoughtLevel),
+        );
+    }
+    serde_json::to_writer(&mut FrameSize(0), &options).map_err(|_| Failure::Busy)?;
+    Ok(options)
+}
+
+async fn described_efforts(
+    model: &ModelRef,
+    choices: &[schema::SessionConfigSelectOption],
+    models: &dyn LanguageModels,
+) -> Result<Option<ReasoningEffortProfile>, Failure> {
+    let value = model_value(model)?;
+    if !choices
+        .iter()
+        .any(|choice| choice.value.0.as_ref() == value)
+    {
+        return Ok(None);
+    }
+    let description = models
+        .describe_model(model)
+        .await
+        .map_err(|_| Failure::Backend)?;
+    Ok(Some(description.profile().reasoning_efforts().clone()))
 }
 
 pub(super) async fn options(
@@ -116,14 +180,16 @@ pub(super) async fn options(
     models: &dyn LanguageModels,
 ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
     let current = selection(session).await?;
-    configuration(&current, directory(models).await?)
+    let choices = directory(models).await?;
+    let efforts = described_efforts(&current.model, &choices, models).await?;
+    configuration(&current, choices, efforts.as_ref())
 }
 pub(super) async fn set(
     session: &dyn SessionHandle,
     models: &dyn LanguageModels,
     request: schema::SetSessionConfigOptionRequest,
 ) -> Result<Vec<schema::SessionConfigOption>, Failure> {
-    if request.config_id.0.as_ref() != "model" {
+    if !matches!(request.config_id.0.as_ref(), "model" | "thought_level") {
         return Err(Failure::Parameters);
     }
     let schema::SessionConfigOptionValue::ValueId { value } = request.value else {
@@ -132,26 +198,40 @@ pub(super) async fn set(
     let value = value.0.as_ref();
     let current = selection(session).await?;
     let choices = directory(models).await?;
-    if !choices
-        .iter()
-        .any(|choice| choice.value.0.as_ref() == value)
-        && model_value(&current.model)? != value
-    {
-        return Err(Failure::Parameters);
-    }
-    let model: ModelRef = serde_json::from_str(value).map_err(|_| Failure::Parameters)?;
-    models
-        .describe_model(&model)
+    let selected = if request.config_id.0.as_ref() == "model" {
+        if !choices
+            .iter()
+            .any(|choice| choice.value.0.as_ref() == value)
+            && model_value(&current.model)? != value
+        {
+            return Err(Failure::Parameters);
+        }
+        ModelSelection {
+            model: serde_json::from_str(value).map_err(|_| Failure::Parameters)?,
+            reasoning_effort: None,
+        }
+    } else {
+        ModelSelection {
+            model: current.model.clone(),
+            reasoning_effort: if value == DEFAULT_EFFORT {
+                None
+            } else {
+                Some(ReasoningEffortId::new(value).map_err(|_| Failure::Parameters)?)
+            },
+        }
+    };
+    let description = models
+        .describe_model(&selected.model)
         .await
         .map_err(|_| Failure::Parameters)?;
-    let selected = ModelSelection {
-        model,
-        reasoning_effort: None,
-    };
-    let synthetic_current = !choices
-        .iter()
-        .any(|choice| choice.value.0.as_ref() == value);
-    let mut options = configuration(&selected, choices)?;
+    let efforts = description.profile().reasoning_efforts();
+    if request.config_id.0.as_ref() == "thought_level" && efforts.supported().is_empty() {
+        return Err(Failure::Parameters);
+    }
+    efforts
+        .resolve(selected.reasoning_effort.as_ref())
+        .map_err(|_| Failure::Parameters)?;
+    configuration(&selected, choices.clone(), Some(efforts))?;
     let arguments = CommandArguments::new(json!(selected)).map_err(|_| Failure::Parameters)?;
     let view = session.commands().await.map_err(|_| Failure::Backend)?;
     let mut entropy = [0_u8; 16];
@@ -169,18 +249,10 @@ pub(super) async fn set(
         .map_err(|_| Failure::Backend)?;
     let actual = selection(session).await?;
     if actual.model == selected.model {
-        return Ok(options);
+        return configuration(&actual, choices, Some(efforts));
     }
-    let schema::SessionConfigKind::Select(select) = options.remove(0).kind else {
-        return Err(Failure::Backend);
-    };
-    let schema::SessionConfigSelectOptions::Ungrouped(mut choices) = select.options else {
-        return Err(Failure::Backend);
-    };
-    if synthetic_current {
-        choices.remove(0);
-    }
-    configuration(&actual, choices)
+    let efforts = described_efforts(&actual.model, &choices, models).await?;
+    configuration(&actual, choices, efforts.as_ref())
 }
 
 #[cfg(test)]
@@ -289,13 +361,13 @@ mod tests {
             model: ModelRef::new("fixture", "00000").unwrap(),
             reasoning_effort: None,
         };
-        assert!(configuration(&available, choices.clone()).is_ok());
+        assert!(configuration(&available, choices.clone(), None).is_ok());
         let unavailable = ModelSelection {
             model: ModelRef::new("gone", "model").unwrap(),
             reasoning_effort: None,
         };
         assert!(matches!(
-            configuration(&unavailable, choices),
+            configuration(&unavailable, choices, None),
             Err(Failure::Busy)
         ));
         let models = Catalog {
@@ -307,12 +379,61 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_choices_preserve_exact_ids_defaults_and_unavailable_selections() {
+        let mut current = ModelSelection {
+            model: ModelRef::new("fixture", "model").unwrap(),
+            reasoning_effort: None,
+        };
+        let efforts = ReasoningEffortProfile::new(
+            ["default", "high", "max"]
+                .map(|value| ReasoningEffortId::new(value).unwrap())
+                .into(),
+            Some(ReasoningEffortId::new("high").unwrap()),
+        )
+        .unwrap();
+        let values =
+            serde_json::to_value(configuration(&current, vec![], Some(&efforts)).unwrap()).unwrap();
+        assert_eq!(values[1]["category"], "thought_level");
+        assert_eq!(values[1]["currentValue"], "@default");
+        assert_eq!(
+            values[1]["options"][0]["description"],
+            "Adapter default: high"
+        );
+        assert_eq!(values[1]["options"][1]["value"], "default");
+        assert_eq!(values[1]["options"][3]["value"], "max");
+        current.reasoning_effort = Some(ReasoningEffortId::new("xhigh").unwrap());
+        let values =
+            serde_json::to_value(configuration(&current, vec![], Some(&efforts)).unwrap()).unwrap();
+        assert_eq!(values[1]["currentValue"], "xhigh");
+        assert_eq!(
+            values[1]["options"][4]["description"],
+            "Current reasoning effort is unavailable"
+        );
+        assert_eq!(configuration(&current, vec![], None).unwrap().len(), 1);
+        assert_eq!(
+            configuration(&current, vec![], Some(&ReasoningEffortProfile::default()))
+                .unwrap()
+                .len(),
+            1
+        );
+        let unknown =
+            ReasoningEffortProfile::new(vec![ReasoningEffortId::new("high").unwrap()], None)
+                .unwrap();
+        let values =
+            serde_json::to_value(configuration(&current, vec![], Some(&unknown)).unwrap()).unwrap();
+        assert_eq!(
+            values[1]["options"][0]["description"],
+            "Provider default is unknown"
+        );
+    }
+
+    #[test]
     fn configuration_preserves_unavailable_selection_and_bounds_escaped_bytes() {
         let current = ModelSelection {
             model: ModelRef::new("gone", "model").unwrap(),
             reasoning_effort: None,
         };
-        let value = serde_json::to_value(configuration(&current, vec![]).unwrap()).unwrap();
+        let value = serde_json::to_value(configuration(&current, vec![], None).unwrap()).unwrap();
         assert_eq!(
             value[0]["currentValue"],
             model_value(&current.model).unwrap()
@@ -327,7 +448,7 @@ mod tests {
             .map(|_| schema::SessionConfigSelectOption::new("q".repeat(500), "\"".repeat(700)))
             .collect();
         assert!(matches!(
-            configuration(&current, choices),
+            configuration(&current, choices, None),
             Err(Failure::Busy)
         ));
     }

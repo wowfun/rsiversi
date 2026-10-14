@@ -8,7 +8,7 @@ pub(crate) struct SeededSource {
     mcp: Arc<rsi_mcp::McpOwner>,
     retrieval: Arc<rsi_retrieval::RetrievalService>,
     cached: Mutex<Option<SeedCache>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     private: std::sync::OnceLock<std::sync::Weak<crate::acp_inputs::PrivateInputs>>,
 }
 #[derive(Debug)]
@@ -29,12 +29,12 @@ impl SeededSource {
             mcp,
             retrieval,
             cached: Mutex::new(None),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             private: std::sync::OnceLock::new(),
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn private_snapshot(
         &self,
         mcp: rsi_agent_session_protocol::DomainSnapshot,
@@ -66,7 +66,7 @@ impl AgentCompositionSource for SeededSource {
     ) -> rsi_agent_composition_protocol::Result<
         Option<rsi_agent_composition_protocol::AgentCompositionPin>,
     > {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if header.agent_preset_id().as_str() == crate::acp_inputs::PRESET {
             return self
                 .private
@@ -157,7 +157,7 @@ pub(crate) fn capture(
     ));
     #[cfg(not(target_os = "linux"))]
     let _ = paths;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         let private = crate::acp_inputs::PrivateInputs::new(
             source.clone(),
@@ -204,12 +204,21 @@ impl rsi_meta::PluginFactory for SourceFactory {
         )))
     }
     async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
-        plan.context()
+        let supply = plan
+            .context()
             .provide_local::<rsi_agent_composition::AgentCompositionSourceContract>(capture(
                 &plan,
                 self.0.clone(),
                 &self.1,
             )?)?;
-        Ok(())
+        plan.defer(
+            "withdraw linked Agent composition source",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
     }
 }

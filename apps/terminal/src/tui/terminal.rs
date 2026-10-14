@@ -1,9 +1,8 @@
 //! One coalescing writer receives complete frames. Input never reads through Crossterm.
 use crossterm::{cursor, event, terminal};
-use ratatui::{
-    backend::{Backend as _, CrosstermBackend},
-    buffer::Buffer,
-};
+#[cfg(unix)]
+use ratatui::backend::{Backend as _, CrosstermBackend};
+use ratatui::buffer::Buffer;
 #[cfg(unix)]
 use std::io::Write as _;
 use std::io::{self, IsTerminal as _};
@@ -17,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 const RESTORE: &[u8] =
     b"\x1b[<u\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l";
 
@@ -257,16 +257,20 @@ async fn write_bytes(
 }
 
 #[cfg(not(unix))]
-async fn writer(
+fn writer(
     _: watch::Receiver<Option<Arc<RenderedFrame>>>,
     _: mpsc::Receiver<String>,
     _: watch::Sender<Option<Arc<RenderedFrame>>>,
     _: Vec<u8>,
     _: CancellationToken,
-) -> io::Result<()> {
-    Err(io::Error::other("Unix terminal required"))
+) -> std::future::Ready<io::Result<()>> {
+    std::future::ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unix terminal required",
+    )))
 }
 
+#[cfg(unix)]
 fn frame(buffer: &Buffer, previous: Option<&Buffer>) -> io::Result<Vec<u8>> {
     use unicode_width::UnicodeWidthStr as _;
     let mut bytes = Vec::new();

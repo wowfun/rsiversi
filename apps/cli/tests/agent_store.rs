@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
     TurnId,

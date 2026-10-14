@@ -28,6 +28,13 @@ pub(crate) struct Caller {
     pub revoked: CancellationToken,
 }
 impl Access {
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "This shared admission gate rejects Unix Local access; only Remote access exists off Unix"
+        )
+    )]
     fn remote(&self) -> Result<(&Policy, &Arc<dyn DeviceAuthentication>)> {
         match self {
             Self::Remote {

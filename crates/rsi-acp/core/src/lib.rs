@@ -328,7 +328,22 @@ impl PeerHandle {
     }
 
     async fn flushed(&self, receive: oneshot::Receiver<()>) -> Result<(), Error> {
-        tokio::select! { biased; result = receive => result.map_err(|_| self.retire(Error::Closed)), () = self.stop.cancelled() => Err(Error::Closed) }
+        tokio::select! { biased; result = receive => result.map_err(|_| self.lost_flush()), () = self.stop.cancelled() => Err(Error::Closed) }
+    }
+
+    fn lost_flush(&self) -> Error {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.stop.is_cancelled() {
+            self.failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_insert(Error::Closed);
+            self.stop.cancel();
+        }
+        Error::Closed
     }
 
     fn close_admission(&self) {

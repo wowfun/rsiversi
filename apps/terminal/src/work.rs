@@ -81,8 +81,24 @@ impl Drop for Stdin {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn stdin(_stop: CancellationToken) -> io::Result<impl io::Read + Send> {
-    Ok(io::stdin())
+pub(crate) fn stdin(_stop: CancellationToken) -> io::Result<io::Empty> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "cancellable terminal input requires native Unix support",
+    ))
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_platform_tests {
+    #[test]
+    fn stdin_refuses_without_acquiring_process_input() {
+        assert_eq!(
+            super::stdin(tokio_util::sync::CancellationToken::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Unsupported,
+        );
+    }
 }
 
 #[cfg(unix)]

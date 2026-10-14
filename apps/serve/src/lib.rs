@@ -78,7 +78,7 @@ impl ServeFactory {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
-    fn failure(&self, error: impl std::fmt::Display) -> MetaError {
+    fn record_failure(&self, error: impl std::fmt::Display) -> String {
         let mut message = error.to_string();
         if message.len() > 4096 {
             let mut end = 4096;
@@ -92,7 +92,10 @@ impl ServeFactory {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(RsiError::Boot(message.clone()));
-        MetaError::InvalidInput(message)
+        message
+    }
+    fn failure(&self, error: impl std::fmt::Display) -> MetaError {
+        MetaError::Activation(self.record_failure(error))
     }
     fn configuration(&self, desired: &ConfigValue) -> Result<HttpConfig, RsiError> {
         if let Some(web) = &self.local_web {
@@ -130,10 +133,18 @@ impl PluginFactory for ServeFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config = self
             .configuration(desired)
-            .map_err(|error| self.failure(error))?;
-        let encoded = serde_json::to_vec(&config).map_err(|error| self.failure(error))?;
+            .map_err(|error| MetaError::InvalidInput(self.record_failure(error)))?;
+        let encoded = serde_json::to_vec(&config)
+            .map_err(|error| MetaError::InvalidInput(self.record_failure(error)))?;
         if encoded.len() > 64 * 1024 {
-            return Err(self.failure("Serve HTTP configuration exceeds 64 KiB"));
+            return Err(MetaError::InvalidInput(
+                self.record_failure("Serve HTTP configuration exceeds 64 KiB"),
+            ));
+        }
+        if !cfg!(unix) {
+            return Err(MetaError::Activation(self.record_failure(
+                "native Serve signals are unsupported on this platform",
+            )));
         }
         let mut prepared =
             PreparedActivation::with_state(ConfigValue::Null, config, encoded.len() + 4096)
@@ -344,7 +355,9 @@ impl Runner {
                     () = self.stop.cancelled() => return Ok(()),
                     result = &mut open, if opening => { result?; opening = false; },
                     event = signals.next(reloading.is_none()) => match event {
+                        #[cfg(unix)]
                         service::SignalEvent::Stop => return Ok(()),
+                        #[cfg(unix)]
                         service::SignalEvent::Reload => {
                             let service = self.service.clone();
                             reloading = Some(Box::pin(async move { service.reload().await }));
@@ -386,5 +399,52 @@ impl rsi_application::ApplicationDiagnostic for ServeFactory {
 impl rsi_application::ApplicationDiagnostic for LocalWebAssetsFactory {
     fn take_diagnostic(&self) -> Option<RsiError> {
         self.0.take_diagnostic()
+    }
+}
+
+#[cfg(test)]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn activation_failure_retains_one_bounded_unicode_boot_diagnostic() {
+        let factory = ServeFactory::new(Vec::new());
+        let failure = factory.failure("🦀".repeat(1025));
+        let MetaError::Activation(message) = failure else {
+            panic!("activation errors must preserve their phase");
+        };
+        assert_eq!(message, "🦀".repeat(1024));
+        assert!(
+            matches!(factory.take_diagnostic(), Some(RsiError::Boot(diagnostic)) if diagnostic == message)
+        );
+        assert!(factory.take_diagnostic().is_none());
+    }
+
+    #[test]
+    fn preparation_refuses_before_planning_an_http_child() {
+        for factory in [
+            ServeFactory::new(Vec::new()),
+            ServeFactory::with_web_assets(Vec::new()),
+        ] {
+            assert!(matches!(
+                factory.prepare(&ConfigValue::Null),
+                Err(MetaError::InvalidInput(message)) if message.contains("--bind")
+            ));
+            let config = serde_json::to_value(HttpConfig {
+                bind: ([127, 0, 0, 1], 0).into(),
+                public_origin: "http://127.0.0.1".into(),
+                tls: None,
+                allow_loopback_http: true,
+            })
+            .unwrap();
+            let result = factory.prepare(&config);
+            if cfg!(unix) {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(MetaError::Activation(_))));
+                assert!(matches!(factory.take_diagnostic(),
+                    Some(RsiError::Boot(message)) if message.contains("unsupported")));
+            }
+        }
     }
 }

@@ -6,6 +6,10 @@ for both embedded and daemon execution. The standard daemon is Linux-only,
 where exact process-generation signal fencing is implemented. Other platforms
 remain embedded-only.
 
+Windows embedded ownership creates a TokenUser-owned protected private directory
+through Native Files, opens its owner lock without following reparse points, and
+retains a namespace pin and exclusive file lease through provider cleanup.
+
 Linux lifecycle checks require a matching process start token and exclude an
 exited, unreaped zombie. A foreground owner's caller may reap it only after
 `host stop` returns; retaining `/proc` metadata is not evidence that the service

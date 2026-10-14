@@ -59,13 +59,13 @@ plugin = "rsi.agent.repeat-tool-reminder"
 kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
-enabled_rhai = "defines.standard_linux_coding_tools"
+enabled_rhai = "defines.standard_output_cache"
 
 [[steps]]
 kind = "plugin"
 id = "bash"
 plugin = "rsi.shell.bash.tool"
-enabled_rhai = "defines.standard_linux_coding_tools"
+enabled_rhai = "defines.standard_coding_tools"
 
 [[steps]]
 kind = "plugin"
@@ -82,7 +82,7 @@ config = { markdown_agents = true, read_structured_results = true }
 kind = "plugin"
 id = "apply-patch"
 plugin = "rsi.apply-patch"
-enabled_rhai = "defines.standard_linux_coding_tools"
+enabled_rhai = "defines.standard_apply_patch"
 
 [[steps]]
 kind = "plugin"
@@ -93,7 +93,7 @@ plugin = "rsi.agent.questions"
 kind = "plugin"
 id = "files"
 plugin = "rsi.files.tools"
-enabled_rhai = "defines.standard_unix_files"
+enabled_rhai = "defines.standard_native_files"
 
 [[steps]]
 kind = "plugin"

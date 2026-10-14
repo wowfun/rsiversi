@@ -1,9 +1,14 @@
 //! Fixture-only Local grant setup through the public API, never the storage backend.
+#[cfg(unix)]
 use rsi_configuration_api::leaf::{CatalogRequest, Client, SetGrant};
+#[cfg(unix)]
 use serde::Deserialize;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::{io::Read, sync::Arc};
 
+#[cfg(unix)]
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
@@ -28,6 +33,7 @@ enum Request {
         request: SetGrant,
     },
 }
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = Vec::new();
@@ -100,4 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     api.close().await;
     println!("{}", serde_json::to_string(&result?)?);
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Err("profile-leaf-probe requires the native Unix Service transport".into())
 }

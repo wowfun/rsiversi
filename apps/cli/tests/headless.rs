@@ -1,19 +1,23 @@
+#![cfg(unix)]
+
 #[path = "headless/child.rs"]
 mod child;
 use child::CommandOutput as _;
-#[cfg(unix)]
+
 use child::ObservedChild;
 
-use axum::{
-    Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
-};
+use axum::extract::State;
+use axum::{Router, body::Body, http::StatusCode, response::Response, routing::post};
 use futures_util::StreamExt as _;
 use rsi::{RunningRsi, StandardCodingTools, StandardComposition};
+
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentMessageContent, AgentPresetId, MessageId, SessionFact,
     SessionFactBody, SessionId, TurnId, TurnOutcome,
 };
+
 use rsi_agent_store_protocol::SessionStore as _;
+
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_turn_protocol::{MessageReceipt, ObservationCursor, SessionObservation};
 use rsi_ai_protocol::{ImageRequest, ModelRef};
@@ -21,18 +25,23 @@ use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
 use rsi_sandbox::SandboxMode;
+
+use rsi_session_protocol::SessionService as _;
 use rsi_session_protocol::{
-    CreateSession, SessionHandle, SessionInput, SessionService as _, SubmitDirectImage,
-    SubmitInput, TurnReceipt,
+    CreateSession, SessionHandle, SessionInput, SubmitDirectImage, SubmitInput, TurnReceipt,
 };
 use std::collections::BTreeMap;
+
 use std::fmt::Write as _;
+use std::sync::Arc;
+
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
+
 use tokio::sync::Notify;
 
 const CHILD_PROVIDER_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -640,6 +649,7 @@ async fn image_server() -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[derive(Clone, Debug)]
+
 struct CrashServerState {
     calls: Arc<AtomicUsize>,
     first_request_started: Arc<Notify>,
@@ -1492,7 +1502,6 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     server.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let (endpoint, first_request_started, _calls, server) = crash_server().await;
@@ -1618,7 +1627,6 @@ fn assert_sigkill_recovery_order(facts: &[SessionFact]) {
     assert!(started < interrupted && interrupted < completed);
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let (endpoint, first_request_started, calls, server) = crash_server().await;
@@ -1774,7 +1782,6 @@ async fn question_then_chat(
     }
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One real Host lifecycle per adapter validates the same question protocol.
 async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
@@ -2201,22 +2208,21 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
     http.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_exits_with_an_undrained_stdout_pipe() {
     verify_undrained_stdout(None).await;
 }
-#[cfg(unix)]
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_after_model_completion_still_stops_blocked_output() {
     verify_undrained_stdout(Some(0)).await;
 }
-#[cfg(unix)]
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_after_model_completion_with_a_full_renderer_queue() {
     verify_undrained_stdout(Some(64)).await;
 }
-#[cfg(unix)]
+
 #[allow(clippy::too_many_lines)] // Bounded pipe setup, completion evidence and signal cleanup share one child.
 async fn verify_undrained_stdout(deltas: Option<usize>) {
     use std::time::Duration;
@@ -2341,7 +2347,6 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     let _ = server.await;
 }
 
-#[cfg(unix)]
 async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
     use std::time::Duration;
     // Read-only WAL visibility proves completion without acquiring the running

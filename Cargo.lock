@@ -4547,7 +4547,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
- "cap-std",
+ "dirs",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -4695,6 +4695,7 @@ dependencies = [
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.15+spec-1.1.0",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -7235,6 +7236,7 @@ dependencies = [
  "rsi-api-uds-client",
  "rsi-approval-protocol",
  "rsi-build-info",
+ "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",
  "rsi-session-protocol",

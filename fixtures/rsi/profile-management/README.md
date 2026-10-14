@@ -8,6 +8,8 @@ remains enforced by the owner. It never opens the grant database or source edito
 Its stdin accepts one bounded catalog or grant operation and stdout returns the
 typed result. Browser tests use it to issue explicit Device leaf grants; remote
 configuration authority alone does not grant source changes.
+The probe's Unix transport is unavailable on other platforms; its executable
+rejects before reading stdin or consulting Service metadata there.
 
 Build with `cargo build -p rsi-cli --example profile-leaf-probe`. Run `browser.mjs`
 with `RSI_WEB_ASSETS` pointing to a fresh product build and an explicit report

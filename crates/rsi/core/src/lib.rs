@@ -51,17 +51,22 @@ mod api_composition;
 mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::{probe_service_host, workflow_restart_impact};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod acp_configuration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod acp_inputs;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod acp_owner;
 mod composition;
 mod integration_source;
 mod local_api_client;
 mod local_host;
+#[cfg(unix)]
 mod mcp_api;
+#[cfg(not(unix))]
+#[path = "mcp_api_unsupported.rs"]
+mod mcp_api;
+#[cfg(unix)]
 mod mcp_ssh;
 #[cfg(unix)]
 mod native_addons;
@@ -477,17 +482,63 @@ fn required_local<C: rsi_meta::LocalContract>(
         .ok_or_else(|| RsiError::Boot(format!("{name} is unavailable")))
 }
 
-/// Captures usable absolute HOME for optional personal skill discovery.
-/// Missing, empty and relative values skip this optional source.
+/// Captures the canonical platform Bash selected by the standard product launcher.
+/// Windows uses the Git for Windows installer registry; Unix uses `/bin/bash`.
+pub fn capture_standard_bash() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let path = {
+        use winreg::{
+            RegKey,
+            enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
+        };
+        let install = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+            .into_iter()
+            .find_map(|hive| {
+                RegKey::predef(hive)
+                    .open_subkey("SOFTWARE\\GitForWindows")
+                    .ok()
+                    .and_then(|key| key.get_value::<String, _>("InstallPath").ok())
+            })
+            .ok_or_else(|| {
+                RsiError::Boot(
+                    "native Windows coding requires an installed Git for Windows Bash".into(),
+                )
+            })?;
+        PathBuf::from(install).join("bin/bash.exe")
+    };
+    #[cfg(not(windows))]
+    let path = PathBuf::from("/bin/bash");
+    canonical_standard_bash(&path)
+}
+
+fn canonical_standard_bash(path: &std::path::Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(RsiError::Boot("standard Bash path must be absolute".into()));
+    }
+    std::fs::canonicalize(path).map_err(|error| {
+        RsiError::Boot(format!(
+            "standard Bash {} is unavailable: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Captures the Windows Profile Known Folder, independent of HOME.
+/// On Unix, missing, empty and relative HOME values skip this optional source.
 pub fn capture_standard_home() -> Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    return Ok(dirs::home_dir().filter(|path| path.is_absolute()));
+    #[cfg(not(windows))]
     Ok(personal_home(std::env::var_os("HOME")))
 }
 
+#[cfg(not(windows))]
 fn personal_home(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
-/// Resolves standard XDG-style paths without searching for a Profile.
+/// Resolves standard platform locations without creating directories or finding a Profile.
+#[cfg(not(windows))]
 pub fn standard_paths() -> Result<HostPaths> {
     let config = optional_environment_path("XDG_CONFIG_HOME")?;
     let state = optional_environment_path("XDG_STATE_HOME")?;
@@ -498,6 +549,50 @@ pub fn standard_paths() -> Result<HostPaths> {
     standard_paths_from(config, state, cache, home.as_deref())
 }
 
+/// Resolves explicit XDG overrides or Windows Known Folders without creating directories.
+#[cfg(windows)]
+pub fn standard_paths() -> Result<HostPaths> {
+    let config = optional_environment_path("XDG_CONFIG_HOME")?;
+    let state = optional_environment_path("XDG_STATE_HOME")?;
+    let cache = optional_environment_path("XDG_CACHE_HOME")?;
+    let defaults = if config.is_none() || state.is_none() || cache.is_none() {
+        Some(windows_standard_paths(
+            dirs::config_dir(),
+            dirs::data_local_dir(),
+        )?)
+    } else {
+        None
+    };
+    let resolve = |override_path: Option<PathBuf>, fallback: Option<&Path>| {
+        override_path
+            .map(|path| path.join("rsi"))
+            .or_else(|| fallback.map(Path::to_owned))
+            .ok_or_else(|| RsiError::Boot("Windows standard path is unavailable".into()))
+    };
+    HostPaths::new(
+        resolve(config, defaults.as_ref().map(HostPaths::config))?,
+        resolve(state, defaults.as_ref().map(HostPaths::state))?,
+        resolve(cache, defaults.as_ref().map(HostPaths::cache))?,
+    )
+    .map_err(|error| RsiError::Boot(error.to_string()))
+}
+
+#[cfg(windows)]
+fn windows_standard_paths(roaming: Option<PathBuf>, local: Option<PathBuf>) -> Result<HostPaths> {
+    let required = |path: Option<PathBuf>, folder: &str| {
+        path.filter(|path| path.is_absolute()).ok_or_else(|| {
+            RsiError::Boot(format!(
+                "required Windows Known Folder `{folder}` is unavailable"
+            ))
+        })
+    };
+    let config = required(roaming, "RoamingAppData")?.join("rsi");
+    let local = required(local, "LocalAppData")?.join("rsi");
+    HostPaths::new(config, local.join("state"), local.join("cache"))
+        .map_err(|error| RsiError::Boot(error.to_string()))
+}
+
+#[cfg(not(windows))]
 fn standard_paths_from(
     config: Option<PathBuf>,
     state: Option<PathBuf>,
@@ -517,6 +612,7 @@ fn standard_paths_from(
     HostPaths::new(config, state, cache).map_err(|error| RsiError::Boot(error.to_string()))
 }
 
+#[cfg(not(windows))]
 fn environment_path(name: &str) -> Result<PathBuf> {
     optional_environment_path(name)?.ok_or_else(|| {
         RsiError::Boot(format!(
@@ -721,6 +817,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn optional_personal_home_ignores_missing_empty_and_relative_paths() {
         for value in [None, Some("".into()), Some("relative".into())] {
             assert_eq!(personal_home(value), None);
@@ -732,6 +829,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn complete_xdg_paths_do_not_require_home() {
         let paths = standard_paths_from(
             Some(PathBuf::from("/config")),
@@ -747,6 +845,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn missing_xdg_path_requires_home_for_its_fallback() {
         assert!(matches!(
             standard_paths_from(
@@ -757,6 +856,115 @@ mod tests {
             ),
             Err(RsiError::Boot(message)) if message.contains("HOME")
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_locations_separate_roaming_config_from_local_data() {
+        let roaming = PathBuf::from(r"D:\fixture\漫游");
+        let local = PathBuf::from(r"D:\fixture\Local😀");
+        let paths = windows_standard_paths(Some(roaming.clone()), Some(local.clone())).unwrap();
+        assert_eq!(paths.config(), roaming.join("rsi"));
+        assert_eq!(paths.state(), local.join("rsi/state"));
+        assert_eq!(paths.cache(), local.join("rsi/cache"));
+        for (roaming, local, folder) in [
+            (None, Some(local.clone()), "RoamingAppData"),
+            (Some(roaming.clone()), None, "LocalAppData"),
+            (
+                Some(PathBuf::from("relative")),
+                Some(local.clone()),
+                "RoamingAppData",
+            ),
+            (Some(PathBuf::new()), Some(local.clone()), "RoamingAppData"),
+            (
+                Some(roaming.clone()),
+                Some(PathBuf::from("relative")),
+                "LocalAppData",
+            ),
+            (Some(roaming), Some(PathBuf::new()), "LocalAppData"),
+        ] {
+            assert!(matches!(windows_standard_paths(roaming, local),
+                Err(RsiError::Boot(message)) if message.contains(folder)));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opt-in installed Git for Windows lookup and subprocess; no user state is written"]
+    fn windows_standard_bash_runs_the_installed_native_executable() {
+        let bash = capture_standard_bash().unwrap();
+        assert!(bash.is_absolute());
+        assert_eq!(bash.file_name().unwrap(), "bash.exe");
+        let output = std::process::Command::new(bash)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("GNU bash"));
+    }
+
+    #[test]
+    fn standard_bash_resolution_rejects_cwd_relative_installations() {
+        assert!(
+            canonical_standard_bash(std::path::Path::new("."))
+                .unwrap_err()
+                .to_string()
+                .contains("must be absolute")
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("bash-fixture");
+        std::fs::write(&executable, b"fixture").unwrap();
+        assert_eq!(
+            canonical_standard_bash(&executable).unwrap(),
+            executable.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opt-in native Known Folder lookup; no directories are created"]
+    fn windows_known_folders_resolve_without_home_or_xdg() {
+        const CHILD: &str = "RSI_KNOWN_FOLDER_PROBE";
+        if std::env::var_os(CHILD).is_some() {
+            let paths = standard_paths().expect("native Known Folders");
+            assert!(paths.config().is_absolute());
+            assert!(paths.state().is_absolute());
+            assert!(paths.cache().is_absolute());
+            assert_eq!(
+                capture_standard_home().unwrap(),
+                dirs::home_dir().filter(|path| path.is_absolute())
+            );
+            return;
+        }
+        for home in [
+            None,
+            Some(r"C:\unrelated-git-home"),
+            Some("/home/msys-user"),
+            Some(""),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::windows_known_folders_resolve_without_home_or_xdg",
+                    "--ignored",
+                ])
+                .env(CHILD, "yes")
+                .env_remove("HOME")
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("XDG_STATE_HOME")
+                .env_remove("XDG_CACHE_HOME");
+            if let Some(home) = home {
+                command.env("HOME", home);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 
