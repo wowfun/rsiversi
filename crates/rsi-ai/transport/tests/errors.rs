@@ -120,6 +120,12 @@ fn stream_transport_mapping_preserves_cancellation_and_timeout() {
         "HTTP request timed out",
     ));
     assert_eq!(timed_out.kind(), ErrorKind::Timeout);
+    assert_eq!(timed_out.provider_code(), Some("http.timeout"));
+
+    let invalid = transport_stream_error(TransportError::new("invalid code\n", "invalid code"));
+    assert_eq!(invalid.kind(), ErrorKind::Protocol);
+    assert_eq!(invalid.dispatch_status(), DispatchStatus::Dispatched);
+    assert_eq!(invalid.provider_code(), None);
 }
 
 #[test]

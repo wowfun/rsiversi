@@ -60,7 +60,6 @@ pub use validation::{
 /// Maximum UTF-8 bytes retained while assembling one language response.
 pub const MAX_LANGUAGE_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum normalized events in one complete language stream.
-pub const MAX_LANGUAGE_EVENTS: usize = 65_536;
 /// Maximum content blocks retained in one language response.
 pub const MAX_CONTENT_BLOCKS: usize = 256;
 /// Maximum citeable sources retained in one language response.

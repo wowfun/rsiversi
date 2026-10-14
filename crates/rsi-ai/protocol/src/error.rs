@@ -50,6 +50,8 @@ pub enum ErrorKind {
     Transport,
     /// The provider reported an internal or unavailable-server failure.
     Server,
+    /// A successful language response contained no usable output.
+    EmptyResponse,
     /// Provider output could not satisfy the normalized semantic contract.
     OutputValidation,
     /// Provider or wire traffic violated its declared protocol.
@@ -79,6 +81,7 @@ impl ErrorKind {
             Self::Timeout => "provider.timeout",
             Self::Transport => "provider.transport",
             Self::Server => "provider.server",
+            Self::EmptyResponse => "provider.empty_response",
             Self::OutputValidation => "provider.output_validation",
             Self::Protocol => "provider.protocol",
             Self::Cancelled => "provider.cancelled",
@@ -102,6 +105,7 @@ impl ErrorKind {
             "provider.timeout" => Self::Timeout,
             "provider.transport" => Self::Transport,
             "provider.server" => Self::Server,
+            "provider.empty_response" => Self::EmptyResponse,
             "provider.output_validation" => Self::OutputValidation,
             "provider.protocol" => Self::Protocol,
             "provider.cancelled" => Self::Cancelled,

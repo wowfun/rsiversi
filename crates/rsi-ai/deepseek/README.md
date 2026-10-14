@@ -35,3 +35,26 @@ without fallback. Run it explicitly with `cargo test --locked -p rsi-ai-deepseek
 `DEEPSEEK_CONTEXT_WINDOW_TOKENS`, `DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS`, and
 `DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS` for the selected model. The test reports the
 selected model and validated usage, never the credential.
+
+## Generation policy
+
+Each exact model has a request output default of 256,000 tokens, overridden by
+`default_output_tokens.<model>`. Configuration preparation rejects defaults
+above the model's declared maximum reserve. Explicit request limits take
+precedence, and summary requests keep their own cap. Capacity reserves do not
+substitute for the request default.
+
+The registered language route allows at most five retries after the first
+attempt for rate limiting, transient server/transport/timeouts and empty output.
+Its explicit regeneration policy permits retry after uncertain dispatch without
+changing dispatch evidence; duplicate generation charges are possible. Tools,
+Images, deferred work and other provider defaults do not inherit that policy.
+Backoff starts at 500 ms, has 10 percent jitter and is capped after jitter at
+10 seconds. Valid Retry-After up to 10 seconds is honored exactly; larger
+server-required waits end the automatic retry chain.
+
+Streaming requests have configurable connect (10 seconds), response-header
+(300 seconds) and SSE idle (300 seconds) limits, without a total stream deadline.
+Legal complete SSE events and heartbeat comments reset idle; partial frames and
+empty chunks do not. Local admission/backpressure time does not consume provider
+idle time. Nonstreaming and other provider requests retain their finite policy.

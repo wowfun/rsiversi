@@ -54,9 +54,21 @@ impl fmt::Debug for SseData {
 /// Decodes SSE framing incrementally under one provider-selected finite frame bound.
 #[allow(clippy::too_many_lines)] // One state machine owns cross-chunk CR/LF and frame grammar.
 pub fn decode_sse(
+    body: ByteStream,
+    termination: SseTermination,
+    maximum_frame_bytes: usize,
+) -> SseStream {
+    decode_sse_with_idle(body, termination, maximum_frame_bytes, None)
+}
+
+/// Decodes frames with an optional network-read idle allowance. Local admission
+/// and downstream consumer waits never charge this allowance.
+#[allow(clippy::too_many_lines)]
+pub fn decode_sse_with_idle(
     mut body: ByteStream,
     termination: SseTermination,
     maximum_frame_bytes: usize,
+    idle_timeout: Option<std::time::Duration>,
 ) -> SseStream {
     Box::pin(stream! {
         if let Err(error) = validate_frame_limit(maximum_frame_bytes) {
@@ -77,7 +89,23 @@ pub fn decode_sse(
         let mut line_start = 0_usize;
         let mut previous_was_cr = false;
         let mut done = false;
-        while let Some(chunk) = body.next().await {
+        let mut remaining = idle_timeout;
+        loop {
+            tokio::task::consume_budget().await;
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                yield Err(TransportError::new("http.timeout", "SSE stream idle timeout")); return;
+            }
+            let started = tokio::time::Instant::now();
+            let next = if let Some(remaining) = remaining {
+                if let Ok(next) = tokio::time::timeout(remaining, body.next()).await {
+                    next
+                } else {
+                    yield Err(TransportError::new("http.timeout", "SSE stream idle timeout"));
+                    return;
+                }
+            } else { body.next().await };
+            remaining = remaining.map(|remaining| remaining.saturating_sub(started.elapsed()));
+            let Some(chunk) = next else { break; };
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
@@ -150,6 +178,7 @@ pub fn decode_sse(
                             return;
                         }
                     };
+                    remaining = idle_timeout;
                     match decoded {
                         Some(data)
                             if termination == SseTermination::DoneSentinel

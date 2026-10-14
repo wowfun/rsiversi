@@ -5390,8 +5390,10 @@ dependencies = [
 name = "rsi-ai-deepseek"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "axum",
+ "futures-util",
  "hex",
  "rsi-ai-openai",
  "rsi-ai-openai-compatible",
@@ -5584,6 +5586,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "httpdate",
  "memchr",
  "reqwest 0.12.28",
  "rsi-ai-protocol",

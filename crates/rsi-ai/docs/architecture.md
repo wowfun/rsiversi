@@ -48,8 +48,10 @@ during Prepare or in a later deferred checkpoint/batch. The snapshot freezes dep
 endpoint fingerprint, config generation, redacted credential source, canonical
 request digest, and bounded retry policy. A provider attempt never retries
 itself. A durable orchestrator may retry only after persisting failure evidence,
-only when policy admits the error kind, and only when dispatch is proven not to
-have crossed the effect seam. `Unknown` dispatch is never retried blindly.
+only when policy admits the error kind and dispatch scope. The default requires
+proven non-dispatch. An explicit language-regeneration policy may permit
+uncertain pure generation, retaining the original dispatch evidence and possible
+duplicate-charge risk; it grants no permission to repeat external tools.
 Routers run the selected adapter's compatibility check before credential or
 media-service access, then freeze those dependencies only for an admitted
 request.

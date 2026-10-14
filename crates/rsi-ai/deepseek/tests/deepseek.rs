@@ -41,6 +41,8 @@ async fn disabled_effort_uses_each_protocols_wire_value() {
         let config = DeepSeekConfig::with_endpoint(endpoint)
             .unwrap()
             .with_protocol(protocol)
+            .with_default_output_tokens("model", 4096)
+            .unwrap()
             .with_model_profile(
                 "model",
                 LanguageModelLimits::new(128_000, 4096, 8192).unwrap(),
@@ -106,6 +108,8 @@ async fn responses_rejects_media_and_unknown_custom_tools_before_dispatch() {
     };
     let adapter = DeepSeekAdapter::new(
         DeepSeekConfig::with_endpoint("http://127.0.0.1:9")
+            .unwrap()
+            .with_default_output_tokens("model", 4096)
             .unwrap()
             .with_model_profile(
                 "model",
@@ -248,6 +252,8 @@ async fn deepseek_defaults_to_stateless_responses_with_plain_reasoning() {
     let adapter = DeepSeekAdapter::new(
         DeepSeekConfig::with_endpoint(format!("http://{address}"))
             .unwrap()
+            .with_default_output_tokens("deepseek-v4-flash", 4096)
+            .unwrap()
             .with_model_profile(
                 "deepseek-v4-flash",
                 LanguageModelLimits::new(128_000, 4096, 16384).unwrap(),
@@ -310,10 +316,13 @@ async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
         DeepSeekConfig::with_endpoint(format!("http://{address}"))
             .map(|config| config.with_protocol(DeepSeekProtocol::ChatCompletions))
             .and_then(|config| {
-                config.with_model_profile(
-                    "deepseek-chat",
-                    LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
-                )
+                config
+                    .with_default_output_tokens("deepseek-chat", 4096)
+                    .unwrap()
+                    .with_model_profile(
+                        "deepseek-chat",
+                        LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
+                    )
             })
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
@@ -348,10 +357,13 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
         DeepSeekConfig::with_endpoint("http://127.0.0.1:9")
             .map(|config| config.with_protocol(DeepSeekProtocol::ChatCompletions))
             .and_then(|config| {
-                config.with_model_profile(
-                    "deepseek-reasoner",
-                    LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
-                )
+                config
+                    .with_default_output_tokens("deepseek-reasoner", 4096)
+                    .unwrap()
+                    .with_model_profile(
+                        "deepseek-reasoner",
+                        LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
+                    )
             })
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
@@ -374,4 +386,165 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
     let provider = error.provider_error().expect("provider failure");
     assert_eq!(provider.kind().code(), "provider.unsupported");
     assert!(provider.to_string().contains("reasoning effort"));
+}
+
+#[test]
+fn default_output_is_256000_overridable_per_model_and_validated_against_capacity() {
+    for protocol in [
+        DeepSeekProtocol::Responses,
+        DeepSeekProtocol::ChatCompletions,
+    ] {
+        let config = DeepSeekConfig::default()
+            .with_protocol(protocol)
+            .with_model_profile(
+                "model",
+                LanguageModelLimits::new(1_000_000, 256_000, 256_000).unwrap(),
+            )
+            .unwrap()
+            .with_default_output_tokens("small", 65_536)
+            .unwrap()
+            .with_model_profile(
+                "small",
+                LanguageModelLimits::new(128_000, 65_536, 65_536).unwrap(),
+            )
+            .unwrap();
+        let adapter = DeepSeekAdapter::new(config, Arc::new(ReqwestTransport::new().unwrap()));
+        assert_eq!(
+            adapter.describe("model").unwrap().default_output_tokens(),
+            Some(256_000)
+        );
+        assert_eq!(
+            adapter.describe("small").unwrap().default_output_tokens(),
+            Some(65_536)
+        );
+    }
+    assert!(
+        DeepSeekConfig::default()
+            .with_model_profile(
+                "model",
+                LanguageModelLimits::new(128_000, 4096, 65_536).unwrap()
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn empty_eof_and_early_disconnect_are_retryable_but_invalid_json_is_not() {
+    use rsi_ai_protocol::{DispatchStatus, ErrorKind};
+    for protocol in [
+        DeepSeekProtocol::Responses,
+        DeepSeekProtocol::ChatCompletions,
+    ] {
+        let partial = if protocol == DeepSeekProtocol::Responses {
+            "data: {\"type\":\"response.created\",\"sequence_number\":0}\n\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"answer\",\"delta\":\"partial\",\"sequence_number\":1}\n\n"
+        } else {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
+        };
+        for (body, expected) in [
+            ("", ErrorKind::EmptyResponse),
+            (partial, ErrorKind::Transport),
+            ("data: not-json\n\n", ErrorKind::Protocol),
+        ] {
+            let path = if protocol == DeepSeekProtocol::Responses {
+                "/responses"
+            } else {
+                "/chat/completions"
+            };
+            let app = Router::new().route(path, post(move || async move { body }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let adapter = DeepSeekAdapter::new(
+                DeepSeekConfig::with_endpoint(endpoint)
+                    .unwrap()
+                    .with_protocol(protocol)
+                    .with_model_profile(
+                        "model",
+                        LanguageModelLimits::new(1_000_000, 256_000, 256_000).unwrap(),
+                    )
+                    .unwrap(),
+                Arc::new(ReqwestTransport::new().unwrap()),
+            );
+            let error = complete_language(
+                &adapter,
+                context("model"),
+                "model",
+                LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+            let error = error.provider_error().unwrap();
+            assert_eq!(error.kind(), expected, "{protocol:?}: {error}");
+            assert_eq!(error.dispatch_status(), DispatchStatus::Dispatched);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_after_and_http_dispatch_evidence_survive_both_protocols() {
+    use rsi_ai_protocol::{DispatchStatus, ErrorKind};
+    for protocol in [
+        DeepSeekProtocol::Responses,
+        DeepSeekProtocol::ChatCompletions,
+    ] {
+        for status in [429, 503] {
+            let path = if protocol == DeepSeekProtocol::Responses {
+                "/responses"
+            } else {
+                "/chat/completions"
+            };
+            let app = Router::new().route(
+                path,
+                post(move || async move {
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("retry-after", "7")],
+                        "busy",
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let adapter = DeepSeekAdapter::new(
+                DeepSeekConfig::with_endpoint(endpoint)
+                    .unwrap()
+                    .with_protocol(protocol)
+                    .with_model_profile(
+                        "model",
+                        LanguageModelLimits::new(1_000_000, 256_000, 256_000).unwrap(),
+                    )
+                    .unwrap(),
+                Arc::new(ReqwestTransport::new().unwrap()),
+            );
+            let error = complete_language(
+                &adapter,
+                context("model"),
+                "model",
+                LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap(),
+            )
+            .await
+            .unwrap_err();
+            let error = error.provider_error().unwrap();
+            assert_eq!(
+                error.kind(),
+                if status == 429 {
+                    ErrorKind::RateLimited
+                } else {
+                    ErrorKind::Server
+                }
+            );
+            assert_eq!(error.status(), Some(status));
+            assert_eq!(error.retry_after_ms(), Some(7000));
+            assert_eq!(error.dispatch_status(), DispatchStatus::Dispatched);
+            server.abort();
+            let _ = server.await;
+        }
+    }
 }

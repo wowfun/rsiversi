@@ -27,7 +27,7 @@ use rsi_ai_provider::{
 };
 use rsi_ai_transport::{
     ChatCompletionsChunk, HttpRequest, HttpTransport, JsonBase64Replacement, JsonRequestBody,
-    MAX_PROVIDER_REQUEST_BODY_BYTES, SseTermination, decode_sse, invalid_request_error,
+    MAX_PROVIDER_REQUEST_BODY_BYTES, SseTermination, decode_sse_with_idle, invalid_request_error,
     json_base64_body, provider_error as ai_error, provider_http_error, reclassify_context_limit,
     transport_connect_error, transport_stream_error,
 };
@@ -57,6 +57,7 @@ pub enum DeveloperMessageRole {
 pub struct ChatCompletionsConfig {
     endpoint: String,
     path: String,
+    stream_idle_timeout: Option<std::time::Duration>,
     allow_image_input: bool,
     developer_role: DeveloperMessageRole,
     disabled_reasoning_alias: Option<rsi_ai_protocol::ReasoningEffortId>,
@@ -66,11 +67,24 @@ pub struct ChatCompletionsConfig {
 }
 
 impl ChatCompletionsConfig {
+    /// Selects a finite SSE network idle timeout without changing other providers.
+    pub fn with_stream_idle_timeout(
+        mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Self, AiError> {
+        if timeout.is_zero() {
+            return Err(invalid_request_error("stream idle timeout must be nonzero"));
+        }
+        self.stream_idle_timeout = Some(timeout);
+        Ok(self)
+    }
+
     /// Creates a configuration using `/v1/chat/completions` with image input enabled.
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
             path: "/v1/chat/completions".to_owned(),
+            stream_idle_timeout: None,
             allow_image_input: true,
             developer_role: DeveloperMessageRole::Developer,
             disabled_reasoning_alias: None,
@@ -332,13 +346,18 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                         .await
                         .map_err(transport_connect_error)?;
                     if !(200..300).contains(&response.status) {
-                        return Err(http_failure(response.status, response.body).await);
+                        return Err(rsi_ai_transport::with_retry_after(
+                            http_failure(response.status, response.body).await,
+                            &response.headers,
+                            std::time::SystemTime::now(),
+                        ));
                     }
                     Ok(translate_chat_stream(
-                        decode_sse(
+                        decode_sse_with_idle(
                             response.body,
                             SseTermination::DoneSentinel,
                             rsi_ai_transport::DEFAULT_SSE_FRAME_BYTES,
+                            config.stream_idle_timeout,
                         ),
                         config.usage_accounting,
                     ))
@@ -1037,7 +1056,7 @@ fn translate_chat_stream(
                 ErrorPhase::Stream,
                 DispatchStatus::Dispatched,
                 "Chat Completions stream ended without finish_reason",
-            )));
+            ).with_provider_code("sse.missing_terminal").expect("static code")));
             return;
         };
         if let Some(index) = reasoning {

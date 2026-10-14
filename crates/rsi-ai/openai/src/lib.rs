@@ -76,6 +76,7 @@ pub struct OpenAiConfig {
     language_models: LanguageModelProfiles,
     reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
     disabled_reasoning_alias: Option<rsi_ai_protocol::ReasoningEffortId>,
+    stream_idle_timeout: Option<std::time::Duration>,
     responses_path: String,
     responses_state: ResponsesState,
     responses_developer_role: MessageRole,
@@ -88,6 +89,7 @@ impl Default for OpenAiConfig {
             language_models: LanguageModelProfiles::default(),
             reasoning_efforts: BTreeMap::new(),
             disabled_reasoning_alias: None,
+            stream_idle_timeout: None,
             responses_path: "/v1/responses".into(),
             responses_state: ResponsesState::Stored,
             responses_developer_role: MessageRole::Developer,
@@ -96,6 +98,18 @@ impl Default for OpenAiConfig {
 }
 
 impl OpenAiConfig {
+    /// Selects the streaming language idle timeout; Images are unchanged.
+    pub fn with_stream_idle_timeout(
+        mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Self, AiError> {
+        if timeout.is_zero() {
+            return Err(invalid_request_error("stream idle timeout must be nonzero"));
+        }
+        self.stream_idle_timeout = Some(timeout);
+        Ok(self)
+    }
+
     /// Maps one endpoint-owned disabled-reasoning ID to Responses `none`.
     /// The semantic profile and original request identity are preserved.
     #[must_use]

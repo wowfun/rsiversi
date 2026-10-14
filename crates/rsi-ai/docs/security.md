@@ -46,8 +46,9 @@ is retained only with that prepared call's resolved media and is released when
 the cache or context drops.
 
 Retry safety is an orchestration rule, not a transport convenience. Dispatched
-or dispatch-uncertain effects are not repeated automatically even if their
-error kind is otherwise retryable.
+or dispatch-uncertain effects require a frozen, capability-specific regeneration
+policy in addition to a retryable error. The default permits only undispatched
+work. Pure language regeneration never authorizes replay of external tools.
 
 SSE remains bounded per provider wire contract. OpenAI Responses admits a
 larger finite frame because documented terminal events may include the complete
