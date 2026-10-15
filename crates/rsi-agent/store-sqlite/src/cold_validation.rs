@@ -228,7 +228,7 @@ where
 }
 
 impl SqliteStore {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) async fn with_validation<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -361,10 +361,13 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::future::Future;
+    #[cfg(unix)]
     use std::task::Poll;
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_flight_owner_resolves_waiters_and_allows_a_new_proof() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -423,6 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn poisoned_proof_cache_refuses_publication_and_releases_flight() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -462,6 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn cancelled_private_queued_read_never_dispatches() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -493,6 +498,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn proof_scan_survives_all_waiter_deadlines_and_publishes_once() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -545,6 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn saturated_jobs_allow_joining_a_flight_but_refuse_new_work() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -620,6 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn abandoned_sql_is_interrupted_and_hook_does_not_poison_reuse() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -664,6 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn completed_read_can_publish_after_its_waiter_leaves() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -713,6 +722,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn cold_queue_refuses_capacity_before_dispatch_and_releases_cancelled_jobs() {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();

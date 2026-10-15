@@ -82,27 +82,23 @@ impl Transcript {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{
-        AgentMessageContent, EffectId, InputMessageSource, MessageId, SessionFact, SessionFactBody,
-        StepId, TurnId, TurnOutcome,
+        AgentMessageContent, InputMessageSource, MessageId, SessionFact, SessionFactBody, StepId,
+        TurnId, TurnOutcome,
     };
-    use rsi_ai_protocol::{ContentDelta, LanguageEvent};
     use rsi_conversation::{BlockIdentity, FactField};
 
-    fn delta(seq: u64, text: &str) -> SessionFact {
-        SessionFact::new(
-            seq,
-            1,
-            SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                turn_id: TurnId::new("turn").unwrap(),
-                effect_id: EffectId::new("model").unwrap(),
-                event: LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text(text.into()),
-                },
+    fn span(transcript: &mut Transcript, seq: u64, text: &str) {
+        transcript.seq = transcript.seq.max(seq);
+        transcript.put_source(
+            "source-span-fixture".into(),
+            "assistant",
+            "Assistant",
+            SourceRef {
+                seq,
+                field: FactField::ModelText { index: 0 },
             },
-        )
-        .unwrap()
+            text,
+        );
     }
 
     #[test]
@@ -116,7 +112,7 @@ mod tests {
             "**Final** answer",
             false,
         );
-        transcript.fact(&delta(3, "tail"));
+        span(&mut transcript, 3, "tail");
         for _ in 0..10 {
             serde_json::to_value(&transcript).unwrap();
         }
@@ -126,7 +122,7 @@ mod tests {
                 .iter()
                 .all(|block| block.markdown_parses.load(Ordering::Relaxed) == 1)
         );
-        transcript.fact(&delta(3, "tail"));
+        span(&mut transcript, 3, "tail");
         serde_json::to_value(&transcript).unwrap();
         assert!(
             transcript
@@ -135,7 +131,7 @@ mod tests {
                 .all(|block| block.markdown_parses.load(Ordering::Relaxed) == 1),
             "duplicate facts must not invalidate the cache"
         );
-        transcript.fact(&delta(2, "**backfill** "));
+        span(&mut transcript, 2, "**backfill** ");
         let view = serde_json::to_value(&transcript).unwrap();
         let finalized = transcript
             .blocks
@@ -151,7 +147,7 @@ mod tests {
         assert_eq!(changed.markdown_parses.load(Ordering::Relaxed), 2);
         assert_eq!(changed.text, "**backfill** tail");
         assert!(view.to_string().contains("strong"));
-        transcript.fact(&delta(4, &"界".repeat(MAX_BLOCK_BYTES)));
+        span(&mut transcript, 4, &"界".repeat(MAX_BLOCK_BYTES));
         for _ in 0..3 {
             serde_json::to_value(&transcript).unwrap();
         }
@@ -171,7 +167,7 @@ mod tests {
     fn missing_interior_delta_is_inserted_once_without_regressing_terminal_status() {
         let mut transcript = Transcript::default();
         for (seq, text) in [(3, "丙"), (1, "甲"), (2, "乙"), (3, "丙"), (2, "乙")] {
-            transcript.fact(&delta(seq, text));
+            span(&mut transcript, seq, text);
         }
         assert_eq!(transcript.blocks.len(), 1);
         assert_eq!(transcript.blocks[0].text, "甲乙丙");
@@ -257,7 +253,7 @@ mod tests {
     fn span_eviction_forgets_only_removed_sources_and_bounds_unicode_text() {
         let mut transcript = Transcript::default();
         for seq in 1..=20_000 {
-            transcript.fact(&delta(seq, "界"));
+            span(&mut transcript, seq, "界");
         }
         let block = &transcript.blocks[0];
         assert_eq!(block.sources.len(), MAXIMUM_BLOCK_SOURCES);
@@ -269,11 +265,11 @@ mod tests {
                 .sources
                 .position(SourceRef {
                     seq: 1,
-                    field: FactField::ModelText
+                    field: FactField::ModelText { index: 0 }
                 })
                 .is_none()
         );
-        transcript.fact(&delta(1, "旧"));
+        span(&mut transcript, 1, "旧");
         assert!(transcript.blocks[0].text.starts_with('旧'));
         assert_eq!(transcript.blocks[0].sources.get(0).unwrap().seq, 1);
         assert!(
@@ -281,11 +277,11 @@ mod tests {
                 .sources
                 .position(SourceRef {
                     seq: 20_000,
-                    field: FactField::ModelText
+                    field: FactField::ModelText { index: 0 }
                 })
                 .is_none()
         );
-        transcript.fact(&delta(20_001, &"😀".repeat(MAX_BLOCK_BYTES)));
+        span(&mut transcript, 20_001, &"😀".repeat(MAX_BLOCK_BYTES));
         let block = &transcript.blocks[0];
         assert_eq!(block.sources.len(), 1);
         assert_eq!(block.text.len(), MAX_BLOCK_BYTES);
@@ -304,7 +300,7 @@ mod tests {
                     "Assistant",
                     SourceRef {
                         seq: block * 1024 + span + 1,
-                        field: FactField::ModelText,
+                        field: FactField::ModelText { index: 0 },
                     },
                     "界",
                 );

@@ -6,15 +6,15 @@ use rsi_agent_composition_protocol::{
 };
 use rsi_agent_kernel::{
     AgentKernel, Clock, DEFAULT_MAXIMUM_ACTIVE_OBSERVERS, KernelFactory, KernelLimits,
-    MAXIMUM_ACTIVE_SESSIONS, MAXIMUM_PENDING_FACT_BYTES,
+    MAXIMUM_ACTIVE_SESSIONS,
 };
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecordBody, AgentMessage, AgentMessageContent, AgentMessageSource,
-    AgentPath, AgentPresetId, BudgetDimension, EffectId, EffectKind, ForkTurnSelection,
-    FrozenAgentSettings, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_FACTS_PER_READ,
-    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_TURN_GENERATED_RECORD_BYTES, MAXIMUM_TURN_TEXT_BYTES,
-    MessageId, MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, StepId, TurnBudget, TurnId, TurnOutcome, WaitResumeCause, fact_prefix_sha256,
+    AgentPath, AgentPresetId, EffectId, EffectKind, ForkTurnSelection, FrozenAgentSettings,
+    MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_FACTS_PER_READ, MAXIMUM_SESSION_FACT_BYTES,
+    MAXIMUM_TURN_TEXT_BYTES, MessageId, MessageOptions, MessageTarget, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, TurnOutcome, WaitResumeCause,
+    fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, AppendCommit, CasObjectRef, SessionStore, StoreActivationPhase, StoreError,
@@ -30,8 +30,8 @@ use rsi_agent_turn_protocol::{
     TurnService, TurnUpdate,
 };
 use rsi_ai_protocol::{
-    AiCapability, ContentDelta, ContentStart, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef,
-    PreparedCallSnapshot, RetryPolicy,
+    AiCapability, ContentDelta, ContentStart, LanguageEvent, ModelRef, PreparedCallSnapshot,
+    RetryPolicy,
 };
 use rsi_meta::{
     ActivationPlan, ConfigValue, PluginFactory, PreparedActivation, ResolvedFactory, Runtime,
@@ -1697,40 +1697,7 @@ fn model_started_fact(seq: u64, turn_id: &TurnId, effect_id: &EffectId) -> Sessi
 }
 
 fn model_finished_fact(seq: u64, turn_id: &TurnId, effect_id: &EffectId) -> SessionFact {
-    SessionFact::new(
-        seq,
-        seq,
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn_id.clone(),
-            effect_id: effect_id.clone(),
-            event: LanguageEvent::Finished {
-                reason: rsi_ai_protocol::FinishReason::Stop,
-                replay: None,
-            },
-        },
-    )
-    .unwrap()
-}
-
-fn budget_fact(
-    seq: u64,
-    turn_id: &TurnId,
-    dimension: BudgetDimension,
-    consumed: u64,
-    limit: u64,
-) -> SessionFact {
-    SessionFact::new(
-        seq,
-        seq,
-        SessionFactBody::BudgetExhausted {
-            turn_id: turn_id.clone(),
-            dimension,
-            consumed,
-            limit,
-        },
-    )
-    .unwrap()
+    SessionFact::new(seq, seq, text_attempt(turn_id, effect_id, "done".into())).unwrap()
 }
 
 async fn kernel(store: Arc<MemoryStore>) -> AgentKernel {
@@ -1834,8 +1801,8 @@ mod domains;
 mod fork_and_scheduler;
 #[path = "kernel/jobs.rs"]
 mod jobs;
-#[path = "kernel/output_recovery.rs"]
-mod output_recovery;
+#[path = "kernel/model_attempts.rs"]
+mod model_attempts;
 #[path = "kernel/recovery_and_finalization.rs"]
 mod recovery_and_finalization;
 #[path = "kernel/settlement.rs"]
@@ -1885,3 +1852,46 @@ mod queue;
 
 #[path = "kernel/execution_authority.rs"]
 mod execution_authority;
+
+fn touched(turn: &TurnId, text: &str) -> SessionFactBody {
+    SessionFactBody::WorkspaceTouched {
+        turn_id: turn.clone(),
+        step_id: StepId::new("fixture-step").unwrap(),
+        effect_id: EffectId::new("fixture-effect").unwrap(),
+        paths: vec![format!("/{text}")],
+    }
+}
+fn start_step(turn: &TurnId) -> SessionFactBody {
+    SessionFactBody::StepStarted {
+        turn_id: turn.clone(),
+        step_id: StepId::new("fixture-step").unwrap(),
+    }
+}
+fn text_attempt(turn: &TurnId, effect: &EffectId, text: String) -> SessionFactBody {
+    SessionFactBody::ModelAttemptSettled {
+        turn_id: turn.clone(),
+        effect_id: effect.clone(),
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text(text),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason: rsi_ai_protocol::FinishReason::Stop,
+                    replay: None,
+                },
+            ]
+            .into_iter()
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap(),
+    }
+}

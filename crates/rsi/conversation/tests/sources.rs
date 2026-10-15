@@ -448,42 +448,71 @@ fn input_sources_preserve_text_and_media_kinds() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One source matrix covers model content, errors and generated media.
 fn model_sources_preserve_delta_failure_and_generated_image_kinds() {
     use rsi_ai_protocol::{
-        AiError, ContentDelta, DispatchStatus, ErrorKind, ErrorPhase, LanguageEvent,
+        AiError, ContentDelta, ContentStart, DispatchStatus, ErrorKind, ErrorPhase, LanguageEvent,
     };
     for (delta, field, text) in [
         (
             ContentDelta::Text("assistant".into()),
-            FactField::ModelText,
+            FactField::ModelText { index: 0 },
             "assistant",
         ),
         (
             ContentDelta::Reasoning("reasoning".into()),
-            FactField::ModelReasoning,
+            FactField::ModelReasoning { index: 0 },
             "reasoning",
         ),
         (
             ContentDelta::ToolArguments("{\"command\":".into()),
-            FactField::ModelToolArguments,
+            FactField::ModelToolArguments { index: 0 },
             "{\"command\":",
         ),
     ] {
         let fact = SessionFact::new(
             9,
             1,
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("model").unwrap(),
-                event: LanguageEvent::ContentDelta { index: 0, delta },
+                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    [
+                        (
+                            0,
+                            LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: match &delta {
+                                    ContentDelta::Text(_) => ContentStart::Text,
+                                    ContentDelta::Reasoning(_) => ContentStart::Reasoning,
+                                    ContentDelta::ToolArguments(_) => ContentStart::ToolCall {
+                                        id: "call".into(),
+                                        name: "tool".into(),
+                                        kind: rsi_ai_protocol::ToolCallKind::Function,
+                                    },
+                                },
+                            },
+                        ),
+                        (1, LanguageEvent::ContentDelta { index: 0, delta }),
+                        (
+                            2,
+                            LanguageEvent::Finished {
+                                reason: rsi_ai_protocol::FinishReason::MaxTokens,
+                                replay: None,
+                            },
+                        ),
+                    ],
+                    true,
+                )
+                .unwrap(),
             },
         )
         .unwrap();
         for candidate in [
-            FactField::ModelText,
-            FactField::ModelReasoning,
-            FactField::ModelToolArguments,
+            FactField::ModelText { index: 0 },
+            FactField::ModelReasoning { index: 0 },
+            FactField::ModelToolArguments { index: 0 },
         ] {
             let selected = select_field(
                 &fact,
@@ -499,20 +528,27 @@ fn model_sources_preserve_delta_failure_and_generated_image_kinds() {
         }
     }
     check_fields(
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: TurnId::new("turn").unwrap(),
             effect_id: EffectId::new("model").unwrap(),
-            event: LanguageEvent::Failed {
-                error: AiError::new(
-                    ErrorKind::Server,
-                    ErrorPhase::Stream,
-                    DispatchStatus::Dispatched,
-                    "safe provider diagnostic",
-                )
-                .unwrap(),
-                replay: None,
-            },
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [(
+                    0,
+                    LanguageEvent::Failed {
+                        error: AiError::new(
+                            ErrorKind::Server,
+                            ErrorPhase::Stream,
+                            DispatchStatus::Dispatched,
+                            "safe provider diagnostic",
+                        )
+                        .unwrap(),
+                        replay: None,
+                    },
+                )],
+                true,
+            )
+            .unwrap(),
         },
         &[(FactField::ModelFailure, "safe provider diagnostic")],
     );

@@ -1,7 +1,6 @@
 use super::check;
-use cap_std::fs::Dir;
 use rsi_files_native_fs::{
-    open_absolute_directory_no_follow, open_relative_directory_no_follow,
+    Directory as Dir, open_absolute_directory_no_follow, open_relative_directory_no_follow,
     open_relative_file_no_follow,
 };
 use rsi_files_protocol::{
@@ -10,17 +9,19 @@ use rsi_files_protocol::{
     RelativePath, Result,
 };
 use rsi_files_protocol::{FileToken, OpenedFile};
-use std::{
-    ffi::{OsStr, OsString},
-    fs::File,
-    os::unix::{
-        ffi::OsStrExt as _,
-        fs::{FileExt as _, MetadataExt as _},
-    },
-    path::Path,
+#[cfg(unix)]
+use std::os::unix::{
+    ffi::{OsStrExt as _, OsStringExt as _},
+    fs::{FileExt as _, MetadataExt as _},
 };
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as _;
+use std::{fs::File, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+type Version = rsi_files_native_fs::FileVersion;
+#[cfg(unix)]
 #[derive(Debug, Eq, PartialEq)]
 struct Version {
     device: u64,
@@ -30,6 +31,7 @@ struct Version {
     modified: (i64, i64),
     changed: (i64, i64),
 }
+#[cfg(unix)]
 impl From<std::fs::Metadata> for Version {
     fn from(value: std::fs::Metadata) -> Self {
         Self {
@@ -43,16 +45,67 @@ impl From<std::fs::Metadata> for Version {
     }
 }
 fn directory_version(directory: &Dir) -> Result<Version> {
-    Ok(directory
-        .try_clone()
-        .map_err(io)?
-        .into_std_file()
-        .metadata()
-        .map_err(io)?
-        .into())
+    #[cfg(unix)]
+    {
+        Ok(directory.dir_metadata().map_err(io)?.into())
+    }
+    #[cfg(windows)]
+    {
+        directory.version().map_err(io)
+    }
 }
-fn native(path: &RelativePath) -> &Path {
-    Path::new(OsStr::from_bytes(path.as_bytes()))
+fn file_version(file: &File) -> Result<Version> {
+    #[cfg(unix)]
+    {
+        Ok(file.metadata().map_err(io)?.into())
+    }
+    #[cfg(windows)]
+    {
+        rsi_files_native_fs::file_version(file).map_err(io)
+    }
+}
+#[cfg_attr(unix, allow(clippy::unnecessary_wraps))] // The shared Windows boundary is fallible.
+fn native(path: &RelativePath) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(
+            path.as_bytes().to_vec(),
+        )))
+    }
+    #[cfg(windows)]
+    {
+        let text = std::str::from_utf8(path.as_bytes()).map_err(|_| FilesError::Invalid)?;
+        if text.contains(['\\', ':']) {
+            return Err(FilesError::Invalid);
+        }
+        Ok(PathBuf::from(text))
+    }
+}
+#[cfg_attr(unix, allow(clippy::unnecessary_wraps))] // Windows names may not be UTF-8.
+fn name_bytes(name: &std::ffi::OsStr) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        Ok(name.as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    {
+        Ok(name
+            .to_str()
+            .ok_or(FilesError::Invalid)?
+            .as_bytes()
+            .to_vec())
+    }
+}
+fn executable(version: &Version) -> bool {
+    #[cfg(unix)]
+    {
+        version.mode & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        let _ = version;
+        false
+    }
 }
 // map_err transfers ownership of the native error at this boundary.
 #[allow(clippy::needless_pass_by_value)]
@@ -72,7 +125,7 @@ fn relative_open_error(error: std::io::Error) -> FilesError {
 }
 #[derive(Debug)]
 struct Entry {
-    name: OsString,
+    name: Vec<u8>,
     kind: Option<FileKind>,
 }
 #[derive(Debug)]
@@ -97,16 +150,17 @@ pub(super) fn open(
     let root = open_absolute_directory_no_follow(binding.workspace()).map_err(io)?;
     let (object, version) = match kind {
         FileKind::File => {
-            let file =
-                open_relative_file_no_follow(&root, native(&path)).map_err(relative_open_error)?;
+            let file = open_relative_file_no_follow(&root, &native(&path)?)
+                .map_err(relative_open_error)?;
             let metadata = file.metadata().map_err(io)?;
             if !metadata.is_file() {
                 return Err(FilesError::Invalid);
             }
-            (Object::File(file), Version::from(metadata))
+            let version = file_version(&file)?;
+            (Object::File(file), version)
         }
         FileKind::Directory => {
-            let directory = open_relative_directory_no_follow(&root, native(&path))
+            let directory = open_relative_directory_no_follow(&root, &native(&path)?)
                 .map_err(relative_open_error)?;
             let version = directory_version(&directory)?;
             let mut entries = Vec::new();
@@ -114,17 +168,15 @@ pub(super) fn open(
             for entry in directory.entries().map_err(io)? {
                 check(cancellation)?;
                 let entry = entry.map_err(io)?;
-                let name = entry.file_name();
-                bytes = bytes
-                    .checked_add(name.as_bytes().len())
-                    .ok_or(FilesError::Capacity)?;
+                let name = name_bytes(&entry.file_name())?;
+                bytes = bytes.checked_add(name.len()).ok_or(FilesError::Capacity)?;
                 if entries.len() == MAXIMUM_DIRECTORY_ENTRIES
                     || bytes > MAXIMUM_DIRECTORY_NAME_BYTES
                 {
                     return Err(FilesError::Capacity);
                 }
                 // Validate before retaining a name that cannot be selected by this protocol.
-                path.join(name.as_bytes())?;
+                path.join(&name)?;
                 let kind = entry.file_type().map_err(io)?;
                 let kind = if kind.is_file() {
                     Some(FileKind::File)
@@ -135,7 +187,7 @@ pub(super) fn open(
                 };
                 entries.push(Entry { name, kind });
             }
-            entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
             if version != directory_version(&directory)? {
                 return Err(FilesError::Changed);
             }
@@ -161,7 +213,7 @@ impl Resource {
                 Object::Directory(..) => FileKind::Directory,
             },
             length: self.length(),
-            executable: matches!(self.object, Object::File(_)) && self.version.mode & 0o111 != 0,
+            executable: matches!(self.object, Object::File(_)) && executable(&self.version),
         }
     }
     pub(super) fn length(&self) -> u64 {
@@ -174,16 +226,16 @@ impl Resource {
         check(cancellation)?;
         let (held, named) = match &self.object {
             Object::File(file) => {
-                let held = file.metadata().map(Version::from).map_err(io)?;
-                let named = open_relative_file_no_follow(&self.root, native(&self.path))
-                    .and_then(|file| file.metadata())
-                    .map(Version::from)
+                let held = file_version(file)?;
+                let named = open_relative_file_no_follow(&self.root, &native(&self.path)?)
+                    .map_err(|_| FilesError::Changed)
+                    .and_then(|file| file_version(&file))
                     .map_err(|_| FilesError::Changed)?;
                 (held, named)
             }
             Object::Directory(directory, _) => {
                 let held = directory_version(directory)?;
-                let named = open_relative_directory_no_follow(&self.root, native(&self.path))
+                let named = open_relative_directory_no_follow(&self.root, &native(&self.path)?)
                     .map_err(|_| FilesError::Changed)
                     .and_then(|directory| directory_version(&directory))?;
                 (held, named)
@@ -213,7 +265,11 @@ impl Resource {
         let mut done = 0;
         while done < count {
             check(cancellation)?;
-            match file.read_at(&mut bytes[done..], offset + done as u64) {
+            #[cfg(unix)]
+            let read = file.read_at(&mut bytes[done..], offset + done as u64);
+            #[cfg(windows)]
+            let read = file.seek_read(&mut bytes[done..], offset + done as u64);
+            match read {
                 Ok(0) => return Err(FilesError::Changed),
                 Ok(read) => done += read,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -244,8 +300,8 @@ impl Resource {
         let mut bytes = 256_usize;
         for entry in entries.iter().skip(offset).take(maximum) {
             check(cancellation)?;
-            let path = self.path.join(entry.name.as_bytes())?;
-            let name = entry.name.to_string_lossy();
+            let path = self.path.join(&entry.name)?;
+            let name = String::from_utf8_lossy(&entry.name);
             // Hex paths and worst-case JSON escaping of the lossy UTF-8 name.
             let cost = path.as_bytes().len() * 2 + name.len() * 6 + 128;
             if bytes + cost > MAXIMUM_DIRECTORY_PAGE_BYTES {

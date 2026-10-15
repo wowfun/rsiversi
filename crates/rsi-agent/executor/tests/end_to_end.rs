@@ -8,8 +8,8 @@ use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_executor::ExecutorFactory;
 use rsi_agent_kernel::KernelFactory;
 use rsi_agent_session_protocol::{
-    AgentPresetId, BudgetDimension, FrozenAgentSettings, SessionFact, SessionFactBody,
-    SessionHeader, SessionId, TurnBudget, TurnId, TurnOutcome,
+    AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
+    TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::{SessionStore, StoredContextCheckpoint, WriteContextCheckpoint};
 use rsi_agent_testkit::{MemoryStore, MemoryStoreFactory};
@@ -205,10 +205,13 @@ impl TurnExecution for FailingClaimFixture {
     ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
         unreachable!("this fixture never waits for a human")
     }
-    fn elapsed_budget(
+    async fn reserve_model_attempt(
         &self,
         _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
+        _effect_id: rsi_agent_session_protocol::EffectId,
+        _purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        _cancellation: CancellationToken,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
         unreachable!("this fixture never drives a claimed turn")
     }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
@@ -1099,42 +1102,49 @@ fn answer_script() -> Vec<LanguageEvent> {
 }
 
 fn header() -> SessionHeader {
-    header_with_budget(TurnBudget::default())
+    header_for_session("session-e2e")
 }
-
-fn header_with_output_budget(recoveries: u64) -> SessionHeader {
-    let mut wire = serde_json::to_value(header_with_budget(
-        TurnBudget::default()
-            .with_maximum_output_recoveries(recoveries)
-            .unwrap(),
-    ))
-    .unwrap();
+fn header_with_output_cap() -> SessionHeader {
+    let mut wire = serde_json::to_value(header()).unwrap();
     wire["settings"]["output_budgets"] =
         json!([{"model":{"deployment":"deployment","model":"model"},"max_output_tokens":9000}]);
     serde_json::from_value(wire).unwrap()
 }
-
-fn header_with_budget(turn_budget: TurnBudget) -> SessionHeader {
-    header_for_session("session-e2e", turn_budget)
-}
-
-fn header_for_session(session: &str, turn_budget: TurnBudget) -> SessionHeader {
+fn header_for_session(session: &str) -> SessionHeader {
     SessionHeader::new_local(
         SessionId::new(session).unwrap(),
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentSettings::new_with_budget(
+        FrozenAgentSettings::new(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),
             SandboxMode::WorkspaceWrite,
             false,
-            turn_budget,
         )
         .unwrap(),
     )
     .unwrap()
+}
+impl BaseStack {
+    async fn cancel_current(&self) {
+        let session = SessionId::new("session-e2e").unwrap();
+        let turn = self
+            .store
+            .inspect_session(&session)
+            .await
+            .unwrap()
+            .active_turn_id
+            .expect("fixture admitted Turn");
+        self.runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap()
+            .cancel(&session, &turn, None)
+            .await
+            .unwrap();
+    }
 }
 
 async fn wait_for_outcome(
@@ -1563,9 +1573,7 @@ impl BaseStack {
             .submit(SubmitTurn {
                 reasoning_effort: None,
                 turn_id: client_turn_id(),
-                session: self
-                    .fresh(header_for_session(session, TurnBudget::default()))
-                    .await,
+                session: self.fresh(header_for_session(session)).await,
                 text: text.into(),
                 model: None,
                 sandbox: None,

@@ -292,15 +292,16 @@ async fn retained_settlement(uncertain: bool) {
     publish(
         execution.as_ref(),
         &claim,
-        tool_script()
-            .into_iter()
-            .map(|event| SessionFactBody::ModelEvent {
-                turn_id: claim.turn_id().clone(),
-                effect_id: source.clone(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event,
-            })
-            .collect(),
+        vec![SessionFactBody::ModelAttemptSettled {
+            turn_id: claim.turn_id().clone(),
+            effect_id: source.clone(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                tool_script().into_iter().map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
+        }],
     )
     .await;
     let effect = EffectId::new("retained-tool").unwrap();

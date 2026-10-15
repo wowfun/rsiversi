@@ -1,5 +1,15 @@
 # rsi-session-api
 
+`session/model-observe` v2 exposes the independent model live channel as incremental
+pages. A connection starts at raw offset zero; subsequent revisions append at the
+previous prefix's exact raw byte length. A new attempt or an empty terminal status
+resets that prefix. Each complete API item is at most 256 KiB; metadata fixes Session,
+Turn, effect, revision, page count and event count across all pages. Clients reject
+gaps, mixed revisions, invalid compact streams and incomplete EOF. Decoding reserves
+observation capacity before accumulating a snapshot; delivered clones retain that
+capacity. The decoder retains a charged clone of the last snapshot while waiting
+for its next delta. No live page advances the durable Fact/control cursor.
+
 `session/export` v1 is an authenticated Subscription Read bound to the attached
 Session/Header. Requests fit 8 KiB; each JSON stream item fits 512 KiB, including
 worst-case escaping of a 64 KiB chunk. Clients check start identity, options,
@@ -17,9 +27,9 @@ subscriptions to the authenticated `ApiContext.origin`. It never falls through t
 the unscoped Local Session service. Handles recheck location Use for new operations;
 stream frames recheck before publication without retaining draft or composition pins.
 
-The current Session format is 19. Operations negotiate their own versions:
-create, recent and inspect v7; attach, draft-snapshot, select-preset and observe v6;
-history and read-message v5; submit v4. Message-status is v3. Interactions, questions
+The current Session format is 22. Operations negotiate their own versions:
+create, recent and inspect v8; attach, draft-snapshot, select-preset and observe v7;
+history and read-message v6; submit v5. Message-status is v3. Interactions, questions
 and answer-question are v2 for typed closed reviews; older closed decoders are not
 compatible. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.

@@ -135,7 +135,7 @@ cancellation; the helper creates no task or queue. Each underlying operation
 retains its own I/O deadline. Other errors, including unknown outcomes, return
 immediately. Mutations use their domain-specific reconciliation policy.
 
-Fact/control, interaction and projection observation share one retry policy: 250 ms initial
+Public Fact/control, model, interaction and projection observers share one retry policy: 250 ms initial
 delay, doubling to 2 seconds; successful delivery resets both delay and failure
 count. Capacity failures, including API Capacity, do not consume the five-failure
 cutoff. Other consecutive failures terminate on the fifth. Reconnection notices
@@ -180,3 +180,5 @@ Exact queue-slot lookup borrows its indexed entry without allocating or sorting 
 The bounded queue projection exposes an immutable revision identity. Only a
 visible slot change replaces it; unrelated controls preserve it. Consumers must
 also bind displayed-Turn actions to their own current Turn identity.
+
+Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.

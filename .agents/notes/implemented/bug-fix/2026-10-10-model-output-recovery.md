@@ -52,3 +52,5 @@ an uncertain dispatched effect.
 Live executor replacement can continue after retained Tool settlement. It must
 reconcile the recovery ordinal from the claimed Turn's Facts instead of resetting
 the allowance; this does not authorize resuming an unfinished model attempt.
+
+Superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md); this record preserves the prior recovery rationale.

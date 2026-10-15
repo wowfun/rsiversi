@@ -1,5 +1,13 @@
 # rsi-desktop
 
+The native build embeds the committed multi-resolution application icon from
+`icons/icon.ico`; `icons/icon.png` contains the same artwork at 256 pixels.
+These assets permit Windows resource compilation. Windows runtime support still
+requires the native transport and Service acceptance gates.
+`icons/icon.svg` is the artwork source. Run `python icons/generate.py` with
+Pillow installed to regenerate both raster assets; the generator never runs
+during a normal build.
+
 Session export opens a Rust-owned native save dialog, then consumes the shared
 verified export stream into the [atomic file sink](../../crates/rsi/session-export/README.md).
 The document supplies only a filename hint and selected pane; it gains no general
@@ -18,7 +26,8 @@ the native connection publishes its transport, before GUI activation. An embedde
 Service and a borrowed daemon use the same client contract as the Worker.
 
 Start with `rsi-desktop --assets /absolute/bundle [--host-profile standard]`.
-The companion `rsi` beside this executable is the canonical coding helper.
+The companion `rsi` (`rsi.exe` on Windows) beside this executable is the canonical
+coding helper. Bash selection uses the [standard product launcher](../../crates/rsi/core/README.md).
 Generation pin failures report a normal startup error with exit code 2 before
 opening a window; they never enter the panic handler.
 Distribution builds must compile both binaries from the same frozen build-family
@@ -29,13 +38,26 @@ Service; a borrowed daemon remains alive.
 
 The `rsi` custom protocol serves the existing closed immutable asset owner and a
 native mailbox, never arbitrary paths. Navigation admits the application root and
-`/preview-local.html` or `/preview-online.html` at `rsi://localhost`. These immutable
+`/preview-local.html` or `/preview-online.html` at the platform document origin:
+`http://rsi.localhost` on Windows WebView2 and `rsi://localhost` elsewhere. Wry
+normalizes a Windows custom-protocol callback URI back to `rsi://localhost`, while
+the document's Origin header and CSP use its actual HTTP origin. These immutable
 preview responses use opaque, script-enabled sandbox policies, respectively with
 external resources disabled or explicit HTTPS access; neither exposes native routes.
 Errors on those exact preview paths retain their sandbox response policy and are
 JSON with nosniff, even when the asset owner is absent or lookup fails.
-Only the main window at `rsi://localhost`
-can call its private routes. The document has no Tauri IPC capabilities. Window-manager close events and the
+Only the main window with a POST method can call private routes, including frame
+polling. Exactly one Origin header must name the platform document origin.
+Linux WebKitGTK omits Origin on same-origin custom-scheme POSTs; that case instead
+requires exactly one Referer naming the application root `rsi://localhost/`.
+Missing both headers, a preview-page Referer in that case, or a malformed,
+foreign or duplicate Origin is rejected. Initial immutable asset GETs may omit
+Origin. The shared
+[Web document mode](../web/README.md) selects the corresponding native transport.
+The document is granted no
+Tauri IPC command permissions. Dialog and clipboard plugins supply Rust-owned
+native operations; registering them does not grant document command access.
+Window-manager close events and the
 application's existing Close action enter the same document drain path; JavaScript
 cannot invoke the Tauri window-close command. Startup composition, protocol admission and Runtime/event-loop
 lifetime each have one internal owner. A single view request and one pending frame are

@@ -27,7 +27,26 @@ struct WindowBlock {
     concise: bool,
     fold: Option<FoldWindow>,
     discarded: bool,
+    transient: String,
     pieces: Vec<WindowPiece>,
+}
+impl WindowBlock {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.key.len() > 4096
+            || self.title.len() > 4096
+            || self.pieces.len() > MAXIMUM_BLOCK_SOURCES
+            || crate::terminal_text(&self.title) != self.title
+            || crate::terminal_text(&self.transient) != self.transient
+            || (!self.transient.is_empty() && (!self.pieces.is_empty() || self.fold.is_some()))
+            || (self.outcome.is_some()
+                && (!matches!(self.role, Role::Reasoning | Role::Tool)
+                    || !self.completed
+                    || self.running))
+        {
+            return Err("invalid viewport block");
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,7 +111,12 @@ impl Viewport {
             if let Some(document) = &prepared {
                 markdown_remaining -= document.bytes();
             }
-            let (mut pieces, fold) = if semantic {
+            let (mut pieces, fold) = if !block.transient.is_empty() {
+                if block.transient.len() > remaining {
+                    break;
+                }
+                (Vec::new(), None)
+            } else if semantic {
                 if block.bytes() > remaining {
                     break;
                 }
@@ -113,7 +137,8 @@ impl Viewport {
             } else {
                 (unfolded(block, position, index, remaining), None)
             };
-            let bytes: usize = pieces.iter().map(|piece| piece.text.len()).sum();
+            let bytes: usize =
+                pieces.iter().map(|piece| piece.text.len()).sum::<usize>() + block.transient.len();
             if bytes > remaining || (pieces.is_empty() && !block.pieces.is_empty()) {
                 break;
             }
@@ -146,6 +171,7 @@ impl Viewport {
                 completed: block.completed,
                 concise: block.concise,
                 discarded: block.discarded,
+                transient: block.transient.clone(),
                 fold,
                 pieces: std::mem::take(&mut pieces),
             });
@@ -174,16 +200,14 @@ impl Viewport {
         let mut markdown_bytes = 0usize;
         let mut keys = std::collections::BTreeSet::new();
         for block in self.blocks {
-            if block.key.len() > 4096
-                || block.title.len() > 4096
-                || block.pieces.len() > MAXIMUM_BLOCK_SOURCES
-                || !keys.insert(block.key.clone())
-                || crate::terminal_text(&block.title) != block.title
-                || (block.outcome.is_some()
-                    && (!matches!(block.role, Role::Reasoning | Role::Tool)
-                        || !block.completed
-                        || block.running))
-            {
+            text_bytes = text_bytes
+                .checked_add(block.transient.len())
+                .ok_or("viewport overflow")?;
+            if text_bytes > Self::MAXIMUM_TEXT {
+                return Err("viewport text bound");
+            }
+            block.validate()?;
+            if !keys.insert(block.key.clone()) {
                 return Err("invalid viewport block");
             }
             let index = result.block_index(block.key, &block.title, block.role, 1);
@@ -208,6 +232,8 @@ impl Viewport {
             }
             target.fold = block.fold;
             target.discarded = block.discarded;
+            target.transient = block.transient;
+            target.text_bytes = target.transient.capacity();
             for piece in block.pieces {
                 text_bytes = text_bytes
                     .checked_add(piece.text.len())
@@ -528,7 +554,7 @@ mod tests {
             Piece::new(
                 Source {
                     seq: 1,
-                    field: rsi_conversation::FactField::ModelReasoning,
+                    field: rsi_conversation::FactField::ModelReasoning { index: 0 },
                 },
                 "source",
                 0,
@@ -560,7 +586,7 @@ mod tests {
             Piece::new(
                 Source {
                     seq: 1,
-                    field: rsi_conversation::FactField::ModelReasoning,
+                    field: rsi_conversation::FactField::ModelReasoning { index: 0 },
                 },
                 &"original text\n".repeat(1000),
                 0,

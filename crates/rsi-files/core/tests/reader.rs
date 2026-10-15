@@ -586,13 +586,21 @@ async fn long_directory_paths_reduce_each_page_before_encoded_byte_budget() {
         .join("/");
     let mut directory = rsi_files_native_fs::open_absolute_directory_no_follow(&root).unwrap();
     for component in relative.split('/') {
-        directory.create_dir(component).unwrap();
-        directory = directory.open_dir(component).unwrap();
+        directory = rsi_files_native_fs::create_directory_no_follow(&directory, component.as_ref())
+            .unwrap();
     }
     for index in 0..30 {
-        directory
-            .write(format!("{index:03}{}", "\"".repeat(197)), "")
-            .unwrap();
+        rustix::fs::openat(
+            &directory,
+            format!("{index:03}{}", "\"".repeat(197)),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
     }
     let service = LocalFiles::new().unwrap();
     let binding = binding(&root);

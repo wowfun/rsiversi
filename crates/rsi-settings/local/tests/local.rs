@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_settings::SettingsFactory;
 use rsi_settings_local::LocalSettingsFactory;

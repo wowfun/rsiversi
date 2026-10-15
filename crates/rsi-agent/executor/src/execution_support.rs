@@ -227,10 +227,12 @@ pub(super) fn should_retry(
 ) -> bool {
     attempt < snapshot.retry_policy.max_retries()
         && snapshot.retry_policy.retries(error.kind())
-        && matches!(
-            error.dispatch_status(),
-            DispatchStatus::NotStarted | DispatchStatus::NotDispatched
-        )
+        && snapshot
+            .retry_policy
+            .permits_dispatch(snapshot.capability, error.dispatch_status())
+        && error
+            .retry_after_ms()
+            .is_none_or(|delay| delay <= snapshot.retry_policy.max_delay_ms())
 }
 
 pub(super) fn retry_delay(
@@ -239,16 +241,15 @@ pub(super) fn retry_delay(
     attempt: u8,
 ) -> Duration {
     let policy = &snapshot.retry_policy;
+    if let Some(delay) = error.retry_after_ms() {
+        return Duration::from_millis(delay);
+    }
     let multiplier = 1_u64 << u32::from(attempt.min(16));
     let exponential = policy
         .initial_delay_ms()
         .saturating_mul(multiplier)
         .min(policy.max_delay_ms());
-    let requested = error
-        .retry_after_ms()
-        .unwrap_or(0)
-        .min(policy.max_delay_ms());
-    let base = exponential.max(requested);
+    let base = exponential;
     let spread = base.saturating_mul(u64::from(policy.jitter_per_mille())) / 1_000;
     let seed = u64::from_str_radix(snapshot.request_sha256.get(..16).unwrap_or("0"), 16)
         .unwrap_or(0)
@@ -258,7 +259,11 @@ pub(super) fn retry_delay(
     } else {
         seed % spread.saturating_mul(2).saturating_add(1)
     };
-    Duration::from_millis(base.saturating_sub(spread).saturating_add(sampled))
+    Duration::from_millis(
+        base.saturating_sub(spread)
+            .saturating_add(sampled)
+            .min(policy.max_delay_ms()),
+    )
 }
 
 pub(super) struct CombinedCancellation {
@@ -438,15 +443,6 @@ pub(super) fn turn_failure(error: TurnError) -> DriveFailure {
                 reason: bounded(&error.to_string()),
             })
         }
-        TurnError::BudgetExceeded {
-            dimension,
-            consumed,
-            limit,
-        } => DriveFailure::Budget {
-            dimension,
-            consumed,
-            limit,
-        },
         other => fatal(other),
     }
 }
@@ -500,41 +496,6 @@ pub(super) enum DriveFailure {
         identity: ToolResultIdentity,
     },
     Fatal(String),
-    Budget {
-        dimension: BudgetDimension,
-        consumed: u64,
-        limit: u64,
-    },
-    DurableBudget {
-        dimension: BudgetDimension,
-        consumed: u64,
-        limit: u64,
-    },
-    SettledToolBudget {
-        dimension: BudgetDimension,
-        consumed: u64,
-        limit: u64,
-        identity: ToolResultIdentity,
-    },
-}
-
-pub(super) fn settled_tool_budget(
-    failure: DriveFailure,
-    identity: ToolResultIdentity,
-) -> DriveFailure {
-    match failure {
-        DriveFailure::Budget {
-            dimension,
-            consumed,
-            limit,
-        } => DriveFailure::SettledToolBudget {
-            dimension,
-            consumed,
-            limit,
-            identity,
-        },
-        failure => failure,
-    }
 }
 
 /// Constructs all mandatory effect-bound extensions before any external Tool work.
@@ -542,10 +503,9 @@ pub(super) fn tool_start_extensions(
     turns: &dyn TurnExecution,
     claim: &TurnClaim,
     effect_id: &EffectId,
+    evidence_bytes: usize,
 ) -> std::result::Result<rsi_tools_protocol::ToolExecutionExtensions, TurnError> {
     let caller = turns.tool_caller(claim, effect_id)?;
-    let budget = claim.header().settings().turn_budget();
-    let evidence_bytes = budget.maximum_generated_record_bytes() / 8 / budget.maximum_tool_calls();
     let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
         .with(Arc::new(
             rsi_jobs::JobOrigin::new(effect_id.as_str().to_owned())
@@ -553,7 +513,7 @@ pub(super) fn tool_start_extensions(
         ))
         .map_err(|error| TurnError::Invalid(error.to_string()))?
         .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(
-            usize::try_from(evidence_bytes).unwrap_or(usize::MAX),
+            evidence_bytes,
         )))
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
     if let Some(execution) = claim.execution() {

@@ -4,16 +4,9 @@ Conversation requests select their explicit output cap from the immutable
 Header's exact-model output budget table before Context build and Prepare.
 Builders must preserve that cap, including absence; compaction instead preserves
 its admitted summary-plan cap. MaxTokens Conversation results authorize no Tools.
-After cancellation checks, the executor publishes and flushes one source-bound
-ModelOutputRecovery before preparing a fresh logical model effect. This is not an
-undispatched provider retry and remains subject to every Turn budget. Summary
-truncation fails with context.compaction_failed without Conversation recovery.
-Cold process recovery interrupts unfinished work rather than reissuing effects.
-Each authorized recovery re-enters ordinary step preparation, including pending
-inputs, model selection and compaction, while retaining the Turn's recovery count.
-Live executor replacement reads that count from claim-visible recovery Facts
-before continuing after a recoverable Tool. A prepared or finished model without
-its required successor remains Interrupted.
+MaxTokens ends the Step and Turn without automatic continuation. Summary
+truncation fails with context.compaction_failed. Cold process recovery interrupts
+unfinished work rather than reissuing effects.
 
 Every Conversation and compaction request preserves the selected reasoning
 effort. Executor rejects a builder that changes it before evidence capture or
@@ -55,12 +48,11 @@ unmatched sections inline; later published evidence repopulates their metadata.
 Capture derives digests from its owned
 text and builds a sorted manifest from validated LanguageRequest values; the
 request-content count bound is checked against the manifest limit at compile time.
-Fact construction remains the publication validation boundary. Only Kernel's explicit prepublication
-evidence-budget rejection permits replacing the entire package with Unavailable
-while retaining the same effect and prepared call. A successful capacity flush
-commits only the preceding prefix and leaves the returned batch unpublished.
-That batch may still use the same explicit budget fallback; publication errors
-and failed or uncertain flushes never permit fallback or another Prepare.
+Capture enforces the per-request evidence capacity before publication, recording
+Unavailable when the optional package cannot fit. Fact construction validates
+the package and Kernel validates exact references. A capacity flush commits only
+the preceding prefix and leaves the returned batch unpublished. Failed or
+uncertain publication never authorizes another Prepare.
 
 Normal, parallel and retained Tool results share one settlement path. A recovered
 accepted conclusion is latched for the remainder of that Turn. Pure
@@ -75,7 +67,7 @@ available for diagnosis and cleanup. A lost acknowledgement uses the same canoni
 never another Tool invocation or callback execution. Goal and repeat-tool
 PostTool contributions remain after durable batch settlement.
 The domain-capture wait has a 30-second ceiling within the complete claim drive.
-Executor shutdown or the elapsed deadline cancels that outer drive and drops a
+Executor shutdown or Turn cancellation cancels that outer drive and drops a
 pending capture without waiting for its local ceiling. This does not assert that
 already-admitted Store work or a synchronous callback can be forcibly interrupted.
 
@@ -94,8 +86,7 @@ The returned view follows the [shared Jobs contract](../../rsi/session-protocol/
 Execution contributions use the claim's frozen composition. Before a new
 provider retry series, one stage captures durable Fact/control watermarks and
 domain states, invokes callbacks in catalog order, validates the complete
-output, and commits it before provider preparation. A proven undispatched
-provider retry reuses those entered inputs. A post-tool stage receives one
+output, and commits it before provider preparation. An admitted provider retry reuses those entered inputs and the original request. A post-tool stage receives one
 source-ordered settled batch after every successful result publication is
 durable. Tool policy stages inspect the exact prepared identity before approval:
 Abstain preserves constraints, RequireApproval adds one, and Deny wins before
@@ -165,6 +156,10 @@ calls cannot observe or release it, so a parallel batch never shares one
 lane-parking authority. A single activation-level
 coordinator owns lane failure, shutdown, retained-Tool cleanup, and the one
 absolute shutdown deadline; an individual lane never performs global cleanup.
+The host deadline is five seconds. A stopped drive gets at most four seconds
+to settle its accepted model prefix, leaving the remaining host interval for
+lane cleanup and checkpoint shutdown. A stuck drive cannot consume a longer,
+unreachable grace period; incomplete cleanup remains an explicit shutdown failure.
 When publication reports `FlushRequired`, the executor flushes the current
 live prefix and retries with the exact returned owned bodies. The normal
 publish path does not clone bodies in anticipation of this uncommon branch.
@@ -300,3 +295,13 @@ before provider preparation and retains that finite operation through settlement
 Revocation prevents the next attempt without preventing publication of an already
 accepted result. Unavailable delegation interrupts the Turn; the executor never
 substitutes a current provider or retries a request under different authority.
+
+## Execution lifetime
+
+A Turn has no cumulative execution allowance. Provider `MaxTokens` ends the
+Turn without recovery generation. A failed transient DeepSeek language attempt
+may be regenerated according to its frozen retry policy, independently of the
+truthful dispatch status; no incomplete attempt authorizes Tool calls. Tool
+optional evidence has an independent per-call limit, defaulting to 32 KiB.
+
+`optional_tool_evidence_bytes` independently limits optional evidence for each Tool call (default 32 KiB, configurable from 0 through 1 MiB). Zero omits optional evidence; mandatory result identity and lifecycle facts remain required.

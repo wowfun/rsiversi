@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::standard_coding_tools;
 use super::{
     ApplicationInvocation, ProfileCatalog, RsiError, capture_standard_environment,
@@ -38,9 +38,9 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
     let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
         .application(&invocation.profile)
         .map_err(profile_management_error)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let coding = standard_coding_tools()?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let coding = None;
     let program = profile
         .program()

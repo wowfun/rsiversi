@@ -12,6 +12,14 @@ no backend or Runtime: an ordinary
 HttpFactory child owns the listener and its requests within the invoking Profile.
 The standard product composes its independently owned service generation beside
 this application.
+Native signal ownership currently requires Unix. Non-Unix preparation rejects
+before creating the HTTP child or acquiring a listener; a Ctrl-C-only waiter
+does not establish the application's native stop and reload lifecycle.
+Complete static HTTP/argument validation precedes platform admission. Malformed
+configuration returns `MetaError::InvalidInput`; valid configuration requiring
+unavailable signals returns `MetaError::Activation`. The retained application
+diagnostic uses the existing `RsiError::Boot` class for Host bootstrap failures.
+Activation failures also use `MetaError::Activation` and retain that diagnostic.
 
 The factory validates arguments and HTTP policy during preparation, before any
 backend activates. Configuration may be an HttpConfig object with no arguments,

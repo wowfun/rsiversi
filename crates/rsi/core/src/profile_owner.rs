@@ -125,9 +125,9 @@ impl ProfileOwner {
     ) -> tokio::sync::watch::Receiver<rsi_host::ProfileStatus> {
         match self {
             Self::Root(host) => host.subscribe_profile(),
-            Self::Scoped { profile, .. } | Self::Product { profile, .. } => {
-                profile.subscribe_profile()
-            }
+            Self::Scoped { profile, .. } => profile.subscribe_profile(),
+            #[cfg(unix)]
+            Self::Product { profile, .. } => profile.subscribe_profile(),
         }
     }
     pub(crate) async fn shutdown(&self) -> ShutdownOutcome {

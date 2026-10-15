@@ -42,7 +42,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 32;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 34;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1986,6 +1986,37 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         exclusive_before_seq: u64,
         limit: usize,
     ) -> Result<StoreBackwardFactPage>;
+    /// Tests one exact Turn's durable model-intent identity without retaining history.
+    /// Indexed stores can answer directly; the default consumes bounded Fact pages.
+    async fn contains_model_intent(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        effect_id: &rsi_agent_session_protocol::EffectId,
+    ) -> Result<bool> {
+        let mut after = 0;
+        loop {
+            let page = self.read_turn_facts(session_id, turn_id, after, 64).await?;
+            page.validate()?;
+            if page.turn_id != *turn_id || page.after_seq != after || page.facts.len() > 64 {
+                return Err(StoreError::Corrupt(
+                    "model intent lookup returned another page selection".into(),
+                ));
+            }
+            if page.facts.iter().any(|fact| matches!(fact.body(),
+                rsi_agent_session_protocol::SessionFactBody::ModelIntent { effect_id: existing, .. } if existing == effect_id)) {
+                return Ok(true);
+            }
+            if !page.has_more {
+                return Ok(false);
+            }
+            after = page
+                .facts
+                .last()
+                .ok_or_else(|| StoreError::Corrupt("empty continuing Turn page".into()))?
+                .seq();
+        }
+    }
     /// Reads at most `limit` ordered Facts for one exact turn after a session cursor.
     async fn read_turn_facts(
         &self,
@@ -2275,6 +2306,9 @@ impl LocalContract for SessionStoreContract {
 /// Closed Store failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreError {
+    /// A required provider or platform capability is unavailable before Store admission.
+    #[error("Agent Store capability unsupported: {0}")]
+    Unsupported(String),
     /// Cold read validation refused admission; the requested durable mutation
     /// has not been admitted or applied. This is not an uncertain write outcome.
     #[error("Agent Store validation capacity is busy")]
@@ -2395,6 +2429,21 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Mechanical uniqueness coordinate; ordering remains the Kernel's authority.
+pub fn store_fact_model_coordinate(
+    body: &rsi_agent_session_protocol::SessionFactBody,
+) -> Option<(&rsi_agent_session_protocol::EffectId, &'static str)> {
+    use rsi_agent_session_protocol::SessionFactBody;
+    match body {
+        SessionFactBody::ModelIntent { effect_id, .. } => Some((effect_id, "model_intent")),
+        SessionFactBody::ModelStarted { effect_id, .. } => Some((effect_id, "model_started")),
+        SessionFactBody::ModelAttemptSettled { effect_id, .. } => {
+            Some((effect_id, "model_attempt_settled"))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

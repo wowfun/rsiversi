@@ -57,7 +57,7 @@ async fn invalid_report_retries_valid_report_stops_before_later_tools_and_missin
         let session = SessionId::new("structured-session").unwrap();
         let message_id = MessageId::new("structured-initial").unwrap();
         let contract = OutputContract::new(json!({"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false})).unwrap();
-        let header = header_for_session(session.as_str(), TurnBudget::default())
+        let header = header_for_session(session.as_str())
             .with_initial_output(Some(InitialOutputContract {
                 message_id: message_id.clone(),
                 contract: contract.clone(),

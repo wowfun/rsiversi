@@ -2,6 +2,9 @@
 name: Typed domain commits share Session authority and generated-record budgets
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Cumulative Turn accounting is superseded; typed atomic commits and their authority remain unchanged.
+
 ## Problem
 
 Plugin-owned state needs durable revision and retry semantics without granting

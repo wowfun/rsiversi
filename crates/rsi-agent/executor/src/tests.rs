@@ -82,6 +82,7 @@ async fn settled_lane_reclaims_admission_from_a_retained_tool_extension() {
 fn prepared_executor_charge_includes_inline_and_dynamic_config_state() {
     let config = ExecutorConfig {
         observe_execution: false,
+        optional_tool_evidence_bytes: default_optional_tool_evidence_bytes(),
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -190,11 +191,7 @@ fn finalization_priority_matrix_preserves_partial_media_and_ignores_blockers_for
     );
     assert!(matches!(
         apply_finalization_failure(
-            TurnOutcome::BudgetExceeded {
-                dimension: BudgetDimension::Elapsed,
-                consumed: 10,
-                limit: 10,
-            },
+            TurnOutcome::MaxTokens,
             "jobs.cleanup",
             "cleanup failed",
             true,
@@ -204,7 +201,7 @@ fn finalization_priority_matrix_preserves_partial_media_and_ignores_blockers_for
 }
 
 #[tokio::test]
-async fn completed_drive_wins_when_the_elapsed_deadline_is_also_ready() {
+async fn completed_drive_wins_when_host_stop_is_also_ready() {
     let stop = CancellationToken::new();
     stop.cancel();
 
@@ -218,33 +215,44 @@ async fn completed_drive_wins_when_the_elapsed_deadline_is_also_ready() {
         drive,
         Err(DriveFailure::Turn(TurnOutcome::Completed))
     ));
-    assert!(!elapsed_deadline_wins(true, &drive));
 }
 
 #[tokio::test(start_paused = true)]
-async fn host_stop_drops_pending_drive_work_before_its_local_timeout() {
+async fn host_stop_waits_for_controlled_settlement_but_bounds_a_stuck_driver() {
     let stop = CancellationToken::new();
-    let claim_stop = stop.child_token();
     let released = CancellationToken::new();
     let started = tokio::time::Instant::now();
-    let mut drive = Box::pin(select_drive_or_stop(&claim_stop, async {
+    let mut drive = Box::pin(select_drive_or_stop(&stop, async {
         let _capture = released.clone().drop_guard();
-        tokio::time::timeout(Duration::from_secs(30), std::future::pending::<()>())
-            .await
-            .expect("host stop must drop this wait before its timeout");
+        std::future::pending::<()>().await;
         Ok(())
     }));
     assert!(futures_util::poll!(drive.as_mut()).is_pending());
-    assert!(!released.is_cancelled());
-
     stop.cancel();
-
-    assert!(matches!(
-        futures_util::poll!(drive.as_mut()),
-        std::task::Poll::Ready(Err(DriveFailure::Stopped))
-    ));
+    assert!(futures_util::poll!(drive.as_mut()).is_pending());
+    assert!(!released.is_cancelled());
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(matches!(drive.await, Err(DriveFailure::Stopped)));
     assert!(released.is_cancelled());
-    assert_eq!(tokio::time::Instant::now(), started);
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_secs(4)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_stop_preserves_a_driver_settlement_during_the_grace_period() {
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let result = select_drive_or_stop(&stop, async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Err(DriveFailure::Turn(TurnOutcome::Cancelled))
+    })
+    .await;
+    assert!(matches!(
+        result,
+        Err(DriveFailure::Turn(TurnOutcome::Cancelled))
+    ));
 }
 
 #[derive(Debug, Default)]
@@ -276,11 +284,14 @@ impl TurnExecution for CheckpointFixture {
     ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
         unreachable!("this fixture never waits for a human")
     }
-    fn elapsed_budget(
+    async fn reserve_model_attempt(
         &self,
         _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
-        unreachable!("this fixture never drives a claimed turn")
+        _effect_id: EffectId,
+        _purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        _cancellation: CancellationToken,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
+        unreachable!("fixture does not dispatch Language")
     }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
         unreachable!("checkpoint writer test does not register")
@@ -442,11 +453,14 @@ impl TurnExecution for FullBeforePublish {
     ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
         unreachable!("this fixture never waits for a human")
     }
-    fn elapsed_budget(
+    async fn reserve_model_attempt(
         &self,
         _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
-        unreachable!("this fixture never drives a claimed turn")
+        _effect_id: EffectId,
+        _purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        _cancellation: CancellationToken,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
+        unreachable!("fixture does not dispatch Language")
     }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
         unreachable!("terminal publication test does not register")
@@ -730,6 +744,7 @@ async fn terminal_publication_delegates_durable_ending_to_kernel() {
     };
     let config = ExecutorConfig {
         observe_execution: false,
+        optional_tool_evidence_bytes: default_optional_tool_evidence_bytes(),
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -762,6 +777,7 @@ async fn terminal_publication_treats_kernel_shutdown_as_driver_stop() {
     };
     let config = ExecutorConfig {
         observe_execution: false,
+        optional_tool_evidence_bytes: default_optional_tool_evidence_bytes(),
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -802,6 +818,7 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
     };
     let config = ExecutorConfig {
         observe_execution: false,
+        optional_tool_evidence_bytes: default_optional_tool_evidence_bytes(),
         executor_id: "executor".into(),
         maximum_active_turns: 1,
         max_context_messages: default_context_messages(),
@@ -1058,7 +1075,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
 fn completed_model_with_tool_call() -> (TurnClaim, Vec<Arc<SessionFact>>) {
     let (claim, accepted) = claim();
     let effect_id = EffectId::new("effect-model-complete").unwrap();
-    let mut facts = vec![
+    let facts = vec![
         accepted,
         SessionFact::new(
             2,
@@ -1101,85 +1118,63 @@ fn completed_model_with_tool_call() -> (TurnClaim, Vec<Arc<SessionFact>>) {
         SessionFact::new(
             4,
             4,
-            SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            SessionFactBody::ModelAttemptSettled {
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
-                event: LanguageEvent::Finished {
-                    reason: FinishReason::ToolCalls,
-                    replay: None,
-                },
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    [
+                        LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: rsi_ai_protocol::ContentStart::ToolCall {
+                                id: "call".into(),
+                                name: "read".into(),
+                                kind: rsi_ai_protocol::ToolCallKind::Function,
+                            },
+                        },
+                        LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
+                        },
+                        LanguageEvent::ContentFinished { index: 0 },
+                        LanguageEvent::Finished {
+                            reason: FinishReason::ToolCalls,
+                            replay: None,
+                        },
+                    ]
+                    .into_iter()
+                    .map(|event| (0, event)),
+                    true,
+                )
+                .unwrap(),
             },
         )
         .unwrap(),
     ];
-    let terminal = facts.pop().unwrap();
-    for event in [
-        LanguageEvent::ContentStarted {
-            index: 0,
-            content: rsi_ai_protocol::ContentStart::ToolCall {
-                id: "call".into(),
-                name: "read".into(),
-                kind: rsi_ai_protocol::ToolCallKind::Function,
-            },
-        },
-        LanguageEvent::ContentDelta {
-            index: 0,
-            delta: rsi_ai_protocol::ContentDelta::ToolArguments("{}".into()),
-        },
-        LanguageEvent::ContentFinished { index: 0 },
-    ] {
-        let seq = facts.len() as u64 + 1;
-        facts.push(
-            SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::ModelEvent {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    event,
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                },
-            )
-            .unwrap(),
-        );
-    }
-    facts.push(SessionFact::new(7, 7, terminal.body().clone()).unwrap());
     (claim, facts.into_iter().map(Arc::new).collect())
 }
 
 #[test]
-fn scan_turn_recovers_only_the_claimed_turn_output_ordinal() {
+fn scan_turn_retains_max_tokens_as_a_settled_attempt_without_successor() {
     let (claim, mut facts) = completed_model_with_tool_call();
-    let mut terminal = facts.pop().unwrap().body().clone();
-    if let SessionFactBody::ModelEvent {
-        event: LanguageEvent::Finished { reason, .. },
-        ..
-    } = &mut terminal
-    {
-        *reason = FinishReason::MaxTokens;
+    let last = facts.pop().unwrap();
+    let mut body = last.body().clone();
+    if let SessionFactBody::ModelAttemptSettled { attempt: log, .. } = &mut body {
+        let mut events = log
+            .events()
+            .collect::<rsi_agent_session_protocol::Result<Vec<_>>>()
+            .unwrap();
+        events.last_mut().unwrap().1 = LanguageEvent::Finished {
+            reason: FinishReason::MaxTokens,
+            replay: None,
+        };
+        *log = rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true).unwrap();
     }
-    facts.push(Arc::new(SessionFact::new(7, 7, terminal).unwrap()));
-    for (seq, turn_id, ordinal) in [
-        (8, claim.turn_id().clone(), 1),
-        (9, TurnId::new("other-turn").unwrap(), 2),
-    ] {
-        facts.push(Arc::new(
-            SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::ModelOutputRecovery {
-                    turn_id,
-                    source_model_effect_id: EffectId::new("effect-model-complete").unwrap(),
-                    ordinal,
-                },
-            )
-            .unwrap(),
-        ));
-    }
+    facts.push(Arc::new(
+        SessionFact::new(last.seq(), last.timestamp_ms(), body).unwrap(),
+    ));
     let mut state = ScannedTurn::default();
     scan_turn(&claim, &mut state, &facts).unwrap();
-    assert_eq!(state.output_recovery_ordinal, 1);
     assert!(state.completed_model_without_successor);
     assert!(state.effects.is_empty());
 }
@@ -1337,7 +1332,10 @@ fn a_rejected_tool_origin_cannot_construct_external_execution_authority() {
     };
     let effect = EffectId::new("unauthenticated-tool").unwrap();
     assert!(turns.tool_caller(&claim, &effect).is_err());
-    assert!(crate::execution_support::tool_start_extensions(&turns, &claim, &effect).is_err());
+    assert!(
+        crate::execution_support::tool_start_extensions(&turns, &claim, &effect, 32 * 1024)
+            .is_err()
+    );
     assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1354,27 +1352,37 @@ pub(super) fn pending_context(
 fn supersession_requires_outstanding_completed_conversation_calls() {
     for mode in ["stop", "empty", "consumed", "duplicate"] {
         let (claim, mut facts) = completed_model_with_tool_call();
-        if mode == "empty" {
-            facts.retain(|fact| {
-                !matches!(
-                    fact.body(),
-                    SessionFactBody::ModelEvent {
-                        event: LanguageEvent::ContentStarted { .. }
-                            | LanguageEvent::ContentDelta { .. }
-                            | LanguageEvent::ContentFinished { .. },
-                        ..
-                    }
-                )
-            });
-        }
-        if mode == "stop" {
+        if mode == "empty" || mode == "stop" {
             let last = facts.pop().unwrap();
             let mut body = last.body().clone();
-            if let SessionFactBody::ModelEvent { event, .. } = &mut body {
-                *event = LanguageEvent::Finished {
-                    reason: FinishReason::Stop,
-                    replay: None,
+            if let SessionFactBody::ModelAttemptSettled { attempt: log, .. } = &mut body {
+                let events = if mode == "empty" {
+                    vec![LanguageEvent::Finished {
+                        reason: FinishReason::MaxTokens,
+                        replay: None,
+                    }]
+                } else {
+                    vec![
+                        LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: rsi_ai_protocol::ContentStart::Text,
+                        },
+                        LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::Text("text".into()),
+                        },
+                        LanguageEvent::ContentFinished { index: 0 },
+                        LanguageEvent::Finished {
+                            reason: FinishReason::Stop,
+                            replay: None,
+                        },
+                    ]
                 };
+                *log = rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    events.into_iter().map(|event| (0, event)),
+                    true,
+                )
+                .unwrap();
             }
             facts.push(Arc::new(
                 SessionFact::new(last.seq(), last.timestamp_ms(), body).unwrap(),
@@ -1454,4 +1462,74 @@ fn uncertain_tool_and_cleanup_failure_preserve_interruption() {
         apply_finalization_failure(outcome.clone(), "cleanup.failed", "cleanup failed", true),
         outcome
     );
+}
+
+#[test]
+fn language_regeneration_has_five_retries_and_bounded_truthful_dispatch_policy() {
+    use rsi_ai_protocol::{
+        AiCapability, AiError, DispatchStatus, ErrorKind, ErrorPhase, RetryPolicy,
+    };
+    let (_, facts) = completed_model_with_tool_call();
+    let mut snapshot = facts
+        .iter()
+        .find_map(|fact| match fact.body() {
+            SessionFactBody::ModelIntent { snapshot, .. } => Some(snapshot.clone()),
+            _ => None,
+        })
+        .unwrap();
+    snapshot.retry_policy = RetryPolicy::new(
+        5,
+        vec![
+            ErrorKind::RateLimited,
+            ErrorKind::Server,
+            ErrorKind::Timeout,
+            ErrorKind::Transport,
+            ErrorKind::EmptyResponse,
+        ],
+        500,
+        10_000,
+        100,
+    )
+    .unwrap()
+    .with_language_regeneration();
+    for dispatch in [
+        DispatchStatus::NotStarted,
+        DispatchStatus::NotDispatched,
+        DispatchStatus::Dispatched,
+        DispatchStatus::Unknown,
+    ] {
+        for kind in [
+            ErrorKind::RateLimited,
+            ErrorKind::Server,
+            ErrorKind::Timeout,
+            ErrorKind::Transport,
+            ErrorKind::EmptyResponse,
+        ] {
+            let error = AiError::new(kind, ErrorPhase::Stream, dispatch, "fixture").unwrap();
+            for attempt in 0..5 {
+                assert!(should_retry(&snapshot, &error, attempt));
+                assert!(retry_delay(&snapshot, &error, attempt) <= Duration::from_secs(10));
+            }
+            assert!(!should_retry(&snapshot, &error, 5));
+            let exact = error.clone().with_retry_after_ms(10_000);
+            assert!(should_retry(&snapshot, &exact, 0));
+            assert_eq!(retry_delay(&snapshot, &exact, 0), Duration::from_secs(10));
+            assert!(!should_retry(
+                &snapshot,
+                &error.clone().with_retry_after_ms(10_001),
+                0
+            ));
+            if matches!(
+                dispatch,
+                DispatchStatus::Dispatched | DispatchStatus::Unknown
+            ) {
+                let mut image = snapshot.clone();
+                image.capability = AiCapability::Image;
+                assert!(!should_retry(&image, &error, 0));
+                let mut generic = snapshot.clone();
+                generic.retry_policy = RetryPolicy::default();
+                assert!(!should_retry(&generic, &error, 0));
+            }
+        }
+    }
 }

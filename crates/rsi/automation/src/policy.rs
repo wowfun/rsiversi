@@ -110,9 +110,13 @@ pub struct PolicyOwner {
 }
 impl PolicyOwner {
     /// # Errors
-    /// Fails when the selected resources cannot be validated, exclusively owned or made ready.
+    /// Returns Unsupported without I/O on platforms lacking native protection,
+    /// or fails when resources cannot be validated, exclusively owned or made ready.
     pub fn open(directory: PathBuf) -> Result<Self, AdmissionError> {
+        crate::require_native_platform()?;
+        #[cfg(unix)]
         let existed = directory.exists();
+        #[cfg(unix)]
         rsi_files_native_fs::create_absolute_directory_no_follow(&directory)
             .map_err(|e| AdmissionError::Invalid(e.to_string()))?;
         #[cfg(unix)]
@@ -420,7 +424,7 @@ impl PolicyOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[tokio::test]

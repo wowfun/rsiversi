@@ -302,6 +302,7 @@ impl LanguageCall for Router {
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
         let route = self.route(&model)?;
+        let request = resolve_request_default(&route.registration, &model, request)?;
         let context = self
             .prepare_context(&route.registration, &model, &request)
             .await?;
@@ -322,6 +323,7 @@ impl LanguageCall for Router {
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedDeferredLanguageCall>, AiError> {
         let route = self.route(&model)?;
+        let request = resolve_request_default(&route.registration, &model, request)?;
         let context = self
             .prepare_context(&route.registration, &model, &request)
             .await?;
@@ -670,4 +672,31 @@ fn ai_error(kind: ErrorKind, message: impl Into<String>) -> AiError {
         message,
     )
     .expect("router-generated AI errors are bounded static facts")
+}
+
+fn resolve_request_default(
+    registration: &ProviderRegistration,
+    model: &ModelRef,
+    request: LanguageRequest,
+) -> Result<LanguageRequest, AiError> {
+    if request.settings().max_output_tokens().is_some() {
+        return Ok(request);
+    }
+    let profile = registration
+        .language()
+        .expect("validated language facet")
+        .describe(model.model())?;
+    match profile.default_output_tokens() {
+        Some(cap) => {
+            let settings = request
+                .settings()
+                .clone()
+                .with_max_output_tokens(cap)
+                .map_err(|error| invalid(error.to_string()))?;
+            request
+                .with_settings(settings)
+                .map_err(|error| invalid(error.to_string()))
+        }
+        None => Ok(request),
+    }
 }

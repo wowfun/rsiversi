@@ -29,7 +29,7 @@ pub fn metadata() -> ApplicationCatalogMetadata {
                 .copied()
                 .chain(APPLICATION_IDS.iter().copied())
                 .chain(["rsi.terminal.ui", "rsi.terminal.portable"])
-                .chain(if cfg!(target_os = "linux") {
+                .chain(if cfg!(any(target_os = "linux", windows)) {
                     Some("rsi.application.acp")
                 } else {
                     None
@@ -67,7 +67,7 @@ impl ApplicationCatalogProvider for Catalog {
                 )
                 .map_err(boot)?;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         builder
             .register_factory(
                 rsi::AddonScope::Application,

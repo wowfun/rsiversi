@@ -476,7 +476,7 @@ fn validate_smoke(path: &Path) -> Result<(), String> {
     let selected = records.iter().filter(matching).collect::<Vec<_>>();
     if !selected
         .iter()
-        .any(|record| record["fact"]["event"]["delta"]["value"] == "dev: native Language")
+        .any(|record| smoke_provider_answer(&record["fact"]))
         || !selected.iter().any(|record| {
             record["fact"]["type"] == "turn_terminal"
                 && record["fact"]["outcome"]["status"] == "completed"
@@ -487,6 +487,36 @@ fn validate_smoke(path: &Path) -> Result<(), String> {
         );
     }
     Ok(())
+}
+fn smoke_provider_answer(value: &Value) -> bool {
+    use rsi_agent_session_protocol::{ModelEventPurpose, SessionFact, SessionFactBody};
+    use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+    let Ok(fact) = serde_json::from_value::<SessionFact>(value.clone()) else {
+        return false;
+    };
+    let SessionFactBody::ModelAttemptSettled {
+        purpose: ModelEventPurpose::Conversation,
+        attempt,
+        ..
+    } = fact.body()
+    else {
+        return false;
+    };
+    let mut answer = String::new();
+    for event in attempt.events() {
+        match event {
+            Ok((
+                _,
+                LanguageEvent::ContentDelta {
+                    delta: ContentDelta::Text(text),
+                    ..
+                },
+            )) => answer.push_str(&text),
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    answer == "dev: native Language"
 }
 fn shell_argument(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -1064,10 +1094,50 @@ mod tests {
 
     #[test]
     fn smoke_requires_matching_provider_text_and_durable_completion() {
+        use rsi_agent_session_protocol::{
+            EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
+        };
+        use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("smoke.jsonl");
+        let attempt = ModelAttemptLog::from_events(
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("dev: ".into()),
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("native Language".into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            ]
+            .into_iter()
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap();
+        let fact = SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: TurnId::new("t").unwrap(),
+                effect_id: EffectId::new("e").unwrap(),
+                purpose: ModelEventPurpose::Conversation,
+                attempt,
+            },
+        )
+        .unwrap();
         let mut records = vec![
-            json!({"session_id":"s","fact":{"turn_id":"t","event":{"delta":{"value":"dev: native Language"}}}}),
+            json!({"session_id":"s","fact":fact}),
             json!({"session_id":"s","fact":{"turn_id":"t","type":"turn_terminal","outcome":{"status":"completed"}}}),
             json!({"type":"outcome","session_id":"s","turn_id":"t","outcome":{"status":"completed"}}),
         ];

@@ -7,7 +7,7 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_store_protocol::{AppendBatch, AtomicAgentCommit, AtomicSessionAppend, SessionStore};
 use rsi_agent_store_sqlite::SqliteStore;
-use rsi_ai_protocol::{ContentDelta, LanguageEvent, ModelRef};
+use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
 use std::future::Future;
 use std::hint::black_box;
@@ -189,7 +189,6 @@ async fn append_session(
 ) {
     let session = SessionId::new(format!("session-{index:03}")).unwrap();
     let turn = TurnId::new(format!("turn-{index:03}")).unwrap();
-    let effect = EffectId::new(format!("effect-{index:03}")).unwrap();
     let payload = "x".repeat(payload_bytes);
     let mut next_seq = 1_u64;
     let mut remaining = fact_count;
@@ -215,14 +214,31 @@ async fn append_session(
                     result: None,
                 }
             } else {
-                SessionFactBody::ModelEvent {
+                SessionFactBody::ModelAttemptSettled {
                     purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: turn.clone(),
-                    effect_id: effect.clone(),
-                    event: LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: ContentDelta::Text(payload.clone()),
-                    },
+                    effect_id: EffectId::new(format!("model-{next_seq}")).unwrap(),
+                    attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                        [
+                            rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: rsi_ai_protocol::ContentStart::Text,
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: rsi_ai_protocol::ContentDelta::Text(payload.clone()),
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                            rsi_ai_protocol::LanguageEvent::Finished {
+                                reason: rsi_ai_protocol::FinishReason::Stop,
+                                replay: None,
+                            },
+                        ]
+                        .into_iter()
+                        .map(|event| (0, event)),
+                        true,
+                    )
+                    .unwrap(),
                 }
             };
             facts.push(SessionFact::new(next_seq, next_seq, body).unwrap());
@@ -708,14 +724,34 @@ async fn benchmark_mixed_lanes() {
             let fact = SessionFact::new(
                 seq,
                 seq,
-                SessionFactBody::ModelEvent {
+                SessionFactBody::ModelAttemptSettled {
                     purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: TurnId::new("turn-001").unwrap(),
-                    effect_id: EffectId::new("effect-001").unwrap(),
-                    event: LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: ContentDelta::Text("sustained write".into()),
-                    },
+                    effect_id: rsi_agent_session_protocol::EffectId::new(format!("model-{seq}"))
+                        .unwrap(),
+                    attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                        [
+                            rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: rsi_ai_protocol::ContentStart::Text,
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: rsi_ai_protocol::ContentDelta::Text(
+                                    "sustained write".into(),
+                                ),
+                            },
+                            rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                            rsi_ai_protocol::LanguageEvent::Finished {
+                                reason: rsi_ai_protocol::FinishReason::Stop,
+                                replay: None,
+                            },
+                        ]
+                        .into_iter()
+                        .map(|event| (0, event)),
+                        true,
+                    )
+                    .unwrap(),
                 },
             )
             .unwrap();

@@ -565,6 +565,11 @@ impl SessionHandle for Backend {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
     }
+    async fn observe_models(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+        Ok(Box::pin(futures_util::stream::pending()))
+    }
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {

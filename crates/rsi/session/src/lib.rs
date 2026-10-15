@@ -1325,6 +1325,17 @@ impl SessionHandle for LocalSessionHandle {
         })
     }
 
+    async fn observe_models(&self) -> Result<rsi_session_protocol::ModelLiveStream> {
+        use futures_util::StreamExt as _;
+        let _admission = self.admit()?;
+        let source = self
+            .turns
+            .observe_models(self.session_id())
+            .await
+            .map_err(map_turn_error)?;
+        Ok(self.guard_stream(source.map(|item| item.map_err(map_turn_error))))
+    }
+
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
         use futures_util::StreamExt as _;
         let _admission = self.admit()?;
@@ -1520,7 +1531,7 @@ pub async fn canonical_workspace_directory(path: &Path) -> Result<PathBuf> {
             "workspace path is not a directory".into(),
         ));
     }
-    Ok(canonical)
+    Ok(rsi_workspace_protocol::canonical_native_path(canonical))
 }
 
 fn now_ms() -> Result<u64> {
@@ -1561,6 +1572,7 @@ fn map_turn_error(error: TurnError) -> SessionError {
 
 fn map_store_error(error: StoreError) -> SessionError {
     match error {
+        StoreError::Unsupported(_) => SessionError::Api(rsi_api_protocol::ApiError::Unavailable),
         StoreError::Invalid(message) => SessionError::Invalid(message),
         StoreError::NotFound(value) => SessionError::NotFound(value),
         StoreError::TurnNotFound { session, turn } => {
@@ -1590,14 +1602,50 @@ fn map_workspace_error(error: &rsi_workspace_protocol::WorkspaceError) -> Sessio
 }
 
 fn map_media_error(error: &MediaError) -> SessionError {
-    let message = error.to_string();
     match error {
         MediaError::Api(error) => SessionError::Api(error.clone()),
-        MediaError::InvalidInput(_) | MediaError::Codec(_) => SessionError::Invalid(message),
+        MediaError::Unsupported(_) => SessionError::Api(rsi_api_protocol::ApiError::Unavailable),
+        MediaError::InvalidInput(_) | MediaError::Codec(_) => {
+            SessionError::Invalid(error.to_string())
+        }
         MediaError::AdmissionFull(_) => SessionError::Capacity,
         MediaError::NotFound(_) | MediaError::Corrupt(_) | MediaError::Io(_) => {
-            SessionError::Backend(message)
+            SessionError::Backend(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod media_error_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_media_is_unavailability_without_backend_diagnostics() {
+        assert_eq!(
+            map_media_error(&MediaError::Unsupported("private backend detail".into())),
+            SessionError::Api(rsi_api_protocol::ApiError::Unavailable)
+        );
+        assert!(matches!(
+            map_media_error(&MediaError::InvalidInput("bad request".into())),
+            SessionError::Invalid(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod store_error_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_store_is_unavailability_without_backend_diagnostics() {
+        assert_eq!(
+            map_store_error(StoreError::Unsupported("private backend detail".into())),
+            SessionError::Api(rsi_api_protocol::ApiError::Unavailable)
+        );
+        assert!(matches!(
+            map_store_error(StoreError::Invalid("bad request".into())),
+            SessionError::Invalid(_)
+        ));
     }
 }
 

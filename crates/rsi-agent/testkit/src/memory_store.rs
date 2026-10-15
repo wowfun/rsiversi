@@ -19,6 +19,26 @@ use super::{
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn contains_model_intent(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        effect_id: &rsi_agent_session_protocol::EffectId,
+    ) -> Result<bool> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        Ok(session.model_coordinates.contains(&(
+            turn_id.clone(),
+            effect_id.clone(),
+            "model_intent".into(),
+        )))
+    }
     async fn session_activity_summaries(
         &self,
         sessions: &[SessionId],
@@ -475,8 +495,11 @@ impl SessionStore for MemoryStore {
             }
             let (turn_updates, fact_prefix_digest) =
                 index_appended_turns(&session.turns, &batch.facts, session.fact_prefix_digest)?;
+            let model_coordinates =
+                index_model_coordinates(&session.model_coordinates, &batch.facts)?;
             let previous = session.last_activity_ms;
             session.last_activity_ms = previous.max(activity);
+            session.model_coordinates.extend(model_coordinates);
             session.facts.extend(batch.facts);
             session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
@@ -510,6 +533,7 @@ impl SessionStore for MemoryStore {
                 .seq();
             let (turns, fact_prefix_digest) =
                 index_appended_turns(&BTreeMap::new(), &batch.facts, EMPTY_FACT_PREFIX_DIGEST)?;
+            let model_coordinates = index_model_coordinates(&BTreeSet::new(), &batch.facts)?;
             state
                 .recent_sessions
                 .insert((header.created_at_ms(), batch.session_id.clone()));
@@ -528,6 +552,7 @@ impl SessionStore for MemoryStore {
                 MemorySession {
                     last_activity_ms: activity,
                     header,
+                    model_coordinates,
                     facts: batch.facts,
                     turns,
                     fact_prefix_digest,
@@ -1893,6 +1918,7 @@ fn apply_atomic_memory_append(
         }
         let (turn_updates, fact_digest) =
             index_appended_turns(&session.turns, &append.facts, session.fact_prefix_digest)?;
+        let model_coordinates = index_model_coordinates(&session.model_coordinates, &append.facts)?;
         let control_digest =
             append
                 .controls
@@ -1902,6 +1928,7 @@ fn apply_atomic_memory_append(
                         .map_err(|error| StoreError::Invalid(error.to_string()))
                 })?;
         session.last_activity_ms = session.last_activity_ms.max(activity);
+        session.model_coordinates.extend(model_coordinates);
         session.facts.extend(append.facts);
         session.turns.extend(turn_updates);
         session.fact_prefix_digest = fact_digest;
@@ -1914,6 +1941,7 @@ fn apply_atomic_memory_append(
         validate_memory_agent_node(state, &header)?;
         let (turns, fact_digest) =
             index_appended_turns(&BTreeMap::new(), &append.facts, EMPTY_FACT_PREFIX_DIGEST)?;
+        let model_coordinates = index_model_coordinates(&BTreeSet::new(), &append.facts)?;
         let control_digest =
             append
                 .controls
@@ -1940,6 +1968,7 @@ fn apply_atomic_memory_append(
             MemorySession {
                 last_activity_ms: activity,
                 header,
+                model_coordinates,
                 facts: append.facts,
                 turns,
                 fact_prefix_digest: fact_digest,
@@ -2907,4 +2936,28 @@ fn index_activity(state: &mut MemoryState, session_id: &SessionId, previous: Opt
     let key = (session.last_activity_ms, session_id.clone());
     state.activity_sessions.insert(key.clone());
     entries.insert(key);
+}
+
+fn index_model_coordinates(
+    existing: &BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>,
+    facts: &[Arc<SessionFact>],
+) -> Result<BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>> {
+    let mut added = BTreeSet::new();
+    for fact in facts {
+        if let Some((effect, role)) =
+            rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
+        {
+            let coordinate = (
+                fact.body().turn_id().clone(),
+                effect.clone(),
+                role.to_owned(),
+            );
+            if existing.contains(&coordinate) || !added.insert(coordinate) {
+                return Err(StoreError::Invalid(
+                    "duplicate model effect coordinate".into(),
+                ));
+            }
+        }
+    }
+    Ok(added)
 }

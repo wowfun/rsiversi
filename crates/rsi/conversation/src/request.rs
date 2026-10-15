@@ -11,6 +11,7 @@ pub struct RequestPresentation {
     effort: Option<String>,
     started: Option<u64>,
     terminal: Option<(u64, bool)>,
+    elapsed_ms: Option<u64>,
     usage: Option<TokenUsage>,
     compaction: bool,
 }
@@ -32,14 +33,21 @@ impl RequestPresentation {
                     == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction;
             }
             SessionFactBody::ModelStarted { .. } => self.started = Some(fact.timestamp_ms()),
-            SessionFactBody::ModelEvent { event, .. } => match event {
-                LanguageEvent::Usage { usage } => self.usage = Some(*usage),
-                LanguageEvent::Finished { .. } => {
-                    self.terminal = Some((fact.timestamp_ms(), false));
+            SessionFactBody::ModelAttemptSettled { attempt, .. } => {
+                for (elapsed, event) in attempt.events().flatten() {
+                    match event {
+                        LanguageEvent::Usage { usage } => self.usage = Some(usage),
+                        LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. } => {
+                            self.elapsed_ms = Some(elapsed);
+                            self.terminal = Some((
+                                fact.timestamp_ms(),
+                                matches!(event, LanguageEvent::Failed { .. }),
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
-                LanguageEvent::Failed { .. } => self.terminal = Some((fact.timestamp_ms(), true)),
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -66,7 +74,10 @@ impl RequestPresentation {
             title.push_str(" · usage unknown");
         }
         if let Some((end, failed)) = self.terminal {
-            if let Some(ms) = self.started.and_then(|start| end.checked_sub(start)) {
+            if let Some(ms) = self
+                .elapsed_ms
+                .or_else(|| self.started.and_then(|start| end.checked_sub(start)))
+            {
                 let _ = write!(title, " · {}.{:01}s", ms / 1000, (ms % 1000) / 100);
             }
             if failed {

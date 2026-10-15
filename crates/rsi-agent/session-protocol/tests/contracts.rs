@@ -28,13 +28,6 @@ fn current_header_policy_defaults_do_not_admit_older_formats() {
     let mut wire = serde_json::to_value(&header).unwrap();
     let settings = wire["settings"].as_object_mut().unwrap();
     assert!(settings.remove("output_budgets").is_some());
-    assert!(
-        settings["turn_budget"]
-            .as_object_mut()
-            .unwrap()
-            .remove("maximum_output_recoveries")
-            .is_some()
-    );
     assert_eq!(
         serde_json::from_value::<SessionHeader>(wire.clone()).unwrap(),
         header
@@ -382,15 +375,9 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
         .remove("agent_preset_id");
     assert!(serde_json::from_value::<SessionHeader>(missing_preset).is_err());
 
-    let mut missing_budget = serde_json::to_value(&header).unwrap();
-    missing_budget["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("turn_budget");
-    assert!(
-        serde_json::from_value::<SessionHeader>(missing_budget).is_err(),
-        "the current durable format must not widen an omitted frozen budget"
-    );
+    let mut obsolete_budget = serde_json::to_value(&header).unwrap();
+    obsolete_budget["settings"]["turn_budget"] = json!({});
+    assert!(serde_json::from_value::<SessionHeader>(obsolete_budget).is_err());
     assert!(
         SessionHeader::new_local(
             SessionId::new("session-1").unwrap(),
@@ -438,9 +425,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 21);
+    assert_eq!(current["format_version"], 22);
     assert!(current.get("workspace_trust").is_none());
-    for version in [20, 19, 18, 17, 16, 15, 14, 1] {
+    for version in [21, 20, 19, 18, 17, 16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -465,121 +452,27 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
 }
 
 #[test]
-fn turn_budget_accepts_each_hard_limit_and_rejects_limit_plus_one() {
-    let maximum = TurnBudget::default();
-    assert_eq!(maximum.maximum_elapsed_ms(), 1_800_000);
-    assert_eq!(maximum.maximum_provider_attempts(), 64);
-    assert_eq!(maximum.maximum_tool_calls(), 256);
-    assert_eq!(maximum.maximum_generated_records(), 65_536);
-    assert_eq!(maximum.maximum_generated_record_bytes(), 67_108_864);
-
-    for invalid in [
-        json!({
-            "maximum_elapsed_ms": 1_800_001,
-            "maximum_provider_attempts": 64,
-            "maximum_tool_calls": 256,
-            "maximum_generated_records": 65_536,
-            "maximum_generated_record_bytes": 67_108_864
-        }),
-        json!({
-            "maximum_elapsed_ms": 1_800_000,
-            "maximum_provider_attempts": 65,
-            "maximum_tool_calls": 256,
-            "maximum_generated_records": 65_536,
-            "maximum_generated_record_bytes": 67_108_864
-        }),
-        json!({
-            "maximum_elapsed_ms": 1_800_000,
-            "maximum_provider_attempts": 64,
-            "maximum_tool_calls": 257,
-            "maximum_generated_records": 65_536,
-            "maximum_generated_record_bytes": 67_108_864
-        }),
-        json!({
-            "maximum_elapsed_ms": 1_800_000,
-            "maximum_provider_attempts": 64,
-            "maximum_tool_calls": 256,
-            "maximum_generated_records": 65_537,
-            "maximum_generated_record_bytes": 67_108_864
-        }),
-        json!({
-            "maximum_elapsed_ms": 1_800_000,
-            "maximum_provider_attempts": 64,
-            "maximum_tool_calls": 256,
-            "maximum_generated_records": 65_536,
-            "maximum_generated_record_bytes": 67_108_865
-        }),
-    ] {
-        assert!(serde_json::from_value::<TurnBudget>(invalid).is_err());
-    }
-}
-
-#[test]
-fn exhaustion_records_cannot_widen_the_named_budget_dimension() {
-    let turn_id = TurnId::new("turn-budget-bound").unwrap();
-    for (dimension, maximum) in [
-        (BudgetDimension::Elapsed, MAXIMUM_TURN_ELAPSED_MS),
-        (
-            BudgetDimension::ProviderAttempts,
-            MAXIMUM_TURN_PROVIDER_ATTEMPTS,
-        ),
-        (
-            BudgetDimension::OutputRecoveries,
-            MAXIMUM_TURN_OUTPUT_RECOVERIES,
-        ),
-        (BudgetDimension::ToolCalls, MAXIMUM_TURN_TOOL_CALLS),
-        (
-            BudgetDimension::GeneratedRecords,
-            MAXIMUM_TURN_GENERATED_RECORDS,
-        ),
-        (
-            BudgetDimension::GeneratedRecordBytes,
-            MAXIMUM_TURN_GENERATED_RECORD_BYTES,
-        ),
-    ] {
-        let widened = maximum + 1;
-        assert!(
-            TurnOutcome::BudgetExceeded {
-                dimension,
-                consumed: widened,
-                limit: widened,
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            SessionFactBody::BudgetExhausted {
-                turn_id: turn_id.clone(),
-                dimension,
-                consumed: widened,
-                limit: widened,
-            }
-            .validate()
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn frozen_settings_serialize_their_creation_time_turn_budget() {
-    let tightened = TurnBudget::new(60_000, 3, 4, 5, 6_000).unwrap();
-    let settings = FrozenAgentSettings::new_with_budget(
-        "bounded",
-        "Be precise.",
-        ModelRef::new("openai", "gpt-test").unwrap(),
-        SandboxMode::WorkspaceWrite,
-        false,
-        tightened.clone(),
-    )
-    .unwrap();
-
-    assert_eq!(settings.turn_budget(), &tightened);
+fn max_tokens_is_terminal_and_removed_budget_records_are_rejected() {
+    let outcome = TurnOutcome::MaxTokens;
+    outcome.validate().unwrap();
     assert_eq!(
-        serde_json::from_value::<FrozenAgentSettings>(serde_json::to_value(&settings).unwrap())
-            .unwrap()
-            .turn_budget(),
-        &tightened
+        serde_json::from_value::<TurnOutcome>(json!({"status":"max_tokens"})).unwrap(),
+        outcome
     );
+    assert!(
+        serde_json::from_value::<TurnOutcome>(
+            json!({"status":"budget_exceeded", "dimension":"elapsed", "consumed":1,"limit":1})
+        )
+        .is_err()
+    );
+    for kind in ["budget_exhausted", "model_output_recovery", "model_event"] {
+        assert!(
+            serde_json::from_value::<SessionFact>(
+                json!({"seq":1,"timestamp_ms":1,"type":kind,"turn_id":"turn"})
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

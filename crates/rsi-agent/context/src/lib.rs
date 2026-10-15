@@ -16,7 +16,7 @@ mod emission;
 
 pub use builder::{
     ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
-    ModelContextBuilderContract, ModelContextCursor, ModelContextState,
+    ModelContextBuilderContract, ModelContextCursor, ModelContextState, RawContextPressure,
 };
 pub use default_provider::{DefaultContextBuilder, DefaultContextBuilderFactory};
 
@@ -25,7 +25,7 @@ use rsi_agent_session_protocol::{
     SessionFactBody, SessionHeader, TurnId, advance_fact_prefix_digest,
 };
 use rsi_ai_protocol::{
-    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageEvent, LanguageRequest,
+    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequest,
     LanguageRequestOptions, Message, MessageContent,
 };
 use rsi_media_protocol::{MediaDescriptor, MediaKind};
@@ -48,9 +48,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 11;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v11\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v11\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 12;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v12\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v12\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,7 +158,6 @@ struct ProjectedTurn {
     messages: Vec<Message>,
     message_bytes: usize,
     terminal: bool,
-    recovery: Option<EffectId>,
     batches: outcomes::Batches,
 }
 
@@ -191,7 +190,6 @@ struct CheckpointTurn {
     id: TurnId,
     messages: Vec<Message>,
     terminal: bool,
-    recovery: Option<EffectId>,
     batches: outcomes::Batches,
 }
 
@@ -214,7 +212,6 @@ struct CheckpointTurnRef<'a> {
     id: &'a TurnId,
     messages: &'a [Message],
     terminal: bool,
-    recovery: Option<&'a EffectId>,
     batches: &'a outcomes::Batches,
 }
 
@@ -342,7 +339,7 @@ impl ContextFold {
             .semantic
             .as_ref()
             .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
-        budget::weight(&(turn.terminal, &turn.recovery, usize::MAX))?
+        budget::weight(&(turn.terminal, usize::MAX))?
             .checked_add(turn.batches.weight()?)
             .and_then(|bytes| bytes.checked_add(1))
             .ok_or(ContextError::Capacity)?
@@ -351,25 +348,7 @@ impl ContextFold {
             .ok_or(ContextError::Capacity)
     }
     fn reaccount_fact(&mut self, fact: &SessionFact, changed: Vec<TurnId>) -> Result<()> {
-        if matches!(
-            fact.body(),
-            SessionFactBody::ModelEvent {
-                event: LanguageEvent::ContentDelta { .. },
-                ..
-            }
-        ) {
-            // Deltas change only assembler strings and fixed-width source digests.
-            // Source sequence numbers are accounted at their maximum width.
-            return self.credit.resize(self.retained_weight()?);
-        }
-        if matches!(
-            fact.body(),
-            SessionFactBody::ModelEvent {
-                event: LanguageEvent::Finished { .. },
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
-                ..
-            }
-        ) {
+        if matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }) {
             return self.reaccount();
         }
         let changed: std::collections::BTreeSet<_> = changed
@@ -378,18 +357,6 @@ impl ContextFold {
             .collect();
         for id in changed {
             self.reaccount_turn(&id)?;
-        }
-        if matches!(
-            fact.body(),
-            SessionFactBody::ModelEvent {
-                event: LanguageEvent::Finished { .. },
-                ..
-            }
-        ) {
-            self.global_metadata_bytes = self
-                .semantic
-                .as_ref()
-                .map_or(Ok(0), compaction::SemanticState::global_weight)?;
         }
         self.credit.resize(self.retained_weight()?)
     }
@@ -539,7 +506,6 @@ impl ContextFold {
                     id: &turn.id,
                     messages: &turn.messages,
                     terminal: turn.terminal,
-                    recovery: turn.recovery.as_ref(),
                     batches: &turn.batches,
                 })
                 .collect(),
@@ -682,7 +648,6 @@ impl ContextFold {
                 messages: turn.messages,
                 message_bytes,
                 terminal: turn.terminal,
-                recovery: turn.recovery,
                 batches: turn.batches,
             });
         }
@@ -1081,45 +1046,7 @@ impl ContextFold {
         options: &LanguageRequestOptions,
     ) -> Result<Vec<Message>> {
         let limits = emission_limits(limits, options)?;
-        let (limits, hints) = self.reserve_recovery_hints(limits)?;
-        let mut messages =
-            without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)?;
-        messages.extend(hints);
-        Ok(messages)
-    }
-
-    fn reserve_recovery_hints(
-        &self,
-        mut limits: ContextLimits,
-    ) -> Result<(ContextLimits, Vec<Message>)> {
-        let mut hints = Vec::new();
-        for turn in self.turns.iter().filter(|turn| !turn.terminal) {
-            let Some(source) = &turn.recovery else {
-                continue;
-            };
-            let text = format!(
-                "Conversation attempt {source} in Turn {} reached its output token limit. None of that attempt's Tools executed. For remaining work in this Turn, split large files into small complete Tool calls or patches, inspect completed writes, and verify the final result. Do not concatenate or execute truncated arguments.",
-                turn.id,
-            );
-            hints.push(
-                Message::developer_text(text)
-                    .map_err(|error| ContextError::Invalid(error.to_string()))?,
-            );
-        }
-        for hint in &hints {
-            // Each appended hint adds its JSON body and one array separator.
-            limits.max_messages = limits
-                .max_messages
-                .checked_sub(1)
-                .filter(|count| *count > 0)
-                .ok_or(ContextError::TooLarge)?;
-            limits.max_bytes = limits
-                .max_bytes
-                .checked_sub(encoded_message_bytes(hint)? + 1)
-                .filter(|bytes| *bytes > 0)
-                .ok_or(ContextError::TooLarge)?;
-        }
-        Ok((limits, hints))
+        without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)
     }
 
     fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
@@ -1168,18 +1095,24 @@ impl ContextFold {
             } => {
                 self.start_model(turn_id, effect_id, purpose, snapshot)?;
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
-                event,
+                attempt,
                 purpose,
-            } => self.apply_model_event(turn_id, effect_id, event, *purpose, seq)?,
-            SessionFactBody::ModelOutputRecovery {
-                turn_id,
-                source_model_effect_id,
-                ..
             } => {
-                self.turn_mut(turn_id)?.recovery = Some(source_model_effect_id.clone());
+                for item in attempt.events() {
+                    let (_, event) =
+                        item.map_err(|error| ContextError::Invalid(error.to_string()))?;
+                    self.apply_model_event(
+                        turn_id,
+                        effect_id,
+                        &event,
+                        *purpose,
+                        seq,
+                        attempt.retain_context(),
+                    )?;
+                }
             }
             SessionFactBody::ToolCallsSuperseded { .. }
             | SessionFactBody::ToolIntent { .. }
@@ -1210,7 +1143,6 @@ impl ContextFold {
             | SessionFactBody::StepStarted { .. }
             | SessionFactBody::StepEnded { .. }
             | SessionFactBody::WorkspaceTouched { .. }
-            | SessionFactBody::BudgetExhausted { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
             | SessionFactBody::ImageStarted { .. } => {}
@@ -1264,6 +1196,7 @@ impl ContextFold {
         event: &rsi_ai_protocol::LanguageEvent,
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
         seq: u64,
+        retain_partial: bool,
     ) -> Result<()> {
         let terminal = matches!(
             event,
@@ -1293,6 +1226,24 @@ impl ContextFold {
             .expect("assembler was observed above");
         match active.assembler.finish() {
             Ok(output) => {
+                if output.finish_reason == rsi_ai_protocol::FinishReason::Cancelled {
+                    self.observe_conversation_usage(
+                        &active.purpose,
+                        active.model,
+                        seq,
+                        output.usage,
+                    );
+                    if retain_partial
+                        && matches!(
+                            active.purpose,
+                            rsi_agent_session_protocol::ModelPurpose::Conversation
+                        )
+                    {
+                        self.push_partial(turn_id, output.content, "cancelled")?;
+                    }
+                    return Ok(());
+                }
+
                 let internal = matches!(
                     active.purpose,
                     rsi_agent_session_protocol::ModelPurpose::ContextCompaction(_)
@@ -1321,13 +1272,53 @@ impl ContextFold {
             }
             Err(LanguageAssemblyError::Incomplete { partial }) => {
                 self.observe_conversation_usage(&active.purpose, active.model, seq, partial.usage);
+                if retain_partial
+                    && matches!(
+                        active.purpose,
+                        rsi_agent_session_protocol::ModelPurpose::Conversation
+                    )
+                {
+                    self.push_partial(turn_id, partial.content, "max_tokens")?;
+                }
                 Ok(())
             }
-            Err(LanguageAssemblyError::Provider { .. }) => Ok(()),
+            Err(LanguageAssemblyError::Provider { error, partial }) => {
+                if retain_partial
+                    && matches!(
+                        active.purpose,
+                        rsi_agent_session_protocol::ModelPurpose::Conversation
+                    )
+                {
+                    self.push_partial(turn_id, partial.content, error.kind().code())?;
+                }
+                Ok(())
+            }
             Err(LanguageAssemblyError::Protocol(error)) => {
                 Err(ContextError::Invalid(error.to_string()))
             }
         }
+    }
+
+    fn push_partial(
+        &mut self,
+        turn_id: &TurnId,
+        content: Vec<ContentBlock>,
+        reason: &str,
+    ) -> Result<()> {
+        let mut safe: Vec<_> = content
+            .into_iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { .. } | ContentBlock::Reasoning { .. }
+                )
+            })
+            .collect();
+        if safe.is_empty() {
+            return Ok(());
+        }
+        safe.push(ContentBlock::Text { text: format!("\n[Interrupted model attempt: {reason}; partial output, no tool execution authorized]") });
+        self.push_turn_message(turn_id, assistant_message(safe, None)?)
     }
 
     fn require_live_turn(&self, turn_id: &TurnId) -> Result<()> {
@@ -1370,7 +1361,6 @@ impl ContextFold {
             messages: vec![message],
             message_bytes,
             terminal: false,
-            recovery: None,
             batches: outcomes::Batches::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);
@@ -1394,7 +1384,6 @@ impl ContextFold {
             messages: Vec::new(),
             message_bytes: 0,
             terminal: false,
-            recovery: None,
             batches: outcomes::Batches::new(),
         });
         self.turn_index.insert(turn_id.clone(), index);

@@ -1,5 +1,7 @@
 pub(crate) enum SignalEvent {
+    #[cfg(unix)]
     Stop,
+    #[cfg(unix)]
     Reload,
 }
 
@@ -36,14 +38,13 @@ impl Signals {
 }
 
 #[cfg(not(unix))]
-pub(crate) struct Signals;
+pub(crate) enum Signals {}
 #[cfg(not(unix))]
 impl Signals {
     pub fn new() -> Result<Self, String> {
-        Ok(Self)
+        Err("native Serve signals are unsupported on this platform".into())
     }
-    pub async fn next(&mut self, _reload_ready: bool) -> SignalEvent {
-        let _ = tokio::signal::ctrl_c().await;
-        SignalEvent::Stop
+    pub fn next(&mut self, _reload_ready: bool) -> std::future::Ready<SignalEvent> {
+        match *self {}
     }
 }

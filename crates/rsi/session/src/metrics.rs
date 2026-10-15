@@ -355,21 +355,37 @@ mod tests {
                             },
                         },
                         3 => SessionFactBody::ModelStarted { turn_id, effect_id },
-                        _ => SessionFactBody::ModelEvent {
+                        4 => SessionFactBody::ModelAttemptSettled {
                             turn_id,
                             effect_id,
                             purpose: ModelEventPurpose::Conversation,
-                            event: if seq == 4 {
-                                rsi_ai_protocol::LanguageEvent::ContentStarted {
-                                    index: 0,
-                                    content: rsi_ai_protocol::ContentStart::Text,
-                                }
-                            } else {
-                                rsi_ai_protocol::LanguageEvent::ContentDelta {
-                                    index: 0,
-                                    delta: rsi_ai_protocol::ContentDelta::Text("x".into()),
-                                }
-                            },
+                            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                                [
+                                    rsi_ai_protocol::LanguageEvent::ContentStarted {
+                                        index: 0,
+                                        content: rsi_ai_protocol::ContentStart::Text,
+                                    },
+                                    rsi_ai_protocol::LanguageEvent::ContentDelta {
+                                        index: 0,
+                                        delta: rsi_ai_protocol::ContentDelta::Text("x".into()),
+                                    },
+                                    rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                                    rsi_ai_protocol::LanguageEvent::Finished {
+                                        reason: rsi_ai_protocol::FinishReason::Stop,
+                                        replay: None,
+                                    },
+                                ]
+                                .into_iter()
+                                .map(|event| (0, event)),
+                                true,
+                            )
+                            .unwrap(),
+                        },
+                        _ => SessionFactBody::WorkspaceTouched {
+                            turn_id,
+                            step_id: rsi_agent_session_protocol::StepId::new("step").unwrap(),
+                            effect_id,
+                            paths: vec!["/workspace/file".into()],
                         },
                     };
                     Arc::new(SessionFact::new(seq, seq, body).unwrap())

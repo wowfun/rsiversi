@@ -12,7 +12,7 @@ pub use json_extract::{
     JsonExtractionLimits,
 };
 pub use json_projection::{JsonProjectionLimits, project_json_body};
-pub use sse::{SseData, SseStream, decode_sse};
+pub use sse::{SseData, SseStream, decode_sse, decode_sse_with_idle};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -636,6 +636,7 @@ pub trait HttpTransport: fmt::Debug + Send + Sync {
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    headers_timeout: Option<Duration>,
 }
 
 impl ReqwestTransport {
@@ -661,7 +662,31 @@ impl ReqwestTransport {
             .timeout(request_timeout)
             .build()
             .map_err(|error| TransportError::new("http.client", error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            headers_timeout: None,
+        })
+    }
+    /// Connect and header deadlines for streaming bodies without a total deadline.
+    pub fn with_streaming_timeouts(
+        connect: Duration,
+        headers: Duration,
+    ) -> Result<Self, TransportError> {
+        if connect.is_zero() || headers.is_zero() {
+            return Err(TransportError::new(
+                "http.invalid_timeout",
+                "HTTP timeouts must be nonzero",
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect)
+            .build()
+            .map_err(|error| TransportError::new("http.client", error.to_string()))?;
+        Ok(Self {
+            client,
+            headers_timeout: Some(headers),
+        })
     }
 }
 
@@ -681,11 +706,23 @@ impl HttpTransport for ReqwestTransport {
             RequestBody::Streaming(stream) => outgoing.body(reqwest::Body::wrap_stream(stream)),
         };
         outgoing = outgoing.header(http::header::ACCEPT_ENCODING, "identity");
+        let send = async {
+            if let Some(timeout) = self.headers_timeout {
+                tokio::time::timeout(timeout, outgoing.send())
+                    .await
+                    .map_err(|_| {
+                        TransportError::new("http.timeout", "HTTP response headers timed out")
+                    })?
+                    .map_err(|error| reqwest_error(&error))
+            } else {
+                outgoing.send().await.map_err(|error| reqwest_error(&error))
+            }
+        };
         let response = tokio::select! {
             () = abort.cancelled() => {
                 return Err(TransportError::new("http.cancelled", "HTTP request was cancelled"));
             }
-            response = outgoing.send() => response.map_err(|error| reqwest_error(&error))?,
+            response = send => response?,
         };
         let status = response.status().as_u16();
         let headers = response.headers().clone();
@@ -794,6 +831,8 @@ pub fn invalid_request_error(error: impl fmt::Display) -> AiError {
 pub fn transport_connect_error(error: TransportError) -> AiError {
     let kind = if error.code() == "http.cancelled" {
         ErrorKind::Cancelled
+    } else if error.code() == "http.timeout" {
+        ErrorKind::Timeout
     } else {
         ErrorKind::Transport
     };
@@ -814,12 +853,16 @@ pub fn transport_stream_error(error: TransportError) -> AiError {
         code if code.starts_with("http.") => ErrorKind::Transport,
         _ => ErrorKind::Protocol,
     };
-    provider_error(
+    let mapped = provider_error(
         kind,
         ErrorPhase::Stream,
         DispatchStatus::Dispatched,
         error.to_string(),
-    )
+    );
+    mapped
+        .clone()
+        .with_provider_code(error.code())
+        .unwrap_or(mapped)
 }
 
 /// Maps a failure while assembling a dispatched response body.
@@ -861,10 +904,14 @@ pub async fn provider_http_error(
     phase: ErrorPhase,
     fallback: &'static str,
 ) -> AiError {
-    let value = collect_body(body, MAX_ERROR_BODY_BYTES)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let value = tokio::time::timeout(
+        DEFAULT_REQUEST_TIMEOUT,
+        collect_body(body, MAX_ERROR_BODY_BYTES),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     let provider = value
         .as_ref()
         .map(|value| value.get("error").unwrap_or(value));
@@ -970,4 +1017,30 @@ impl TransportError {
     pub const fn code(&self) -> &'static str {
         self.code
     }
+}
+
+/// Adds provider retry metadata without changing error classification or dispatch truth.
+pub fn with_retry_after(
+    error: AiError,
+    headers: &HeaderMap,
+    now: std::time::SystemTime,
+) -> AiError {
+    let Some(raw) = headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return error;
+    };
+    let raw = raw.trim();
+    let millis = raw
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds.saturating_mul(1000))
+        .or_else(|| {
+            httpdate::parse_http_date(raw).ok().map(|deadline| {
+                u64::try_from(deadline.duration_since(now).unwrap_or_default().as_millis())
+                    .unwrap_or(u64::MAX)
+            })
+        });
+    millis.map_or(error.clone(), |millis| error.with_retry_after_ms(millis))
 }

@@ -1,4 +1,5 @@
 mod bridge;
+mod document;
 mod export;
 mod protocol;
 use async_trait::async_trait;
@@ -132,17 +133,9 @@ fn run() -> Result<i32, String> {
             tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
-                tauri::WebviewUrl::External("rsi://localhost/".parse()?),
+                tauri::WebviewUrl::External(document::root_url()),
             )
-            .on_navigation(|url| {
-                url.scheme() == "rsi"
-                    && url.host_str() == Some("localhost")
-                    && url.query().is_none()
-                    && matches!(
-                        url.path(),
-                        "/" | "/preview-local.html" | "/preview-online.html"
-                    )
-            })
+            .on_navigation(document::admits_navigation)
             .title("RSI")
             .inner_size(1440.0, 980.0)
             .data_directory(data)
@@ -204,11 +197,10 @@ fn request_document_close(app: &tauri::AppHandle, owner: &Owner) {
     };
     let lifetime = bridge.lifetime.clone();
     let failed = bridge.failed.clone();
-    if app.get_webview_window("main").is_none_or(|window| {
-        window
-            .eval("window.dispatchEvent(new Event('rsi-native-close'))")
-            .is_err()
-    }) {
+    if app
+        .get_webview_window("main")
+        .is_none_or(|window| window.eval(document::REQUEST_CLOSE).is_err())
+    {
         failed.store(true, Ordering::Release);
         lifetime.request_stop();
         return;
@@ -281,11 +273,11 @@ fn bootstrap(
     let companion = executable
         .parent()
         .ok_or("Desktop executable directory is absent")?
-        .join("rsi")
+        .join(format!("rsi{}", std::env::consts::EXE_SUFFIX))
         .canonicalize()
         .map_err(|_| "Install the paired rsi companion beside rsi-desktop")?;
     let coding = rsi::StandardCodingTools::new(
-        std::fs::canonicalize("/bin/bash").map_err(error)?,
+        rsi::capture_standard_bash().map_err(error)?,
         companion,
         rsi::scrub_child_environment(std::env::vars_os()),
     )

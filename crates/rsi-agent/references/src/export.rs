@@ -1,5 +1,6 @@
 use super::*;
 use rsi_agent_store_protocol::StoreFactSuffix;
+#[cfg(test)]
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
 
 /// Only this module can construct or mutate an admitted capture envelope.
@@ -60,7 +61,7 @@ pub(super) fn capture(
             if start < text.len() {
                 let text = &text[start..];
                 available -= text.len();
-                retained.push(text);
+                retained.push(text.to_owned());
                 first = seq;
                 last = last.max(seq);
             }
@@ -139,12 +140,12 @@ pub(super) fn capture(
 #[derive(Eq, PartialEq)]
 enum Block<'a> {
     Human(u64),
-    Assistant(&'a TurnId, &'a EffectId, u32),
+    Assistant(&'a TurnId, &'a EffectId, usize),
 }
 struct Group<'a> {
     key: Block<'a>,
     role: &'static str,
-    fragments: Vec<(u64, &'a str)>,
+    fragments: Vec<(u64, std::borrow::Cow<'a, str>)>,
 }
 fn groups(facts: &[SessionFact]) -> Vec<Group<'_>> {
     let mut groups: Vec<Group<'_>> = Vec::new();
@@ -181,23 +182,22 @@ fn groups(facts: &[SessionFact]) -> Vec<Group<'_>> {
                     }
                 }
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
                 purpose: ModelEventPurpose::Conversation,
-                event:
-                    LanguageEvent::ContentDelta {
-                        index,
-                        delta: ContentDelta::Text(text),
-                    },
                 ..
-            } => append_group(
-                &mut groups,
-                Block::Assistant(turn_id, effect_id, *index),
-                "Assistant",
-                fact.seq(),
-                text,
-            ),
+            } => {
+                for item in super::selected::reference_texts(fact) {
+                    append_group(
+                        &mut groups,
+                        Block::Assistant(turn_id, effect_id, item.record.content_index),
+                        "Assistant",
+                        fact.seq(),
+                        item.text,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -208,8 +208,9 @@ fn append_group<'a>(
     key: Block<'a>,
     role: &'static str,
     seq: u64,
-    text: &'a str,
+    text: impl Into<std::borrow::Cow<'a, str>>,
 ) {
+    let text = text.into();
     if text.is_empty() {
         return;
     }
@@ -312,11 +313,43 @@ mod tests {
         }
     }
     fn model(purpose: ModelEventPurpose, delta: ContentDelta) -> SessionFactBody {
-        SessionFactBody::ModelEvent {
-            turn_id: TurnId::new("turn").unwrap(),
-            effect_id: EffectId::new("effect").unwrap(),
+        use rsi_ai_protocol::{ContentStart, FinishReason, ToolCallKind};
+        let content = match &delta {
+            ContentDelta::Text(_) => ContentStart::Text,
+            ContentDelta::Reasoning(_) => ContentStart::Reasoning,
+            ContentDelta::ToolArguments(_) => ContentStart::ToolCall {
+                id: "call".into(),
+                name: "tool".into(),
+                kind: ToolCallKind::Function,
+            },
+        };
+        settled(
             purpose,
-            event: LanguageEvent::ContentDelta { index: 0, delta },
+            [
+                LanguageEvent::ContentStarted { index: 0, content },
+                LanguageEvent::ContentDelta { index: 0, delta },
+                LanguageEvent::Finished {
+                    reason: FinishReason::MaxTokens,
+                    replay: None,
+                },
+            ],
+        )
+    }
+    fn settled(
+        purpose: ModelEventPurpose,
+        events: impl IntoIterator<Item = LanguageEvent>,
+    ) -> SessionFactBody {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SessionFactBody::ModelAttemptSettled {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new(format!("effect-{id}")).unwrap(),
+            purpose,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                events.into_iter().map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
         }
     }
     #[test]
@@ -452,37 +485,54 @@ mod tests {
     }
     #[test]
     fn streaming_deltas_coalesce_without_joining_distinct_model_blocks() {
+        use rsi_ai_protocol::{ContentStart, FinishReason};
         let header = header();
-        let mut other = model(
-            ModelEventPurpose::Conversation,
-            ContentDelta::Text("second block".into()),
-        );
-        if let SessionFactBody::ModelEvent {
-            event: LanguageEvent::ContentDelta { index, .. },
-            ..
-        } = &mut other
-        {
-            *index = 1;
-        }
         let envelope = capture(
             &header,
             &header,
             suffix(
                 0,
                 vec![
-                    model(
+                    settled(
                         ModelEventPurpose::Conversation,
-                        ContentDelta::Text("Hello ".into()),
+                        [
+                            LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: ContentStart::Reasoning,
+                            },
+                            LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: ContentDelta::Reasoning("hidden".into()),
+                            },
+                            LanguageEvent::ContentFinished { index: 0 },
+                            LanguageEvent::ContentStarted {
+                                index: 1,
+                                content: ContentStart::Text,
+                            },
+                            LanguageEvent::ContentDelta {
+                                index: 1,
+                                delta: ContentDelta::Text("Hello ".into()),
+                            },
+                            LanguageEvent::ContentDelta {
+                                index: 1,
+                                delta: ContentDelta::Text("世界".into()),
+                            },
+                            LanguageEvent::ContentFinished { index: 1 },
+                            LanguageEvent::ContentStarted {
+                                index: 2,
+                                content: ContentStart::Text,
+                            },
+                            LanguageEvent::ContentDelta {
+                                index: 2,
+                                delta: ContentDelta::Text("second block".into()),
+                            },
+                            LanguageEvent::ContentFinished { index: 2 },
+                            LanguageEvent::Finished {
+                                reason: FinishReason::Stop,
+                                replay: None,
+                            },
+                        ],
                     ),
-                    model(
-                        ModelEventPurpose::Conversation,
-                        ContentDelta::Reasoning("hidden".into()),
-                    ),
-                    model(
-                        ModelEventPurpose::Conversation,
-                        ContentDelta::Text("世界".into()),
-                    ),
-                    other,
                     SessionFactBody::ImageRequested {
                         turn_id: TurnId::new("image").unwrap(),
                         model: rsi_ai_protocol::ModelRef::new("test", "image").unwrap(),

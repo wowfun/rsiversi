@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 #[path = "support/product.rs"]
 mod product;
 #[allow(dead_code)]

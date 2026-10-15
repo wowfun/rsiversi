@@ -372,7 +372,7 @@ async fn exercise(
                 id: request.goal,
                 objective: request.objective,
                 constraints: request.constraints,
-                max_rounds: request.max_rounds,
+                max_rounds: Some(request.max_rounds),
             },
         }),
     )

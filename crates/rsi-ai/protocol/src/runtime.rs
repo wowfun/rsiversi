@@ -88,6 +88,7 @@ pub struct RetryPolicy {
     initial_delay_ms: u64,
     max_delay_ms: u64,
     jitter_per_mille: u16,
+    allow_language_regeneration: bool,
 }
 
 impl<'de> Deserialize<'de> for RetryPolicy {
@@ -103,6 +104,8 @@ impl<'de> Deserialize<'de> for RetryPolicy {
             initial_delay_ms: u64,
             max_delay_ms: u64,
             jitter_per_mille: u16,
+            #[serde(default)]
+            allow_language_regeneration: bool,
         }
 
         let wire = WireRetryPolicy::deserialize(deserializer)?;
@@ -113,6 +116,10 @@ impl<'de> Deserialize<'de> for RetryPolicy {
             wire.max_delay_ms,
             wire.jitter_per_mille,
         )
+        .map(|mut policy| {
+            policy.allow_language_regeneration = wire.allow_language_regeneration;
+            policy
+        })
         .map_err(serde::de::Error::custom)
     }
 }
@@ -148,7 +155,29 @@ impl RetryPolicy {
             initial_delay_ms,
             max_delay_ms,
             jitter_per_mille,
+            allow_language_regeneration: false,
         })
+    }
+
+    /// Permits pure language regeneration after an uncertain outcome, including
+    /// known dispatch, potentially
+    /// incurring duplicate generation charges. Never authorizes Tool or Image replay.
+    #[must_use]
+    pub fn with_language_regeneration(mut self) -> Self {
+        self.allow_language_regeneration = true;
+        self
+    }
+
+    /// Checks dispatch independently of the truthful provider dispatch evidence.
+    pub fn permits_dispatch(
+        &self,
+        capability: AiCapability,
+        dispatch: crate::DispatchStatus,
+    ) -> bool {
+        matches!(
+            dispatch,
+            crate::DispatchStatus::NotStarted | crate::DispatchStatus::NotDispatched
+        ) || (self.allow_language_regeneration && capability == AiCapability::Language)
     }
 
     /// Returns the maximum retries after the initial attempt.
@@ -203,6 +232,7 @@ impl Default for RetryPolicy {
             initial_delay_ms: 500,
             max_delay_ms: 10_000,
             jitter_per_mille: 100,
+            allow_language_regeneration: false,
         }
     }
 }

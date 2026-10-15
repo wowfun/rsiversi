@@ -17,6 +17,8 @@ const MAX_METADATA: i64 = 32 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionError {
+    #[error("Automation native filesystem protection is unsupported on this platform")]
+    Unsupported,
     #[error("invalid automation input: {0}")]
     Invalid(String),
     #[error("automation permission denied")]
@@ -70,21 +72,25 @@ pub struct Ledger {
     work_lane: Arc<tokio::sync::Semaphore>,
     _lease: File,
     fenced: AtomicBool,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     lose_commit_reply: AtomicBool,
 }
 type SourcedAttemptPage = (Vec<(Attempt, String)>, u64, bool);
 impl Ledger {
     /// # Errors
-    /// Fails when the selected resources cannot be validated, exclusively owned or made ready.
+    /// Returns Unsupported without I/O on platforms lacking native protection,
+    /// or fails when resources cannot be validated, exclusively owned or made ready.
     #[expect(
         clippy::too_many_lines,
         reason = "Keep one complete ownership operation or acceptance scenario together"
     )]
     pub fn open(directory: &Path, now_ms: u64) -> Result<Arc<Self>> {
+        crate::require_native_platform()?;
         crate::protocol::timestamp(now_ms).map_err(invalid)?;
+        #[cfg(unix)]
         let existed = directory.exists();
-        let root =
+        #[cfg(unix)]
+        let _root =
             rsi_files_native_fs::create_absolute_directory_no_follow(directory).map_err(invalid)?;
         #[cfg(unix)]
         if !existed {
@@ -101,7 +107,6 @@ impl Ledger {
                 return Err(invalid("automation directory must be private"));
             }
         }
-        let _root = root;
         for entry in std::fs::read_dir(directory).map_err(invalid)? {
             let entry = entry.map_err(invalid)?;
             if ![
@@ -119,6 +124,7 @@ impl Ledger {
         }
         let lease = crate::private_file(&directory.join(".writer.lock"))?;
         lease.try_lock().map_err(|_| AdmissionError::Capacity)?;
+        #[cfg(unix)]
         let database = crate::private_file(&directory.join("automation.sqlite3"))?;
         let connection = Connection::open(directory.join("automation.sqlite3")).map_err(invalid)?;
         #[cfg(unix)]
@@ -134,7 +140,7 @@ impl Ledger {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(invalid)?;
         let tables:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0)).map_err(invalid)?;
-        if (version == 0 && tables != 0) || !matches!(version, 0 | 2) {
+        if (version == 0 && tables != 0) || !matches!(version, 0 | 3) {
             return Err(invalid("unsupported Automation database format"));
         }
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA max_page_count=270336; PRAGMA journal_size_limit=8388608;
@@ -147,7 +153,7 @@ impl Ledger {
           CREATE INDEX IF NOT EXISTS receipts_body ON receipts(source,digest,rule);
           CREATE TABLE IF NOT EXISTS mutations(request TEXT PRIMARY KEY,digest TEXT NOT NULL,attempt INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS artifacts(attempt INTEGER NOT NULL REFERENCES attempts(id),ordinal INTEGER NOT NULL,created INTEGER NOT NULL,png BLOB NOT NULL,PRIMARY KEY(attempt,ordinal));
-          INSERT OR IGNORE INTO settings VALUES('floor',0); PRAGMA user_version=2;").map_err(invalid)?;
+          INSERT OR IGNORE INTO settings VALUES('floor',0); PRAGMA user_version=3;").map_err(invalid)?;
         let ledger = Arc::new(Self {
             connection: Mutex::new(connection),
             work: tokio_util::task::TaskTracker::new(),
@@ -155,7 +161,7 @@ impl Ledger {
             work_lane: Arc::new(tokio::sync::Semaphore::new(1)),
             _lease: lease,
             fenced: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             lose_commit_reply: AtomicBool::new(false),
         });
         ledger.transact(|tx| {
@@ -289,7 +295,7 @@ impl Ledger {
             self.fenced.store(true, Ordering::Release);
             return Err(AdmissionError::OutcomeUnknown);
         }
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if self.lose_commit_reply.swap(false, Ordering::AcqRel) {
             self.fenced.store(true, Ordering::Release);
             return Err(AdmissionError::OutcomeUnknown);
@@ -1273,6 +1279,6 @@ fn row_optional_number(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Resul
         .transpose()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "store_tests.rs"]
 pub(crate) mod tests;

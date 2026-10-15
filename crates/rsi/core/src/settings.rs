@@ -54,14 +54,7 @@ impl PluginFactory for AgentSettingsFactory {
                     "system_prompt": "You are a careful coding agent.",
                     "sandbox": "workspace-write",
                     "require_approval": false,
-                    "turn_budget": {
-                        "maximum_elapsed_ms": 1_800_000,
-                        "maximum_provider_attempts": 64,
-                        "maximum_output_recoveries": rsi_agent_session_protocol::TurnBudget::default().maximum_output_recoveries(),
-                        "maximum_tool_calls": 256,
-                        "maximum_generated_records": 65_536,
-                        "maximum_generated_record_bytes": 67_108_864
-                    }
+
                 }),
                 base: json!({}),
                 metadata: metadata(),
@@ -92,7 +85,7 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
     rsi_settings_protocol::SettingsMetadata {
         schema: json!({
             "type":"object", "additionalProperties":false,
-            "required":["settings_id","system_prompt","sandbox","require_approval","turn_budget"],
+            "required":["settings_id","system_prompt","sandbox","require_approval"],
             "properties": {
                 "settings_id":{"type":"string","description":"Immutable settings identity captured in each Session."},
                 "system_prompt":{"type":"string"},
@@ -102,14 +95,7 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
                 "pricing":{"type":"array","maxItems":256,"description":"Session-frozen exact deployment/endpoint/model quotes in integer currency billionths per token; validated by the Agent price table."},
                 "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
                 "require_approval":{"type":"boolean"},
-                "turn_budget":{"type":"object","additionalProperties":false,"properties":{
-                    "maximum_elapsed_ms":{"type":"integer","minimum":0},
-                    "maximum_provider_attempts":{"type":"integer","minimum":0},
-                    "maximum_output_recoveries":{"type":"integer","minimum":0,"maximum":rsi_agent_session_protocol::MAXIMUM_TURN_OUTPUT_RECOVERIES},
-                    "maximum_tool_calls":{"type":"integer","minimum":0},
-                    "maximum_generated_records":{"type":"integer","minimum":0},
-                    "maximum_generated_record_bytes":{"type":"integer","minimum":0}
-                },"description":"The Agent validator enforces its exact bounded Turn budget."}
+
             }
         }),
         applies: rsi_settings_protocol::SettingsApply::NewSession,
@@ -133,7 +119,6 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         _output_budgets: rsi_agent_session_protocol::OutputBudgetTable,
         sandbox: rsi_sandbox::SandboxMode,
         require_approval: bool,
-        turn_budget: rsi_agent_session_protocol::TurnBudget,
     }
     let config: Configuration = serde_json::from_value(value.clone())
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
@@ -156,7 +141,6 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         &config.system_prompt,
         config.sandbox,
         config.require_approval,
-        &config.turn_budget,
     )
     .map_err(|error| SettingsError::InvalidInput(error.to_string()))
 }
@@ -174,7 +158,7 @@ mod tests {
     fn decoded_output_policy_is_validated_before_settings_admission() {
         let mut value = json!({
             "settings_id":"test", "system_prompt":"", "sandbox":"workspace-write",
-            "require_approval":false, "turn_budget":rsi_agent_session_protocol::TurnBudget::default(),
+            "require_approval":false,
             "output_budgets":[{"model":{"deployment":"fixture","model":"model"},"max_output_tokens":32768}],
         });
         validate_settings(&value).unwrap();

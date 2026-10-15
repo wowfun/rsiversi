@@ -12,6 +12,7 @@ rsi-execution = { path = "../core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]

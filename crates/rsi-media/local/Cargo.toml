@@ -16,9 +16,11 @@ rsi-media-protocol = { path = "../protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
-same-file.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
 image.workspace = true

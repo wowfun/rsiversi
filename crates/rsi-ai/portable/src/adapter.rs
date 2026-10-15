@@ -197,12 +197,12 @@ fn language_stream(
     allowed: Vec<MediaDescriptor>,
 ) -> LanguageAdapterStream {
     Box::pin(async_stream::stream! {
-        let mut events = 0;
+        let mut started = false;
         loop {
-            let result = next_language(&mut exchange, &context, &allowed, events).await;
+            let result = next_language(&mut exchange, &context, &allowed, started).await;
             match result {
                 Ok((event, terminal)) => {
-                    events += 1;
+                    started = true;
                     yield Ok(event);
                     if terminal { break; }
                 }
@@ -241,13 +241,10 @@ async fn next_language(
     exchange: &mut Exchange,
     context: &PrepareContext,
     allowed: &[MediaDescriptor],
-    events: usize,
+    started: bool,
 ) -> Result<(LanguageEvent, bool), AiError> {
-    if events >= portable::MAXIMUM_STREAM_EVENTS {
-        return Err(exchange.invalid());
-    }
     let ControlResponse::Language { event } =
-        next_control(exchange, context, allowed, events > 0).await?
+        next_control(exchange, context, allowed, started).await?
     else {
         return Err(exchange.invalid());
     };
@@ -264,7 +261,7 @@ async fn next_language(
             error: error(
                 failure.kind(),
                 ErrorPhase::Stream,
-                if events > 0 {
+                if started {
                     DispatchStatus::Unknown
                 } else {
                     failure.dispatch_status()
@@ -306,8 +303,7 @@ async fn next_image(
     allowed: &[MediaDescriptor],
     events: usize,
 ) -> Result<ImageEvent, AiError> {
-    // The same finite event ceiling bounds both bridge stream envelopes; output
-    // byte/count grammar remains the Image assembler's contract.
+    // Images retain their independent event and byte/count bounds.
     if events >= portable::MAXIMUM_STREAM_EVENTS {
         return Err(exchange.invalid());
     }

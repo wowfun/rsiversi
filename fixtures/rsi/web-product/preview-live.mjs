@@ -1,3 +1,4 @@
+import {assistantText} from './model-attempt.mjs';
 import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Opt-in real model acceptance; this file is never loaded by default tests.
@@ -64,7 +65,7 @@ try {
   const result=parentFacts.find(fact=>fact.type==='tool_result'&&fact.effect_id===intent.effect_id);assert(result&&!result.result.is_error,'live spawn failed');const child=result.result.value.session_id;assert(child);
   let childFacts;await waitUntil(()=>{childFacts=facts(child);return childFacts.some(fact=>fact.type==='turn_terminal')},'live child completion',120000);
   await writeFile(join(report,`child-${version}-facts.json`),JSON.stringify(childFacts,null,2));
-  const answer=childFacts.filter(fact=>fact.type==='model_event'&&fact.event?.type==='content_delta'&&fact.event.delta?.type==='text').map(fact=>fact.event.delta.value).join('');
+  const answer=assistantText(childFacts);
   assert(answer.includes(tokens[version-1]),'child did not produce the current definition token');
   assert.equal(childFacts.filter(fact=>fact.type==='tool_intent').length,0,'empty allow child used tools');
   children.push(child);
@@ -75,7 +76,7 @@ try {
  await main.locator('article.message').filter({has:page.locator('.message-title').filter({hasText:/^present ·/})}).scrollIntoViewIfNeeded();
  await main.getByRole('button',{name:'Open current file',exact:true}).click();const frame=page.frameLocator('iframe.file-html');await frame.getByRole('heading',{name:'Live model artifact'}).waitFor();await frame.getByRole('button',{name:'Click to verify'}).click();await frame.getByRole('button',{name:'Clicked successfully'}).waitFor();await page.screenshot({path:join(report,'live-html-interactive.png')});
  const parentFacts=facts(parent);await writeFile(join(report,'parent-facts.json'),JSON.stringify(parentFacts,null,2));
- const parentAnswer=parentFacts.filter(fact=>fact.type==='model_event'&&fact.event?.type==='content_delta'&&fact.event.delta?.type==='text').map(fact=>fact.event.delta.value).join('');
+ const parentAnswer=assistantText(parentFacts);
  for(const [index,token] of tokens.entries()){
   const completion=parentFacts.find(fact=>fact.type==='input_message_entered'&&fact.source?.type==='completion'&&fact.source.child_session_id===children[index]&&fact.source.outcome.status==='completed');
   assert(completion?.content.some(part=>part.type==='text'&&part.text.includes(token)),'durable child completion did not carry the current reply');

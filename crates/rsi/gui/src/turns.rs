@@ -58,6 +58,43 @@ pub(crate) struct Index {
     rebuilds: usize,
 }
 impl Index {
+    pub fn live(
+        &mut self,
+        turn: &TurnId,
+        effect: &EffectId,
+        purpose: ModelEventPurpose,
+        keys: &[String],
+        blocks: &VecDeque<Block>,
+        after: u64,
+    ) {
+        let state = self.states.entry(turn.clone()).or_default();
+        let model = state.models.entry(effect.clone()).or_default();
+        let previous = *model;
+        if model.seq == 0 {
+            model.seq = after.saturating_add(1);
+        }
+        model.conversation = purpose == ModelEventPurpose::Conversation;
+        let mut changed = *model != previous;
+        for block in blocks.iter().filter(|block| keys.contains(&block.key)) {
+            let link = Link {
+                effect: Some(effect.clone()),
+                role: block.role,
+                image: false,
+            };
+            if state.links.get(&block.key) != Some(&link) {
+                state.links.insert(block.key.clone(), link);
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty.insert(turn.clone());
+        }
+        self.retain(blocks, Some(turn));
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Fact updates its model and Turn projection together"
+    )]
     pub fn observe(&mut self, fact: &SessionFact, blocks: &VecDeque<Block>) {
         let id = fact.body().turn_id().clone();
         let state = self.states.entry(id.clone()).or_default();
@@ -65,7 +102,7 @@ impl Index {
         let effect = match fact.body() {
             Fact::ModelIntent { effect_id, .. }
             | Fact::ModelStarted { effect_id, .. }
-            | Fact::ModelEvent { effect_id, .. } => Some(effect_id.clone()),
+            | Fact::ModelAttemptSettled { effect_id, .. } => Some(effect_id.clone()),
             _ => None,
         };
         if let Some(effect) = &effect {
@@ -76,22 +113,27 @@ impl Index {
             } else {
                 model.seq.min(fact.seq())
             };
-            if let Fact::ModelEvent { purpose, event, .. } = fact.body() {
-                model.conversation = *purpose == ModelEventPurpose::Conversation;
-                match event {
-                    LanguageEvent::ContentStarted {
-                        content: ContentStart::ToolCall { .. },
-                        ..
-                    } => model.tools = true,
-                    LanguageEvent::Finished { reason, .. } => {
-                        model.tools |= *reason == FinishReason::ToolCalls;
-                        model.finished = Some((
-                            fact.seq(),
-                            matches!(reason, FinishReason::Stop | FinishReason::ToolCalls),
-                        ));
+            if let Fact::ModelAttemptSettled {
+                purpose, attempt, ..
+            } = fact.body()
+            {
+                for (_, event) in attempt.events().filter_map(Result::ok) {
+                    model.conversation = *purpose == ModelEventPurpose::Conversation;
+                    match &event {
+                        LanguageEvent::ContentStarted {
+                            content: ContentStart::ToolCall { .. },
+                            ..
+                        } => model.tools = true,
+                        LanguageEvent::Finished { reason, .. } => {
+                            model.tools |= *reason == FinishReason::ToolCalls;
+                            model.finished = Some((
+                                fact.seq(),
+                                matches!(reason, FinishReason::Stop | FinishReason::ToolCalls),
+                            ));
+                        }
+                        LanguageEvent::Failed { .. } => model.finished = Some((fact.seq(), false)),
+                        _ => {}
                     }
-                    LanguageEvent::Failed { .. } => model.finished = Some((fact.seq(), false)),
-                    _ => {}
                 }
             }
             changed |= *model != previous;
@@ -117,7 +159,7 @@ impl Index {
                     TurnOutcome::Failed { .. } => "Failed",
                     TurnOutcome::PartialFailed { .. } => "Partially failed",
                     TurnOutcome::Interrupted { .. } => "Interrupted",
-                    TurnOutcome::BudgetExceeded { .. } => "Budget exceeded",
+                    TurnOutcome::MaxTokens => "Output limit",
                 };
                 if state
                     .terminal
@@ -281,7 +323,15 @@ impl State {
             } else if candidate {
                 turn.candidate.push(block.key.clone());
             }
-            if matches!(link.role, "tool" | "reasoning" | "metadata" | "assistant") && !answer {
+            let compaction = link
+                .effect
+                .as_ref()
+                .and_then(|effect| self.models.get(effect))
+                .is_some_and(|model| !model.conversation);
+            if matches!(link.role, "tool" | "reasoning" | "metadata" | "assistant")
+                && !answer
+                && !compaction
+            {
                 turn.process.push(block.key.clone());
             }
         }
@@ -291,7 +341,7 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Transcript;
+    use super::super::Transcript as ActualTranscript;
     use super::*;
     use rsi_agent_session_protocol::{
         ActivationId, AgentMessageContent, InputMessageSource, MessageId, StepId,
@@ -307,15 +357,48 @@ mod tests {
             require_approval: false,
         }
     }
-    fn event(effect: &str, event: LanguageEvent, purpose: ModelEventPurpose) -> Fact {
-        Fact::ModelEvent {
-            turn_id: TurnId::new("turn").unwrap(),
-            effect_id: EffectId::new(effect).unwrap(),
+    enum Input {
+        Fact(Box<Fact>),
+        Event {
+            effect: String,
+            event: LanguageEvent,
+            purpose: ModelEventPurpose,
+        },
+    }
+    impl From<Fact> for Input {
+        fn from(fact: Fact) -> Self {
+            Self::Fact(Box::new(fact))
+        }
+    }
+    #[derive(Default)]
+    struct Transcript {
+        inner: ActualTranscript,
+        streaming: Option<(
+            String,
+            ModelEventPurpose,
+            rsi_agent_session_protocol::ModelAttemptBuilder,
+            u64,
+        )>,
+    }
+    impl std::ops::Deref for Transcript {
+        type Target = ActualTranscript;
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+    impl std::ops::DerefMut for Transcript {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.inner
+        }
+    }
+    fn event(effect: &str, event: LanguageEvent, purpose: ModelEventPurpose) -> Input {
+        Input::Event {
+            effect: effect.into(),
             event,
             purpose,
         }
     }
-    fn text(effect: &str, text: &str) -> Fact {
+    fn text(effect: &str, text: &str) -> Input {
         event(
             effect,
             LanguageEvent::ContentDelta {
@@ -325,7 +408,7 @@ mod tests {
             ModelEventPurpose::Conversation,
         )
     }
-    fn finish(effect: &str, reason: FinishReason) -> Fact {
+    fn finish(effect: &str, reason: FinishReason) -> Input {
         event(
             effect,
             LanguageEvent::Finished {
@@ -335,6 +418,34 @@ mod tests {
             ModelEventPurpose::Conversation,
         )
     }
+    fn complete(effect: &str, text: &str) -> Fact {
+        Fact::ModelAttemptSettled {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new(effect).unwrap(),
+            purpose: ModelEventPurpose::Conversation,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: ContentStart::Text,
+                    },
+                    LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text(text.into()),
+                    },
+                    LanguageEvent::ContentFinished { index: 0 },
+                    LanguageEvent::Finished {
+                        reason: FinishReason::Stop,
+                        replay: None,
+                    },
+                ]
+                .into_iter()
+                .map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
+        }
+    }
     fn terminal(outcome: TurnOutcome) -> Fact {
         Fact::TurnTerminal {
             turn_id: TurnId::new("turn").unwrap(),
@@ -342,8 +453,136 @@ mod tests {
             result: None,
         }
     }
-    fn apply(transcript: &mut Transcript, body: Fact) {
-        transcript.fact(&SessionFact::new(transcript.seq + 1, 1, body).unwrap());
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture mirrors one complete streaming attempt lifecycle"
+    )]
+    fn apply(transcript: &mut Transcript, input: impl Into<Input>) {
+        let input = input.into();
+        if let Some((old, _, _, _)) = &transcript.streaming {
+            let change = match &input {
+                Input::Fact(_) => true,
+                Input::Event { effect, .. } => effect != old,
+            };
+            if change {
+                let old = old.clone();
+                apply(transcript, finish(&old, FinishReason::MaxTokens));
+            }
+        }
+        match input {
+            Input::Fact(body) => {
+                let seq = transcript.seq + 1;
+                transcript.fact(&SessionFact::new(seq, 1, *body).unwrap());
+            }
+            Input::Event {
+                effect,
+                event,
+                purpose,
+            } => {
+                let turn = TurnId::new("turn").unwrap();
+                let effect_id = EffectId::new(&effect).unwrap();
+                if transcript.streaming.is_none() {
+                    let seq = transcript.seq + 1;
+                    transcript.fact(
+                        &SessionFact::new(
+                            seq,
+                            1,
+                            Fact::ModelStarted {
+                                turn_id: turn.clone(),
+                                effect_id: effect_id.clone(),
+                            },
+                        )
+                        .unwrap(),
+                    );
+                    let mut builder = rsi_agent_session_protocol::ModelAttemptBuilder::new();
+                    builder
+                        .push(
+                            0,
+                            &LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: ContentStart::Text,
+                            },
+                        )
+                        .unwrap();
+                    transcript.streaming = Some((effect.clone(), purpose, builder, 0));
+                }
+                let (_, _, builder, revision) = transcript.streaming.as_mut().unwrap();
+                *revision += 1;
+                let terminal = matches!(
+                    &event,
+                    LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
+                );
+                if terminal {
+                    builder
+                        .push(*revision, &LanguageEvent::ContentFinished { index: 0 })
+                        .unwrap();
+                    if matches!(
+                        &event,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::ToolCalls,
+                            ..
+                        }
+                    ) {
+                        builder
+                            .push(
+                                *revision,
+                                &LanguageEvent::ContentStarted {
+                                    index: 1,
+                                    content: ContentStart::ToolCall {
+                                        id: "call".into(),
+                                        name: "tool".into(),
+                                        kind: rsi_ai_protocol::ToolCallKind::Function,
+                                    },
+                                },
+                            )
+                            .unwrap();
+                        builder
+                            .push(
+                                *revision,
+                                &LanguageEvent::ContentDelta {
+                                    index: 1,
+                                    delta: rsi_ai_protocol::ContentDelta::ToolArguments(
+                                        "{}".into(),
+                                    ),
+                                },
+                            )
+                            .unwrap();
+                        builder
+                            .push(*revision, &LanguageEvent::ContentFinished { index: 1 })
+                            .unwrap();
+                    }
+                }
+                builder.push(*revision, &event).unwrap();
+                if terminal {
+                    let (_, purpose, builder, _) = transcript.streaming.take().unwrap();
+                    let seq = transcript.seq + 1;
+                    transcript.fact(
+                        &SessionFact::new(
+                            seq,
+                            1,
+                            Fact::ModelAttemptSettled {
+                                turn_id: turn,
+                                effect_id,
+                                purpose,
+                                attempt: builder.finish(true).unwrap(),
+                            },
+                        )
+                        .unwrap(),
+                    );
+                } else {
+                    let snapshot = rsi_agent_turn_protocol::ModelLiveSnapshot {
+                        session_id: rsi_agent_session_protocol::SessionId::new("session").unwrap(),
+                        turn_id: turn,
+                        effect_id,
+                        purpose,
+                        revision: *revision,
+                        prefix: builder.prefix(),
+                        status: rsi_agent_turn_protocol::ModelLiveStatus::Streaming,
+                    };
+                    transcript.model(&snapshot);
+                }
+            }
+        }
     }
     fn turn(transcript: &Transcript) -> &Turn {
         transcript.turns.view.entries.values().next().unwrap()
@@ -351,12 +590,15 @@ mod tests {
     #[test]
     fn new_turns_and_backfill_only_reclassify_affected_entries() {
         let mut t = Transcript {
-            seq: 100,
+            inner: ActualTranscript {
+                seq: 100,
+                ..ActualTranscript::default()
+            },
             ..Transcript::default()
         };
         for i in 0..32 {
-            let mut fact = text(&format!("effect-{i}"), "text");
-            if let Fact::ModelEvent { turn_id, .. } = &mut fact {
+            let mut fact = complete(&format!("effect-{i}"), "text");
+            if let Fact::ModelAttemptSettled { turn_id, .. } = &mut fact {
                 *turn_id = TurnId::new(format!("turn-{i}")).unwrap();
             }
             let before = t.turns.rebuilds;
@@ -367,8 +609,8 @@ mod tests {
         // Backfill adds an earlier block to one Turn without rewriting its peers.
         let before = t.turns.rebuilds;
         let old = t.turns.view.entries.clone();
-        let mut backfill = text("earlier", "earlier text");
-        if let Fact::ModelEvent { turn_id, .. } = &mut backfill {
+        let mut backfill = complete("earlier", "earlier text");
+        if let Fact::ModelAttemptSettled { turn_id, .. } = &mut backfill {
             *turn_id = TurnId::new("turn-20").unwrap();
         }
         t.fact(&SessionFact::new(1, 1, backfill).unwrap());
@@ -407,12 +649,38 @@ mod tests {
         let mut t = Transcript::default();
         apply(&mut t, accepted());
         apply(&mut t, text("first", "Let me check"));
-        let block = t.blocks[0].revision.clone();
-        let key = t.blocks[0].key.clone();
+        let block = t
+            .blocks
+            .iter()
+            .find(|block| block.role == "assistant")
+            .unwrap()
+            .revision
+            .clone();
+        let key = t
+            .blocks
+            .iter()
+            .find(|block| block.role == "assistant")
+            .unwrap()
+            .key
+            .clone();
         assert_eq!(turn(&t).candidate, vec![key.clone()]);
         apply(&mut t, finish("first", FinishReason::ToolCalls));
         assert!(turn(&t).candidate.is_empty());
-        assert!(std::sync::Arc::ptr_eq(&block, &t.blocks[0].revision));
+        assert!(!std::sync::Arc::ptr_eq(
+            &block,
+            &t.blocks
+                .iter()
+                .find(|block| block.role == "assistant")
+                .unwrap()
+                .revision
+        ));
+        let block = t
+            .blocks
+            .iter()
+            .find(|block| block.role == "assistant")
+            .unwrap()
+            .revision
+            .clone();
         apply(
             &mut t,
             Fact::InputMessageEntered {
@@ -439,9 +707,16 @@ mod tests {
         assert_eq!(turn(&t).answer.len(), 1);
         assert!(!turn(&t).process.contains(&steering));
         assert!(turn(&t).process.contains(&key));
-        assert!(std::sync::Arc::ptr_eq(&block, &t.blocks[0].revision));
+        assert!(std::sync::Arc::ptr_eq(
+            &block,
+            &t.blocks
+                .iter()
+                .find(|block| block.role == "assistant")
+                .unwrap()
+                .revision
+        ));
         let revision = t.turns.view.revision;
-        t.turns.retain(&t.blocks, None);
+        t.inner.turns.retain(&t.inner.blocks, None);
         assert_eq!(revision, t.turns.view.revision);
     }
     #[test]
@@ -462,7 +737,7 @@ mod tests {
             assert!(!turn(&t).foldable);
             assert!(turn(&t).answer.is_empty());
             t.blocks.clear();
-            t.turns.retain(&t.blocks, None);
+            t.inner.turns.retain(&t.inner.blocks, None);
             assert!(t.turns.view.entries.is_empty());
             assert!(t.turns.states.is_empty());
         }
@@ -501,7 +776,13 @@ mod tests {
         apply(&mut t, accepted());
         apply(&mut t, text("first", "Intermediate"));
         apply(&mut t, finish("first", FinishReason::Stop));
-        let first = t.blocks[0].key.clone();
+        let first = t
+            .blocks
+            .iter()
+            .find(|block| block.role == "assistant")
+            .unwrap()
+            .key
+            .clone();
         apply(&mut t, text("second", "Final response"));
         let second = t.blocks.back().unwrap().key.clone();
         apply(&mut t, finish("second", FinishReason::Stop));
@@ -559,24 +840,33 @@ mod tests {
                 effect: None,
                 reason: "interrupted".into(),
             },
-            TurnOutcome::BudgetExceeded {
-                dimension: rsi_agent_session_protocol::BudgetDimension::ProviderAttempts,
-                consumed: 1,
-                limit: 1,
-            },
+            TurnOutcome::MaxTokens,
         ] {
             let mut t = Transcript::default();
             apply(&mut t, accepted());
             apply(&mut t, text("model", "Retained response"));
             apply(&mut t, finish("model", FinishReason::Stop));
-            let key = t.blocks[0].key.clone();
+            let key = t
+                .blocks
+                .iter()
+                .find(|block| block.role == "assistant")
+                .unwrap()
+                .key
+                .clone();
             apply(&mut t, terminal(outcome));
             assert!(!turn(&t).partial);
             assert!(!turn(&t).foldable);
             assert!(!turn(&t).running);
             assert!(turn(&t).answer.is_empty());
             assert!(turn(&t).process.contains(&key));
-            assert_eq!(t.blocks[0].text, "Retained response");
+            assert_eq!(
+                t.blocks
+                    .iter()
+                    .find(|block| block.role == "assistant")
+                    .unwrap()
+                    .text,
+                "Retained response"
+            );
         }
     }
 
@@ -600,8 +890,23 @@ mod tests {
                 !turn(&t).foldable,
                 "partial process remains visible: {reason:?}"
             );
-            assert_eq!(t.blocks[0].text, "Retained partial response");
-            assert!(turn(&t).process.contains(&t.blocks[0].key));
+            assert_eq!(
+                t.blocks
+                    .iter()
+                    .find(|block| block.role == "assistant")
+                    .unwrap()
+                    .text,
+                "Retained partial response"
+            );
+            assert!(
+                turn(&t).process.contains(
+                    &t.blocks
+                        .iter()
+                        .find(|block| block.role == "assistant")
+                        .unwrap()
+                        .key
+                )
+            );
         }
     }
 

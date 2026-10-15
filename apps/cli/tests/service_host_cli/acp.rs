@@ -155,6 +155,119 @@ async fn effort_chat(
     chat().await
 }
 
+#[cfg(windows)]
+async fn native_tools_chat(
+    State(requests): State<Arc<std::sync::Mutex<Vec<Value>>>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let index = {
+        let mut captured = requests.lock().unwrap();
+        let index = captured.len();
+        captured.push(body.clone());
+        index
+    };
+    if index >= 2 {
+        return chat().await;
+    }
+    let name = if index == 0 { "bash" } else { "file_read" };
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == name)
+    );
+    assert!(
+        !body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "output_read")
+    );
+    let arguments = if index == 0 {
+        json!({"command":"cat > native.txt <<'RSI_EOF'\nnative-acp-tool-evidence\n中文 \\ escaped \"quotes\"\nRSI_EOF\n", "run_in_background":false})
+    } else {
+        json!({"path":"native.txt"})
+    };
+    let data = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":format!("native-{index}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3}})
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(data))
+        .unwrap()
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_bash_and_files_execute_through_owned_windows_acp() {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/v1/chat/completions", post(native_tools_chat))
+        .with_state(requests.clone());
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let fixture = CliFixture::new(&endpoint);
+    profile(&fixture);
+    let (child, mut peer) = start(&fixture).await;
+    let port = peer.handle();
+    let session = request(
+        &port,
+        "session/new",
+        json!({"cwd":fixture.workspace,"mcpServers":[]}),
+    )
+    .await;
+    let pending = request(
+        &port,
+        "session/prompt",
+        json!({"sessionId":session["sessionId"],"prompt":[{"type":"text","text":"exercise native Bash and Files"}]}),
+    );
+    tokio::pin!(pending);
+    let mut permissions = 0;
+    loop {
+        tokio::select! {
+            result = &mut pending => { assert_eq!(result["stopReason"], "end_turn"); break; }
+            event = peer.next() => {
+                let event = event.unwrap();
+                if let Message::Request { id, method, .. } = event.message {
+                    assert_eq!(method, "session/request_permission");
+                    permissions += 1;
+                    port.respond(&id, Ok(&json!({"outcome":{"outcome":"selected","optionId":"allow-once"}}))).await.unwrap();
+                }
+            }
+        }
+    }
+    assert!(permissions >= 1);
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("native.txt")).unwrap(),
+        "native-acp-tool-evidence\n中文 \\ escaped \"quotes\"\n".as_bytes()
+    );
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        assert!(
+            captured[2]["messages"]
+                .to_string()
+                .contains("native-acp-tool-evidence")
+        );
+    }
+    request(
+        &port,
+        "session/close",
+        json!({"sessionId":session["sessionId"]}),
+    )
+    .await;
+    stop(&fixture, peer, child).await;
+    provider.abort();
+    let _ = provider.await;
+}
+
 async fn truncated_chat(
     State(requests): State<Arc<std::sync::Mutex<Vec<Value>>>>,
     axum::Json(body): axum::Json<Value>,
@@ -173,7 +286,7 @@ async fn truncated_chat(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
+async fn output_limit_reports_max_tokens_without_continuation_over_stdio() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -188,11 +301,6 @@ async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
     let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
     let mut settings: Value =
         serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-    settings["rsi.agent"]["turn_budget"] = json!(
-        rsi_agent_session_protocol::TurnBudget::default()
-            .with_maximum_output_recoveries(0)
-            .unwrap()
-    );
     settings["rsi.agent"]["output_budgets"] = json!([{
         "model":{"deployment":"fixture","model":"fixture-model"}, "max_output_tokens":8192
     }]);
@@ -215,7 +323,7 @@ async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
         assert_eq!(
             requests.len(),
             1,
-            "zero recovery allowance must not dispatch another request"
+            "output limit must stop without dispatching another request"
         );
         assert_eq!(requests[0]["max_tokens"], 8192);
     }
@@ -230,6 +338,7 @@ async fn output_recovery_exhaustion_reports_max_tokens_over_stdio() {
     let _ = provider.await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_during_permission_preserves_peer_and_accepts_late_reply() {
     let (endpoint, state, provider) = gated_provider("bash").await;
@@ -289,6 +398,7 @@ async fn cancel_during_permission_preserves_peer_and_accepts_late_reply() {
     let _ = provider.await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn disconnect_during_private_mcp_prepare_reaps_unpublished_process() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
@@ -330,6 +440,7 @@ async fn disconnect_during_private_mcp_prepare_reaps_unpublished_process() {
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn private_mcp_executes_with_permission_and_cold_restore_requires_exact_manifest() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -430,6 +541,10 @@ async fn private_mcp_executes_with_permission_and_cold_restore_requires_exact_ma
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One fixture proves draft disposal, selection changes and cold durable replay across two native processes."
+)]
 async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -472,6 +587,9 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     let draft = request(&port, "session/new", setup.clone()).await;
     let model = "{\"deployment\":\"fixture\",\"model\":\"fixture-model\"}";
     assert_eq!(draft["configOptions"][0]["currentValue"], model);
+    assert_eq!(draft["configOptions"][1]["id"], "thought_level");
+    assert_eq!(draft["configOptions"][1]["currentValue"], "high");
+    assert_eq!(draft["configOptions"][1]["options"][0]["value"], "@default");
     assert_eq!(
         draft["configOptions"][0]["options"]
             .as_array()
@@ -487,6 +605,7 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     )
     .await;
     assert_eq!(selected["configOptions"][0]["currentValue"], second);
+    assert_eq!(selected["configOptions"][1]["currentValue"], "@default");
     assert_eq!(
         update(&mut peer).await["configOptions"][0]["currentValue"],
         second
@@ -500,7 +619,12 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     assert_eq!(configured["configOptions"][0]["currentValue"], model);
     let configured_update = update(&mut peer).await;
     assert_eq!(configured_update["sessionUpdate"], "config_option_update");
-    for (config_id, value) in [("invalid", second), ("model", "fixture/fixture-model")] {
+    for (config_id, value) in [
+        ("invalid", second),
+        ("model", "fixture/fixture-model"),
+        ("thought_level", "max"),
+        ("thought_level", "invalid effort"),
+    ] {
         let invalid = port
             .request(
                 "session/set_config_option",
@@ -518,6 +642,7 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     )
     .await;
     assert_eq!(unchanged["configOptions"][0]["currentValue"], model);
+    assert_eq!(unchanged["configOptions"][1]["currentValue"], "@default");
     request(
         &port,
         "session/close",
@@ -587,9 +712,40 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
         assert_eq!(requests[1]["model"], "second");
         assert_eq!(requests[1]["reasoning_effort"], "low");
     }
+    for effort in ["high", "@default", "high"] {
+        let configured = request(
+            &port,
+            "session/set_config_option",
+            json!({"sessionId":id,"configId":"thought_level","value":effort}),
+        )
+        .await;
+        assert_eq!(configured["configOptions"][0]["currentValue"], second);
+        assert_eq!(configured["configOptions"][1]["currentValue"], effort);
+        assert_eq!(
+            update(&mut peer).await["configOptions"],
+            configured["configOptions"]
+        );
+    }
+    let response = request(
+        &port,
+        "session/prompt",
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"explicit ACP reasoning effort"}]}),
+    )
+    .await;
+    assert_eq!(response["stopReason"], "end_turn");
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "hello from daemon"
+    );
+    assert_eq!(requests.lock().unwrap()[2]["reasoning_effort"], "high");
+    // Cold startup must recover the durable choice, not an ACP connection cache.
+    stop(&fixture, peer, child).await;
+    let (child, mut peer) = start(&fixture).await;
+    let port = peer.handle();
     let restore = json!({"cwd":fixture.workspace,"mcpServers":[],"sessionId":id});
     let loaded = request(&port, "session/load", restore.clone()).await;
     assert_eq!(loaded["configOptions"][0]["currentValue"], second);
+    assert_eq!(loaded["configOptions"][1]["currentValue"], "high");
     assert_eq!(
         update(&mut peer).await["content"]["text"],
         "explicit initial effort"
@@ -603,8 +759,17 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     assert_eq!(user["sessionUpdate"], "user_message_chunk");
     assert_eq!(user["content"]["text"], "stdio round trip");
     assert_eq!(assistant["content"]["text"], "hello from daemon");
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "explicit ACP reasoning effort"
+    );
+    assert_eq!(
+        update(&mut peer).await["content"]["text"],
+        "hello from daemon"
+    );
     let resumed = request(&port, "session/resume", restore).await;
     assert_eq!(resumed["configOptions"][0]["currentValue"], second);
+    assert_eq!(resumed["configOptions"][1]["currentValue"], "high");
     // The following response is a wire barrier after resume: no replay may precede it.
     let listed = request(&port, "session/list", json!({})).await;
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);

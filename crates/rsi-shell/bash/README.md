@@ -6,7 +6,11 @@ classification; the submitted origin comes from the executor's `JobOrigin`
 extension. UI previews use the producer's bounded Process tail peek. Calls
 without a scope execute directly and have no live Jobs preview.
 
-This package is the ordinary Linux Bash capability plugin. It has two explicit
+This package is the ordinary Linux and Windows Bash capability plugin. Windows
+construction requires an explicit native Bash executable, such as Git for
+Windows Bash; WSL launchers are not Bash executables for this provider. Windows
+Process owns the command and descendants through a Job Object and uses forced
+termination rather than Unix signals. It has two explicit
 owners:
 
 - `BashJobProducerFactory` registers the stable `rsi.coding.bash` producer with
@@ -36,8 +40,7 @@ when output is nonempty. A nonzero exit is a command outcome rather than a Tool
 transport failure, so the model can inspect the evidence and correct its work.
 Background
 commands have no command timeout and require live
-turn-scoped Jobs authority. Activation fails closed outside Linux until the
-Process family provides equivalent native settlement semantics there.
+turn-scoped Jobs authority. Activation fails closed outside Linux and Windows.
 
 Bash is Local-program Callable. An internal call preserves ordinary approval,
 Sandbox policy, Turn Jobs ownership and process settlement; program dispatch

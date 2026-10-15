@@ -21,11 +21,11 @@ pub enum FactField {
     /// Exact inline text preview of one frozen user reference.
     InputReference { index: u16 },
     /// One assistant text delta.
-    ModelText,
+    ModelText { index: u16 },
     /// One reasoning delta.
-    ModelReasoning,
+    ModelReasoning { index: u16 },
     /// One streamed Tool-argument delta.
-    ModelToolArguments,
+    ModelToolArguments { index: u16 },
     /// Display text of a normalized model failure.
     ModelFailure,
     /// Redacted prepared provider identity and request metadata.
@@ -67,9 +67,21 @@ impl<'de> Deserialize<'de> for FactField {
             ("input_text", Some(index)) => Self::InputText { index },
             ("input_image", Some(index)) => Self::InputImage { index },
             ("input_reference", Some(index)) => Self::InputReference { index },
-            ("model_text", None) => Self::ModelText,
-            ("model_reasoning", None) => Self::ModelReasoning,
-            ("model_tool_arguments", None) => Self::ModelToolArguments,
+            ("model_text", Some(index))
+                if usize::from(index) < rsi_ai_protocol::MAX_CONTENT_BLOCKS =>
+            {
+                Self::ModelText { index }
+            }
+            ("model_reasoning", Some(index))
+                if usize::from(index) < rsi_ai_protocol::MAX_CONTENT_BLOCKS =>
+            {
+                Self::ModelReasoning { index }
+            }
+            ("model_tool_arguments", Some(index))
+                if usize::from(index) < rsi_ai_protocol::MAX_CONTENT_BLOCKS =>
+            {
+                Self::ModelToolArguments { index }
+            }
             ("model_failure", None) => Self::ModelFailure,
             ("model_snapshot", None) => Self::ModelSnapshot,
             ("tool_arguments", None) => Self::ToolArguments,
@@ -123,9 +135,9 @@ fn order(field: FactField) -> (u8, u16, u8) {
         FactField::InputText { index } => (1, index, 0),
         FactField::InputImage { index } => (1, index, 1),
         FactField::InputReference { index } => (1, index, 2),
-        FactField::ModelText => (2, 0, 0),
-        FactField::ModelReasoning => (3, 0, 0),
-        FactField::ModelToolArguments => (4, 0, 0),
+        FactField::ModelText { index } => (2, index, 0),
+        FactField::ModelReasoning { index } => (3, index, 0),
+        FactField::ModelToolArguments { index } => (4, index, 0),
         FactField::ModelFailure => (5, 0, 0),
         FactField::ModelSnapshot => (6, 0, 0),
         FactField::ToolCommand => (7, 0, 0),
@@ -172,6 +184,8 @@ pub enum FieldValue<'a> {
     Rejection(&'a ToolRejection),
     /// Redacted provider preparation.
     Model(&'a PreparedCallSnapshot),
+    /// One compact attempt's semantic text field.
+    Attempt(&'a rsi_agent_session_protocol::ModelAttemptLog, FactField),
     /// Immutable image reference.
     Media(&'a MediaRef),
 }
@@ -183,6 +197,14 @@ impl FieldValue<'_> {
     pub fn window(&self, start: usize, maximum: usize) -> Result<FieldWindow, WindowError> {
         match self {
             Self::Text(text) => FieldWindow::text(text, start, maximum),
+            Self::Attempt(attempt, field) => FieldWindow::text_parts(
+                attempt.events().filter_map(|item| match item {
+                    Err(error) => Some(Err(WindowError::Serialization(error.to_string()))),
+                    Ok((_, event)) => model_text(event, *field).map(Ok),
+                }),
+                start,
+                maximum,
+            ),
             Self::Json(value) => FieldWindow::json(value, start, maximum),
             Self::Outcome(value) => FieldWindow::json(value, start, maximum),
             Self::Rejection(value) => FieldWindow::json(value, start, maximum),
@@ -193,12 +215,27 @@ impl FieldValue<'_> {
 }
 
 /// Selects only an exact matching source; missing or variant-mismatched fields are unavailable.
-#[expect(
-    clippy::too_many_lines,
-    reason = "One exhaustive Fact-field selector keeps source ownership in one place."
-)]
 pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<'_>> {
     if fact.seq() != source.seq {
+        return None;
+    }
+    if let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body() {
+        if source.field == FactField::ModelFailure
+            && let LanguageEvent::Failed { error, .. } = attempt.terminal()
+        {
+            return Some(FieldValue::Text(Cow::Owned(error.to_string())));
+        }
+        if matches!(
+            source.field,
+            FactField::ModelText { .. }
+                | FactField::ModelReasoning { .. }
+                | FactField::ModelToolArguments { .. }
+        ) && attempt
+            .events()
+            .any(|item| item.is_ok_and(|(_, event)| model_text(event, source.field).is_some()))
+        {
+            return Some(FieldValue::Attempt(attempt, source.field));
+        }
         return None;
     }
     let text = match (fact.body(), source.field) {
@@ -224,47 +261,7 @@ pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<
             };
             return Some(FieldValue::Media(media));
         }
-        (SessionFactBody::TurnAccepted { text, .. }, FactField::TurnInput)
-        | (
-            SessionFactBody::ModelEvent {
-                event:
-                    LanguageEvent::ContentDelta {
-                        delta: ContentDelta::Text(text),
-                        ..
-                    },
-                ..
-            },
-            FactField::ModelText,
-        )
-        | (
-            SessionFactBody::ModelEvent {
-                event:
-                    LanguageEvent::ContentDelta {
-                        delta: ContentDelta::Reasoning(text),
-                        ..
-                    },
-                ..
-            },
-            FactField::ModelReasoning,
-        )
-        | (
-            SessionFactBody::ModelEvent {
-                event:
-                    LanguageEvent::ContentDelta {
-                        delta: ContentDelta::ToolArguments(text),
-                        ..
-                    },
-                ..
-            },
-            FactField::ModelToolArguments,
-        ) => text,
-        (
-            SessionFactBody::ModelEvent {
-                event: LanguageEvent::Failed { error, .. },
-                ..
-            },
-            FactField::ModelFailure,
-        ) => return Some(FieldValue::Text(Cow::Owned(error.to_string()))),
+        (SessionFactBody::TurnAccepted { text, .. }, FactField::TurnInput) => text,
         (
             SessionFactBody::ModelIntent { snapshot, .. }
             | SessionFactBody::ImageIntent { snapshot, .. },
@@ -313,6 +310,33 @@ fn command_text(body: &SessionFactBody) -> Option<&str> {
         | SessionFactBody::ToolRejected {
             name, arguments, ..
         } if name == "bash" => arguments.get("command")?.as_str(),
+        _ => None,
+    }
+}
+
+fn model_text(event: LanguageEvent, field: FactField) -> Option<String> {
+    match (event, field) {
+        (
+            LanguageEvent::ContentDelta {
+                index,
+                delta: ContentDelta::Text(text),
+            },
+            FactField::ModelText { index: expected },
+        )
+        | (
+            LanguageEvent::ContentDelta {
+                index,
+                delta: ContentDelta::Reasoning(text),
+            },
+            FactField::ModelReasoning { index: expected },
+        )
+        | (
+            LanguageEvent::ContentDelta {
+                index,
+                delta: ContentDelta::ToolArguments(text),
+            },
+            FactField::ModelToolArguments { index: expected },
+        ) if index == u32::from(expected) => Some(text),
         _ => None,
     }
 }

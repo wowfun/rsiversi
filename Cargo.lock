@@ -4009,9 +4009,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.17"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4547,7 +4547,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
- "cap-std",
+ "dirs",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -4695,6 +4695,7 @@ dependencies = [
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.15+spec-1.1.0",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -5182,6 +5183,7 @@ dependencies = [
 name = "rsi-agent-session-protocol"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "hex",
  "jsonschema",
  "rsi-ai-protocol",
@@ -5389,8 +5391,10 @@ dependencies = [
 name = "rsi-ai-deepseek"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "axum",
+ "futures-util",
  "hex",
  "rsi-ai-openai",
  "rsi-ai-openai-compatible",
@@ -5583,6 +5587,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "httpdate",
  "memchr",
  "reqwest 0.12.28",
  "rsi-ai-protocol",
@@ -5850,6 +5855,8 @@ name = "rsi-app-tools"
 version = "0.0.1"
 dependencies = [
  "nix 0.29.0",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
  "rustix 1.1.4",
  "serde_json",
  "sha2",
@@ -6221,6 +6228,7 @@ version = "0.0.1"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
  "rsi-process",
@@ -6236,7 +6244,6 @@ name = "rsi-credentials-local"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "libc",
  "rsi-credentials-protocol",
  "rsi-files-native-fs",
@@ -6296,6 +6303,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
@@ -6305,7 +6313,6 @@ name = "rsi-directory-picker"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "rsi-api-protocol",
  "rsi-configuration-access",
  "rsi-directory-picker-api",
@@ -6363,6 +6370,7 @@ dependencies = [
  "rsi-process-local",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-workspace-path",
  "serde_json",
  "tempfile",
  "tokio",
@@ -6385,11 +6393,11 @@ name = "rsi-files"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "hex",
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-meta",
+ "rustix 1.1.4",
  "serde_json",
  "tempfile",
  "tokio",
@@ -6814,10 +6822,10 @@ dependencies = [
  "image",
  "libc",
  "rsi-api-protocol",
+ "rsi-files-native-fs",
  "rsi-media",
  "rsi-media-protocol",
  "rsi-meta",
- "same-file",
  "serde",
  "serde_json",
  "sha2",
@@ -7236,6 +7244,7 @@ dependencies = [
  "rsi-api-uds-client",
  "rsi-approval-protocol",
  "rsi-build-info",
+ "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",
  "rsi-session-protocol",
@@ -7560,6 +7569,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-settings",
  "rsi-settings-protocol",
@@ -7640,7 +7650,6 @@ name = "rsi-ssh-helper"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "hex",
  "rsi-execution",
  "rsi-execution-local",
@@ -7730,6 +7739,7 @@ name = "rsi-storage"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-files-native-fs",
  "rsi-meta",
  "serde",
  "serde_json",
@@ -7773,6 +7783,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-storage",
  "rsi-storage-domain",
@@ -7863,6 +7874,7 @@ dependencies = [
  "ratatui",
  "rsi-agent-session-protocol",
  "rsi-agent-todo",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-conversation",
  "rsi-media-protocol",
@@ -8168,7 +8180,6 @@ name = "rsi-workspace-review"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "cap-std",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -8337,9 +8348,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -9422,7 +9433,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

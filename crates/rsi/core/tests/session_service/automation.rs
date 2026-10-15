@@ -284,8 +284,6 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
         explore_on_failure: true,
         authorized_catalog_digest: pin.source_digest().into(),
         model: rsi_ai_protocol::ModelRef::new("fixture", "fixture-model").unwrap(),
-        turn_budget: rsi_agent_session_protocol::TurnBudget::new(120_000, 8, 16, 256, 1_048_576)
-            .unwrap(),
         max_rounds: 2,
     };
     owner
@@ -367,7 +365,16 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
         ),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "exploration deadline: {error}; requests: {}; exploration: {:?}",
+            requests.lock().unwrap().len(),
+            owner
+                .ledger
+                .get(receipt.attempt_id)
+                .map(|attempt| attempt.exploration)
+        )
+    });
     if fail_after_report {
         let attempt = owner.ledger.get(receipt.attempt_id).unwrap();
         let failure = result.is_err();
@@ -774,8 +781,6 @@ async fn signed_deployment_reaches_native_browser_and_live_deepseek_goal() {
         explore_on_failure: true,
         authorized_catalog_digest: pin.source_digest().into(),
         model: rsi_ai_protocol::ModelRef::new("fixture", "deepseek-flash").unwrap(),
-        turn_budget: rsi_agent_session_protocol::TurnBudget::new(120_000, 8, 16, 256, 1_048_576)
-            .unwrap(),
         max_rounds: 2,
     };
     owner
@@ -921,8 +926,6 @@ async fn prepare_visual_fixture() {
         explore_on_failure: false,
         authorized_catalog_digest: "0".repeat(64),
         model: rsi_ai_protocol::ModelRef::new("fixture", "fixture-model").unwrap(),
-        turn_budget: rsi_agent_session_protocol::TurnBudget::new(120_000, 8, 16, 256, 1_048_576)
-            .unwrap(),
         max_rounds: 2,
     };
     let policy = rsi_automation::PolicyOwner::open(root.join("policy")).unwrap();
@@ -1001,7 +1004,7 @@ async fn prepare_visual_fixture() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn unavailable_runtime_remains_readable_and_diagnostics_does_not_arm_execution() {
+async fn unavailable_runtime_refuses_activation_without_publishing_automation_authority() {
     let (endpoint, provider) = provider().await;
     let fixture = fixture(&endpoint);
     let missing = fixture.paths.state().join("missing-runtime");
@@ -1014,51 +1017,29 @@ async fn unavailable_runtime_remains_readable_and_diagnostics_does_not_arm_execu
         .unwrap();
     crate::product::ready(&host).await;
     let mut changes = host.subscribe_profile();
-    let owner = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let Some(owner) = host.lookup_local::<AutomationContract>() {
-                break owner;
+            let failed = changes
+                .borrow_and_update()
+                .observed()
+                .iter()
+                .any(|instance| {
+                    instance.id().as_str() == "fixture-automation"
+                        && *instance.state() == rsi_host::ProfileInstanceState::Failed
+                });
+            if failed {
+                break;
             }
             changes.changed().await.unwrap();
         }
     })
     .await
     .unwrap();
-    assert_eq!(
-        owner
-            .api(
-                rsi_api_protocol::CallOrigin::Local,
-                rsi_automation_api::Request::Status,
-                None
-            )
-            .await
-            .unwrap()["readiness"],
-        "browser_unavailable"
-    );
+    assert!(host.lookup_local::<AutomationContract>().is_none());
     assert!(
-        owner
-            .api(
-                rsi_api_protocol::CallOrigin::Local,
-                rsi_automation_api::Request::Diagnostics,
-                None
-            )
-            .await
-            .unwrap()["browser"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty())
+        host.lookup_local::<rsi_automation::BrowserRegistryContract>()
+            .is_none()
     );
-    assert_eq!(
-        owner
-            .api(
-                rsi_api_protocol::CallOrigin::Local,
-                rsi_automation_api::Request::Status,
-                None
-            )
-            .await
-            .unwrap()["readiness"],
-        "browser_unavailable"
-    );
-    drop(owner);
     assert!(host.shutdown().await.is_clean());
     provider.abort();
 }

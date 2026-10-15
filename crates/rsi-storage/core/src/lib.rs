@@ -40,6 +40,9 @@ pub const MAXIMUM_STORAGE_DOMAIN_BYTES: usize = 256 * 1024 * 1024;
 /// Failure returned by the non-session storage contracts.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StorageError {
+    /// The backend or platform cannot supply a required capability before admission.
+    #[error("storage capability unsupported: {0}")]
+    Unsupported(String),
     /// A caller supplied malformed or out-of-bounds input.
     #[error("invalid storage input: {0}")]
     InvalidInput(String),
@@ -69,6 +72,7 @@ impl StorageError {
         match self {
             Self::OutcomeUnknown(_) | Self::RecoveryRequired => true,
             Self::InvalidInput(_)
+            | Self::Unsupported(_)
             | Self::DuplicateBackend(_)
             | Self::BackendUnavailable(_)
             | Self::Corrupt(_)

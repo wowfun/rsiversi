@@ -14,45 +14,71 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub async fn run_probe() -> Result<String, JsValue> {
-    let settings = serde_json::from_value(serde_json::json!({"settings_id": "standard", "system_prompt": "You are a careful coding agent.", "default_model": {"deployment": "fixture", "model": "fixture-model"}, "sandbox": "workspace-write", "require_approval": false, "turn_budget": {"maximum_elapsed_ms": 1800000, "maximum_provider_attempts": 64, "maximum_tool_calls": 256, "maximum_generated_records": 65536, "maximum_generated_record_bytes": 67108864}})).unwrap();
+    let settings = serde_json::from_value(serde_json::json!({"settings_id": "standard", "system_prompt": "You are a careful coding agent.", "default_model": {"deployment": "fixture", "model": "fixture-model"}, "sandbox": "workspace-write", "require_approval": false})).unwrap();
     let header = rsi_agent_session_protocol::SessionHeader::new_local(
         rsi_agent_session_protocol::SessionId::new("browser-header").unwrap(),
         1_788_778_132_168,
         "/workspace",
         rsi_agent_session_protocol::AgentPresetId::new("standard").unwrap(),
         settings,
-    ).unwrap();
+    )
+    .unwrap();
     let header = serde_json::to_string(&header).unwrap();
     let decoded: rsi_agent_session_protocol::SessionHeader = serde_json::from_str(&header)
         .map_err(|error| JsValue::from_str(&format!("durable header decode: {error}")))?;
     assert_eq!(decoded.created_at_ms(), 1_788_778_132_168);
-    for path in ["/workspace", r"C:\workspace", r"\\server\share\workspace", r"\\?\C:\workspace"] {
+    for path in [
+        "/workspace",
+        r"C:\workspace",
+        r"\\server\share\workspace",
+        r"\\?\C:\workspace",
+    ] {
         let mut value: serde_json::Value = serde_json::from_str(&header).unwrap();
         value["coordinates"]["path"] = path.into();
         let decoded = serde_json::from_value::<rsi_agent_session_protocol::SessionHeader>(value)
             .map_err(|error| JsValue::from_str(&format!("foreign header path {path}: {error}")))?;
         assert_eq!(decoded.canonical_cwd(), path);
         let request = rsi_approval_protocol::ApprovalRequest {
-            subject: rsi_approval_protocol::ApprovalSubject::new("session", "turn", "effect").unwrap(),
-            id: "review".into(), action: "Run a command".into(), reason: "Prepared fixture".into(),
+            subject: rsi_approval_protocol::ApprovalSubject::new("session", "turn", "effect")
+                .unwrap(),
+            id: "review".into(),
+            action: "Run a command".into(),
+            reason: "Prepared fixture".into(),
             review: Some(rsi_approval_protocol::ApprovalReview {
-            execution: None,
-                arguments: serde_json::json!({"command":"printf fixture"}), cwd: path.into(),
-                sandbox: "workspace-write".into(), request_sha256: "0".repeat(64),
+                execution: None,
+                arguments: serde_json::json!({"command":"printf fixture"}),
+                cwd: path.into(),
+                sandbox: "workspace-write".into(),
+                request_sha256: "0".repeat(64),
             }),
         };
-        serde_json::from_slice::<rsi_approval_protocol::ApprovalRequest>(&serde_json::to_vec(&request).unwrap()).unwrap();
+        serde_json::from_slice::<rsi_approval_protocol::ApprovalRequest>(
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
         let policy = rsi_tools_protocol::ToolExecutionPolicy {
-            mode: rsi_sandbox::SandboxMode::WorkspaceWrite, cwd: path.into(), workspace: path.into(),
+            mode: rsi_sandbox::SandboxMode::WorkspaceWrite,
+            cwd: path.into(),
+            workspace: path.into(),
         };
-        serde_json::from_slice::<rsi_tools_protocol::ToolExecutionPolicy>(&serde_json::to_vec(&policy).unwrap()).unwrap();
+        serde_json::from_slice::<rsi_tools_protocol::ToolExecutionPolicy>(
+            &serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
         let stamp = rsi_sandbox::EnforcementStamp {
             requested: rsi_sandbox::SandboxMode::WorkspaceWrite,
-            backend: rsi_sandbox::SandboxBackend::Bubblewrap { sha256:"0".repeat(64) }, workspace: path.into(),
-            filesystem: rsi_sandbox::SandboxFileSystem::WorkspaceWrite, scratch: rsi_sandbox::SandboxScratch::PrivateTmp,
+            backend: rsi_sandbox::SandboxBackend::Bubblewrap {
+                sha256: "0".repeat(64),
+            },
+            workspace: path.into(),
+            filesystem: rsi_sandbox::SandboxFileSystem::WorkspaceWrite,
+            scratch: rsi_sandbox::SandboxScratch::PrivateTmp,
             network: rsi_sandbox::SandboxNetwork::Host,
         };
-        serde_json::from_slice::<rsi_sandbox::EnforcementStamp>(&serde_json::to_vec(&stamp).unwrap()).unwrap();
+        serde_json::from_slice::<rsi_sandbox::EnforcementStamp>(
+            &serde_json::to_vec(&stamp).unwrap(),
+        )
+        .unwrap();
     }
     let execution =
         rsi_meta::Execution::browser().map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -69,14 +95,25 @@ pub async fn run_probe() -> Result<String, JsValue> {
         .await;
     shells::retirement_cancels_partial_surface_activation_and_drains_its_owner(execution.clone())
         .await;
-    shells::abandoned_surface_cleanup_failure_cannot_be_reported_as_clean_shell_shutdown(execution.clone())
+    shells::abandoned_surface_cleanup_failure_cannot_be_reported_as_clean_shell_shutdown(
+        execution.clone(),
+    )
+    .await;
+    ui::declaration_reorder_drives_surfaces_and_renderers_with_actual_target_mappings(
+        execution.clone(),
+    )
+    .await;
+    ui::dropped_waiter_and_contribution_retirement_drain_admitted_mutation_once(execution.clone())
         .await;
-    ui::declaration_reorder_drives_surfaces_and_renderers_with_actual_target_mappings(execution.clone()).await;
-    ui::dropped_waiter_and_contribution_retirement_drain_admitted_mutation_once(execution.clone()).await;
-    ui::replacement_target_foreign_application_and_business_payload_are_fenced(execution.clone()).await;
+    ui::replacement_target_foreign_application_and_business_payload_are_fenced(execution.clone())
+        .await;
     ui::action_capacity_is_not_released_when_response_waiters_are_dropped(execution.clone()).await;
-    ui::duplicate_and_failed_activation_preserve_existing_bundle_and_reject_foreign_buttons(execution.clone()).await;
-    ui::independent_registry_and_reactivated_bundle_never_reuse_old_references(execution.clone()).await;
+    ui::duplicate_and_failed_activation_preserve_existing_bundle_and_reject_foreign_buttons(
+        execution.clone(),
+    )
+    .await;
+    ui::independent_registry_and_reactivated_bundle_never_reuse_old_references(execution.clone())
+        .await;
     ui::presentation_close_signals_reads_and_preserves_admitted_mutations(execution.clone()).await;
     files::malformed_open_binding_and_file_pages_never_escape_or_replay().await;
     files::directory_client_checks_parent_exact_names_order_and_forward_progress().await;

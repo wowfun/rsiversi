@@ -1,5 +1,22 @@
 # rsi
 
+The standard Windows ACP composition exposes native Files and explicit native
+Bash tools. Full Process output caching and its `output_read` contribution are
+enabled only where the Process owner publishes the cache capability. CLI and
+Desktop use `capture_standard_bash`, which selects Bash from the absolute Git for Windows installation recorded
+by its installer. It fails clearly if that installation is absent; it never
+substitutes the Windows WSL launcher. On Unix it resolves `/bin/bash`.
+Windows does not advertise the Linux
+apply-patch helper or PTY terminal contribution. These are independent optional
+capabilities, rather than prerequisites for the native ACP coding pipeline.
+Native Unix MCP profile management is also omitted from the standard Windows
+Service; the private ACP integration owns its own explicit MCP inputs.
+
+The product MCP management API requires the Unix Profile-management authority.
+On non-Unix hosts its factory rejects preparation and activation explicitly;
+compilation does not grant credentials or SSH stdio configuration authority
+without that owner.
+
 The Linux Base supplies one lazy `rsi.browser.runtime-pool`. Automation and the
 opt-in `rsi.browser.session` owner must select the same pinned runtime; its two
 slots include opening and retiring instances. `rsi.standard.session-browser`
@@ -115,6 +132,10 @@ submission reconciliation and observation cursor/retry policy live in
 [rsi-client](../client/README.md).
 
 The standard catalog links providers but does not select or enable a deployment.
+Windows ACP uses an application-owned embedded Service and the same private
+Session composition and durable backend as other native consumers. Its backend
+retires before that Service; it does not start or impersonate the Linux daemon.
+The [ACP application](../../../apps/acp/README.md) owns stdio and signal policy.
 A missing default model is a valid unconfigured Agent defaults document. The
 defaults plugin and its Settings namespace remain active; new Session creation
 returns the typed `SetupRequired` error until a model is selected. Every
@@ -229,7 +250,13 @@ flat `status` and nullable `reason`, and `default`.
 
 The shipped asset bundle also contains `acp-internal`, a private composition
 which includes the standard preset and disables its human-question contribution.
-Both sources are hashed and byte-verified together. Ordinary preset catalogs
+Both sources are hashed and byte-verified together. Concurrent cold publications
+converge by verifying the winner's exact bytes;
+private staging children are created relative to their retained directory.
+Windows preset staging also uses native private creation with an explicit
+TokenUser owner, independent of the token's default owner for ordinary temporary
+directories. Ordinary failure removes the owned staging directory.
+Ordinary preset catalogs
 grant authority to the exact `standard` directory only; ACP explicitly derives
 an isolated catalog for `acp-internal`, with no user roots or default override.
 On Linux, ACP private input preparation is supplied by the Service's ordinary composition
@@ -307,6 +334,9 @@ The shipped `standard` asset is materialized below a digest-addressed,
 owner-writable cache, but the catalog grants System authority only to that
 exact verified `standard` identity and directory. Other cache siblings are not
 discovered as presets and cannot inherit System source or trust.
+Materialization requires native Unix filesystem protection. Non-Unix hosts
+refuse before accessing the cache; path-based checks and inherited default
+permissions do not establish the System source's protection.
 
 Addons use `StandardAddonBuilder`, immutable `StandardAddon`, and
 `StandardAddonSet`. A declaration owns its exact resolved factories, Local/Event
@@ -415,6 +445,10 @@ All index/object operations use pinned directories and no-follow regular files.
 Store directories and index/object files must belong to the effective user and
 deny group/other writes. Source manifests and build inputs retain their explicit
 caller-selected trust.
+Build fingerprints refuse links and special objects, accepting only directories
+and regular files. If a native platform refuses the open before type inspection,
+its I/O error still establishes rejection; callers must not depend on one errno
+or semantic error variant for every special object.
 Private staging is bounded and removed on ordinary failure. An immutable object
 may remain if later index publication fails. The consumed source copy determines
 its digest even when the public build output changes during copying.
@@ -590,6 +624,13 @@ again before source publication. Input traversal admits at most 1,024 entries,
 rejects symbolic links and special files, represents missing watched paths explicitly,
 and rejects watches that include the output artifact. These explicit inputs do
 not infer compiler dependencies or make the build hermetic.
+Fingerprinting reads inputs sequentially and does not acquire an atomic snapshot
+across files. Concurrent edits can produce a mixed observation; the before/after
+comparison cannot detect edits that restore the same bytes between observations.
+Classification, file hashing and directory enumeration use the same opened
+object. Identified links or special files are rejected as invalid build input.
+Failures opening or inspecting an input remain I/O errors when its type cannot
+be established.
 Only an exit-zero, settled, uncancelled build with unchanged captured inputs may
 install the exact opened output through the existing source-store transaction.
 A failed command never installs an old output. Installation does not enable it.
@@ -648,8 +689,25 @@ base seed, current MCP seed and retrieval flags are unchanged. Every snapshot
 still checks those owners before reuse, so cached bytes never substitute for
 current readiness or current executable authority.
 
-Personal skill discovery skips missing, empty or relative HOME values. Standard
-path resolution still requires an absolute HOME when an XDG fallback needs it.
+Explicit `HostPaths` remain authoritative. Absolute `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME` and `XDG_CACHE_HOME` also override their respective standard
+locations on Windows, with `rsi` appended. Invalid overrides refuse before I/O.
+Unspecified Windows standard config uses
+`FOLDERID_RoamingAppData/rsi`; state and cache use
+`FOLDERID_LocalAppData/rsi/state` and `FOLDERID_LocalAppData/rsi/cache`.
+Runtime data remains below the selected local state. Missing mandatory Known
+Folders refuse standard path resolution when a fallback is needed. Personal
+skill discovery captures `FOLDERID_Profile` regardless of HOME and skips an
+unavailable or non-absolute result. These lookups
+do not create directories and do not consult HOME.
+They provide locations, not permission or confinement proofs.
+Windows ACP uses an embedded Service with native private stores and byte-verified
+shipped presets. Other application and provider platform limits still apply;
+successful pure preview establishes catalog resolution only.
+
+On Unix, personal skill discovery skips missing, empty or relative HOME values.
+Standard path resolution still requires an absolute HOME when an XDG fallback
+needs it.
 
 The standard Host includes `rsi.acp.host` with an empty endpoint list and a dedicated
 `state/acp` observation journal. Local Host Profiles may replace that leaf with

@@ -30,8 +30,16 @@ mode 0700; credential, lock and temporary files must be single-link regular
 files owned by that user with mode 0600. Existing permissions are never silently
 repaired. Missing directories and files are created only by mutation. A retained
 directory handle owns each operation; subsequent file operations do not reopen
-its absolute path. Other targets fail explicitly as unsupported when equivalent
-native access controls are unavailable; they never write an unprotected file.
+its absolute path.
+
+Windows uses the native Files owner to validate a normalized local drive path,
+acquire directories and single-link regular files without following reparse
+points, and require the exact protected TokenUser private DACL. Reads create
+nothing. Mutations create only missing private directories, retain the writable
+namespace guard and a stable private writer lock, and publish a synced private
+temporary file through that namespace handle. Existing DACLs are never repaired.
+The same bounded zeroizing codec is used on Unix and Windows.
+Other targets fail explicitly as unsupported; they never write an unprotected file.
 
 Writers acquire a stable private lock file with a one-second bounded wait, reread
 the current document under the lock and preserve unrelated entries. Lock files
@@ -58,10 +66,12 @@ the waiter was dropped. A resolution started after completion cannot join a pre-
 old lookup's cleanup cannot remove a newer flight. A resolve overlapping a write
 may still finish with the earlier value, as may a provider call that already
 froze that value. Rotation does not revoke already issued secret values.
+Windows readers retain a validated read-only handle with delete sharing, so
+atomic credential replacement can complete while a reader decodes the earlier file.
 
 `FileSecretStore::new` uses strict no-follow acquisition. Explicit owners may use
 `with_trusted_root_alias` to resolve only the first component beneath `/` before
 that same acquisition, using the native Files root-alias contract. Construction
 performs no I/O; each operation validates the logical and resolved path. Nested
 symlinks and all existing file/permission checks remain enforced. Other platforms
-retain their explicit unsupported behavior.
+do not gain root-alias acceptance; Windows paths retain native no-follow checks.

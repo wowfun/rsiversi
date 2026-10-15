@@ -98,6 +98,7 @@ pub(crate) fn parse_import(
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    Unsupported,
     Invalid,
     Capacity,
     Codec,
@@ -107,6 +108,7 @@ pub(crate) enum Failure {
 pub(crate) fn map_failure(error: MediaError) -> rsi_api_protocol::Result<Failure> {
     Ok(match error {
         MediaError::Api(error) => return Err(error),
+        MediaError::Unsupported(_) => Failure::Unsupported,
         MediaError::Io(_) => return Err(ApiError::Backend("Media backend failed".into())),
         MediaError::InvalidInput(_) => Failure::Invalid,
         MediaError::AdmissionFull(_) => Failure::Capacity,
@@ -118,6 +120,7 @@ pub(crate) fn map_failure(error: MediaError) -> rsi_api_protocol::Result<Failure
 impl Failure {
     pub fn into_error(self) -> MediaError {
         match self {
+            Self::Unsupported => MediaError::Unsupported("remote backend capability".into()),
             Self::Invalid => MediaError::InvalidInput("remote Media rejected input".into()),
             Self::Capacity => MediaError::AdmissionFull("remote Media admission".into()),
             Self::Codec => MediaError::Codec("remote Media codec rejected source".into()),
@@ -139,4 +142,24 @@ pub(crate) fn validate_body(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_capability_is_distinct_from_invalid_input_and_redacts_backend_text() {
+        let failure =
+            map_failure(MediaError::Unsupported("private backend detail".into())).unwrap();
+        let encoded = serde_json::to_value(failure).unwrap();
+        assert_eq!(encoded, serde_json::json!({"code": "unsupported"}));
+        let decoded: Failure = serde_json::from_value(encoded).unwrap();
+        assert!(matches!(decoded.into_error(), MediaError::Unsupported(_)));
+        let invalid = map_failure(MediaError::InvalidInput("bad request".into())).unwrap();
+        assert_eq!(
+            serde_json::to_value(invalid).unwrap(),
+            serde_json::json!({"code": "invalid"})
+        );
+    }
 }

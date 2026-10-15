@@ -10,8 +10,10 @@ The local factory has optional and required activation policies. Optional
 activation may publish an unconfined service for holders that use only
 `danger-full-access`; required activation fails before publication when no
 restricted backend passes its behavior probe. The standard product selects the
-required policy whenever it links effect-bearing coding Tools, so those Tools
+required policy on Linux whenever it links effect-bearing coding Tools, so those Tools
 cannot become ready with enforcement deferred until their first call.
+Windows standard composition supplies no Linux backend candidates and supports
+explicit unconfined pipe plans. Restricted process policies remain unavailable.
 
 Restricted process calls fail closed without a selected backend. The
 `danger-full-access` mode is an explicit holder bypass and is stamped as

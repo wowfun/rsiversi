@@ -1,11 +1,18 @@
+#[cfg(unix)]
 use rsi::{AgentPresetManager, AgentPresetSource, AgentPresetTrust};
+#[cfg(unix)]
 use rsi_agent_presets::{AgentPresetId, COMPOSITION_FILE};
+#[cfg(unix)]
 use rsi_host::HostPaths;
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[cfg(unix)]
 fn write_preset(root: &Path, id: &str, composition: &str) {
     let directory = root.join(id);
     fs::create_dir_all(&directory).unwrap();
@@ -13,6 +20,7 @@ fn write_preset(root: &Path, id: &str, composition: &str) {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_ownership() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = rsi_meta::Runtime::default();
@@ -72,6 +80,7 @@ async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_o
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn manager_derives_settings_roots_user_root_and_default_override() {
     let temporary = tempfile::tempdir().unwrap();
     let config = temporary.path().join("config");
@@ -169,6 +178,7 @@ async fn manager_derives_settings_roots_user_root_and_default_override() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn independent_managers_detect_a_concurrent_default_write_without_clobbering() {
     let temporary = tempfile::tempdir().unwrap();
     let config = temporary.path().join("config");
@@ -329,6 +339,7 @@ fn built_binary_advertises_the_complete_management_command_tree() {
 }
 
 #[test]
+#[cfg(unix)]
 fn built_binary_rejects_a_non_absolute_configured_root() {
     let temporary = tempfile::tempdir().unwrap();
     let xdg_config = temporary.path().join("xdg-config");
@@ -362,6 +373,7 @@ fn built_binary_rejects_a_non_absolute_configured_root() {
     );
 }
 
+#[cfg(unix)]
 struct CliFixture {
     _temporary: tempfile::TempDir,
     xdg_config: std::path::PathBuf,
@@ -372,6 +384,7 @@ struct CliFixture {
     workspace: std::path::PathBuf,
 }
 
+#[cfg(unix)]
 impl CliFixture {
     fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
@@ -466,6 +479,7 @@ max_output_reserve_tokens = 16384
     }
 }
 
+#[cfg(unix)]
 fn json_output(output: Output) -> serde_json::Value {
     let Output {
         status,
@@ -481,6 +495,7 @@ fn json_output(output: Output) -> serde_json::Value {
     serde_json::from_slice(&stdout).unwrap()
 }
 
+#[cfg(unix)]
 fn assert_copied_metadata(path: &Path) {
     let copied_metadata = fs::read_to_string(path).unwrap();
     assert!(copied_metadata.contains("name = \"Mine\""));
@@ -489,6 +504,7 @@ fn assert_copied_metadata(path: &Path) {
 }
 
 #[test]
+#[cfg(unix)]
 fn built_binary_lists_shows_and_resolves_paths_in_text_and_single_document_json() {
     let fixture = CliFixture::new();
 
@@ -549,6 +565,7 @@ fn built_binary_lists_shows_and_resolves_paths_in_text_and_single_document_json(
 }
 
 #[test]
+#[cfg(unix)]
 fn built_binary_does_not_render_metadata_as_extra_rows_or_terminal_controls() {
     let fixture = CliFixture::new();
     fs::write(
@@ -582,6 +599,7 @@ fn built_binary_does_not_render_metadata_as_extra_rows_or_terminal_controls() {
 }
 
 #[test]
+#[cfg(unix)]
 fn built_binary_never_promotes_a_cache_sibling_to_a_system_preset() {
     let fixture = CliFixture::new();
     let initial = fixture.command(&["agent-preset", "list", "--output", "json"]);
@@ -607,6 +625,7 @@ fn built_binary_never_promotes_a_cache_sibling_to_a_system_preset() {
 
 #[test]
 #[allow(clippy::too_many_lines)] // One built-binary scenario keeps copy, default, and delete ordering visible.
+#[cfg(unix)]
 fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
     let fixture = CliFixture::new();
     fs::write(

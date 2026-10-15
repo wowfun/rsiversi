@@ -1,5 +1,10 @@
 //! Lossless bounded protocol pipes on the same process registry as batch jobs.
+#[cfg(not(any(unix, windows)))]
+use super::ProcessError;
+#[cfg(unix)]
 use super::*;
+#[cfg(not(unix))]
+use super::{Result, Service};
 use rsi_process::{DuplexProcess, DuplexProcessSpec, ManagedDuplexProcess};
 #[async_trait::async_trait]
 impl DuplexProcess for Service {
@@ -11,7 +16,11 @@ impl DuplexProcess for Service {
                 .map_err(|_| ProcessError::Spawn("Tokio runtime is unavailable".into()))?;
             self.spawn_duplex(spec, &runtime)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.windows.spawn_duplex(spec).await
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = spec;
             Err(ProcessError::Unsupported)

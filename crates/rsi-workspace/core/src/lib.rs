@@ -386,6 +386,7 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
             "workspace path must name a directory".into(),
         ));
     }
+    let canonical = rsi_workspace_protocol::canonical_native_path(canonical);
     rsi_workspace_protocol::validate_workspace_path(&canonical)?;
     Ok(canonical)
 }

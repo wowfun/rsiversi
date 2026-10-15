@@ -7,6 +7,17 @@ export async function resources(page) {
 export const resourceSelector='.resource-dock:not([hidden]) [data-dockkit-content]:not([aria-hidden=true]) .resource-content';
 const detailSelector=`#detail[open], ${resourceSelector}`;
 export function details(page) {return page.locator(detailSelector).last();}
+export async function sourceInspectionGeometry(page,{timeout=30_000}={}) {
+  const result=await page.waitForFunction(selector=>{
+    const dialog=[...document.querySelectorAll(selector)].at(-1);
+    const heading=dialog?.closest('[data-dockkit-content]')?.querySelector('[data-dockkit-strip]');
+    const controls=dialog?.querySelector('.block-sources > .actions');
+    if(!dialog?.isConnected||!heading||!controls||!dialog.getClientRects().length)return null;
+    const bounds=dialog.getBoundingClientRect();
+    return {headingBottom:heading.getBoundingClientRect().bottom,contentTop:bounds.top,controlsBottom:controls.getBoundingClientRect().bottom,viewportHeight:innerHeight,scrollTop:dialog.scrollTop};
+  },resourceSelector,{timeout});
+  try{return await result.jsonValue();}finally{await result.dispose();}
+}
 function readyUiControl({rootSelector,label,dispatch=false,deadline}) {
   if(Date.now()>=deadline)return false;
   const root=[...document.querySelectorAll(rootSelector)].at(-1);

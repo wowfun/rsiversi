@@ -110,6 +110,14 @@ impl rsi_client::ObservationSink for CliObservationSink {
             .await
             .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
     }
+    async fn model(
+        &self,
+        snapshot: rsi_agent_turn_protocol::ObservedModel,
+    ) -> Result<(), rsi_client::ObservationFailure> {
+        self.send(CliEvent::Model { snapshot })
+            .await
+            .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
+    }
     async fn interactions(
         &self,
         snapshot: rsi_session_protocol::InteractionSnapshot,
@@ -152,6 +160,7 @@ impl rsi_client::ObservationSink for CliObservationSink {
     ) {
         let name = match kind {
             rsi_client::ObservationKind::Facts => "Session",
+            rsi_client::ObservationKind::Models => "Model",
             rsi_client::ObservationKind::Interactions => "Interaction",
             rsi_client::ObservationKind::Projections => "Extension state",
         };
@@ -224,38 +233,71 @@ async fn render_observation(
 }
 
 #[derive(Debug)]
-pub(super) struct InteractionWatcher(JoinHandle<()>);
-impl Drop for InteractionWatcher {
+pub(super) struct MessageObservations {
+    stop: CancellationToken,
+    tasks: [JoinHandle<()>; 2],
+}
+impl MessageObservations {
+    pub(super) async fn close(mut self) {
+        self.stop.cancel();
+        for task in &mut self.tasks {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+impl Drop for MessageObservations {
     fn drop(&mut self) {
-        self.0.abort();
+        self.stop.cancel();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
-pub(super) fn spawn_interactions(
-    handle: Arc<dyn SessionHandle>,
-    renderer: Renderer,
+pub(super) fn spawn_message_observations(
+    handle: &Arc<dyn SessionHandle>,
+    renderer: &Renderer,
     stop: &CancellationToken,
     work: &ApplicationWork,
-) -> InteractionWatcher {
+) -> MessageObservations {
     let stopped = stop.child_token();
     let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
-    InteractionWatcher(work.tasks.spawn(async move {
-        let sink = CliObservationSink {
-            session: None,
-            renderer: renderer.clone(),
-            stop: stopped.clone(),
+    let tasks = [false, true].map(|models| {
+        let stopped = stopped.clone();
+        let execution = execution.clone();
+        let handle = handle.clone();
+        let renderer = renderer.clone();
+        work.tasks.spawn(async move {
+            let sink = CliObservationSink {
+                session: None,
+                renderer: renderer.clone(),
+                stop: stopped.clone(),
                 finished: CancellationToken::new(),
                 generation: None,
-        };
-        tokio::select! { biased;
-            () = stopped.cancelled() => {},
-            result = rsi_client::observe_interactions(handle.as_ref(), &sink, &execution) => {
-                if let Err(error) = result {
-                    let _ = notice(&renderer, "error", json!({"message":format!("Interaction observation stopped; reattach the Session to retry: {error}")})).await;
+            };
+            let observing = async {
+                if models {
+                    rsi_client::observe_models(handle.as_ref(), &sink, &execution).await
+                } else {
+                    rsi_client::observe_interactions(handle.as_ref(), &sink, &execution).await
                 }
-            },
-        }
-    }))
+            };
+            tokio::select! { biased;
+                () = stopped.cancelled() => {},
+                result = observing => {
+                    if let Err(error) = result {
+                        let kind = if models { "Model" } else { "Interaction" };
+                        let _ = notice(&renderer, "error", json!({"message":format!("{kind} observation stopped; reattach the Session to retry: {error}")})).await;
+                    }
+                },
+            }
+        })
+    });
+    MessageObservations {
+        stop: stopped,
+        tasks,
+    }
 }
 
 async fn history(
@@ -958,12 +1000,14 @@ mod tests {
     async fn idle_interactions_do_not_poll_and_drop_stops_observation() {
         let concrete = Arc::new(UnknownThenAcceptedHandle::default());
         let (renderer, mut events) = tokio::sync::mpsc::channel(32);
-        let watcher = spawn_interactions(
-            concrete.clone(),
-            renderer,
+        let handle: Arc<dyn SessionHandle> = concrete.clone();
+        let watcher = spawn_message_observations(
+            &handle,
+            &renderer,
             &CancellationToken::new(),
             &ApplicationWork::default(),
         );
+        drop(handle);
         tokio::task::yield_now().await;
         assert!(matches!(
             events.try_recv().map(unscoped),
@@ -1034,9 +1078,10 @@ mod tests {
         let concrete = Arc::new(UnknownThenAcceptedHandle::default());
         concrete.interaction_failures.store(5, Ordering::SeqCst);
         let (renderer, mut events) = tokio::sync::mpsc::channel(32);
-        let _watcher = spawn_interactions(
-            concrete.clone(),
-            renderer,
+        let handle: Arc<dyn SessionHandle> = concrete.clone();
+        let _watcher = spawn_message_observations(
+            &handle,
+            &renderer,
             &CancellationToken::new(),
             &ApplicationWork::default(),
         );

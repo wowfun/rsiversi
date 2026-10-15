@@ -167,16 +167,17 @@ async fn real_kernel_controllers_release_observers_with_idle_handles_and_pending
             .await
             .unwrap();
         sink.observations.acquire().await.unwrap().forget();
-        plateau(&fixture.kernel, 1, 1, 1).await;
+        // Durable facts and transient model previews each own a Session observer.
+        plateau(&fixture.kernel, 2, 1, 1).await;
         let (second_fiber, second) = controller(&fixture, &id, true).await;
         sink.projections.acquire().await.unwrap().forget();
-        plateau(&fixture.kernel, 2, 2, 2).await;
+        plateau(&fixture.kernel, 4, 2, 2).await;
         let mut extra_projection = handle.observe_projections().await.unwrap();
         extra_projection.next().await.unwrap().unwrap();
-        plateau(&fixture.kernel, 2, 2, 3).await;
+        plateau(&fixture.kernel, 4, 2, 3).await;
         drop(extra_projection);
         second_fiber.dispose().await;
-        plateau(&fixture.kernel, 1, 1, 1).await;
+        plateau(&fixture.kernel, 2, 1, 1).await;
         first_fiber.dispose().await;
         plateau(&fixture.kernel, 0, 0, 0).await;
         assert_eq!(

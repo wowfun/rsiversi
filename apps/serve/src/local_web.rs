@@ -243,12 +243,17 @@ impl rsi_api_http::BrowserBootstrap for Ticket {
 mod tests {
     use super::*;
     use rsi_api_http::BrowserBootstrap;
+    use std::path::Path;
+
+    fn assets(name: &str) -> PathBuf {
+        Path::new(if cfg!(windows) { "C:/" } else { "/" }).join(name)
+    }
 
     fn launch(args: &[&str], ssh: bool) -> Arc<WebLaunch> {
         WebLaunch::new(
             args.iter().map(OsString::from).collect(),
             WebLaunchEnvironment {
-                assets: Some(PathBuf::from("/bundle")),
+                assets: Some(assets("bundle")),
                 ssh,
                 opener: None,
             },
@@ -258,13 +263,23 @@ mod tests {
     fn local_options_have_one_small_grammar_and_explicit_overrides() {
         let defaults = launch(&[], false).options().unwrap();
         assert_eq!(defaults.port, 8787);
-        assert_eq!(defaults.assets, PathBuf::from("/bundle"));
+        assert_eq!(defaults.assets, assets("bundle"));
         assert!(defaults.open);
-        let overridden = launch(&["--port", "0", "--assets", "/custom", "--no-open"], false)
-            .options()
-            .unwrap();
+        let custom = assets("custom");
+        let overridden = launch(
+            &[
+                "--port",
+                "0",
+                "--assets",
+                custom.to_str().unwrap(),
+                "--no-open",
+            ],
+            false,
+        )
+        .options()
+        .unwrap();
         assert_eq!(overridden.port, 0);
-        assert_eq!(overridden.assets, PathBuf::from("/custom"));
+        assert_eq!(overridden.assets, custom);
         assert!(!overridden.open);
         assert!(!launch(&[], true).options().unwrap().open);
         for args in [
@@ -282,8 +297,10 @@ mod tests {
         }
     }
     #[derive(Debug)]
+    #[cfg(unix)]
     struct HealthyService;
     #[async_trait]
+    #[cfg(unix)]
     impl crate::ServingService for HealthyService {
         async fn stopped(&self) -> Result<(), String> {
             std::future::pending().await
@@ -293,6 +310,7 @@ mod tests {
         }
     }
     #[async_trait]
+    #[cfg(unix)]
     impl rsi_api_http::HttpListener for HealthyService {
         fn address(&self) -> std::net::SocketAddr {
             ([127, 0, 0, 1], 8787).into()
@@ -305,8 +323,10 @@ mod tests {
         }
     }
     #[derive(Debug, Default)]
+    #[cfg(unix)]
     struct FailedOpener(tokio::sync::Notify);
     #[async_trait]
+    #[cfg(unix)]
     impl BrowserOpener for FailedOpener {
         async fn open(&self, url: &str) -> Result<(), String> {
             assert_eq!(url, "http://127.0.0.1:8787#rsi-launch=fixture");
@@ -315,6 +335,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn opener_failure_keeps_serving_and_shutdown_fences_browser_handoff() {
         let opener = Arc::new(FailedOpener::default());
         let runner = Arc::new(crate::Runner {

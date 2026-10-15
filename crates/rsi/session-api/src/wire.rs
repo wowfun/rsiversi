@@ -43,6 +43,7 @@ pub(crate) enum Operation {
     Cancel,
     History,
     Observe,
+    ModelObserve,
     Interactions,
     Projections,
     Resource,
@@ -64,7 +65,7 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::WorkflowReadiness,
         Self::ListWorkflows,
         Self::ReadWorkflow,
@@ -91,6 +92,7 @@ impl Operation {
         Self::Cancel,
         Self::History,
         Self::Observe,
+        Self::ModelObserve,
         Self::Interactions,
         Self::Projections,
         Self::Resource,
@@ -140,6 +142,7 @@ impl Operation {
             Self::ReadMessage => ("read-message", Data, Read, 8192, OBSERVATION_REPLY),
             Self::Cancel => ("cancel", Control, Mutation, 128 * 1024, 8192),
             Self::History => ("history", Data, Read, 8192, LARGE_REPLY),
+            Self::ModelObserve => ("model-observe", Subscription, Read, 8192, 256 * 1024),
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
             Self::Interactions => ("interactions", Subscription, Read, 8192, INTERACTION_REPLY),
             Self::Projections => ("projections", Subscription, Read, 8192, PROJECTION_REPLY),
@@ -178,17 +181,18 @@ impl Operation {
                 "session",
                 name,
                 match self {
-                    Self::Create | Self::Inspect | Self::Recent => 7,
-                    Self::Submit => 4,
+                    Self::Create | Self::Inspect | Self::Recent => 8,
+                    Self::Submit => 5,
                     Self::MessageStatus => 3,
-                    Self::ListWorkflows
+                    Self::ModelObserve
+                    | Self::ListWorkflows
                     | Self::Jobs
                     | Self::TerminalOutput
                     | Self::Interactions
                     | Self::Questions
                     | Self::AnswerQuestion => 2,
-                    Self::Attach | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 6,
-                    Self::History | Self::ReadMessage => 5,
+                    Self::Attach | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 7,
+                    Self::History | Self::ReadMessage => 6,
                     _ => 1,
                 },
             )

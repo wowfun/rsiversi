@@ -1,5 +1,10 @@
 # rsi-ai-protocol
 
+Language completion with `max_tokens` or `cancelled` may close still-open content
+as partial evidence. It never makes partial Tool arguments executable. Natural
+Stop and ToolCalls continue to require every content block to be explicitly closed;
+the Agent's settlement projection decides whether partial safe text enters context.
+
 `LanguageProfile::input_capacity_tokens` validates the finite generation cap and
 the exact model limit, then owns the request input-window calculation:
 the context window minus the larger of the default output reserve and the explicit

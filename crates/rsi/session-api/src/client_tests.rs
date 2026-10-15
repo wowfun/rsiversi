@@ -11,6 +11,8 @@ mod draft;
 mod export;
 #[path = "client_tests/jobs.rs"]
 mod jobs;
+#[path = "client_tests/models.rs"]
+mod models;
 #[path = "client_tests/projections.rs"]
 mod projections;
 #[path = "client_tests/resources.rs"]
@@ -589,12 +591,13 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
 #[test]
 fn session_client_requires_current_header_operation_versions() {
     let versions = [
-        (Operation::Create, 7),
-        (Operation::Attach, 6),
-        (Operation::Recent, 7),
-        (Operation::DraftSnapshot, 6),
-        (Operation::SelectPreset, 6),
-        (Operation::Inspect, 7),
+        (Operation::Create, 8),
+        (Operation::Attach, 7),
+        (Operation::Recent, 8),
+        (Operation::DraftSnapshot, 7),
+        (Operation::SelectPreset, 7),
+        (Operation::Inspect, 8),
+        (Operation::ModelObserve, 2),
     ];
     for (operation, version) in versions {
         let current = operation.spec();
@@ -613,10 +616,11 @@ fn session_client_requires_current_header_operation_versions() {
         ));
     }
     for operation in [Operation::History, Operation::ReadMessage] {
-        assert_eq!(operation.spec().id.version(), 5);
+        assert_eq!(operation.spec().id.version(), 6);
     }
-    assert_eq!(Operation::Observe.spec().id.version(), 6);
-    assert_eq!(Operation::Submit.spec().id.version(), 4);
+    assert_eq!(Operation::Observe.spec().id.version(), 7);
+    assert_eq!(Operation::ModelObserve.spec().id.version(), 2);
+    assert_eq!(Operation::Submit.spec().id.version(), 5);
     assert_eq!(Operation::MessageStatus.spec().id.version(), 3);
     assert!(SessionClient::new(Remote::new()).is_ok());
 }

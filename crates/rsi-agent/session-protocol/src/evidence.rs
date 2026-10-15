@@ -4,7 +4,7 @@ use crate::{Result, SessionError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Maximum decoded evidence bytes per request and new inline bytes per Turn.
+/// Maximum decoded evidence bytes per request.
 pub const MAXIMUM_REQUEST_EVIDENCE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum occurrences of one content kind in the inspection manifest.
@@ -133,7 +133,7 @@ pub struct EvidenceContentCount {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceUnavailable {
-    /// Optional evidence exceeded its own or the Turn's remaining byte budget.
+    /// Optional evidence exceeded its independent per-request byte allowance.
     Budget,
     /// A producer did not capture evidence for this intent.
     NotCaptured,

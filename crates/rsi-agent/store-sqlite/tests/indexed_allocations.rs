@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The public cold-read and offline-audit seams must reject large indexed text
 //! before making a correspondingly large Rust allocation.
 #![expect(

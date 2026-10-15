@@ -46,6 +46,34 @@ const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_mess
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn contains_model_intent(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        effect_id: &rsi_agent_session_protocol::EffectId,
+    ) -> Result<bool> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let turn_id = turn_id.clone();
+        let effect_id = effect_id.clone();
+        self.with_reader(move |connection| {
+            connection
+                .query_row(
+                    append::MODEL_COORDINATE_LOOKUP,
+                    params![
+                        session_id.as_str(),
+                        effect_id.as_str(),
+                        "model_intent",
+                        turn_id.as_str()
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map(|value| value.is_some())
+                .map_err(sql_error)
+        })
+        .await
+    }
     async fn session_activity_summaries(
         &self,
         sessions: &[SessionId],
@@ -2156,12 +2184,7 @@ impl SessionStore for SqliteStore {
         let owner = Arc::clone(&self.inner);
         let reference = self
             .with_cas_publication(move || {
-                install_cas(
-                    &owner.cas_dir,
-                    &owner.cas_staging_dir,
-                    &bytes,
-                    &owner.cas_publication,
-                )
+                install_cas(&owner.cas_dir, &bytes, &owner.cas_publication)
             })
             .await?;
         self.with_writer(move |connection| {

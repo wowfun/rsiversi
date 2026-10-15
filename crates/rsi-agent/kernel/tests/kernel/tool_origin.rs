@@ -106,7 +106,17 @@ pub(super) async fn publish_model_calls(
     calls: &[(&str, &str)],
     prepared: &PreparedCallSnapshot,
 ) {
-    let model = EffectId::new("source-model").unwrap();
+    publish_model_calls_named(kernel, claim, "source-model", calls, prepared).await;
+}
+
+pub(super) async fn publish_model_calls_named(
+    kernel: &AgentKernel,
+    claim: &TurnClaim,
+    model: &str,
+    calls: &[(&str, &str)],
+    prepared: &PreparedCallSnapshot,
+) {
+    let model = EffectId::new(model).unwrap();
     let turn_id = claim.turn_id().clone();
     flush_bodies(
         kernel,
@@ -158,15 +168,16 @@ pub(super) async fn publish_model_calls(
     flush_bodies(
         kernel,
         claim,
-        events
-            .into_iter()
-            .map(|event| SessionFactBody::ModelEvent {
-                turn_id: turn_id.clone(),
-                effect_id: model.clone(),
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event,
-            })
-            .collect(),
+        vec![SessionFactBody::ModelAttemptSettled {
+            turn_id: turn_id.clone(),
+            effect_id: model.clone(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                events.into_iter().map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
+        }],
     )
     .await;
 }

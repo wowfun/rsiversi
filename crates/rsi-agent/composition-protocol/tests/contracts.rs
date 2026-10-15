@@ -9,9 +9,7 @@ mod resource;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionError, AgentCompositionPin, AgentSessionDraft,
 };
-use rsi_agent_session_protocol::{
-    AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId, TurnBudget,
-};
+use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId};
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{
@@ -135,13 +133,12 @@ fn header(preset_id: &str) -> SessionHeader {
         1,
         "/workspace",
         AgentPresetId::new(preset_id).unwrap(),
-        FrozenAgentSettings::new_with_budget(
+        FrozenAgentSettings::new(
             "profile",
             "system",
             ModelRef::new("provider", "model").unwrap(),
             SandboxMode::ReadOnly,
             true,
-            TurnBudget::default(),
         )
         .unwrap(),
     )

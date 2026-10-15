@@ -137,95 +137,64 @@ async fn persistent_store_failure_eventually_latches_a_flush_error() {
 
 #[tokio::test(start_paused = true)]
 async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() {
+    cancellation_pending_capacity(false).await;
+}
+async fn cancellation_pending_capacity(fail_flush: bool) {
     let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_workers();
-    let first = submit(&kernel, "session-cancel-full", "hello").await;
-    let _lease = kernel.register("executor".into()).unwrap();
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        store.clone(),
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_process_pending_fact_bytes: 3500,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let workers = kernel.start_workers();
+    let submitted = submit(&kernel, "cancel-full", "work").await;
+    let lease = kernel.register("worker".into()).unwrap();
     let claim = kernel
-        .claim("executor", CancellationToken::new())
+        .claim("worker", CancellationToken::new())
         .await
         .unwrap()
         .unwrap();
-    let effect = EffectId::new("effect-fill").unwrap();
-    let intent = kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelIntent {
-                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                },
-                price_quote: None,
-                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                turn_id: first.turn_id.clone(),
-                effect_id: effect.clone(),
-                snapshot: snapshot(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    kernel
-        .flush(&claim, intent.last().unwrap().seq())
-        .await
-        .unwrap();
-    kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelStarted {
-                turn_id: first.turn_id.clone(),
-                effect_id: effect.clone(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    let mut chunk = MAX_LANGUAGE_OUTPUT_BYTES;
-    while chunk > 0 {
-        let result = kernel
-            .publish(
-                &claim,
-                vec![SessionFactBody::ModelEvent {
-                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                    turn_id: first.turn_id.clone(),
-                    effect_id: effect.clone(),
-                    event: LanguageEvent::ContentDelta {
-                        index: 0,
-                        delta: ContentDelta::Text("x".repeat(chunk)),
-                    },
-                }],
-            )
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(TurnError::Flush(_) | TurnError::BudgetExceeded { .. }) => chunk /= 2,
-            Err(error) => panic!("unexpected fill failure: {error}"),
-        }
+    tool_origin::flush_bodies(&kernel, &claim, vec![start_step(claim.turn_id())]).await;
+    if fail_flush {
+        store.fail_next_appends(usize::MAX);
     }
-
-    assert!(
+    let facts = kernel
+        .publish(&claim, vec![touched(claim.turn_id(), &"x".repeat(3000))])
+        .await
+        .unwrap()
+        .published();
+    assert_eq!(
         kernel
             .cancel(
-                &first.session_id,
-                &first.turn_id,
-                Some("x".repeat(MAXIMUM_AGENT_DIAGNOSTIC_BYTES)),
+                &submitted.session_id,
+                &submitted.turn_id,
+                Some("c".repeat(1024))
             )
-            .await
-            .is_err(),
-        "the full speculative suffix must reject the cancellation Fact"
+            .await,
+        Err(TurnError::Capacity)
     );
-
-    tokio::time::advance(std::time::Duration::from_millis(200)).await;
-    tokio::task::yield_now().await;
-    let retry = kernel
-        .cancel(&first.session_id, &first.turn_id, None)
+    store.fail_next_appends(0);
+    kernel.flush(&claim, facts[0].seq()).await.unwrap();
+    kernel
+        .cancel(
+            &submitted.session_id,
+            &submitted.turn_id,
+            Some("c".repeat(1024)),
+        )
         .await
         .unwrap();
-    assert!(
-        retry.accepted,
-        "failed admission must not consume cancellation"
-    );
-    kernel.shutdown(worker).await.unwrap();
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Cancelled)
+        .await
+        .unwrap();
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -591,7 +560,6 @@ async fn conflicting_retry_does_not_replace_the_original_turn_control_state() {
 #[allow(clippy::too_many_lines)] // Keep the exact admission, flush, and retry timeline visible.
 async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state() {
     let turn_id = TurnId::new("turn-1").unwrap();
-    let effect_id = EffectId::new("effect-capacity").unwrap();
     let accepted = SessionFact::new(
         1,
         42,
@@ -605,38 +573,10 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
         },
     )
     .unwrap();
-    let intent = SessionFactBody::ModelIntent {
-        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-        },
-        price_quote: None,
-        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-        turn_id: turn_id.clone(),
-        effect_id: effect_id.clone(),
-        snapshot: snapshot(),
-    };
-    let started = SessionFactBody::ModelStarted {
-        turn_id: turn_id.clone(),
-        effect_id: effect_id.clone(),
-    };
-    let body = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: turn_id.clone(),
-        effect_id: effect_id.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("x".repeat(1024)),
-        },
-    };
-    let second_body = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: turn_id.clone(),
-        effect_id,
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("y".repeat(1024)),
-        },
-    };
+    let intent = start_step(&turn_id);
+    let started = touched(&turn_id, "start");
+    let body = touched(&turn_id, &"x".repeat(1024));
+    let second_body = touched(&turn_id, &"y".repeat(1024));
     let body_bytes = [
         intent.clone(),
         started.clone(),
@@ -810,108 +750,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
 
 #[tokio::test(start_paused = true)]
 async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure() {
-    let memory = Arc::new(MemoryStore::new());
-    let kernel = kernel(memory.clone()).await;
-    let worker = kernel.start_workers();
-    let submitted = submit(&kernel, "session-cancel-pending-capacity", "hello").await;
-    let _lease = kernel
-        .register("executor-capacity-taxonomy".into())
-        .unwrap();
-    let claim = kernel
-        .claim("executor-capacity-taxonomy", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    let effect_id = EffectId::new("effect-capacity-taxonomy").unwrap();
-    let intent = kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelIntent {
-                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                },
-                price_quote: None,
-                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                turn_id: submitted.turn_id.clone(),
-                effect_id: effect_id.clone(),
-                snapshot: snapshot(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    let intent_bytes = intent[0].encoded_len();
-    kernel.flush(&claim, intent[0].seq()).await.unwrap();
-
-    let started = SessionFactBody::ModelStarted {
-        turn_id: submitted.turn_id.clone(),
-        effect_id: effect_id.clone(),
-    };
-    let first_delta = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: submitted.turn_id.clone(),
-        effect_id: effect_id.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("x".repeat(MAX_LANGUAGE_OUTPUT_BYTES)),
-        },
-    };
-    let second_delta_base = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: submitted.turn_id.clone(),
-        effect_id: effect_id.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("y".into()),
-        },
-    };
-    let started_bytes = SessionFact::new(3, 42, started.clone())
-        .unwrap()
-        .encoded_len();
-    let first_delta_bytes = SessionFact::new(4, 42, first_delta.clone())
-        .unwrap()
-        .encoded_len();
-    let second_base_bytes = SessionFact::new(5, 42, second_delta_base)
-        .unwrap()
-        .encoded_len();
-    let pending_budget =
-        usize::try_from(MAXIMUM_TURN_GENERATED_RECORD_BYTES).unwrap() - intent_bytes;
-    let second_text_bytes = pending_budget
-        .checked_sub(started_bytes + first_delta_bytes + second_base_bytes - 1)
-        .expect("maximum deltas leave room for the second event");
-    assert!(second_text_bytes <= MAX_LANGUAGE_OUTPUT_BYTES);
-    let second_delta = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: submitted.turn_id.clone(),
-        effect_id,
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("y".repeat(second_text_bytes)),
-        },
-    };
-
-    memory.fail_next_appends(usize::MAX);
-    assert!(matches!(
-        kernel
-            .publish(&claim, vec![started, first_delta, second_delta])
-            .await
-            .unwrap(),
-        PublishAttempt::Published(_)
-    ));
-    assert_eq!(MAXIMUM_PENDING_FACT_BYTES, 64 * 1024 * 1024);
-    assert_eq!(
-        kernel
-            .cancel(
-                &submitted.session_id,
-                &submitted.turn_id,
-                Some("c".repeat(MAXIMUM_AGENT_DIAGNOSTIC_BYTES)),
-            )
-            .await,
-        Err(TurnError::Capacity)
-    );
-
-    memory.fail_next_appends(0);
-    kernel.shutdown(worker).await.unwrap();
+    cancellation_pending_capacity(true).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1071,33 +910,9 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
     let blocker_turn = TurnId::new("turn-process-failure-b").unwrap();
     let target_effect = EffectId::new("effect-process-failure-a").unwrap();
     let blocker_effect = EffectId::new("effect-process-failure-b").unwrap();
-    let target_first = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: target_turn.clone(),
-        effect_id: target_effect.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("x".repeat(4096)),
-        },
-    };
-    let target_second = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: target_turn.clone(),
-        effect_id: target_effect.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("y".repeat(4096)),
-        },
-    };
-    let blocker_first = SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: blocker_turn.clone(),
-        effect_id: blocker_effect.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("z".repeat(4096)),
-        },
-    };
+    let target_first = touched(&target_turn, &"x".repeat(3000));
+    let target_second = touched(&target_turn, &"y".repeat(3000));
+    let blocker_first = touched(&blocker_turn, &"z".repeat(3000));
     let process_bytes = SessionFact::new(4, 42, target_first.clone())
         .unwrap()
         .encoded_len()
@@ -1153,36 +968,18 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
         .unwrap()
         .unwrap();
 
-    for (claim, turn_id, effect_id) in [
+    for (claim, turn_id, _effect_id) in [
         (&target_claim, &target_turn, &target_effect),
         (&blocker_claim, &blocker_turn, &blocker_effect),
     ] {
         let intent = kernel
-            .publish(
-                claim,
-                vec![SessionFactBody::ModelIntent {
-                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                    },
-                    price_quote: None,
-                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                    turn_id: turn_id.clone(),
-                    effect_id: effect_id.clone(),
-                    snapshot: snapshot(),
-                }],
-            )
+            .publish(claim, vec![start_step(turn_id)])
             .await
             .unwrap()
             .published();
         kernel.flush(claim, intent[0].seq()).await.unwrap();
         let started = kernel
-            .publish(
-                claim,
-                vec![SessionFactBody::ModelStarted {
-                    turn_id: turn_id.clone(),
-                    effect_id: effect_id.clone(),
-                }],
-            )
+            .publish(claim, vec![touched(turn_id, "start")])
             .await
             .unwrap()
             .published();
@@ -1994,15 +1791,17 @@ async fn retained_history(store: &MemoryStore, name: &str) -> usize {
             sandbox: SandboxMode::WorkspaceWrite,
             require_approval: false,
         },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn.clone(),
-            effect_id: EffectId::new("retained-effect").unwrap(),
-            event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                index: 0,
-                delta: rsi_ai_protocol::ContentDelta::Text("x".repeat(8 * 1024 * 1024)),
-            },
-        },
+        model_intent_fact(2, &turn, &EffectId::new("retained-effect").unwrap())
+            .body()
+            .clone(),
+        model_started_fact(3, &turn, &EffectId::new("retained-effect").unwrap())
+            .body()
+            .clone(),
+        text_attempt(
+            &turn,
+            &EffectId::new("retained-effect").unwrap(),
+            "x".repeat(8 * 1024 * 1024),
+        ),
         SessionFactBody::TurnTerminal {
             turn_id: turn,
             outcome: TurnOutcome::Completed,
@@ -2069,11 +1868,13 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
         Err(TurnError::Capacity)
     ));
     let mut stream = streams.pop().unwrap();
-    drop(stream.next().await.unwrap().unwrap());
+    for _ in 0..3 {
+        drop(stream.next().await.unwrap().unwrap());
+    }
     let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
         panic!("Fact history")
     };
-    assert_eq!(fact.seq(), 2);
+    assert_eq!(fact.seq(), 4);
     let last_clone = fact.clone();
     drop(fact);
     drop(stream);
@@ -2108,7 +1909,7 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
             &session,
             ObservationCursor {
                 control_seq: 1,
-                fact_seq: 2,
+                fact_seq: 4,
             },
         )
         .await
@@ -2116,7 +1917,7 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
     let SessionObservation::Fact { fact, .. } = resumed.next().await.unwrap().unwrap() else {
         panic!("terminal Fact")
     };
-    assert_eq!(fact.seq(), 3);
+    assert_eq!(fact.seq(), 5);
     drop(replacement);
     drop(streams);
 }
@@ -2192,7 +1993,7 @@ async fn minimum_retention_and_read_budgets_make_progress_one_page_at_a_time() {
         )
         .await
         .unwrap();
-    for expected in 1..=3 {
+    for expected in 1..=5 {
         let update = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
             .await
             .unwrap()
@@ -2304,33 +2105,54 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
 }
 
 #[tokio::test]
-async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets() {
+#[allow(clippy::too_many_lines)] // One maximum-size attempt crosses admission, observation, persistence and reading.
+async fn capacity_limited_model_attempt_progresses_with_minimum_observation_and_read_budgets() {
     use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
     let store = Arc::new(MemoryStore::new());
     let session = SessionId::new("maximum-observed-fact").unwrap();
     let turn = TurnId::new("maximum-turn").unwrap();
-    let model_fact = |text| {
-        SessionFact::new(
-            2,
-            2,
-            SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                turn_id: turn.clone(),
-                effect_id: EffectId::new("maximum-effect").unwrap(),
-                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: rsi_ai_protocol::ContentDelta::Text(text),
-                },
+    let effect = EffectId::new("maximum-effect").unwrap();
+    let mut builder = rsi_agent_session_protocol::ModelAttemptBuilder::new();
+    builder
+        .push(
+            0,
+            &LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
             },
         )
-        .unwrap()
+        .unwrap();
+    let delta = LanguageEvent::ContentDelta {
+        index: 0,
+        delta: ContentDelta::Text("x".repeat(64 * 1024)),
     };
-    let overhead = model_fact("x".into()).encoded_len() - 1;
-    let payload = MAXIMUM_SESSION_FACT_BYTES - overhead;
-    // JSON escapes NUL to six bytes. The decoded delta remains below 32 MiB.
-    let text = "\0".repeat(payload / 6) + &"x".repeat(payload % 6);
-    let maximum = model_fact(text);
-    assert_eq!(maximum.encoded_len(), MAXIMUM_SESSION_FACT_BYTES);
+    while builder.push(0, &delta).is_ok() {}
+    builder
+        .push(
+            0,
+            &LanguageEvent::Finished {
+                reason: rsi_ai_protocol::FinishReason::MaxTokens,
+                replay: None,
+            },
+        )
+        .unwrap();
+    let attempt = builder.finish(true).unwrap();
+    let maximum = SessionFact::new(
+        4,
+        4,
+        SessionFactBody::ModelAttemptSettled {
+            turn_id: turn.clone(),
+            effect_id: effect.clone(),
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+            attempt,
+        },
+    )
+    .unwrap();
+    let maximum_bytes = maximum.encoded_len();
+    assert!(
+        maximum_bytes > 31 * 1024 * 1024
+            && maximum_bytes < rsi_agent_session_protocol::MAXIMUM_MODEL_ATTEMPT_BYTES
+    );
     let accepted = SessionFact::new(
         1,
         1,
@@ -2345,10 +2167,10 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
     )
     .unwrap();
     let terminal = SessionFact::new(
-        3,
-        3,
+        5,
+        5,
         SessionFactBody::TurnTerminal {
-            turn_id: turn,
+            turn_id: turn.clone(),
             outcome: TurnOutcome::Completed,
             result: None,
         },
@@ -2360,7 +2182,13 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
             session_id: session.clone(),
             header: Some(header(session.as_str())),
             expected_seq: 0,
-            facts: vec![Arc::new(accepted), Arc::new(maximum), Arc::new(terminal)],
+            facts: vec![
+                Arc::new(accepted),
+                Arc::new(model_intent_fact(2, &turn, &effect)),
+                Arc::new(model_started_fact(3, &turn, &effect)),
+                Arc::new(maximum),
+                Arc::new(terminal),
+            ],
         },
     )
     .await
@@ -2382,7 +2210,7 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
             &session,
             ObservationCursor {
                 control_seq: 1,
-                fact_seq: 1,
+                fact_seq: 3,
             },
         )
         .await
@@ -2390,12 +2218,12 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
     let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
         panic!("maximum Fact expected");
     };
-    assert_eq!(fact.encoded_len(), MAXIMUM_SESSION_FACT_BYTES);
+    assert_eq!(fact.encoded_len(), maximum_bytes);
     drop(fact);
     let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
         panic!("terminal Fact expected");
     };
-    assert_eq!(fact.seq(), 3);
+    assert_eq!(fact.seq(), 5);
 }
 
 #[tokio::test]

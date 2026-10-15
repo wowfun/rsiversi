@@ -7,10 +7,10 @@ use std::{
 };
 
 async fn next(observation: &mut UiObservation) -> UiItem {
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
         let mut latest = None;
         loop {
-            let incoming = if latest.is_some() {
+            let incoming = if let Some(previous) = latest.take() {
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(200),
                     observation.next(),
@@ -18,7 +18,7 @@ async fn next(observation: &mut UiObservation) -> UiItem {
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => return latest.unwrap(),
+                    Err(_) => return previous,
                 }
             } else {
                 observation.next().await
@@ -129,6 +129,10 @@ fn node(item: &UiItem, name: &str) -> String {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit Linux confined Session browser through production UI mutation API"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real browser lifecycle with shared owned resources"
+)]
 async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     struct Server(std::process::Child);
     impl Drop for Server {
@@ -316,7 +320,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     assert_eq!(image["width"], 1280);
     assert_eq!(image["height"], 720);
     let mut png = Vec::new();
-    let length = image["bytes"].as_u64().unwrap() as usize;
+    let length = usize::try_from(image["bytes"].as_u64().unwrap()).unwrap();
     while png.len() < length {
         let bytes = client
             .source(&rsi_ui_api::Source {

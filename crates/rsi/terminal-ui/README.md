@@ -1,6 +1,6 @@
 # rsi-terminal-ui
 
-Scene protocol version 13 carries one base surface (application or Session) and
+Scene protocol version 15 carries one base surface (application or Session) and
 at most one redacted application overlay. A bounded Composer prefix selects the
 inline model/effort list at the base editor rectangle; other overlays use a
 centered dialog. The wire type is not recursive. Base
@@ -25,7 +25,7 @@ never scroll past the final content page.
 Secret input is masked by the resident application before capture and never
 enters a scene.
 
-Partial transcript pages use each model event's authenticated purpose kind.
+Partial transcript pages use each model attempt's authenticated purpose kind.
 Context-compaction output is an internal status block, distinct from assistant
 answers even when the preceding model intent is outside the loaded page.
 
@@ -38,11 +38,18 @@ and selection only; rendering does not acquire authority from menu contents.
 Transcript retention is bounded independently from the viewport. Layout retains
 two screens of row metadata and reuses unchanged block layouts. Viewport clipping
 does not mark resident text as evicted. A lost scroll anchor starts at the oldest
-retained content; only a live-tail view captures from the end. A rendered source
+retained content; only a live-tail view captures from the end.
+Live snapshot updates preserve retained block identity and manual expansion;
+their source-free text crosses the bounded scene viewport and invalidates layout
+caches only when displayed text or truncation changes, preserving cached layout
+for revisions without a visible change. It gains copy coordinates only after settlement. Model
+process durations use attempt-relative event times rather than wall-clock
+timestamps, including when older request metadata is loaded later.
+A rendered source
 map is meaningful only for its matching Session and completed screen write.
 Summary-row clicks resolve through that frame's source anchors to a retained
 foldable block. They do not grant source-copy authority to decorative labels.
-Request metadata orders after the latest received Fact of its effect; retained
+Request metadata orders after its live content and the latest received Fact of its effect; retained
 content blocks preserve their request identity so older metadata backfill can
 recover that position without changing source coordinates.
 
@@ -144,3 +151,5 @@ Mode changes preserve logical selection and scroll anchors.
 
 Program Tool cards are labeled as program calls and retain their source facts.
 They do not acquire a synthetic provider-request block or model timing label.
+
+Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.

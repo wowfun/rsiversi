@@ -117,6 +117,9 @@ pub(crate) struct HeadlessTurnOptions {
 
 #[derive(Clone, Debug)]
 pub(crate) enum CliEvent {
+    Model {
+        snapshot: rsi_agent_turn_protocol::ObservedModel,
+    },
     Projections {
         snapshot: rsi_session_protocol::ProjectionSnapshot,
     },
@@ -167,23 +170,26 @@ struct InteractionEnvelope<'a> {
 impl CliEvent {
     fn json_line(&self) -> std::result::Result<String, serde_json::Error> {
         match self {
+            Self::Model { .. } => Err(serde::ser::Error::custom(
+                "model snapshots require bounded page delivery",
+            )),
             Self::Projections { snapshot } => serde_json::to_string(
-                &serde_json::json!({"version":5,"type":"projections","data":snapshot}),
+                &serde_json::json!({"version":6,"type":"projections","data":snapshot}),
             ),
             Self::Interactions { snapshot } => serde_json::to_string(&InteractionEnvelope {
-                version: 5,
+                version: 6,
                 kind: "interactions",
                 data: snapshot,
             }),
             Self::Notice { kind, value } => {
-                serde_json::to_string(&serde_json::json!({"version":5,"type":kind,"data":value}))
+                serde_json::to_string(&serde_json::json!({"version":6,"type":kind,"data":value}))
             }
             Self::Message {
                 session_id,
                 message_id,
                 accepted_control_seq,
             } => serde_json::to_string(&MessageEnvelope {
-                version: 5,
+                version: 6,
                 kind: "message",
                 session_id,
                 message_id,
@@ -195,7 +201,7 @@ impl CliEvent {
                 turn_id,
                 entered_fact_seq,
             } => serde_json::to_string(&TurnEnvelope {
-                version: 5,
+                version: 6,
                 kind: "turn",
                 session_id,
                 message_id,
@@ -207,7 +213,7 @@ impl CliEvent {
                 record,
                 durable_control_seq,
             } => serde_json::to_string(&ControlEnvelope {
-                version: 5,
+                version: 6,
                 kind: "control",
                 data: ControlData {
                     session_id,
@@ -220,7 +226,7 @@ impl CliEvent {
                 fact,
                 durable_seq,
             } => serde_json::to_string(&LiveFactEnvelope {
-                version: 5,
+                version: 6,
                 kind: "fact",
                 session_id,
                 fact,
@@ -232,7 +238,7 @@ impl CliEvent {
                 outcome,
                 durable_seq,
             } => serde_json::to_string(&OutcomeEnvelope {
-                version: 5,
+                version: 6,
                 kind: "outcome",
                 session_id,
                 turn_id,
@@ -530,7 +536,7 @@ struct CliMessageSink {
     cancellation: CancellationToken,
     stopped: CancellationToken,
     work: ApplicationWork,
-    interactions: std::sync::Mutex<Option<session_cli::InteractionWatcher>>,
+    observations: std::sync::Mutex<Option<session_cli::MessageObservations>>,
 }
 #[async_trait::async_trait]
 impl rsi_client::MessageSink for CliMessageSink {
@@ -541,6 +547,16 @@ impl rsi_client::MessageSink for CliMessageSink {
         use rsi_client::MessageEvent;
         let terminal = matches!(event, MessageEvent::Outcome { .. });
         let claimed = matches!(event, MessageEvent::Claimed { .. });
+        if terminal {
+            let observations = self
+                .observations
+                .lock()
+                .expect("message observations poisoned")
+                .take();
+            if let Some(observations) = observations {
+                observations.close().await;
+            }
+        }
         let event = match event {
             MessageEvent::Accepted(receipt) => CliEvent::Message {
                 session_id: receipt.session_id,
@@ -584,12 +600,12 @@ impl rsi_client::MessageSink for CliMessageSink {
             .map_err(|_| rsi_client::MessageRunError::SinkStopped)?;
         if claimed && !self.stopped.is_cancelled() && !self.cancellation.is_cancelled() {
             *self
-                .interactions
+                .observations
                 .lock()
-                .expect("message interaction watcher poisoned") =
-                Some(session_cli::spawn_interactions(
-                    self.handle.clone(),
-                    self.renderer.clone(),
+                .expect("message observations poisoned") =
+                Some(session_cli::spawn_message_observations(
+                    &self.handle,
+                    &self.renderer,
                     &self.stopped,
                     &self.work,
                 ));
@@ -619,7 +635,7 @@ pub(crate) async fn drive_application_turn(
             cancellation: cancellation.clone(),
             stopped: rendering_stopped.clone(),
             work,
-            interactions: std::sync::Mutex::new(None),
+            observations: std::sync::Mutex::new(None),
         };
         rsi_client::drive_message(handle.as_ref(), request, &cancellation, &sink)
             .await
@@ -672,6 +688,10 @@ pub(crate) async fn send_finish_line(
 pub(crate) struct CliRenderState {
     wrote_text: bool,
     text_ends_newline: bool,
+    model_effect: Option<rsi_agent_session_protocol::EffectId>,
+    model_settled: Option<rsi_agent_session_protocol::EffectId>,
+    model_cursor: rsi_agent_session_protocol::ModelEventCursor,
+    pending_model: Option<rsi_agent_turn_protocol::ObservedModel>,
 }
 
 impl CliRenderState {
@@ -684,6 +704,88 @@ impl CliRenderState {
     ) -> Result<()> {
         if output == OutputMode::Text {
             write_status_event(stderr, event)?;
+            if let CliEvent::Fact { fact, .. } = event
+                && let SessionFactBody::ModelStarted { effect_id, .. } = fact.body()
+                && self.model_effect.as_ref() != Some(effect_id)
+            {
+                self.model_effect = Some(effect_id.clone());
+                self.model_cursor = rsi_agent_session_protocol::ModelEventCursor::default();
+                if self
+                    .pending_model
+                    .as_ref()
+                    .is_some_and(|pending| &pending.effect_id == effect_id)
+                    && let Some(snapshot) = self.pending_model.take()
+                {
+                    write_model_events(
+                        stdout,
+                        snapshot.prefix.events_after(&mut self.model_cursor),
+                        &mut self.wrote_text,
+                        &mut self.text_ends_newline,
+                    )?;
+                }
+            }
+            if let CliEvent::Model { snapshot } = event {
+                if snapshot.purpose != rsi_agent_session_protocol::ModelEventPurpose::Conversation
+                    || self.model_settled.as_ref() == Some(&snapshot.effect_id)
+                    || !matches!(
+                        snapshot.status,
+                        rsi_agent_turn_protocol::ModelLiveStatus::Streaming
+                    )
+                {
+                    return Ok(());
+                }
+                if self.model_effect.as_ref() != Some(&snapshot.effect_id) {
+                    self.pending_model = Some(snapshot.clone());
+                    return Ok(());
+                }
+                return write_model_events(
+                    stdout,
+                    snapshot.prefix.events_after(&mut self.model_cursor),
+                    &mut self.wrote_text,
+                    &mut self.text_ends_newline,
+                );
+            }
+            if let CliEvent::Fact { fact, .. } = event
+                && let SessionFactBody::ModelAttemptSettled {
+                    effect_id,
+                    purpose,
+                    attempt,
+                    ..
+                } = fact.body()
+                && *purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation
+            {
+                if self
+                    .pending_model
+                    .as_ref()
+                    .is_some_and(|pending| &pending.effect_id == effect_id)
+                {
+                    self.pending_model = None;
+                }
+                if self.model_settled.as_ref() == Some(effect_id) {
+                    return Ok(());
+                }
+                if self.model_effect.as_ref() != Some(effect_id) {
+                    self.model_effect = Some(effect_id.clone());
+                    self.model_cursor = rsi_agent_session_protocol::ModelEventCursor::default();
+                }
+                write_model_events(
+                    stdout,
+                    attempt.events_after(&mut self.model_cursor),
+                    &mut self.wrote_text,
+                    &mut self.text_ends_newline,
+                )?;
+                self.model_settled = Some(effect_id.clone());
+                return Ok(());
+            }
+            if let CliEvent::Fact { fact, .. } = event
+                && let SessionFactBody::TurnTerminal { turn_id, .. } = fact.body()
+                && self
+                    .pending_model
+                    .as_ref()
+                    .is_some_and(|pending| &pending.turn_id == turn_id)
+            {
+                self.pending_model = None;
+            }
         }
         write_live_event(
             stdout,
@@ -1149,13 +1251,7 @@ pub(crate) fn report_terminal_diagnostic(outcome: &TurnOutcome) {
         TurnOutcome::Failed { code, message }
         | TurnOutcome::PartialFailed { code, message, .. } => eprintln!("{code}: {message}"),
         TurnOutcome::Interrupted { reason, .. } => eprintln!("interrupted: {reason}"),
-        TurnOutcome::BudgetExceeded {
-            dimension,
-            consumed,
-            limit,
-        } => {
-            eprintln!("turn budget exceeded for {dimension:?}: consumed {consumed}, limit {limit}");
-        }
+        TurnOutcome::MaxTokens => eprintln!("max_tokens: model output reached its token limit"),
         TurnOutcome::Completed | TurnOutcome::Cancelled => {}
     }
 }
@@ -1174,6 +1270,19 @@ pub(crate) fn write_live_event(
 }
 
 pub(crate) fn write_jsonl_event(stdout: &mut impl Write, event: &CliEvent) -> Result<()> {
+    if let CliEvent::Model { snapshot } = event {
+        for page in snapshot.pages() {
+            serde_json::to_writer(
+                &mut *stdout,
+                &serde_json::json!({"version":6,"type":"model","data":page}),
+            )
+            .map_err(|error| RsiError::Run(error.to_string()))?;
+            stdout
+                .write_all(b"\n")
+                .map_err(|error| stdout_write_error(&error))?;
+        }
+        return stdout.flush().map_err(|error| stdout_write_error(&error));
+    }
     let line = event
         .json_line()
         .map_err(|error| RsiError::Run(error.to_string()))?;
@@ -1205,15 +1314,11 @@ pub(crate) fn write_text_event(
         return Ok(());
     };
     match fact.body() {
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            event:
-                LanguageEvent::ContentDelta {
-                    delta: ContentDelta::Text(text),
-                    ..
-                },
+            attempt,
             ..
-        } => write_text_delta(stdout, text, wrote_text, text_ends_newline),
+        } => write_model_events(stdout, attempt.events(), wrote_text, text_ends_newline),
         SessionFactBody::ToolResult { result, .. } => {
             for content in &result.content {
                 if let ToolContent::Image { media } = content {
@@ -1239,7 +1344,9 @@ pub use rsi_terminal_ui::terminal_text;
 fn write_status_event(stderr: &mut impl Write, event: &CliEvent) -> Result<()> {
     let text = match event {
         CliEvent::Notice { kind, .. } if is_query_result(kind) => return Ok(()),
-        CliEvent::Control { .. } | CliEvent::Projections { .. } => return Ok(()),
+        CliEvent::Control { .. } | CliEvent::Projections { .. } | CliEvent::Model { .. } => {
+            return Ok(());
+        }
         CliEvent::Interactions { snapshot } => format!(
             "interactions: {}",
             serde_json::to_string(snapshot).map_err(|error| RsiError::Run(error.to_string()))?
@@ -1354,3 +1461,22 @@ application_diagnostics!(
     InspectorFactory,
     NativeAddonsFactory
 );
+
+fn write_model_events(
+    stdout: &mut impl Write,
+    events: impl Iterator<Item = rsi_agent_session_protocol::Result<(u64, LanguageEvent)>>,
+    wrote_text: &mut bool,
+    text_ends_newline: &mut bool,
+) -> Result<()> {
+    for event in events {
+        let (_, event) = event.map_err(|error| RsiError::Run(error.to_string()))?;
+        if let LanguageEvent::ContentDelta {
+            delta: ContentDelta::Text(text),
+            ..
+        } = event
+        {
+            write_text_delta(stdout, &text, wrote_text, text_ends_newline)?;
+        }
+    }
+    Ok(())
+}

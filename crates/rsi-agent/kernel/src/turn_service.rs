@@ -328,6 +328,13 @@ impl TurnService for AgentKernel {
         .boxed())
     }
 
+    async fn observe_models(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ModelLiveStream> {
+        model_live::observe(&self.inner, session_id)
+    }
+
     async fn observe_session(
         &self,
         session_id: &SessionId,
@@ -942,9 +949,8 @@ impl AgentKernel {
                 session.turns.iter().find_map(|(id, turn)| {
                     (turn.activation_id.is_some()
                         && turn.terminal.is_none()
-                        && !turn.cancel_requested
-                        && turn.budget_exhausted.is_none())
-                    .then(|| id.clone())
+                        && !turn.cancel_requested)
+                        .then(|| id.clone())
                 })
             })
         } else {
@@ -1461,12 +1467,10 @@ impl AgentKernel {
                         "resident session changed across atomic message claim".into(),
                     ));
                 }
-                let budget = session.header.settings().turn_budget().clone();
                 for fact in &facts {
                     apply_recovered_fact(
                         &mut session.turns,
                         &mut session.turn_order,
-                        &budget,
                         &session.header,
                         fact,
                     )

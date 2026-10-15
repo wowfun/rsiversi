@@ -175,38 +175,90 @@ impl MetricsReducer {
         if self.summary.through_seq.checked_add(1) != Some(fact.seq()) {
             return Err("metrics Fact sequence gap");
         }
-        match fact.body() {
-            SessionFactBody::ModelEvent {
-                turn_id,
-                effect_id,
-                purpose,
-                event,
-            } if !matches!(
-                event,
-                LanguageEvent::Usage { .. }
-                    | LanguageEvent::Finished { .. }
-                    | LanguageEvent::Failed { .. }
-            ) =>
-            {
-                if self.exact(turn_id, effect_id)?.purpose != *purpose {
-                    return Err("metrics model purpose mismatch");
-                }
-                self.summary.through_seq = fact.seq();
-                return Ok(());
-            }
+        if !matches!(
+            fact.body(),
             SessionFactBody::ModelIntent { .. }
-            | SessionFactBody::ModelStarted { .. }
-            | SessionFactBody::ModelEvent { .. }
-            | SessionFactBody::TurnTerminal { .. } => {}
-            _ => {
-                self.summary.through_seq = fact.seq();
-                return Ok(());
-            }
+                | SessionFactBody::ModelStarted { .. }
+                | SessionFactBody::ModelAttemptSettled { .. }
+                | SessionFactBody::TurnTerminal { .. }
+        ) {
+            self.summary.through_seq = fact.seq();
+            return Ok(());
         }
         let mut next = self.clone();
         next.apply(fact)?;
         next.summary.through_seq = fact.seq();
         *self = next;
+        Ok(())
+    }
+
+    fn model_event(
+        &mut self,
+        turn_id: &TurnId,
+        effect_id: &EffectId,
+        purpose: ModelEventPurpose,
+        event: &LanguageEvent,
+        seq: u64,
+        timestamp_ms: u64,
+    ) -> Result<(), &'static str> {
+        let open = self.exact(turn_id, effect_id)?;
+        if open.purpose != purpose {
+            return Err("metrics model purpose mismatch");
+        }
+        if let LanguageEvent::Usage { usage } = event {
+            if open.usage.replace(*usage).is_some() {
+                return Err("duplicate attempt usage");
+            }
+            let quote = open.price_quote.clone();
+            self.summary.configured_cost.usage(quote.as_ref(), *usage)?;
+            let first = self.summary.reported_attempts == 0;
+            self.summary.tokens = if first {
+                *usage
+            } else {
+                sum(self.summary.tokens, *usage)?
+            };
+            self.summary.reported_attempts = add(self.summary.reported_attempts, 1)?;
+        } else if matches!(
+            event,
+            LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
+        ) {
+            let open = self.open.take().expect("exact model attempt");
+            let failed = matches!(event, LanguageEvent::Failed { .. });
+            if failed {
+                self.summary.failed_attempts = add(self.summary.failed_attempts, 1)?;
+            }
+            if !failed && open.purpose == ModelEventPurpose::Conversation {
+                self.summary.last_context = open
+                    .usage
+                    .zip(open.description)
+                    .map(|(usage, description)| {
+                        ContextUsage::new(
+                            description,
+                            self.output_budgets.cap(&open.model),
+                            usage.input_tokens(),
+                            seq,
+                        )
+                    })
+                    .transpose()?;
+            } else if !failed && open.purpose == ModelEventPurpose::ContextCompaction {
+                self.summary.last_context = None;
+            }
+            self.summary.last_attempt = Some(AttemptMetrics {
+                turn: open.turn,
+                effect: open.effect,
+                model: open.model,
+                config_generation: open.config_generation,
+                reasoning_effort: open
+                    .settings
+                    .and_then(|settings| settings.effective_reasoning_effort),
+                usage: open.usage,
+                elapsed_ms: open
+                    .started_ms
+                    .and_then(|start| timestamp_ms.checked_sub(start)),
+                failed,
+                terminal_seq: seq,
+            });
+        }
         Ok(())
     }
 
@@ -247,69 +299,26 @@ impl MetricsReducer {
                     return Err("duplicate model start");
                 }
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
-                event,
                 purpose,
+                attempt,
             } => {
-                let open = self.exact(turn_id, effect_id)?;
-                if open.purpose != *purpose {
-                    return Err("metrics model purpose mismatch");
-                }
-                if let LanguageEvent::Usage { usage } = event {
-                    if open.usage.replace(*usage).is_some() {
-                        return Err("duplicate attempt usage");
-                    }
-                    let quote = open.price_quote.clone();
-                    self.summary.configured_cost.usage(quote.as_ref(), *usage)?;
-                    let first = self.summary.reported_attempts == 0;
-                    self.summary.tokens = if first {
-                        *usage
-                    } else {
-                        sum(self.summary.tokens, *usage)?
-                    };
-                    self.summary.reported_attempts = add(self.summary.reported_attempts, 1)?;
-                } else if matches!(
-                    event,
-                    LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
-                ) {
-                    let open = self.open.take().expect("exact model attempt");
-                    let failed = matches!(event, LanguageEvent::Failed { .. });
-                    if failed {
-                        self.summary.failed_attempts = add(self.summary.failed_attempts, 1)?;
-                    }
-                    if !failed && open.purpose == ModelEventPurpose::Conversation {
-                        self.summary.last_context = open
-                            .usage
-                            .zip(open.description)
-                            .map(|(usage, description)| {
-                                ContextUsage::new(
-                                    description,
-                                    self.output_budgets.cap(&open.model),
-                                    usage.input_tokens(),
-                                    fact.seq(),
-                                )
-                            })
-                            .transpose()?;
-                    } else if !failed && open.purpose == ModelEventPurpose::ContextCompaction {
-                        self.summary.last_context = None;
-                    }
-                    self.summary.last_attempt = Some(AttemptMetrics {
-                        turn: open.turn,
-                        effect: open.effect,
-                        model: open.model,
-                        config_generation: open.config_generation,
-                        reasoning_effort: open
-                            .settings
-                            .and_then(|settings| settings.effective_reasoning_effort),
-                        usage: open.usage,
-                        elapsed_ms: open
-                            .started_ms
-                            .and_then(|start| fact.timestamp_ms().checked_sub(start)),
-                        failed,
-                        terminal_seq: fact.seq(),
-                    });
+                let start = self
+                    .exact(turn_id, effect_id)?
+                    .started_ms
+                    .unwrap_or(fact.timestamp_ms());
+                for item in attempt.events() {
+                    let (elapsed, event) = item.map_err(|_| "invalid model attempt evidence")?;
+                    self.model_event(
+                        turn_id,
+                        effect_id,
+                        *purpose,
+                        &event,
+                        fact.seq(),
+                        start.saturating_add(elapsed),
+                    )?;
                 }
             }
             SessionFactBody::TurnTerminal { turn_id, .. }

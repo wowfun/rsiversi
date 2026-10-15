@@ -82,6 +82,7 @@ impl ServiceHostDiagnostics {
         increment(&self.inner.capacity_rejections, 1);
     }
 
+    #[cfg(unix)]
     pub(crate) fn with_api(api: rsi_api_http::HttpDiagnostics) -> Self {
         Self {
             inner: Arc::default(),

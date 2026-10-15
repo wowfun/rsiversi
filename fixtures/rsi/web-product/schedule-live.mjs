@@ -1,3 +1,4 @@
+import {assistantText} from './model-attempt.mjs';
 import {navigationFilter} from './controls.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
@@ -34,7 +35,7 @@ try {
   assert.equal(automatic.length,1,'one automatic input');assert.equal(automatic[0].source.source.domain.id,'rsi.schedule');
   const list=facts.find(f=>f.type==='tool_intent' && f.name==='schedule_list' && f.turn_id===automatic[0].turn_id);assert(list,'automatic Turn must call ordinary Tool');
   const listed=facts.find(f=>f.type==='tool_result' && f.effect_id===list.effect_id);assert.equal(listed?.result.value.state.allocated_rounds,1);assert.equal(listed.result.value.state.reminders.length,1);assert.equal(listed.result.value.state.reminders[0].consumed,true);
-  const text=facts.filter(f=>f.type==='model_event' && f.turn_id===automatic[0].turn_id).map(f=>f.event?.type==='content_delta' && f.event.delta?.type==='text' ? f.event.delta.value : '').join('');assert.match(text,/LIVE_SCHEDULE_ONCE/);
+  const text=assistantText(facts.filter(f=>f.turn_id===automatic[0].turn_id));assert.match(text,/LIVE_SCHEDULE_ONCE/);
   assert.equal(service.provider.requests.length,0);await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByText('Running',{exact:true}).waitFor({state:'hidden'});await page.screenshot({path:join(report,'schedule-wide.png')});
   await page.setViewportSize({width:420,height:900});await pane.locator('.transcript').evaluate(element=>{element.scrollTop=element.scrollHeight;});await page.screenshot({path:join(report,'schedule-narrow.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);
   await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browser.version(),model,reasoning_effort:'off',mock_model_requests:0,automatic_rounds:1,tool_calls:['schedule_create','schedule_list'],elapsed_ms:Date.now()-started},null,2));

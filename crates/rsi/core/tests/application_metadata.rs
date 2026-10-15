@@ -84,6 +84,7 @@ fn service_catalog_lists_and_protects_explicit_builtins() {
     assert!(catalog.list_applications().is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn standard_preset_manager_preserves_the_service_launch_identity() {
     let root = tempfile::tempdir().unwrap();

@@ -26,6 +26,7 @@ pub async fn discover_models(
 ) -> Result<Vec<rsi_ai_protocol::DiscoveredModel>, AiError> {
     rsi_ai_openai::discovery::list(transport, endpoint, "/models", secret).await
 }
+use futures_util::StreamExt as _;
 use sha2::{Digest as _, Sha256};
 
 /// Explicit wire selection; no fallback or automatic retry changes protocols.
@@ -54,6 +55,7 @@ pub struct DeepSeekConfig {
     chat: ChatCompletionsConfig,
     responses: OpenAiConfig,
     protocol: DeepSeekProtocol,
+    default_output_tokens: BTreeMap<String, u32>,
 }
 
 impl Default for DeepSeekConfig {
@@ -68,6 +70,7 @@ impl DeepSeekConfig {
     pub fn with_endpoint(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let endpoint = endpoint.into();
         let chat = ChatCompletionsConfig::new(endpoint.clone())?
+            .with_stream_idle_timeout(std::time::Duration::from_mins(5))?
             .with_path("/chat/completions")?
             .with_image_input(false)
             .with_disabled_reasoning_alias(
@@ -75,6 +78,7 @@ impl DeepSeekConfig {
             )
             .with_developer_role(DeveloperMessageRole::System);
         let responses = OpenAiConfig::new(endpoint)?
+            .with_stream_idle_timeout(std::time::Duration::from_mins(5))?
             .with_responses_options("/responses", ResponsesState::Stateless, MessageRole::System)?
             .with_disabled_reasoning_alias(
                 rsi_ai_protocol::ReasoningEffortId::new("off").expect("static effort ID"),
@@ -83,6 +87,7 @@ impl DeepSeekConfig {
             chat,
             responses,
             protocol: DeepSeekProtocol::default(),
+            default_output_tokens: BTreeMap::new(),
         })
     }
 
@@ -93,6 +98,32 @@ impl DeepSeekConfig {
         self
     }
 
+    /// Overrides a model's request cap before installing its capacity profile.
+    pub fn with_default_output_tokens(
+        mut self,
+        model: impl Into<String>,
+        cap: u32,
+    ) -> Result<Self, AiError> {
+        let model = model.into();
+        rsi_ai_protocol::validate_identifier("model", &model)
+            .map_err(rsi_ai_transport::invalid_request_error)?;
+        rsi_ai_protocol::LanguageSettings::default()
+            .with_max_output_tokens(cap)
+            .map_err(rsi_ai_transport::invalid_request_error)?;
+        self.default_output_tokens.insert(model, cap);
+        Ok(self)
+    }
+
+    /// Overrides the finite SSE idle allowance for this deployment.
+    pub fn with_stream_idle_timeout(
+        mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Self, AiError> {
+        self.chat = self.chat.with_stream_idle_timeout(timeout)?;
+        self.responses = self.responses.with_stream_idle_timeout(timeout)?;
+        Ok(self)
+    }
+
     /// Adds one exact model-capacity profile to this deployment.
     pub fn with_model_profile(
         mut self,
@@ -100,6 +131,17 @@ impl DeepSeekConfig {
         limits: LanguageModelLimits,
     ) -> Result<Self, AiError> {
         let model = model.into();
+        let cap = self
+            .default_output_tokens
+            .get(&model)
+            .copied()
+            .unwrap_or(256_000);
+        if cap > limits.max_output_reserve_tokens() {
+            return Err(rsi_ai_transport::invalid_request_error(
+                "DeepSeek default_output_tokens exceeds the model's declared maximum output reserve",
+            ));
+        }
+        self.default_output_tokens.insert(model.clone(), cap);
         self.chat = self.chat.with_model_profile(model.clone(), limits)?;
         self.responses = self.responses.with_model_profile(model, limits)?;
         Ok(self)
@@ -138,6 +180,7 @@ impl DeepSeekConfig {
 pub struct DeepSeekAdapter {
     inner: Arc<dyn LanguageAdapter>,
     protocol: DeepSeekProtocol,
+    default_output_tokens: BTreeMap<String, u32>,
 }
 
 impl DeepSeekAdapter {
@@ -153,6 +196,7 @@ impl DeepSeekAdapter {
                 }
             },
             protocol: config.protocol,
+            default_output_tokens: config.default_output_tokens,
         }
     }
 }
@@ -163,6 +207,7 @@ impl fmt::Debug for DeepSeekAdapter {
             .debug_struct("DeepSeekAdapter")
             .field("inner", &self.inner)
             .field("protocol", &self.protocol)
+            .field("default_output_tokens", &self.default_output_tokens)
             .finish()
     }
 }
@@ -175,9 +220,11 @@ impl LanguageAdapter for DeepSeekAdapter {
     fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
         let profile = self.inner.describe(model)?;
         if self.protocol == DeepSeekProtocol::ChatCompletions {
-            return Ok(profile);
+            return profile
+                .with_default_output_tokens(self.default_output_tokens.get(model).copied())
+                .map_err(rsi_ai_transport::invalid_request_error);
         }
-        Ok(rsi_ai_protocol::LanguageProfile::new(
+        rsi_ai_protocol::LanguageProfile::new(
             profile.context_window_tokens(),
             profile.default_output_reserve_tokens(),
             profile.max_output_reserve_tokens(),
@@ -187,7 +234,9 @@ impl LanguageAdapter for DeepSeekAdapter {
             Vec::new(),
         )
         .expect("validated DeepSeek model limits")
-        .with_reasoning_efforts(profile.reasoning_efforts().clone()))
+        .with_reasoning_efforts(profile.reasoning_efforts().clone())
+        .with_default_output_tokens(self.default_output_tokens.get(model).copied())
+        .map_err(rsi_ai_transport::invalid_request_error)
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
@@ -216,7 +265,46 @@ impl LanguageAdapter for DeepSeekAdapter {
         if let Err(error) = self.validate_request(&model, &request) {
             return Box::pin(async move { Err(error) });
         }
-        self.inner.prepare(context, model, request)
+        let pending = self.inner.prepare(context, model, request);
+        Box::pin(async move {
+            let prepared = pending.await?;
+            Ok(Prepared::new(prepared.snapshot().clone(), move |abort| {
+                Box::pin(async move {
+                    let mut input = prepared.start(abort).await?;
+                    let output: LanguageAdapterStream = Box::pin(async_stream::stream! {
+                        let mut emitted = false;
+                        while let Some(event) = input.next().await {
+                            match &event {
+                                Ok(rsi_ai_protocol::LanguageEvent::ContentDelta { delta, .. }) => {
+                                    emitted |= match delta {
+                                        rsi_ai_protocol::ContentDelta::Text(value)
+                                        | rsi_ai_protocol::ContentDelta::Reasoning(value)
+                                        | rsi_ai_protocol::ContentDelta::ToolArguments(value) => !value.is_empty(),
+                                    };
+                                }
+                                Ok(rsi_ai_protocol::LanguageEvent::Failed { error, replay })
+                                    if error.kind() == rsi_ai_protocol::ErrorKind::Protocol
+                                        && matches!(error.provider_code(), Some("sse.missing_terminal" | "sse.missing_done" | "sse.incomplete_frame")) => {
+                                    yield Ok(rsi_ai_protocol::LanguageEvent::Failed {
+                                        error: error.clone().with_kind(if emitted { rsi_ai_protocol::ErrorKind::Transport } else { rsi_ai_protocol::ErrorKind::EmptyResponse }), replay: replay.clone() });
+                                    return;
+                                }
+                                Ok(rsi_ai_protocol::LanguageEvent::Finished { reason: rsi_ai_protocol::FinishReason::Stop, replay }) if !emitted => {
+                                    yield Ok(rsi_ai_protocol::LanguageEvent::Failed {
+                                        error: rsi_ai_transport::provider_error(rsi_ai_protocol::ErrorKind::EmptyResponse,
+                                            rsi_ai_protocol::ErrorPhase::Stream, rsi_ai_protocol::DispatchStatus::Dispatched,
+                                            "DeepSeek completed without output"), replay: replay.clone() });
+                                    return;
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                    });
+                    Ok(output)
+                })
+            }))
+        })
     }
 }
 
@@ -252,6 +340,25 @@ fn validate_responses_support(request: &LanguageRequest) -> Result<(), AiError> 
     Ok(())
 }
 
+/// Finite phase deadlines, in milliseconds, for `DeepSeek` streaming requests.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[allow(clippy::struct_field_names)] // Serialized fields explicitly state their time unit.
+struct DeepSeekTimeouts {
+    connect_ms: u64,
+    headers_ms: u64,
+    idle_ms: u64,
+}
+impl Default for DeepSeekTimeouts {
+    fn default() -> Self {
+        Self {
+            connect_ms: 10_000,
+            headers_ms: 300_000,
+            idle_ms: 300_000,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeepSeekPluginConfig {
@@ -261,6 +368,10 @@ struct DeepSeekPluginConfig {
     #[serde(default)]
     protocol: DeepSeekProtocol,
     language_models: BTreeMap<String, LanguageModelLimits>,
+    #[serde(default)]
+    http_timeouts: DeepSeekTimeouts,
+    #[serde(default)]
+    default_output_tokens: BTreeMap<String, u32>,
     #[serde(default)]
     reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
@@ -315,9 +426,34 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
                 "DeepSeek deployment requires a nonempty exact model map".into(),
             ));
         }
+        if [
+            config.http_timeouts.connect_ms,
+            config.http_timeouts.headers_ms,
+            config.http_timeouts.idle_ms,
+        ]
+        .contains(&0)
+        {
+            return Err(rsi_meta::MetaError::InvalidInput(
+                "DeepSeek HTTP timeouts must be nonzero".into(),
+            ));
+        }
         let mut adapter = DeepSeekConfig::with_endpoint(&config.endpoint)
             .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?
-            .with_protocol(config.protocol);
+            .with_protocol(config.protocol)
+            .with_stream_idle_timeout(std::time::Duration::from_millis(
+                config.http_timeouts.idle_ms,
+            ))
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        for (model, cap) in &config.default_output_tokens {
+            if !config.language_models.contains_key(model) {
+                return Err(rsi_meta::MetaError::InvalidInput(
+                    "output default names an unconfigured model".into(),
+                ));
+            }
+            adapter = adapter
+                .with_default_output_tokens(model, *cap)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
         for (model, limits) in &config.language_models {
             adapter = adapter
                 .with_model_profile(model, *limits)
@@ -350,8 +486,11 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
         let transport: Arc<dyn HttpTransport> = match &self.transport {
             Some(transport) => Arc::clone(transport),
             None => Arc::new(
-                rsi_ai_transport::ReqwestTransport::new()
-                    .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?,
+                rsi_ai_transport::ReqwestTransport::with_streaming_timeouts(
+                    std::time::Duration::from_millis(prepared.config.http_timeouts.connect_ms),
+                    std::time::Duration::from_millis(prepared.config.http_timeouts.headers_ms),
+                )
+                .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?,
             ),
         };
         let endpoint_fingerprint = format!(
@@ -360,6 +499,23 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
         );
         let registration = ProviderRegistration::builder(&prepared.config.deployment, "deepseek")
             .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?
+            .with_retry_policy(
+                rsi_ai_protocol::RetryPolicy::new(
+                    5,
+                    vec![
+                        rsi_ai_protocol::ErrorKind::RateLimited,
+                        rsi_ai_protocol::ErrorKind::Server,
+                        rsi_ai_protocol::ErrorKind::Timeout,
+                        rsi_ai_protocol::ErrorKind::Transport,
+                        rsi_ai_protocol::ErrorKind::EmptyResponse,
+                    ],
+                    500,
+                    10_000,
+                    100,
+                )
+                .expect("static DeepSeek retry policy")
+                .with_language_regeneration(),
+            )
             .with_credential(prepared.config.credential)
             .with_protocol(
                 prepared.config.protocol.name(),

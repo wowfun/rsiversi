@@ -776,6 +776,11 @@ impl SessionHandle for Handle {
             has_more: checked.has_more,
         })
     }
+    async fn observe_models(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+        crate::client_stream::models(self).await
+    }
     async fn observe(
         &self,
         cursor: ObservationCursor,

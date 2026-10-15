@@ -15,13 +15,12 @@ use rsi_agent_composition_protocol::{
 };
 use rsi_agent_session_protocol::{
     ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentMessage,
-    AgentMessageContent, AgentMessageSource, AgentPath, BudgetDimension, EffectId, EffectKind,
-    ForkOrigin, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_DURABLE_AGENT_TREE_NODES,
-    MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_RUNNING_AGENT_TREE_NODES,
-    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES, MAXIMUM_TURN_TEXT_BYTES,
-    MessageDiscardReason, MessageId, MessageOptions, MessageTarget, SessionFact, SessionFactBody,
-    SessionHeader, SessionId, StepOutcome, TurnBudget, TurnId, TurnOutcome, WaitResumeCause,
-    validate_identifier,
+    AgentMessageContent, AgentMessageSource, AgentPath, EffectId, EffectKind, ForkOrigin,
+    MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ,
+    MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_RUNNING_AGENT_TREE_NODES, MAXIMUM_SESSION_FACT_BYTES,
+    MAXIMUM_SESSION_HEADER_BYTES, MAXIMUM_TURN_TEXT_BYTES, MessageDiscardReason, MessageId,
+    MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId,
+    StepOutcome, TurnId, TurnOutcome, WaitResumeCause, validate_identifier,
 };
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
@@ -90,10 +89,13 @@ pub const DEFAULT_MAXIMUM_STORE_READ_BYTES: usize = 64 * 1024 * 1024;
 /// Default number of simultaneously attached observers.
 pub const DEFAULT_MAXIMUM_ACTIVE_OBSERVERS: usize = 1_024;
 
-/// Process-wide Kernel resource limits; all defaults may only be tightened.
+/// Process-wide Kernel resource limits; model reservations may be raised by the host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KernelLimits {
+    /// Logical live model reservations in positive multiples of 64 MiB, not measured RSS.
+    #[serde(default = "default_live_model_bytes")]
+    pub maximum_live_model_bytes: usize,
     /// Total speculative Fact bytes across all resident sessions.
     #[serde(default = "default_process_pending_fact_bytes")]
     pub maximum_process_pending_fact_bytes: usize,
@@ -106,6 +108,10 @@ pub struct KernelLimits {
     /// Simultaneously attached live observations.
     #[serde(default = "default_active_observers")]
     pub maximum_active_observers: usize,
+}
+
+const fn default_live_model_bytes() -> usize {
+    256 * 1024 * 1024
 }
 
 const fn default_process_pending_fact_bytes() -> usize {
@@ -127,6 +133,7 @@ const fn default_active_observers() -> usize {
 impl Default for KernelLimits {
     fn default() -> Self {
         Self {
+            maximum_live_model_bytes: default_live_model_bytes(),
             maximum_process_pending_fact_bytes: default_process_pending_fact_bytes(),
             maximum_store_read_bytes: default_store_read_bytes(),
             maximum_active_observers: default_active_observers(),
@@ -136,8 +143,17 @@ impl Default for KernelLimits {
 }
 
 impl KernelLimits {
-    /// Revalidates positive values no wider than the fixed process maxima.
+    /// Validates reservation granularity and the independent fixed process maxima.
     pub fn validate(&self) -> Result<()> {
+        if self.maximum_live_model_bytes == 0
+            || !self
+                .maximum_live_model_bytes
+                .is_multiple_of(model_live::ATTEMPT_BYTES)
+        {
+            return Err(KernelError::Capacity(
+                "live model reservation capacity must be a positive multiple of 64 MiB".into(),
+            ));
+        }
         for (name, value, maximum) in [
             (
                 "maximum_process_pending_fact_bytes",
@@ -224,7 +240,10 @@ impl fmt::Debug for AgentKernel {
     }
 }
 
+mod model_live;
+
 struct KernelInner {
+    model_live: model_live::Models,
     execution_messages: execution_admission::Messages,
     tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
@@ -632,11 +651,9 @@ struct TurnControl {
     claim_composition: Option<AgentCompositionPin>,
     program_roles: Arc<BTreeMap<String, rsi_tools_protocol::ToolProgramRole>>,
     conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
-    evidence_inline_bytes: usize,
+
     tool_source: Option<Arc<tool_origin::ToolSource>>,
-    output_recovery_ordinal: u64,
-    seen_model_effects: Arc<BTreeSet<EffectId>>,
-    elapsed: Arc<elapsed::ElapsedState>,
+
     accepted_at_ms: u64,
     accepted_seq: u64,
     activation_id: Option<rsi_agent_session_protocol::ActivationId>,
@@ -648,8 +665,6 @@ struct TurnControl {
     claim: Option<ClaimOwner>,
     prepared_lane: Option<Arc<TreeClaimLane>>,
     effects: BTreeMap<EffectId, ActiveEffect>,
-    budget_usage: BudgetUsage,
-    budget_exhausted: Option<(BudgetDimension, u64, u64)>,
 }
 
 #[derive(Clone)]
@@ -670,15 +685,6 @@ struct DurableMessageScan {
     pending: Vec<DurableMessageEntry>,
     durable_control_seq: u64,
     durable_fact_seq: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct BudgetUsage {
-    provider_attempts: u64,
-    output_recoveries: u64,
-    tool_calls: u64,
-    generated_records: u64,
-    generated_record_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -731,10 +737,7 @@ impl TurnControl {
             program_roles: Arc::new(BTreeMap::new()),
             conclusion: None,
             tool_source: None,
-            output_recovery_ordinal: 0,
-            seen_model_effects: Arc::new(BTreeSet::new()),
-            evidence_inline_bytes: 0,
-            elapsed: Arc::new(elapsed::ElapsedState::default()),
+
             accepted_at_ms,
             accepted_seq,
             activation_id: None,
@@ -746,8 +749,6 @@ impl TurnControl {
             claim: None,
             prepared_lane: None,
             effects: BTreeMap::new(),
-            budget_usage: BudgetUsage::default(),
-            budget_exhausted: None,
         }
     }
 }
@@ -876,7 +877,6 @@ mod continuation;
 mod contributions;
 mod controlled_work;
 mod domains;
-mod elapsed;
 mod ending;
 mod evidence;
 mod execution;
@@ -915,10 +915,9 @@ use recovery::{
 };
 use turn_state::{
     apply_executor_body, apply_recovered_fact, bounded_diagnostic, canonicalize_terminal,
-    clone_turn_control, deregister_executor, enforce_turn_budget, enqueue, kernel_turn_error,
-    lock_state, next_fact, publish_live_watermarks, push_pending, reserve_atomic_capacity,
-    submission_conflict, turn_composition_error, turn_kernel_error, turn_not_found,
-    turn_store_error,
+    clone_turn_control, deregister_executor, enqueue, kernel_turn_error, lock_state, next_fact,
+    publish_live_watermarks, push_pending, reserve_atomic_capacity, submission_conflict,
+    turn_composition_error, turn_kernel_error, turn_not_found, turn_store_error,
 };
 
 struct ObservationState {

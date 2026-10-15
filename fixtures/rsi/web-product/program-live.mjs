@@ -1,3 +1,4 @@
+import {assistantText} from './model-attempt.mjs';
 import {navigationFilter} from './controls.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {requireProviderUsage} from './evidence.mjs';
@@ -44,7 +45,7 @@ try {
     const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(128)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
     const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);await writeFile(join(report,`${mode}-facts.json`),JSON.stringify(facts,null,2));
     const intents=facts.filter(f=>f.type==='tool_intent'),reads=intents.filter(f=>f.name==='file_read');assert.equal(reads.length,4);
-    const text=facts.filter(f=>f.type==='model_event').map(f=>f.event?.type==='content_delta'&&f.event.delta?.type==='text'?f.event.delta.value:'').join('');assert.match(text,/LIVE_TOTAL_46/);
+    const text=assistantText(facts);assert.match(text,/LIVE_TOTAL_46/);
     if(mode==='program') {
       const coordinators=intents.filter(f=>f.name==='run_code');assert.equal(coordinators.length,1);assert.equal(coordinators[0].arguments.script,script);
       assert(reads.every((read,index)=>read.origin?.kind==='program'&&read.origin.parent_effect_id===coordinators[0].effect_id&&read.origin.ordinal===index+1));

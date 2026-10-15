@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use rsi_api_protocol::{AuthenticatedDevice, CallOrigin, DeviceId};
 use rsi_automation::*;
 use rsi_browser::{Assertion, CheckSpec};
@@ -26,8 +28,6 @@ fn rule() -> AutomationRule {
         explore_on_failure: true,
         authorized_catalog_digest: "0".repeat(64),
         model: rsi_ai_protocol::ModelRef::new("fixture", "fixture-model").unwrap(),
-        turn_budget: rsi_agent_session_protocol::TurnBudget::new(120_000, 8, 16, 256, 1_048_576)
-            .unwrap(),
         max_rounds: 2,
     }
 }

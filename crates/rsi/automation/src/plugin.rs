@@ -48,6 +48,10 @@ struct Config {
 fn meta(e: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(e.to_string())
 }
+fn invalid(e: impl std::fmt::Display) -> MetaError {
+    MetaError::InvalidInput(e.to_string())
+}
+
 #[async_trait]
 #[expect(
     clippy::too_many_lines,
@@ -55,28 +59,29 @@ fn meta(e: impl std::fmt::Display) -> MetaError {
 )]
 impl PluginFactory for AutomationFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        let c: Config = serde_json::from_value(config.clone()).map_err(meta)?;
+        let c: Config = serde_json::from_value(config.clone()).map_err(invalid)?;
         if !c.directory.is_absolute()
             || c.sources.len() > 16
             || c.listen.is_some_and(|a| !a.ip().is_loopback())
         {
-            return Err(meta(
+            return Err(invalid(
                 "explicit private Automation directory and loopback listener required",
             ));
         }
         if let Some(runtime) = c.runtime {
-            runtime.validate().map_err(meta)?;
+            runtime.validate().map_err(invalid)?;
         }
         let mut ids = std::collections::BTreeSet::new();
         for source in c.sources {
-            crate::protocol::identity(&source.id).map_err(meta)?;
-            source.credential.validate().map_err(meta)?;
+            crate::protocol::identity(&source.id).map_err(invalid)?;
+            source.credential.validate().map_err(invalid)?;
             if source.credential.owner.as_str() != "rsi.automation" || !ids.insert(source.id) {
-                return Err(meta(
+                return Err(invalid(
                     "Automation sources require unique identities and owner-local credentials",
                 ));
             }
         }
+        crate::require_native_platform().map_err(meta)?;
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<ApiRegistrarContract>()
             .requiring_local::<rsi_browser::RuntimePoolContract>()
@@ -87,6 +92,7 @@ impl PluginFactory for AutomationFactory {
             .requiring_local::<rsi_workspace_protocol::WorkspaceRegistryContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        crate::require_native_platform().map_err(meta)?;
         let config: Config =
             serde_json::from_value(plan.config().as_ref().clone()).map_err(meta)?;
         let directory = config.directory.clone();
@@ -126,6 +132,8 @@ impl PluginFactory for AutomationFactory {
             workspace: config.directory.join("workspace"),
             roots,
         });
+        // Compile the native-effect path only where this owner admits activation.
+        #[cfg(unix)]
         rsi_files_native_fs::create_absolute_directory_no_follow(&explorer.workspace)
             .map_err(meta)?;
         let credentials = plan.local::<rsi_credentials_protocol::CredentialsResolveContract>()?;
@@ -222,9 +230,10 @@ enum Never {}
 fn api_error(error: AdmissionError) -> ApiError {
     match error {
         AdmissionError::Capacity => ApiError::Capacity,
-        AdmissionError::NotFound | AdmissionError::Unavailable | AdmissionError::Corrupt => {
-            ApiError::Unavailable
-        }
+        AdmissionError::Unsupported
+        | AdmissionError::NotFound
+        | AdmissionError::Unavailable
+        | AdmissionError::Corrupt => ApiError::Unavailable,
         AdmissionError::OutcomeUnknown => ApiError::OutcomeUnknown,
         AdmissionError::Conflict => {
             ApiError::Invalid("automation revision or identity conflict".into())
@@ -471,5 +480,64 @@ mod tests {
             authorize_read_return(&CallOrigin::Local, &grant),
             Err(ApiError::Unauthorized)
         ));
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_configuration_precedes_platform_admission_without_io() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("sentinel"), b"retained").unwrap();
+        let valid = json!({"directory": root.path().join("missing/automation")});
+        let source = json!({"id":"github","credential":{"owner":"rsi.automation","slot":"github"}});
+        let mut invalid = vec![Value::Null, json!({}), json!({"directory":"relative"})];
+        for (field, value) in [
+            ("directory", json!("")),
+            ("listen", json!("192.0.2.1:8080")),
+            ("sources", json!(vec![source.clone(); 17])),
+            ("sources", json!([source.clone(), source.clone()])),
+            (
+                "sources",
+                json!([{"id":"invalid/id","credential":source["credential"]}]),
+            ),
+            (
+                "sources",
+                json!([{"id":"github","credential":{"owner":"rsi.other","slot":"github"}}]),
+            ),
+            (
+                "sources",
+                json!([{"id":"github","credential":{"owner":"rsi.automation","slot":""}}]),
+            ),
+            (
+                "runtime",
+                json!({"node":"relative","chromium_directory":root.path(),"package_directory":root.path(),"systemd_run":root.path(),"user_runtime_directory":root.path(),"artifact_digest":"a".repeat(64)}),
+            ),
+            ("unknown", json!(true)),
+        ] {
+            let mut config = valid.clone();
+            config[field] = value;
+            invalid.push(config);
+        }
+        let factory = AutomationFactory::default();
+        for config in invalid {
+            assert!(
+                matches!(factory.prepare(&config), Err(MetaError::InvalidInput(_))),
+                "static invalid configuration: {config}"
+            );
+        }
+        let result = factory.prepare(&valid);
+        if cfg!(unix) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(root.path().join("sentinel")).unwrap(),
+            b"retained"
+        );
     }
 }

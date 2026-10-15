@@ -2,6 +2,9 @@
 name: Goal state and live continuation authority
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Aggregate Turn allowances are superseded; the resolved safe-integer Goal round maximum remains durable.
+
 ## Problem
 
 An ordinary Turn has finite elapsed, provider, Tool and generated-record

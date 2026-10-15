@@ -1,4 +1,4 @@
-import {closeDetails,details,openResource,resources} from "./controls.mjs";
+import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import './paired-env.mjs';
@@ -237,11 +237,10 @@ try {
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       await navigationFilter(page,"all");await page.locator("#refresh").click();
       await page.locator(`[data-testid="conversation-row"][data-session-id="${leftIdentity.split(" · ").at(-1)}"]`).getByTestId("conversation-open").click();
-      await left.locator(".transcript > .omitted").waitFor();
-      assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
-      assert.doesNotMatch(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
+      await left.locator(".message.assistant").filter({hasText:"Stream complete."}).waitFor();
+      assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       await left.locator(".transcript").evaluate(node => { node.scrollTop = 0; });
-      await page.screenshot({ path: join(report, `${name}-partial-history.png`) });
+      await page.screenshot({ path: join(report, `${name}-settled-history.png`) });
       const sourceButton = left.locator(".message.assistant").filter({ hasText: "segment" }).getByRole("button", { name: "Inspect sources", exact: true });
       await sourceButton.evaluate(node => {
         window.sourcePointerEvidence = [];
@@ -260,32 +259,17 @@ try {
         }), null, 2));
       }
       const blockSources = details(page).locator('.block-sources');
-      assert.equal(await blockSources.locator(".source-reference").count(), 64);
-      const firstReference = await blockSources.locator(".source-reference").first().innerText();
-      await blockSources.getByRole("button", { name: "Next sources", exact: true }).click();
-      await blockSources.locator(".hint").filter({ hasText: "Sources 65–" }).waitFor();
-      assert.notEqual(await blockSources.locator(".source-reference").first().innerText(), firstReference);
-      await blockSources.getByRole("button", { name: "Previous sources", exact: true }).click();
-      await blockSources.locator(".hint").filter({ hasText: "Sources 1–" }).waitFor();
-      assert.equal(await blockSources.locator(".source-reference").first().innerText(), firstReference);
-      assert.equal(await details(page).evaluate(dialog => {
-        const bounds = dialog.getBoundingClientRect();
-        const heading = dialog.closest("[data-dockkit-content]").querySelector("[data-dockkit-strip]").getBoundingClientRect();
-        const controls = dialog.querySelector(".block-sources > .actions").getBoundingClientRect();
-        return heading.bottom <= bounds.top + 2 && controls.bottom <= innerHeight && dialog.scrollTop === 0;
-      }), true, "source-list paging keeps title and controls in view");
+      assert.equal(await blockSources.locator(".source-reference").count(), 1);
+      assert.equal(await blockSources.getByRole("button", { name: "Next sources", exact: true }).isEnabled(), false);
+      const sourceGeometry=await sourceInspectionGeometry(page);
+      assert.equal(sourceGeometry.headingBottom<=sourceGeometry.contentTop+2&&sourceGeometry.controlsBottom<=sourceGeometry.viewportHeight&&sourceGeometry.scrollTop===0,true,"source inspection keeps title and controls in view");
       await page.screenshot({ path: join(report, `${name}-block-sources.png`) });
       await blockSources.locator(".source-reference").first().click();
       await page.locator(".source-text").filter({ hasText: "segment" }).waitFor();
       await closeDetails(page);
 
-      await left.getByRole("button", { name: "Earlier history", exact: true }).click();
-      await left.locator(".pane-status").filter({ hasText: "History" }).waitFor();
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
-      await left.getByRole("button", { name: "Back to live", exact: true }).click();
-      await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
-      assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
       await page.getByRole("button", { name: "Settings", exact: true }).click();
       await page.locator(".advanced-settings summary").click();
       await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
@@ -303,8 +287,10 @@ try {
       await identifier.fill(previousId);
       const sandbox=page.getByRole('combobox',{name:'Settings / sandbox',exact:true});
       const sandboxMode=await sandbox.inputValue();await sandbox.selectOption(sandboxMode);
-      const numeric=page.getByRole('spinbutton',{name:'Settings / turn_budget / maximum_tool_calls',exact:true});
-      await page.getByRole('checkbox',{name:'Include Settings / turn_budget / maximum_tool_calls',exact:true}).check();await numeric.fill('123');
+      const caps=page.getByRole('textbox',{name:'Settings / output_budgets JSON',exact:true});
+      await page.getByRole('checkbox',{name:'Include Settings / output_budgets',exact:true}).check();
+      const capValue = maximum => `[{"model":{"deployment":"fixture","model":"fixture-model"},"max_output_tokens":${maximum}}]`;
+      await caps.fill(capValue('123'));
       await page.screenshot({path:join(report,`${name}-settings-typed.png`)});
       await page.setViewportSize({width:420,height:860});await page.screenshot({path:join(report,`${name}-settings-typed-narrow.png`)});await page.setViewportSize({width:1440,height:980});
       const savingEditor = await approvalSetting.elementHandle();
@@ -312,21 +298,21 @@ try {
       await page.waitForFunction(previous => !previous.isConnected, savingEditor);
       await savingEditor.dispose();
       assert(await approvalSetting.isChecked());
-      await numeric.fill('18446744073709551615');
+      await caps.fill(capValue('18446744073709551615'));
       await page.getByRole('button', {name:'Save settings',exact:true}).click();
-      await page.locator('.settings-field-error').filter({hasText:'exact integer'}).waitFor();
+      await page.locator('.settings-field-error').filter({hasText:'exact numbers'}).waitFor();
       await page.getByRole('button', {name:'Edit as JSON',exact:true}).click();
       const exactEditor=page.getByRole('textbox', {name:'Settings JSON',exact:true});
       assert.equal(await page.locator('.settings-field-error').innerText(),'');
       const exactText=await exactEditor.inputValue();
-      assert.match(exactText,/"maximum_tool_calls":18446744073709551615/);
+      assert.match(exactText,/"max_output_tokens":18446744073709551615/);
       await page.screenshot({path:join(report,`${name}-settings-exact-json.png`)});
-      await exactEditor.fill(exactText.replace('"maximum_tool_calls":18446744073709551615','"maximum_tool_calls":123'));
+      await exactEditor.fill(exactText.replace('"max_output_tokens":18446744073709551615','"max_output_tokens":123'));
       const savingExact=await exactEditor.elementHandle();
       await page.getByRole('button', {name:'Save settings',exact:true}).click();
       await page.waitForFunction(previous=>!previous.isConnected,savingExact);await savingExact.dispose();
       assert(await approvalSetting.isChecked());
-      assert.equal(await numeric.inputValue(),'123');
+      assert.equal(JSON.parse(await caps.inputValue())[0].max_output_tokens,123);
       await closeDetails(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();

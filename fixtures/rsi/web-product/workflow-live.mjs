@@ -1,3 +1,4 @@
+import {assistantText} from './model-attempt.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Explicit live native workflow proof through the actual browser and Host.
@@ -83,7 +84,7 @@ try {
   while (Date.now() < deadline) {
     data = programEvidence(service.workspace);
     const terminal = data.controls.find(({record}) => record.type === 'program_run' && record.event.event === 'terminal');
-    const assistantText = data.facts.filter(({record}) => record.type === 'model_event').map(({record}) => record.event?.type === 'content_delta' && record.event.delta?.type === 'text' ? record.event.delta.value : '').join('');
+    const assistantText = assistantText(data.facts.map(({record})=>record));
     if (terminal && assistantText.includes(finalMarker) && await pane.locator('.pane-status').innerText() === 'Completed') break;
     if (terminal && !['completed', ...(cancellation?['cancelled']:[])].includes(terminal.record.event.outcome.status)) break;
     await page.waitForTimeout(200);
@@ -146,7 +147,7 @@ try {
       assert(second.record.seq>first.record.seq,'verifier admitted only after the review settled');
     } else assert.deepEqual(actual,{total:42,verified:true});
   }
-  const replies = data.facts.filter(({session_id, record}) => session_id === root && record.type === 'model_event').map(({record}) => record.event?.type === 'content_delta' && record.event.delta?.type === 'text' ? record.event.delta.value : '').join('');
+  const replies = assistantText(data.facts.filter(({session_id})=>session_id===root).map(({record})=>record));
   assert(replies.includes(finalMarker)); assert.match(replies, /WORKFLOW_DETACHED/);
   await page.getByRole('region', {name: 'Needs attention', exact: true}).getByText('Running', {exact: true}).waitFor({state: 'hidden'});
   await page.screenshot({path: join(report, 'workflow-wide.png')});

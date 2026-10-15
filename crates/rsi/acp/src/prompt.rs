@@ -118,6 +118,11 @@ async fn observe(
         .observe(submission.cursor)
         .await
         .map_err(|_| Failure::Backend)?;
+    let mut models = turns
+        .observe_models(&session.id)
+        .await
+        .map_err(|_| Failure::Backend)?;
+    let mut delivery = replay::ModelDelivery::default();
     let mut cursor = submission.cursor;
     let mut turn = submission.turn.clone();
     let mut cancel_deadline = None;
@@ -133,6 +138,13 @@ async fn observe(
             }
             () = async { match cancel_deadline { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => return Err(Failure::Timeout),
             update = updates.next() => update.ok_or(Failure::Backend)?.map_err(|_| Failure::Backend)?,
+            update = models.next() => {
+                let snapshot = update.ok_or(Failure::Backend)?.map_err(|_| Failure::Backend)?;
+                if turn.as_ref() == Some(&snapshot.turn_id) && let Some(peer) = peer {
+                    delivery.live(session.id.as_str(), peer, &snapshot).await?;
+                }
+                continue;
+            }
         };
         match &observation {
             SessionObservation::Control { record, .. } => cursor.control_seq = record.seq(),
@@ -169,7 +181,7 @@ async fn observe(
                     continue;
                 }
                 if let Some(peer) = peer {
-                    replay::fact_update(session.id.as_str(), &fact, peer, false).await?;
+                    delivery.fact(session.id.as_str(), peer, &fact).await?;
                 }
                 if let SessionFactBody::TurnTerminal {
                     turn_id, outcome, ..
@@ -179,11 +191,7 @@ async fn observe(
                     let reason = match outcome {
                         TurnOutcome::Completed => schema::StopReason::EndTurn,
                         TurnOutcome::Cancelled => schema::StopReason::Cancelled,
-                        TurnOutcome::BudgetExceeded {
-                            dimension: rsi_agent_session_protocol::BudgetDimension::OutputRecoveries,
-                            ..
-                        } => schema::StopReason::MaxTokens,
-                        TurnOutcome::BudgetExceeded { .. } => schema::StopReason::MaxTurnRequests,
+                        TurnOutcome::MaxTokens => schema::StopReason::MaxTokens,
                         _ => return Err(Failure::Backend),
                     };
                     if let Some(peer) = peer {

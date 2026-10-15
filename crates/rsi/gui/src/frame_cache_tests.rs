@@ -1,23 +1,34 @@
 use super::*;
 use crate::projection::Transcript;
 use rsi_agent_session_protocol::{EffectId, SessionFact, SessionFactBody, TurnId};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent};
 
-fn delta(seq: u64, block: u32, text: String) -> SessionFact {
-    SessionFact::new(
-        seq,
-        1,
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: TurnId::new("turn").unwrap(),
-            effect_id: EffectId::new("model").unwrap(),
-            event: LanguageEvent::ContentDelta {
-                index: block,
-                delta: ContentDelta::Text(text),
-            },
+// Cache-layer source spans are independent of provider event fragmentation.
+fn span(transcript: &mut Transcript, seq: u64, block: u32, text: &str) {
+    let turn = TurnId::new("turn").unwrap();
+    let effect = EffectId::new(format!("model-{block}")).unwrap();
+    let key = rsi_conversation::BlockIdentity::Model {
+        turn: &turn,
+        effect: &effect,
+        index: 0,
+    }
+    .key();
+    transcript.seq = transcript.seq.max(seq);
+    transcript.test_source(
+        key.clone(),
+        rsi_conversation::SourceRef {
+            seq,
+            field: rsi_conversation::FactField::ModelText { index: 0 },
         },
-    )
-    .unwrap()
+        text,
+    );
+    transcript.turns.live(
+        &turn,
+        &effect,
+        rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        &[key],
+        &transcript.blocks,
+        seq,
+    );
 }
 
 #[test]
@@ -45,7 +56,7 @@ fn queue_frames_reuse_json_until_slots_or_displayed_turn_change() {
         CachedPane::capture_with_queue(metadata.clone(), Some(live), Some(live), old).unwrap()
     };
     let first = capture(&live, None);
-    live.fact(&delta(1, 0, "streaming".into()));
+    span(&mut live, 1, 0, "streaming");
     let second = capture(&live, Some(&first));
     assert!(Arc::ptr_eq(
         &first.queue.as_ref().unwrap().content.value,
@@ -83,7 +94,12 @@ fn queue_frames_reuse_json_until_slots_or_displayed_turn_change() {
 fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_bytes() {
     let mut transcript = Transcript::default();
     for index in 0..128 {
-        transcript.fact(&delta(u64::from(index) + 1, index, "x".repeat(8000)));
+        span(
+            &mut transcript,
+            u64::from(index) + 1,
+            index,
+            &"x".repeat(8000),
+        );
     }
     assert_eq!(transcript.blocks.len(), 128);
     assert_eq!(
@@ -102,8 +118,7 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
     expected["transcript"] = serde_json::to_value(&transcript).unwrap();
     assert_eq!(serde_json::to_value(&first).unwrap(), expected);
     assert_eq!(first.bytes, serde_json::to_vec(&first).unwrap().len());
-    let changed = delta(129, 127, " tail".into());
-    transcript.fact(&changed);
+    span(&mut transcript, 129, 127, " tail");
     // The comparison covers projection plus size counting, not wire encoding or RSS.
     let baseline_transcript = transcript.clone();
     let ((baseline, _), baseline_allocations) = allocations::measure(|| {
@@ -132,7 +147,7 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
     assert_eq!(patch["transcript"]["upsert"].as_array().unwrap().len(), 1);
     assert_eq!(patch["transcript"]["remove"], json!([]));
     assert!(patch["transcript"].get("order").is_none());
-    transcript.fact(&changed);
+    span(&mut transcript, 129, 127, " tail");
     let duplicate =
         CachedPane::capture(metadata.clone(), Some(&transcript), Some(&second)).unwrap();
     assert_eq!(duplicate.projected_blocks, 0);
@@ -199,11 +214,11 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
         durable_control_seq: 1,
     };
     let mut transcript = Transcript::default();
-    transcript.fact(&delta(1, 0, "earlier".into()));
+    span(&mut transcript, 1, 0, "earlier");
     transcript.observation(&update);
     // Ordinary block admission evicts the older Fact while retaining its following preview.
     for index in 1..128 {
-        transcript.fact(&delta(u64::from(index) + 1, index, "later".into()));
+        span(&mut transcript, u64::from(index) + 1, index, "later");
     }
     assert!(transcript.omitted);
     assert_eq!(transcript.blocks.front().unwrap().key, "discard:discarded");
@@ -221,11 +236,11 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
 fn cached_wire_matches_markdown_after_backfill_reordering_and_eviction() {
     let mut transcript = Transcript::default();
     for index in 0..128 {
-        transcript.fact(&delta(u64::from(index) + 2, index, "**body**".into()));
+        span(&mut transcript, u64::from(index) + 2, index, "**body**");
     }
     let metadata = json!({"transcript":null});
     let first = CachedPane::capture(metadata.clone(), Some(&transcript), None).unwrap();
-    transcript.fact(&delta(1, 127, "*earlier* ".into()));
+    span(&mut transcript, 1, 127, "*earlier* ");
     let second = CachedPane::capture(metadata.clone(), Some(&transcript), Some(&first)).unwrap();
     assert_eq!(second.projected_blocks, 1);
     let reordered =
@@ -236,7 +251,7 @@ fn cached_wire_matches_markdown_after_backfill_reordering_and_eviction() {
     );
     assert_eq!(reordered["transcript"]["remove"], json!([]));
     let evicted = transcript.blocks[0].key.clone();
-    transcript.fact(&delta(130, 128, "`new`".into()));
+    span(&mut transcript, 130, 128, "`new`");
     let third = CachedPane::capture(metadata, Some(&transcript), Some(&second)).unwrap();
     assert_eq!(third.projected_blocks, 1);
     let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &second, &third)).unwrap();
@@ -282,8 +297,8 @@ fn turn_patches_preserve_revision_and_disjoint_membership() {
 fn fresh_index_with_equal_wire_revision_cannot_reuse_another_transcript() {
     let mut one = Transcript::default();
     let mut two = Transcript::default();
-    one.fact(&delta(1, 0, "one".into()));
-    two.fact(&delta(1, 1, "two".into()));
+    span(&mut one, 1, 0, "one");
+    span(&mut two, 1, 1, "two");
     assert_eq!(one.turns.view.revision, two.turns.view.revision);
     let metadata = json!({"transcript":null});
     let first = CachedPane::capture(metadata.clone(), Some(&one), None).unwrap();

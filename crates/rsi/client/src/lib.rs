@@ -33,7 +33,7 @@ pub use lifetime::{ConnectionLifetime, ConnectionLifetimeContract};
 pub use message::{MessageEvent, MessageRunError, MessageSink, drive_message};
 pub use observation::ObservationSinkContract;
 pub use observation::{
-    ObservationFailure, ObservationKind, ObservationSink, observe_interactions,
+    ObservationFailure, ObservationKind, ObservationSink, observe_interactions, observe_models,
     observe_projections, observe_session,
 };
 pub use queue::{QueueItem, QueueProjection, reconcile_queue, validate_queue_receipt};

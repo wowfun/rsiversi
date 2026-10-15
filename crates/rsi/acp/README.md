@@ -55,11 +55,20 @@ Directory enumeration reads committed route pages without describing every route
 An assignment enumerates once, describes only its chosen route, and returns those
 choices with the authoritative post-command selection. Responses retain exact
 encoded envelope admission; mutable catalogs are not cached across operations.
-The model-only assignment requests the target adapter's default reasoning effort,
-as defined by the Agent model-selection contract; it does not retain an explicit
-effort from the previous selection. ACP currently advertises no separate effort
-option. Assignment admission bounds the advertised configuration before mutation,
-then builds only the authoritative post-command response.
+The `thought_level` select option uses ACP's standard `thought_level` category.
+Its values are the current LanguageProfile's exact supported effort IDs plus
+`@default`, which requests the adapter default and cannot collide with an effort
+ID. The default option describes the declared effective default when known;
+unknown defaults remain unknown. Models without declared choices and unavailable
+routes omit the selector. A retained unsupported effort remains visible with an
+unavailable description, but cannot be assigned again.
+Effort assignments use the same durable model-selection command as model changes;
+setup, load, resume and update notifications return the complete current state.
+Unsupported values fail before mutation or provider I/O. The model-only assignment
+requests the target adapter's default reasoning effort, as defined by the Agent
+model-selection contract; it does not retain an explicit effort from the previous
+selection. Assignment admission bounds the complete advertised configuration
+before mutation, then builds the authoritative post-command response.
 Configuration tasks await their update notification's flush before releasing
 operation admission; the connection router owns the response drain barrier.
 
@@ -72,5 +81,5 @@ Tests using a supplied Session owner establish this adapter's behavior only.
 Application composition, private MCP, independent SDK interoperability and live
 provider evidence require their separate product acceptance tests.
 
-The [ACP application](../../../apps/acp/README.md) owns Unix stdio and signal
+The [ACP application](../../../apps/acp/README.md) owns native stdio and signal
 handling; this library provides its reusable native Agent backend.

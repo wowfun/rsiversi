@@ -208,11 +208,11 @@ async fn concurrent_executor_lanes_contend_for_one_ready_message_without_failure
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Cancellation and budget cases share the full live-descendant and preserved-inbox contract.
-async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inbox() {
+#[allow(clippy::too_many_lines)] // Cancellation and output-limit cases share the full live-descendant and preserved-inbox contract.
+async fn cancelled_or_max_tokens_parent_cascades_without_erasing_child_inbox() {
     for (label, parent_outcome) in [
         ("cancel", None),
-        ("budget", Some((BudgetDimension::Elapsed, 1_800_000_u64))),
+        ("max_tokens", Some(TurnOutcome::MaxTokens)),
     ] {
         let store = Arc::new(MemoryStore::new());
         let kernel = kernel(store.clone()).await;
@@ -308,29 +308,12 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
             .await
             .unwrap();
 
-        let outcome = if let Some((dimension, limit)) = parent_outcome {
-            let budget_outcome = TurnOutcome::BudgetExceeded {
-                dimension,
-                consumed: limit,
-                limit,
-            };
+        let outcome = if let Some(outcome) = parent_outcome {
             kernel
-                .close_current_step(&root_claim, &budget_outcome)
+                .close_current_step(&root_claim, &outcome)
                 .await
                 .unwrap();
-            kernel
-                .publish(
-                    &root_claim,
-                    vec![SessionFactBody::BudgetExhausted {
-                        turn_id: root_claim.turn_id().clone(),
-                        dimension,
-                        consumed: limit,
-                        limit,
-                    }],
-                )
-                .await
-                .unwrap();
-            budget_outcome
+            outcome
         } else {
             kernel
                 .cancel(&root_id, root_claim.turn_id(), Some("stop tree".into()))

@@ -46,7 +46,7 @@ fn process_plans_preserve_non_utf8_os_strings_and_reject_foreign_platform() {
 #[test]
 fn process_plans_preserve_wide_os_strings_and_reject_foreign_platform() {
     use std::os::windows::ffi::OsStringExt as _;
-    let original = std::ffi::OsString::from_wide(&[b'C' as u16, 0xd800]);
+    let original = std::ffi::OsString::from_wide(&[u16::from(b'C'), 0xd800]);
     let captured = OsValue::capture(&original).unwrap();
     let decoded: OsValue = portable::decode(&portable::encode(&captured).unwrap()).unwrap();
     assert_eq!(decoded.restore().unwrap(), original);

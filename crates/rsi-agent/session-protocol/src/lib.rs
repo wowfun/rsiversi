@@ -5,7 +5,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use rsi_ai_protocol::{
-    AiCapability, ImageRequest, LanguageEvent, MAX_IMAGE_OUTPUTS, ModelRef, PreparedCallSnapshot,
+    AiCapability, ImageRequest, MAX_IMAGE_OUTPUTS, ModelRef, PreparedCallSnapshot,
 };
 use rsi_approval_protocol::{ApprovalDecision, ApprovalOutcome};
 pub use rsi_execution_protocol::{ExecutionCoordinates, ExecutionLocation, ExecutionTargetId};
@@ -17,7 +17,12 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod model_attempt;
 mod queue;
+pub use model_attempt::{
+    MAXIMUM_MODEL_ATTEMPT_BYTES, MODEL_ATTEMPT_CHUNK_BYTES, MODEL_ATTEMPT_TERMINAL_RESERVE,
+    ModelAttemptBuilder, ModelAttemptLog, ModelAttemptPrefix, ModelEventCursor, ModelPrefixDecoder,
+};
 pub use queue::*;
 mod program;
 pub use program::*;
@@ -82,7 +87,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 21;
+pub const SESSION_FORMAT_VERSION: u32 = 22;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -103,18 +108,6 @@ pub const MAXIMUM_SESSION_FACT_BYTES: usize = 36 * 1024 * 1024;
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum Facts returned by one Store read.
 pub const MAXIMUM_FACTS_PER_READ: usize = 512;
-/// Hard maximum elapsed milliseconds for one accepted turn.
-pub const MAXIMUM_TURN_ELAPSED_MS: u64 = 30 * 60 * 1_000;
-/// Hard maximum provider attempts for one accepted turn.
-pub const MAXIMUM_TURN_PROVIDER_ATTEMPTS: u64 = 64;
-/// Hard maximum logical recoveries after incomplete Conversation output.
-pub const MAXIMUM_TURN_OUTPUT_RECOVERIES: u64 = 16;
-/// Hard maximum Tool calls for one accepted turn.
-pub const MAXIMUM_TURN_TOOL_CALLS: u64 = 256;
-/// Hard maximum generated Facts and Turn-attributed domain controls for one accepted turn.
-pub const MAXIMUM_TURN_GENERATED_RECORDS: u64 = 65_536;
-/// Hard maximum compact encoded bytes across generated Facts and Turn-attributed domain controls.
-pub const MAXIMUM_TURN_GENERATED_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 /// Empty predecessor for the canonical durable Fact-prefix digest chain.
 pub const EMPTY_FACT_PREFIX_DIGEST: [u8; 32] = [0; 32];
 /// Empty predecessor for the canonical Agent-control digest chain.
@@ -805,6 +798,8 @@ impl InputMessageSource {
 pub enum StepOutcome {
     /// The Step produced a complete model result or tool request.
     Completed,
+    /// The model exhausted its requested output token allowance.
+    MaxTokens,
     /// The Step stopped because its Turn ended.
     Stopped { reason: String },
 }
@@ -812,7 +807,7 @@ pub enum StepOutcome {
 impl StepOutcome {
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Completed => Ok(()),
+            Self::Completed | Self::MaxTokens => Ok(()),
             Self::Stopped { reason } => validate_safe_diagnostic("Step stop reason", reason),
         }
     }
@@ -1219,204 +1214,6 @@ impl AsRef<str> for AgentPresetId {
     }
 }
 
-/// Immutable hard-stop budget for one accepted turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-#[allow(clippy::struct_field_names)]
-pub struct TurnBudget {
-    maximum_elapsed_ms: u64,
-    maximum_provider_attempts: u64,
-    maximum_output_recoveries: u64,
-    maximum_tool_calls: u64,
-    maximum_generated_records: u64,
-    maximum_generated_record_bytes: u64,
-}
-
-impl<'de> Deserialize<'de> for TurnBudget {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        #[allow(clippy::struct_field_names)]
-        struct WireBudget {
-            maximum_elapsed_ms: u64,
-            maximum_provider_attempts: u64,
-            #[serde(default = "default_output_recoveries")]
-            maximum_output_recoveries: u64,
-            maximum_tool_calls: u64,
-            maximum_generated_records: u64,
-            maximum_generated_record_bytes: u64,
-        }
-
-        let wire = WireBudget::deserialize(deserializer)?;
-        Self::new(
-            wire.maximum_elapsed_ms,
-            wire.maximum_provider_attempts,
-            wire.maximum_tool_calls,
-            wire.maximum_generated_records,
-            wire.maximum_generated_record_bytes,
-        )
-        .and_then(|budget| budget.with_maximum_output_recoveries(wire.maximum_output_recoveries))
-        .map_err(serde::de::Error::custom)
-    }
-}
-
-impl Default for TurnBudget {
-    fn default() -> Self {
-        Self {
-            maximum_elapsed_ms: MAXIMUM_TURN_ELAPSED_MS,
-            maximum_provider_attempts: MAXIMUM_TURN_PROVIDER_ATTEMPTS,
-            maximum_output_recoveries: default_output_recoveries(),
-            maximum_tool_calls: MAXIMUM_TURN_TOOL_CALLS,
-            maximum_generated_records: MAXIMUM_TURN_GENERATED_RECORDS,
-            maximum_generated_record_bytes: MAXIMUM_TURN_GENERATED_RECORD_BYTES,
-        }
-    }
-}
-
-impl TurnBudget {
-    /// Creates a positive budget no wider than the repository hard maxima.
-    ///
-    /// Starts with two output recoveries. Use [`Self::with_maximum_output_recoveries`]
-    /// to select another allowance, including zero.
-    pub fn new(
-        maximum_elapsed_ms: u64,
-        maximum_provider_attempts: u64,
-        maximum_tool_calls: u64,
-        maximum_generated_records: u64,
-        maximum_generated_record_bytes: u64,
-    ) -> Result<Self> {
-        let budget = Self {
-            maximum_elapsed_ms,
-            maximum_provider_attempts,
-            maximum_output_recoveries: default_output_recoveries(),
-            maximum_tool_calls,
-            maximum_generated_records,
-            maximum_generated_record_bytes,
-        };
-        budget.validate()?;
-        Ok(budget)
-    }
-
-    /// Configures the bounded per-Turn recovery allowance; zero disables recovery.
-    pub fn with_maximum_output_recoveries(mut self, value: u64) -> Result<Self> {
-        self.maximum_output_recoveries = value;
-        self.validate()?;
-        Ok(self)
-    }
-
-    /// Returns the frozen output recovery allowance.
-    pub const fn maximum_output_recoveries(&self) -> u64 {
-        self.maximum_output_recoveries
-    }
-
-    /// Revalidates positivity and every fixed hard maximum.
-    pub fn validate(&self) -> Result<()> {
-        if self.maximum_output_recoveries > MAXIMUM_TURN_OUTPUT_RECOVERIES {
-            return Err(SessionError::Invalid(format!(
-                "maximum_output_recoveries must be within 0..={MAXIMUM_TURN_OUTPUT_RECOVERIES}",
-            )));
-        }
-        validate_budget_dimension(
-            "maximum_elapsed_ms",
-            self.maximum_elapsed_ms,
-            MAXIMUM_TURN_ELAPSED_MS,
-        )?;
-        validate_budget_dimension(
-            "maximum_provider_attempts",
-            self.maximum_provider_attempts,
-            MAXIMUM_TURN_PROVIDER_ATTEMPTS,
-        )?;
-        validate_budget_dimension(
-            "maximum_tool_calls",
-            self.maximum_tool_calls,
-            MAXIMUM_TURN_TOOL_CALLS,
-        )?;
-        validate_budget_dimension(
-            "maximum_generated_records",
-            self.maximum_generated_records,
-            MAXIMUM_TURN_GENERATED_RECORDS,
-        )?;
-        validate_budget_dimension(
-            "maximum_generated_record_bytes",
-            self.maximum_generated_record_bytes,
-            MAXIMUM_TURN_GENERATED_RECORD_BYTES,
-        )
-    }
-
-    /// Returns the elapsed-time limit measured from durable acceptance time.
-    pub const fn maximum_elapsed_ms(&self) -> u64 {
-        self.maximum_elapsed_ms
-    }
-
-    /// Returns the provider-attempt limit.
-    pub const fn maximum_provider_attempts(&self) -> u64 {
-        self.maximum_provider_attempts
-    }
-
-    /// Returns the Tool-call limit.
-    pub const fn maximum_tool_calls(&self) -> u64 {
-        self.maximum_tool_calls
-    }
-
-    /// Returns the generated-record count limit.
-    pub const fn maximum_generated_records(&self) -> u64 {
-        self.maximum_generated_records
-    }
-
-    /// Returns the executor-generated compact-byte limit.
-    pub const fn maximum_generated_record_bytes(&self) -> u64 {
-        self.maximum_generated_record_bytes
-    }
-}
-
-const fn default_output_recoveries() -> u64 {
-    2
-}
-
-fn validate_budget_dimension(name: &'static str, value: u64, maximum: u64) -> Result<()> {
-    if value == 0 || value > maximum {
-        return Err(SessionError::Invalid(format!(
-            "{name} must be within 1..={maximum}"
-        )));
-    }
-    Ok(())
-}
-
-/// Turn-budget dimension that prevented further work admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BudgetDimension {
-    /// Wall time since `TurnAccepted`.
-    Elapsed,
-    /// Language or Image provider attempts.
-    ProviderAttempts,
-    /// New logical attempts after incomplete Conversation output.
-    OutputRecoveries,
-    /// Tool invocations.
-    ToolCalls,
-    /// Generated Fact and Turn domain-control count.
-    GeneratedRecords,
-    /// Compact encoded bytes across generated Facts and Turn-attributed domain controls.
-    GeneratedRecordBytes,
-}
-
-impl BudgetDimension {
-    /// Returns the repository hard maximum for this durable dimension.
-    pub const fn hard_maximum(self) -> u64 {
-        match self {
-            Self::Elapsed => MAXIMUM_TURN_ELAPSED_MS,
-            Self::ProviderAttempts => MAXIMUM_TURN_PROVIDER_ATTEMPTS,
-            Self::OutputRecoveries => MAXIMUM_TURN_OUTPUT_RECOVERIES,
-            Self::ToolCalls => MAXIMUM_TURN_TOOL_CALLS,
-            Self::GeneratedRecords => MAXIMUM_TURN_GENERATED_RECORDS,
-            Self::GeneratedRecordBytes => MAXIMUM_TURN_GENERATED_RECORD_BYTES,
-        }
-    }
-}
-
 /// Immutable redacted settings captured when one session becomes durable.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1427,7 +1224,7 @@ pub struct FrozenAgentSettings {
     default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     sandbox: SandboxMode,
     require_approval: bool,
-    turn_budget: TurnBudget,
+
     pricing: PriceTable,
     output_budgets: OutputBudgetTable,
 }
@@ -1446,7 +1243,7 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
             default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
             sandbox: SandboxMode,
             require_approval: bool,
-            turn_budget: TurnBudget,
+
             #[serde(default)]
             pricing: PriceTable,
             #[serde(default)]
@@ -1454,13 +1251,12 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
         }
 
         let wire = WireSettings::deserialize(deserializer)?;
-        Self::new_with_budget(
+        Self::new(
             wire.settings_id,
             wire.system_prompt,
             wire.default_model,
             wire.sandbox,
             wire.require_approval,
-            wire.turn_budget,
         )
         .map(|mut settings| {
             settings.default_reasoning_effort = wire.default_reasoning_effort;
@@ -1481,25 +1277,6 @@ impl FrozenAgentSettings {
         sandbox: SandboxMode,
         require_approval: bool,
     ) -> Result<Self> {
-        Self::new_with_budget(
-            settings_id,
-            system_prompt,
-            default_model,
-            sandbox,
-            require_approval,
-            TurnBudget::default(),
-        )
-    }
-
-    /// Creates bounded immutable Agent settings with an explicit tightened turn budget.
-    pub fn new_with_budget(
-        settings_id: impl Into<String>,
-        system_prompt: impl Into<String>,
-        default_model: ModelRef,
-        sandbox: SandboxMode,
-        require_approval: bool,
-        turn_budget: TurnBudget,
-    ) -> Result<Self> {
         let settings = Self {
             settings_id: settings_id.into(),
             system_prompt: system_prompt.into(),
@@ -1509,7 +1286,6 @@ impl FrozenAgentSettings {
             output_budgets: OutputBudgetTable::default(),
             sandbox,
             require_approval,
-            turn_budget,
         };
         settings.validate()?;
         Ok(settings)
@@ -1522,7 +1298,6 @@ impl FrozenAgentSettings {
             &self.system_prompt,
             self.sandbox,
             self.require_approval,
-            &self.turn_budget,
         )?;
         self.pricing.validate()?;
         self.default_model
@@ -1538,7 +1313,6 @@ impl FrozenAgentSettings {
         system_prompt: &str,
         sandbox: SandboxMode,
         require_approval: bool,
-        turn_budget: &TurnBudget,
     ) -> Result<()> {
         validate_identifier("Agent settings", settings_id)?;
         validate_safe_text(
@@ -1547,7 +1321,6 @@ impl FrozenAgentSettings {
             MAXIMUM_SYSTEM_PROMPT_BYTES,
             true,
         )?;
-        turn_budget.validate()?;
         if sandbox == SandboxMode::DangerFullAccess && !require_approval {
             return Err(SessionError::Invalid(
                 "danger-full-access requires live approval".into(),
@@ -1627,11 +1400,6 @@ impl FrozenAgentSettings {
     /// Returns whether live approval was required at creation.
     pub const fn require_approval(&self) -> bool {
         self.require_approval
-    }
-
-    /// Returns the immutable turn budget captured at session creation.
-    pub const fn turn_budget(&self) -> &TurnBudget {
-        &self.turn_budget
     }
 
     /// Returns the lowercase SHA-256 of the canonical redacted settings.
@@ -2155,22 +1923,15 @@ pub enum TurnOutcome {
         /// Safe bounded reason.
         reason: String,
     },
-    /// One immutable turn-budget dimension prevented further work.
-    BudgetExceeded {
-        /// Exhausted dimension.
-        dimension: BudgetDimension,
-        /// Amount already consumed when admission stopped.
-        consumed: u64,
-        /// Frozen limit for this turn.
-        limit: u64,
-    },
+    /// The provider exhausted its requested output token allowance.
+    MaxTokens,
 }
 
 impl TurnOutcome {
     /// Revalidates bounded terminal diagnostics.
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Completed | Self::Cancelled => Ok(()),
+            Self::Completed | Self::Cancelled | Self::MaxTokens => Ok(()),
             Self::Failed { code, message } => {
                 validate_identifier("turn failure code", code)?;
                 validate_safe_text(
@@ -2209,11 +1970,6 @@ impl TurnOutcome {
                 MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
                 false,
             ),
-            Self::BudgetExceeded {
-                dimension,
-                consumed,
-                limit,
-            } => validate_budget_exhaustion(*dimension, *consumed, *limit),
         }
     }
 }
@@ -2309,26 +2065,6 @@ pub enum SessionFactBody {
         /// Optional safe caller reason.
         reason: Option<String>,
     },
-    /// Further work stopped at one immutable turn-budget dimension.
-    BudgetExhausted {
-        /// Exact target turn.
-        turn_id: TurnId,
-        /// Exhausted dimension.
-        dimension: BudgetDimension,
-        /// Amount already consumed when admission stopped.
-        consumed: u64,
-        /// Frozen limit for this turn.
-        limit: u64,
-    },
-    /// A truncated Conversation authorized one new logical model attempt.
-    ModelOutputRecovery {
-        /// Owning Turn.
-        turn_id: TurnId,
-        /// Latest Conversation effect which finished with `MaxTokens`.
-        source_model_effect_id: EffectId,
-        /// One-based ordinal across the complete Turn.
-        ordinal: u64,
-    },
     /// Immutable Language provider input was prepared before I/O.
     ModelIntent {
         /// Exact target turn.
@@ -2378,15 +2114,15 @@ pub enum SessionFactBody {
         /// Immutable Media reference, never media bytes.
         media: MediaRef,
     },
-    /// One normalized Language stream event.
-    ModelEvent {
-        /// Exact target turn.
+    /// One atomically settled Language attempt, including partial failure evidence.
+    ModelAttemptSettled {
+        /// Exact target Turn.
         turn_id: TurnId,
-        /// Exact effect identity.
+        /// Exact started effect identity.
         effect_id: EffectId,
-        /// Validated provider-neutral event.
-        event: LanguageEvent,
-        /// Purpose kind authenticated against the exact model intent.
+        /// Lossless normalized stream and timing evidence.
+        attempt: ModelAttemptLog,
+        /// Frozen interpretation of this attempt.
         purpose: ModelEventPurpose,
     },
     /// One Tool call was pinned before execution.
@@ -2532,20 +2268,6 @@ impl SessionFactBody {
                 }
                 Ok(())
             }
-            Self::ModelOutputRecovery { ordinal, .. } => {
-                if *ordinal == 0 || *ordinal > MAXIMUM_TURN_OUTPUT_RECOVERIES {
-                    return Err(SessionError::Invalid(format!(
-                        "output recovery ordinal must be within 1..={MAXIMUM_TURN_OUTPUT_RECOVERIES}",
-                    )));
-                }
-                Ok(())
-            }
-            Self::BudgetExhausted {
-                dimension,
-                consumed,
-                limit,
-                ..
-            } => validate_budget_exhaustion(*dimension, *consumed, *limit),
             Self::ModelIntent {
                 snapshot,
                 purpose,
@@ -2585,9 +2307,17 @@ impl SessionFactBody {
             | Self::ImageStarted { .. }
             | Self::ToolStarted { .. }
             | Self::ToolCallsSuperseded { .. } => Ok(()),
-            Self::ModelEvent { event, .. } => event
-                .validate()
-                .map_err(|error| SessionError::Invalid(error.to_string())),
+            Self::ModelAttemptSettled { .. } => {
+                let actual = bounded_compact_json_len(self, MAXIMUM_MODEL_ATTEMPT_BYTES)?;
+                if actual > MAXIMUM_MODEL_ATTEMPT_BYTES {
+                    return Err(SessionError::TooLarge {
+                        kind: "model attempt",
+                        maximum: MAXIMUM_MODEL_ATTEMPT_BYTES,
+                        actual,
+                    });
+                }
+                Ok(())
+            }
             Self::ToolIntent {
                 identity,
                 name,
@@ -2664,14 +2394,12 @@ impl SessionFactBody {
             | Self::WorkspaceTouched { turn_id, .. }
             | Self::ImageRequested { turn_id, .. }
             | Self::CancelRequested { turn_id, .. }
-            | Self::ModelOutputRecovery { turn_id, .. }
-            | Self::BudgetExhausted { turn_id, .. }
             | Self::ModelIntent { turn_id, .. }
             | Self::ModelStarted { turn_id, .. }
             | Self::ImageIntent { turn_id, .. }
             | Self::ImageStarted { turn_id, .. }
             | Self::ImageOutput { turn_id, .. }
-            | Self::ModelEvent { turn_id, .. }
+            | Self::ModelAttemptSettled { turn_id, .. }
             | Self::ToolIntent { turn_id, .. }
             | Self::ToolCallsSuperseded { turn_id, .. }
             | Self::ToolRejected { turn_id, .. }
@@ -2739,19 +2467,6 @@ fn validate_workspace_touch(paths: &[String]) -> Result<()> {
     }
     for path in paths {
         validate_canonical_path(path)?;
-    }
-    Ok(())
-}
-
-fn validate_budget_exhaustion(dimension: BudgetDimension, consumed: u64, limit: u64) -> Result<()> {
-    if (limit == 0 && dimension != BudgetDimension::OutputRecoveries)
-        || limit > dimension.hard_maximum()
-        || consumed < limit
-    {
-        return Err(SessionError::Invalid(
-            "budget exhaustion requires a reached limit within the dimension's allowed range"
-                .into(),
-        ));
     }
     Ok(())
 }

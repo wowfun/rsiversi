@@ -1,5 +1,11 @@
 // The document keeps one transport contract. Native execution remains in rsi-gui;
 // this adapter contains no Session, provider, or credential policy.
+import {isNativeDocument} from '../document-mode.js';
+
+export function createDocumentTransport(location = globalThis.location): NativeDocument | Worker {
+  return isNativeDocument(location) ? new NativeDocument() : new Worker('/worker.js', {type: 'module'});
+}
+
 export class NativeDocument {
   onmessage?: (event: { data: unknown }) => void;
   onerror?: (event: { preventDefault(): void }) => void;
@@ -10,7 +16,7 @@ export class NativeDocument {
   private abort = new AbortController();
   private termination?: Promise<void>;
   private async request(path: string, body?: BodyInit): Promise<Response> {
-    const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', body, signal: this.abort.signal });
+    const response = await fetch(path, { method: 'POST', body, signal: this.abort.signal });
     if (!response.ok) {
       const source = await response.text();
       let failure;

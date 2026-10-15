@@ -13,11 +13,20 @@ use rsi_media_protocol::{
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+#[cfg(any(not(windows), test))]
+use std::fs;
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+use std::io::Read;
+#[cfg(not(windows))]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(windows)]
+mod windows;
 
 const MAXIMUM_HEADER_BYTES: usize = 4 * 1024;
 const MAXIMUM_ENVELOPE_BYTES: u64 =
@@ -39,21 +48,28 @@ impl LocalMediaConfig {
                 "local Media root must be absolute".into(),
             ));
         }
-        Ok(())
+        #[cfg(windows)]
+        rsi_files_native_fs::resolve_absolute_root_alias(&self.root, true)
+            .map_err(|error| MediaError::InvalidInput(error.to_string()))?;
+        require_native_platform()
     }
 }
 
 #[derive(Debug)]
 struct Backend {
+    #[cfg(not(windows))]
     root: PathBuf,
     reads: ByteBudget,
     io: Arc<tokio::sync::Semaphore>,
+    #[cfg(windows)]
+    store: Arc<windows::Store>,
 }
 
 #[async_trait]
 impl MediaBackend for Backend {
     async fn put(&self, media: StoredMedia) -> Result<()> {
         verify_shape(&media)?;
+        #[cfg(not(windows))]
         let root = self.root.clone();
         let permit = self
             .io
@@ -61,31 +77,41 @@ impl MediaBackend for Backend {
             .try_acquire_owned()
             .map_err(|_| MediaError::AdmissionFull("local Media I/O tasks".into()))?;
         let reads = self.reads.clone();
+        #[cfg(windows)]
+        let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             verify(&media)?;
-            let path = object_path(&root, &media.reference.id);
-            match read_object(&path, &media.reference.id, &reads) {
-                Ok(existing) => {
-                    if existing.reference == media.reference && existing.bytes == media.bytes {
-                        return sync_publication(&path, sync_directory)
-                            .map_err(|_| publication_unknown());
-                    }
-                    return Err(MediaError::Corrupt(
-                        "existing MediaId has different content".into(),
-                    ));
-                }
-                Err(MediaError::NotFound(_)) => {}
-                Err(error) => return Err(error),
+            #[cfg(windows)]
+            {
+                store.put(&media, &reads)
             }
-            write_object(&path, &media, &reads)?;
-            Ok(())
+            #[cfg(not(windows))]
+            {
+                let path = object_path(&root, &media.reference.id);
+                match read_object(&path, &media.reference.id, &reads) {
+                    Ok(existing) => {
+                        if existing.reference == media.reference && existing.bytes == media.bytes {
+                            return sync_publication(&path, sync_directory)
+                                .map_err(|_| publication_unknown());
+                        }
+                        return Err(MediaError::Corrupt(
+                            "existing MediaId has different content".into(),
+                        ));
+                    }
+                    Err(MediaError::NotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+                write_object(&path, &media, &reads)?;
+                Ok(())
+            }
         })
         .await
         .map_err(|_| publication_unknown())?
     }
 
     async fn get(&self, id: &MediaId) -> Result<StoredMedia> {
+        #[cfg(not(windows))]
         let root = self.root.clone();
         let id = id.clone();
         let permit = self
@@ -94,9 +120,18 @@ impl MediaBackend for Backend {
             .try_acquire_owned()
             .map_err(|_| MediaError::AdmissionFull("local Media I/O tasks".into()))?;
         let reads = self.reads.clone();
+        #[cfg(windows)]
+        let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            read_object(&object_path(&root, &id), &id, &reads)
+            #[cfg(windows)]
+            {
+                store.get(&id, &reads)
+            }
+            #[cfg(not(windows))]
+            {
+                read_object(&object_path(&root, &id), &id, &reads)
+            }
         })
         .await
         .map_err(|error| join_error(&error))?
@@ -112,9 +147,10 @@ impl PluginFactory for LocalMediaBackendFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: LocalMediaConfig = serde_json::from_value(desired.clone())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        config
-            .validate()
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        config.validate().map_err(|error| match error {
+            MediaError::Unsupported(_) => MetaError::Activation(error.to_string()),
+            _ => MetaError::InvalidInput(error.to_string()),
+        })?;
         let retained = config.root.as_os_str().len() + 32;
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -124,14 +160,24 @@ impl PluginFactory for LocalMediaBackendFactory {
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
+        require_native_platform().map_err(|error| MetaError::Activation(error.to_string()))?;
         let config = plan.take_state::<LocalMediaConfig>()?;
         let root = config.root;
         let setup_root = root.clone();
+        #[cfg(windows)]
+        let store = tokio::task::spawn_blocking(move || windows::Store::open(&setup_root))
+            .await
+            .map_err(|error| MetaError::Activation(error.to_string()))?
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        #[cfg(not(windows))]
         tokio::task::spawn_blocking(move || prepare_objects(&setup_root))
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let backend: Arc<dyn MediaBackend> = Arc::new(Backend {
+            #[cfg(windows)]
+            store: Arc::new(store),
+            #[cfg(not(windows))]
             root,
             reads: ByteBudget::default(),
             io: Arc::new(tokio::sync::Semaphore::new(64)),
@@ -155,14 +201,21 @@ fn join_error(error: &tokio::task::JoinError) -> MediaError {
     MediaError::Io(format!("Media blocking task failed: {error}"))
 }
 
+#[cfg(any(not(windows), test))]
 fn object_path(root: &Path, id: &MediaId) -> PathBuf {
     root.join("objects")
         .join(&id.as_str()[..2])
         .join(format!("{}.rsi-media", id.as_str()))
 }
 
+#[cfg(not(windows))]
 fn read_object(path: &Path, expected_id: &MediaId, reads: &ByteBudget) -> Result<StoredMedia> {
+    require_native_platform()?;
     let bytes = read_file_bounded(path, expected_id, reads)?;
+    decode_object(bytes, expected_id)
+}
+
+fn decode_object(bytes: RetainedBytes, expected_id: &MediaId) -> Result<StoredMedia> {
     let newline = bytes
         .as_bytes()
         .iter()
@@ -184,15 +237,24 @@ fn read_object(path: &Path, expected_id: &MediaId, reads: &ByteBudget) -> Result
     Ok(media)
 }
 
+#[cfg(not(windows))]
 fn read_file_bounded(path: &Path, id: &MediaId, reads: &ByteBudget) -> Result<RetainedBytes> {
-    let map_io = |error: std::io::Error| match error.kind() {
+    let file = open_unchanged_regular_file(path, "Media object").map_err(|e| read_error(&e, id))?;
+    read_opened_file(file, id, reads)
+}
+
+fn read_error(error: &std::io::Error, id: &MediaId) -> MediaError {
+    match error.kind() {
         std::io::ErrorKind::NotFound => MediaError::NotFound(id.clone()),
         std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
             MediaError::Corrupt(error.to_string())
         }
         _ => MediaError::Io(error.to_string()),
-    };
-    let mut file = open_unchanged_regular_file(path, "Media object").map_err(map_io)?;
+    }
+}
+
+fn read_opened_file(mut file: File, id: &MediaId, reads: &ByteBudget) -> Result<RetainedBytes> {
+    let map_io = |error| read_error(&error, id);
     let length = file.metadata().map_err(map_io)?.len();
     if length > MAXIMUM_ENVELOPE_BYTES {
         return Err(MediaError::Corrupt("object envelope is too large".into()));
@@ -213,6 +275,7 @@ fn read_file_bounded(path: &Path, id: &MediaId, reads: &ByteBudget) -> Result<Re
         .map_err(|error| MediaError::Io(error.to_string()))
 }
 
+#[cfg(not(windows))]
 fn open_unchanged_regular_file(path: &Path, label: &str) -> std::io::Result<File> {
     let initial = fs::symlink_metadata(path)?;
     if !initial.file_type().is_file() {
@@ -235,14 +298,6 @@ fn open_unchanged_regular_file(path: &Path, label: &str) -> std::io::Result<File
             return Err(changed_file(label));
         }
     }
-    #[cfg(windows)]
-    {
-        let opened_identity = same_file::Handle::from_file(file.try_clone()?)?;
-        let current_identity = same_file::Handle::from_file(open_file_no_follow(path)?)?;
-        if opened_identity != current_identity {
-            return Err(changed_file(label));
-        }
-    }
     #[cfg(not(any(unix, windows)))]
     if initial.len() != opened.len()
         || current.len() != opened.len()
@@ -254,6 +309,7 @@ fn open_unchanged_regular_file(path: &Path, label: &str) -> std::io::Result<File
     Ok(file)
 }
 
+#[cfg(not(windows))]
 fn open_file_no_follow(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -262,18 +318,10 @@ fn open_file_no_follow(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        const FILE_SHARE_READ: u32 = 0x0000_0001;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
     options.open(path)
 }
 
+#[cfg(not(windows))]
 fn not_regular_file(label: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -281,6 +329,7 @@ fn not_regular_file(label: &str) -> std::io::Error {
     )
 }
 
+#[cfg(not(windows))]
 fn changed_file(label: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -288,6 +337,7 @@ fn changed_file(label: &str) -> std::io::Error {
     )
 }
 
+#[cfg(not(windows))]
 fn write_object(path: &Path, media: &StoredMedia, reads: &ByteBudget) -> Result<()> {
     write_object_with_sync(path, media, reads, sync_directory)
 }
@@ -297,16 +347,21 @@ fn sync_directory(parent: &Path) -> std::io::Result<()> {
     File::open(parent).and_then(|directory| directory.sync_all())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Media native directory synchronization is unsupported on this platform",
+    ))
 }
 
 fn publication_unknown() -> MediaError {
     MediaError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)
 }
 
+#[cfg(not(windows))]
 fn prepare_objects(root: &Path) -> Result<()> {
+    require_native_platform()?;
     let objects = root.join("objects");
     fs::create_dir_all(&objects).map_err(|error| MediaError::Io(error.to_string()))?;
     set_directory_permissions(&objects)?;
@@ -317,6 +372,7 @@ fn prepare_objects(root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn sync_publication(
     path: &Path,
     mut sync: impl FnMut(&Path) -> std::io::Result<()>,
@@ -326,12 +382,14 @@ fn sync_publication(
     sync(shard.parent().expect("owned objects directory"))
 }
 
+#[cfg(not(windows))]
 fn write_object_with_sync(
     path: &Path,
     media: &StoredMedia,
     reads: &ByteBudget,
     sync: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
+    require_native_platform()?;
     let parent = path
         .parent()
         .ok_or_else(|| MediaError::InvalidInput("object path has no parent".into()))?;
@@ -359,6 +417,7 @@ fn write_object_with_sync(
         TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
+        #[cfg(not(windows))]
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -424,9 +483,9 @@ fn set_directory_permissions(path: &Path) -> Result<()> {
         .map_err(|error| MediaError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_directory_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+    require_native_platform()
 }
 
 #[cfg(unix)]
@@ -436,10 +495,167 @@ fn set_open_file_permissions(file: &File) -> Result<()> {
         .map_err(|error| MediaError::Io(error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_open_file_permissions(_file: &File) -> Result<()> {
-    Ok(())
+    require_native_platform()
+}
+
+fn require_native_platform() -> Result<()> {
+    if cfg!(any(unix, windows)) {
+        Ok(())
+    } else {
+        Err(MediaError::Unsupported(
+            "Media native filesystem protection is unsupported on this platform".into(),
+        ))
+    }
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_precedes_cas_creation_and_existing_object_reads() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            LocalMediaBackendFactory
+                .prepare(&serde_json::json!({ "root": root.path().join("missing") }))
+                .is_err()
+        );
+        assert!(matches!(
+            prepare_objects(&root.path().join("missing")),
+            Err(MediaError::Unsupported(_))
+        ));
+        let path = root.path().join("object");
+        fs::write(&path, b"retained").unwrap();
+        let id = MediaId::new("a".repeat(64)).unwrap();
+        assert!(matches!(
+            read_object(&path, &id, &ByteBudget::default()),
+            Err(MediaError::Unsupported(_))
+        ));
+        assert!(!root.path().join("missing").exists());
+        assert_eq!(fs::read(path).unwrap(), b"retained");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_configuration_precedes_platform_admission() {
+        assert!(matches!(
+            LocalMediaConfig {
+                root: "relative".into()
+            }
+            .validate(),
+            Err(MediaError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn valid_configuration_checks_platform_without_filesystem_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let result = LocalMediaConfig {
+            root: root.path().join("missing"),
+        }
+        .validate();
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MediaError::Unsupported(_))));
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod factory_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_distinguishes_invalid_input_from_unavailable_native_capability() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            LocalMediaBackendFactory.prepare(&serde_json::json!({"root":"relative"})),
+            Err(MetaError::InvalidInput(_))
+        ));
+        let result = LocalMediaBackendFactory
+            .prepare(&serde_json::json!({"root":root.path().join("missing/media")}));
+        if cfg!(any(unix, windows)) {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(MetaError::Activation(_))));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn backend(root: &Path) -> Backend {
+        Backend {
+            reads: ByteBudget::default(),
+            io: Arc::new(tokio::sync::Semaphore::new(64)),
+            store: Arc::new(windows::Store::open(root).unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_media_publication_reuses_exact_bytes_and_rejects_corruption() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("private-media");
+        let backend = backend(&root);
+        let bytes = bytes::Bytes::from_static(
+            b"canonical body identity belongs to the caller's normalizer",
+        );
+        let reference = MediaRef {
+            id: MediaId::new(hex::encode(Sha256::digest(&bytes))).unwrap(),
+            mime: "image/png".into(),
+            bytes: bytes.len() as u64,
+            width: 1,
+            height: 1,
+        };
+        let media = StoredMedia {
+            reference: reference.clone(),
+            bytes: bytes.clone(),
+        };
+        let shard = object_path(&root, &reference.id)
+            .parent()
+            .unwrap()
+            .to_owned();
+        let mut sync_count = 0;
+        let result = backend
+            .store
+            .put_with_sync(&media, &backend.reads, |namespace| {
+                assert!(std::fs::rename(root.join("objects"), root.join("moved-objects")).is_err());
+                assert!(std::fs::rename(&shard, root.join("moved-shard")).is_err());
+                sync_count += 1;
+                if sync_count == 2 {
+                    return Err(std::io::Error::other("injected sync failure"));
+                }
+                namespace.sync_all()
+            });
+        assert!(matches!(
+            result,
+            Err(MediaError::Api(rsi_api_protocol::ApiError::OutcomeUnknown))
+        ));
+        assert_eq!(sync_count, 2);
+        assert_eq!(backend.get(&reference.id).await.unwrap().bytes, bytes);
+        backend.put(media.clone()).await.unwrap();
+        backend.put(media).await.unwrap();
+        assert_eq!(backend.get(&reference.id).await.unwrap().bytes, bytes);
+        let path = object_path(&root, &reference.id);
+        std::fs::write(&path, b"corrupt").unwrap();
+        assert!(backend.get(&reference.id).await.is_err());
+        assert!(std::fs::rename(&root, temporary.path().join("moved")).is_err());
+        drop(backend);
+        std::fs::rename(&root, temporary.path().join("moved")).unwrap();
+    }
+}

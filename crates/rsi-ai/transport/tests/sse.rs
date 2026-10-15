@@ -309,3 +309,72 @@ async fn overlapping_claims_can_both_grow_past_the_initial_unit() {
         .expect("valid");
     assert_eq!(second_value.as_str().len(), payload.len());
 }
+
+#[tokio::test(start_paused = true)]
+async fn idle_deadline_ignores_empty_chunks_and_partial_frames() {
+    use std::time::Duration;
+    for fragment in ["", "data: never complete"] {
+        let body: ByteStream = Box::pin(stream::unfold(0, move |count| async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Some((Ok(Bytes::from_static(fragment.as_bytes())), count + 1))
+        }));
+        let began = tokio::time::Instant::now();
+        let mut decoded = rsi_ai_transport::decode_sse_with_idle(
+            body,
+            SseTermination::Eof,
+            DEFAULT_SSE_FRAME_BYTES,
+            Some(Duration::from_millis(100)),
+        );
+        assert_eq!(
+            decoded.next().await.unwrap().unwrap_err().code(),
+            "http.timeout"
+        );
+        assert_eq!(began.elapsed(), Duration::from_millis(100));
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn heartbeat_renews_idle_allowance_and_local_backpressure_is_excluded() {
+    use std::time::Duration;
+    let body: ByteStream = Box::pin(stream::unfold(0, |count| async move {
+        if count == 12 {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let part = if count < 10 {
+            ": keepalive\n\n"
+        } else {
+            "data: hello\n\n"
+        };
+        Some((Ok(Bytes::from_static(part.as_bytes())), count + 1))
+    }));
+    let began = tokio::time::Instant::now();
+    let mut decoded = rsi_ai_transport::decode_sse_with_idle(
+        body,
+        SseTermination::Eof,
+        DEFAULT_SSE_FRAME_BYTES,
+        Some(Duration::from_millis(100)),
+    );
+    assert_eq!(decoded.next().await.unwrap().unwrap().as_str(), "hello");
+    assert_eq!(began.elapsed(), Duration::from_millis(880));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(decoded.next().await.unwrap().unwrap().as_str(), "hello");
+    assert!(decoded.next().await.is_none());
+}
+#[tokio::test(start_paused = true)]
+async fn always_ready_empty_chunks_cannot_bypass_an_expired_idle_deadline() {
+    use std::time::Duration;
+    let body: ByteStream = Box::pin(stream::unfold(0, |count| async move {
+        tokio::time::advance(Duration::from_millis(10)).await;
+        Some((Ok(Bytes::new()), count + 1))
+    }));
+    let mut decoded = rsi_ai_transport::decode_sse_with_idle(
+        body,
+        SseTermination::Eof,
+        DEFAULT_SSE_FRAME_BYTES,
+        Some(Duration::from_millis(100)),
+    );
+    assert_eq!(
+        decoded.next().await.unwrap().unwrap_err().code(),
+        "http.timeout"
+    );
+}

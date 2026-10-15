@@ -1,8 +1,12 @@
-use rsi_meta::{FiberState, ResolvedFactory, Runtime, UpdateMode};
+#![cfg(unix)]
+
+use rsi_meta::FiberState;
+use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_storage::{StorageFactory, StorageHubContract};
 use rsi_storage_domain::{DomainFacilityContract, DomainFactory, DomainSpec};
 use rsi_storage_json::JsonStorageFactory;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::fs;
 use std::sync::Arc;
 

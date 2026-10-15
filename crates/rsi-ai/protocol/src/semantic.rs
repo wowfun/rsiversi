@@ -270,6 +270,7 @@ pub struct LanguageProfile {
     image_tool_result: ImageToolResultCapability,
     accepted_provider_extensions: Vec<ProviderExtensionFormat>,
     reasoning_efforts: crate::ReasoningEffortProfile,
+    default_output_tokens: Option<u32>,
 }
 
 impl<'de> Deserialize<'de> for LanguageProfile {
@@ -289,6 +290,8 @@ impl<'de> Deserialize<'de> for LanguageProfile {
             image_tool_result: ImageToolResultCapability,
             accepted_provider_extensions: Vec<ProviderExtensionFormat>,
             reasoning_efforts: crate::ReasoningEffortProfile,
+            #[serde(default)]
+            default_output_tokens: Option<u32>,
         }
 
         let profile = WireProfile::deserialize(deserializer)?;
@@ -302,6 +305,9 @@ impl<'de> Deserialize<'de> for LanguageProfile {
             profile.accepted_provider_extensions,
         )
         .map(|profile_value| profile_value.with_reasoning_efforts(profile.reasoning_efforts))
+        .and_then(|profile_value| {
+            profile_value.with_default_output_tokens(profile.default_output_tokens)
+        })
         .map_err(serde::de::Error::custom)
     }
 }
@@ -333,6 +339,7 @@ impl LanguageProfile {
             image_tool_result,
             accepted_provider_extensions,
             reasoning_efforts: crate::ReasoningEffortProfile::default(),
+            default_output_tokens: None,
         };
         profile.validate()?;
         Ok(profile)
@@ -361,6 +368,18 @@ impl LanguageProfile {
         self.max_output_reserve_tokens
     }
 
+    /// Default request output cap, distinct from capacity reservation.
+    pub const fn default_output_tokens(&self) -> Option<u32> {
+        self.default_output_tokens
+    }
+
+    /// Installs a model default after checking its declared capacity.
+    pub fn with_default_output_tokens(mut self, cap: Option<u32>) -> Result<Self, SemanticError> {
+        self.input_capacity_tokens(cap)?;
+        self.default_output_tokens = cap;
+        Ok(self)
+    }
+
     /// Validates explicit request output policy against this exact model capacity.
     pub fn validate_output_cap(&self, settings: &LanguageSettings) -> Result<(), SemanticError> {
         self.input_capacity_tokens(settings.max_output_tokens())
@@ -369,6 +388,7 @@ impl LanguageProfile {
 
     /// Input tokens available after the effective request output reserve.
     pub fn input_capacity_tokens(&self, output_cap: Option<u32>) -> Result<u32, SemanticError> {
+        let output_cap = output_cap.or(self.default_output_tokens);
         if !valid_output_cap(output_cap)
             || output_cap.is_some_and(|cap| cap > self.max_output_reserve_tokens)
         {

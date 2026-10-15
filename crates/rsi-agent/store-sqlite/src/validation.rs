@@ -1347,7 +1347,7 @@ pub(super) struct ControlReplaySummary {
 
 /// Decode each bounded canonical control once and feed all index projections.
 #[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn validate_agent_indexes(
     connection: &Connection,
     header: &SessionHeader,

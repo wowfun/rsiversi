@@ -113,15 +113,23 @@ async fn exhausted_grant_revision_rejects_revocation_without_closing_its_scope()
     };
     grant(&running, scope.clone(), true).await;
     assert!(running.shutdown().await.is_clean());
-    let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+    let mut database =
+        rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
     let bytes: Vec<u8> = database.query_row(
         "SELECT value FROM rsi_storage_records WHERE domain='rsi.profile-leaves' AND key='grants'",
         [], |row| row.get(0)).unwrap();
     let mut grants: Grants = serde_json::from_slice(&bytes).unwrap();
+    let previous_bytes = i64::try_from(bytes.len()).unwrap();
     grants.revision = u64::MAX.to_string();
     grants.validate().unwrap();
     let bytes = serde_json::to_vec(&grants).unwrap();
-    database.execute("UPDATE rsi_storage_records SET value=?1 WHERE domain='rsi.profile-leaves' AND key='grants'", [&bytes]).unwrap();
+    let transaction = database.transaction().unwrap();
+    transaction.execute("UPDATE rsi_storage_records SET value=?1 WHERE domain='rsi.profile-leaves' AND key='grants'", [&bytes]).unwrap();
+    transaction.execute(
+        "UPDATE rsi_storage_domains SET record_bytes=record_bytes+?1 WHERE domain='rsi.profile-leaves'",
+        [i64::try_from(bytes.len()).unwrap() - previous_bytes],
+    ).unwrap();
+    transaction.commit().unwrap();
     drop(database);
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))

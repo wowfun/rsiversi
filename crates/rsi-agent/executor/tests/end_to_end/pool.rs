@@ -114,10 +114,7 @@ async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
     )
     .await;
     let lease_dropped = Arc::new(AtomicBool::new(false));
-    let claim_header = Arc::new(header_for_session(
-        "session-failing-claim",
-        TurnBudget::default(),
-    ));
+    let claim_header = Arc::new(header_for_session("session-failing-claim"));
     let claim = TurnClaimIssuer::new().issue(
         "executor-failing-claim".into(),
         1,
@@ -403,12 +400,7 @@ async fn single_lane_configuration_keeps_independent_sessions_serial() {
         .submit(SubmitTurn {
             reasoning_effort: None,
             turn_id: client_turn_id(),
-            session: stack
-                .fresh(header_for_session(
-                    "session-single-a",
-                    TurnBudget::default(),
-                ))
-                .await,
+            session: stack.fresh(header_for_session("session-single-a")).await,
             text: "first".into(),
             model: None,
             sandbox: None,
@@ -422,12 +414,7 @@ async fn single_lane_configuration_keeps_independent_sessions_serial() {
         .submit(SubmitTurn {
             reasoning_effort: None,
             turn_id: client_turn_id(),
-            session: stack
-                .fresh(header_for_session(
-                    "session-single-b",
-                    TurnBudget::default(),
-                ))
-                .await,
+            session: stack.fresh(header_for_session("session-single-b")).await,
             text: "second".into(),
             model: None,
             sandbox: None,
@@ -625,10 +612,8 @@ async fn retries_only_a_policy_admitted_proven_undispatched_model_attempt() {
     );
     assert!(facts.iter().any(|body| matches!(
         body,
-        SessionFactBody::ModelEvent {
-            event: LanguageEvent::Failed { error, .. },
-            ..
-        } if error.dispatch_status() == DispatchStatus::NotDispatched
+        SessionFactBody::ModelAttemptSettled { attempt: log, .. }
+            if log.events().any(|event| matches!(event.unwrap().1, LanguageEvent::Failed { error, .. } if error.dispatch_status() == DispatchStatus::NotDispatched))
     )));
 }
 
@@ -650,6 +635,93 @@ async fn never_retries_a_dispatch_uncertain_model_attempt() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn language_regeneration_retries_original_request_five_times_without_history_pollution() {
+    let stack = BaseStack::activate().await;
+    let failed = vec![
+        LanguageEvent::ContentStarted {
+            index: 0,
+            content: ContentStart::Text,
+        },
+        LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("discarded-retry-prefix".into()),
+        },
+        LanguageEvent::Failed {
+            error: AiError::new(
+                ErrorKind::Transport,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "stream interrupted",
+            )
+            .unwrap(),
+            replay: None,
+        },
+    ];
+    let scripts = (0..5).map(|_| StartOutcome::Stream(failed.clone())).chain([
+        StartOutcome::Stream(answer_script()),
+        StartOutcome::Stream(answer_script()),
+    ]);
+    let fixture = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(scripts.collect()),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::new(5, vec![ErrorKind::Transport], 1, 1, 0)
+            .unwrap()
+            .with_language_regeneration(),
+    });
+    let language = stack
+        .activate_language("test.regeneration", fixture.clone())
+        .await;
+    let executor = stack.activate_executor("regeneration").await;
+    let (submitted, outcome) = stack.submit_and_wait("finish the original request").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(fixture.starts.load(Ordering::SeqCst), 6);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        let first = serde_json::to_value(&requests[0]).unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| serde_json::to_value(request).unwrap() == first)
+        );
+    }
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 128)
+        .await
+        .unwrap()
+        .facts;
+    let attempts: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ModelAttemptSettled { attempt, .. } => Some(attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts.len(), 6);
+    for attempt in &attempts[..5] {
+        assert!(!attempt.retain_context());
+        assert!(
+            matches!(attempt.terminal(), LanguageEvent::Failed { error, .. }
+            if error.dispatch_status() == DispatchStatus::Dispatched)
+        );
+        assert!(attempt.events().any(|event| matches!(event.unwrap().1,
+            LanguageEvent::ContentDelta { delta: ContentDelta::Text(text), .. }
+            if text == "discarded-retry-prefix")));
+    }
+    assert!(attempts[5].retain_context());
+    let (_, outcome) = stack
+        .resume_and_wait("continue", submitted.session_id)
+        .await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let next = serde_json::to_string(&fixture.requests.lock().unwrap()[6]).unwrap();
+    assert!(next.contains("done"));
+    assert!(!next.contains("discarded-retry-prefix"));
+    stack.dispose(language, executor).await;
 }
 
 #[derive(Debug)]

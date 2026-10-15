@@ -685,6 +685,7 @@ impl SessionBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     fn test_entry() -> Arc<Entry> {
         let authority = test_authority();
         Arc::new(Entry {
@@ -709,6 +710,7 @@ mod tests {
             snapshot: Mutex::new(Value::Null),
         })
     }
+    #[cfg(unix)]
     #[derive(Debug)]
     struct ImportMedia {
         result: rsi_media_protocol::Result<MediaRef>,
@@ -716,6 +718,7 @@ mod tests {
         entered: CancellationToken,
         calls: AtomicU64,
     }
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Media for ImportMedia {
         async fn import_image_with_options(
@@ -741,12 +744,14 @@ mod tests {
             unreachable!()
         }
     }
+    #[cfg(unix)]
     fn image_result() -> Value {
         let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"[..]);
         png.extend_from_slice(&1280_u32.to_be_bytes());
         png.extend_from_slice(&720_u32.to_be_bytes());
         json!({"status":"completed","png":STANDARD.encode(png)})
     }
+    #[cfg(unix)]
     fn canonical_image() -> MediaRef {
         MediaRef {
             id: rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
@@ -756,7 +761,7 @@ mod tests {
             height: 720,
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn screenshot_deadline_or_cancellation_drops_the_wait_without_losing_its_charge() {
         for cancelled in [false, true] {
@@ -791,7 +796,7 @@ mod tests {
             owner.close().await;
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn image_budget_refunds_prepublication_rejections_and_keeps_uncertain_receipts() {
         use rsi_media_protocol::MediaError;
@@ -837,7 +842,7 @@ mod tests {
             owner.close().await;
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_retirement_removes_the_binding_and_all_waiters_share_the_failure() {
         let (runtime, _permits) = crate::runtime::ownership_tests::full_ready_runtime();
@@ -865,6 +870,7 @@ mod tests {
         assert!(!owner.entries.lock().unwrap().contains_key(&session));
         owner.close().await;
     }
+    #[cfg(unix)]
     fn test_authority() -> SessionAuthority {
         let header = Arc::new(
             SessionHeader::new_local(
@@ -897,10 +903,10 @@ mod tests {
         );
         SessionAuthority::Agent(Arc::new(issuer.agent_caller(&claim).unwrap()))
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[derive(Debug)]
     struct UnusedMedia;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Media for UnusedMedia {
         async fn import_image_with_options(
@@ -917,7 +923,7 @@ mod tests {
             unreachable!()
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn shared_pool_capacity_returns_not_started_and_removes_the_unlaunched_session_entry() {
         let (runtime, _permits) = crate::runtime::ownership_tests::full_ready_runtime();

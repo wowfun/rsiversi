@@ -5,8 +5,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    AiError, MAX_CONTENT_BLOCKS, MAX_EXTENSION_BYTES, MAX_LANGUAGE_EVENTS,
-    MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES, MAX_WARNINGS, validation,
+    AiError, MAX_CONTENT_BLOCKS, MAX_EXTENSION_BYTES, MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES,
+    MAX_WARNINGS, validation,
 };
 
 const MAX_SOURCE_FIELD_BYTES: usize = 16 * 1024;
@@ -688,7 +688,6 @@ pub struct LanguageAssembler {
     assembled_bytes: usize,
     #[serde(skip)]
     encoded_payload_bytes: usize,
-    event_count: usize,
     usage: Option<TokenUsage>,
     replay: Option<ProviderExtension>,
     finish_reason: Option<FinishReason>,
@@ -714,7 +713,6 @@ impl LanguageAssembler {
             content: BTreeMap::new(),
             assembled_bytes: 0,
             encoded_payload_bytes: 0,
-            event_count: 0,
             usage: None,
             replay: None,
             finish_reason: None,
@@ -731,15 +729,6 @@ impl LanguageAssembler {
             return Err(StreamError::invalid(
                 "stream.already_finished",
                 "language stream emitted an event after its terminal event",
-            ));
-        }
-        self.event_count = self.event_count.checked_add(1).ok_or_else(|| {
-            StreamError::invalid("stream.too_many_events", "language event count overflowed")
-        })?;
-        if self.event_count > MAX_LANGUAGE_EVENTS {
-            return Err(StreamError::invalid(
-                "stream.too_many_events",
-                format!("language stream exceeds {MAX_LANGUAGE_EVENTS} events"),
             ));
         }
         event.validate()?;
@@ -833,6 +822,11 @@ impl LanguageAssembler {
                 }
             }
             LanguageEvent::Finished { reason, replay } => {
+                if matches!(reason, FinishReason::MaxTokens | FinishReason::Cancelled) {
+                    for (index, open) in std::mem::take(&mut self.open) {
+                        self.content.insert(index, open.close());
+                    }
+                }
                 if !self.open.is_empty() {
                     return Err(StreamError::invalid(
                         "stream.content_still_open",
@@ -886,7 +880,7 @@ impl LanguageAssembler {
                 }),
             });
         }
-        if self.content.is_empty() {
+        if self.content.is_empty() && finish_reason != FinishReason::Cancelled {
             return Err(LanguageAssemblyError::Protocol(StreamError::invalid(
                 "stream.empty_output",
                 "successful language output must contain at least one content block",
@@ -896,7 +890,9 @@ impl LanguageAssembler {
             .content
             .values()
             .any(|block| matches!(block, ContentBlock::ToolCall(_)));
-        if matches!(finish_reason, FinishReason::ToolCalls) != has_tool_call {
+        if finish_reason != FinishReason::Cancelled
+            && matches!(finish_reason, FinishReason::ToolCalls) != has_tool_call
+        {
             return Err(LanguageAssemblyError::Protocol(StreamError::invalid(
                 "stream.finish_reason_mismatch",
                 "tool-call finish reason must match the assembled content",

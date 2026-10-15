@@ -20,6 +20,9 @@ callers must not treat the two roles as interchangeable.
 The closed error taxonomy distinguishes permanent malformed or out-of-bounds
 input from transient generation admission pressure. Callers may retry
 `AdmissionFull`; they must not reinterpret `InvalidInput` as backpressure.
+`Unsupported` identifies a missing backend or platform capability before
+admission. The Media API preserves that category without transmitting backend
+diagnostics.
 
 Image import is independently durable: success returns the canonical `MediaRef`
 after publication. Clients may submit that reference in a later Session Message

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use async_trait::async_trait;
 use image::{ImageBuffer, ImageFormat, Rgba};
 use rsi_api_protocol::{

@@ -82,6 +82,29 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
             publish_public_reply(&kernel, &child, &"x".repeat(4 * 1024 * 1024 + 1)).await;
         } else if case == "pages" {
             publish_reply_parts(&kernel, &child, "streamed-model", &vec!["x".into(); 200]).await;
+            let facts = store.inner.read_facts(&child_id, 0, 128).await.unwrap();
+            let step_id = facts
+                .facts
+                .iter()
+                .rev()
+                .find_map(|fact| match fact.body() {
+                    SessionFactBody::StepStarted { step_id, .. } => Some(step_id.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            for index in 0..130 {
+                tool_origin::flush_bodies(
+                    &kernel,
+                    &child,
+                    vec![SessionFactBody::WorkspaceTouched {
+                        turn_id: child.turn_id().clone(),
+                        step_id: step_id.clone(),
+                        effect_id: EffectId::new("scan-effect").unwrap(),
+                        paths: vec![format!("/scan-{index}")],
+                    }],
+                )
+                .await;
+            }
         }
         *store.pause_reply_for.lock().unwrap() = Some(child_id.clone());
         store.fail_reply_read.store(fail_read, Ordering::Release);
@@ -467,7 +490,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
 #[allow(clippy::too_many_lines)] // Both Store backends exercise completion delivery across each terminal boundary.
 async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_scan() {
     for sqlite in [false, true] {
-        for ending in ["completed", "cancelled", "budget"] {
+        for ending in ["completed", "cancelled", "max_tokens"] {
             let temporary = tempfile::tempdir().unwrap();
             let path = temporary.path().join("store");
             let store: Arc<dyn SessionStore> = if sqlite {
@@ -541,29 +564,12 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
                         .unwrap();
                     TurnOutcome::Cancelled
                 }
-                "budget" => {
-                    let outcome = TurnOutcome::BudgetExceeded {
-                        dimension: BudgetDimension::Elapsed,
-                        consumed: 1_800_000,
-                        limit: 1_800_000,
-                    };
+                "max_tokens" => {
                     kernel
-                        .close_current_step(&root_claim, &outcome)
+                        .close_current_step(&root_claim, &TurnOutcome::MaxTokens)
                         .await
                         .unwrap();
-                    kernel
-                        .publish(
-                            &root_claim,
-                            vec![SessionFactBody::BudgetExhausted {
-                                turn_id: root_claim.turn_id().clone(),
-                                dimension: BudgetDimension::Elapsed,
-                                consumed: 1_800_000,
-                                limit: 1_800_000,
-                            }],
-                        )
-                        .await
-                        .unwrap();
-                    outcome
+                    TurnOutcome::MaxTokens
                 }
                 _ => TurnOutcome::Completed,
             };
@@ -578,7 +584,7 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
                     && !entry.wake_required
             }));
 
-            if ending != "completed" {
+            if ending == "cancelled" {
                 assert_eq!(
                     kernel
                         .enter_pending_step_messages(&root_claim)
@@ -1881,41 +1887,43 @@ async fn publish_reply_parts(
         turn_id: turn_id.clone(),
         effect_id: effect_id.clone(),
     }];
-    bodies.extend(
-        [
-            LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::Reasoning,
-            },
-            LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Reasoning("private reasoning".into()),
-            },
-            LanguageEvent::ContentFinished { index: 0 },
-            LanguageEvent::ContentStarted {
+    bodies.push(SessionFactBody::ModelAttemptSettled {
+        turn_id: turn_id.clone(),
+        effect_id: effect_id.clone(),
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+        attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Reasoning,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Reasoning("private reasoning".into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::ContentStarted {
+                    index: 1,
+                    content: ContentStart::Text,
+                },
+            ]
+            .into_iter()
+            .chain(parts.iter().map(|text| LanguageEvent::ContentDelta {
                 index: 1,
-                content: ContentStart::Text,
-            },
-        ]
-        .into_iter()
-        .chain(parts.iter().map(|text| LanguageEvent::ContentDelta {
-            index: 1,
-            delta: ContentDelta::Text(text.clone()),
-        }))
-        .chain([
-            LanguageEvent::ContentFinished { index: 1 },
-            LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: None,
-            },
-        ])
-        .map(|event| SessionFactBody::ModelEvent {
-            turn_id: turn_id.clone(),
-            effect_id: effect_id.clone(),
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            event,
-        }),
-    );
+                delta: ContentDelta::Text(text.clone()),
+            }))
+            .chain([
+                LanguageEvent::ContentFinished { index: 1 },
+                LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            ])
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap(),
+    });
     for batch in bodies.chunks(64) {
         let facts = kernel
             .publish(claim, batch.to_vec())

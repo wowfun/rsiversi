@@ -165,7 +165,7 @@ async fn builder_cannot_drop_frozen_output_cap_before_provider_prepare() {
         .await;
     let executor = stack.activate_executor("executor-drops-cap").await;
     let (_, outcome) = stack
-        .submit_and_wait_with_header("work", None, header_with_output_budget(2))
+        .submit_and_wait_with_header("work", None, header_with_output_cap())
         .await;
     assert!(matches!(outcome, TurnOutcome::Failed { code, .. } if code == "context.settings"));
     assert!(provider.requests.lock().unwrap().is_empty());
@@ -297,7 +297,7 @@ async fn context_capacity_fails_before_provider_dispatch_across_executor_generat
         .submit_and_wait_with_header(
             "same pool after replacement",
             None,
-            header_for_session("context-capacity-new-session", TurnBudget::default()),
+            header_for_session("context-capacity-new-session"),
         )
         .await;
     assert!(matches!(outcome, TurnOutcome::Failed { code, .. } if code == "context.capacity"));

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 #[path = "support/product.rs"]
 mod product;
 use rsi::{DEFAULT_AGENT_PRESET_ID, StandardComposition};

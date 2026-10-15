@@ -195,7 +195,10 @@ mod tests {
         }
         let before = fs::read(root.path().join("one/Cargo.lock")).unwrap();
         let error = verify(root.path(), false).unwrap_err();
-        assert!(error.contains("one/Cargo.lock") && error.contains("two/Cargo.lock"));
+        for name in ["one", "two"] {
+            let lock = Path::new(name).join("Cargo.lock");
+            assert!(error.contains(&lock.display().to_string()), "{error}");
+        }
         assert!(error.contains("verify-lockfiles --online"));
         assert_eq!(
             fs::read(root.path().join("one/Cargo.lock")).unwrap(),

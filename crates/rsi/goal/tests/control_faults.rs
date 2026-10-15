@@ -138,7 +138,7 @@ fn request() -> GoalControl {
             id: DomainRequestId::new("goal").unwrap(),
             objective: "Verify work".into(),
             constraints: String::new(),
-            max_rounds: 2,
+            max_rounds: Some(2),
         },
     }
 }

@@ -793,6 +793,7 @@ async fn reply(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    #[cfg(unix)]
     async fn claim_io_releases_bookkeeping_while_dispatch_remains_tracked_through_close() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -854,6 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn converged_reservation_releases_bookkeeping_without_fencing_a_healthy_ledger() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -874,6 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn poisoned_attempt_bookkeeping_does_not_panic_during_teardown() {
         for converged in [false, true] {
             let directory = crate::test_directory();
@@ -928,6 +931,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cancellation_before_the_first_worker_poll_reaches_the_published_token() {
         let admission = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -972,6 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn stopped_scheduler_does_not_claim_and_abnormal_reservation_destruction_fences() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -1021,6 +1026,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_durable_failure_settlement_fences_admission_and_releases_live_entry() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -1085,6 +1091,7 @@ mod tests {
         deadline.await;
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn precheck_failure_retains_its_specific_diagnostic() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -1132,6 +1139,7 @@ mod tests {
         owner.close().await;
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn complete_checker_result_survives_cleanup_failure_before_execution_error() {
         let directory = crate::test_directory();
         let ledger = Ledger::open(&directory.path().join("ledger"), now()).unwrap();
@@ -1198,6 +1206,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "Keep one complete ownership operation or acceptance scenario together"
     )]
+    #[cfg(unix)]
     async fn listener_classifies_rejection_and_signed_non_work_without_execution() {
         let tmp = crate::test_directory();
         let ledger = Ledger::open(&tmp.path().join("ledger"), now()).unwrap();
@@ -1311,6 +1320,7 @@ mod tests {
         owner.close().await;
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn saturated_listener_returns_the_bounded_busy_json() {
         let tmp = crate::test_directory();
         let ledger = Ledger::open(&tmp.path().join("ledger"), now()).unwrap();
@@ -1342,11 +1352,13 @@ mod tests {
         owner.close().await;
     }
     #[derive(Debug)]
+    #[cfg(unix)]
     struct TestPreview {
         closes: std::sync::atomic::AtomicUsize,
         close_fails: bool,
     }
     #[async_trait]
+    #[cfg(unix)]
     impl rsi_browser::PreviewBrowser for TestPreview {
         async fn navigate(&self, _: &str) -> Result<String, String> {
             Ok(String::new())
@@ -1365,12 +1377,14 @@ mod tests {
         }
     }
     #[derive(Debug)]
+    #[cfg(unix)]
     struct TestExplorer {
         ledger: Arc<Ledger>,
         fails: bool,
         cancel: bool,
     }
     #[async_trait]
+    #[cfg(unix)]
     impl Explorer for TestExplorer {
         async fn explore(
             &self,
@@ -1398,6 +1412,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(unix)]
     async fn exploration_errors_and_cleanup_failures_settle_before_returning() {
         for (fails, close_fails, cancel) in [
             (true, false, false),

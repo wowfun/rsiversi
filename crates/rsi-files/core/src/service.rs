@@ -17,10 +17,10 @@ use std::{
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
-#[path = "unix.rs"]
+#[cfg(any(unix, windows))]
+#[path = "native.rs"]
 mod platform;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[path = "unsupported.rs"]
 mod platform;
 

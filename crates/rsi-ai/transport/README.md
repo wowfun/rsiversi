@@ -69,6 +69,21 @@ rather than leaving a queued background task.
 The production client performs one request with redirects disabled, a 10-second
 connect timeout, and a five-minute whole-request timeout. Callers that need
 different finite deadlines can construct it with `ReqwestTransport::with_timeouts`.
+Language providers may instead select `with_streaming_timeouts`: a bounded
+connect and response-header wait, with no total body deadline. The SSE decoder
+then enforces its selected idle allowance across network reads. Only a complete
+valid event or heartbeat resets that allowance; empty chunks and incomplete
+frames do not. Time spent waiting for local frame admission or a downstream
+consumer is excluded. DeepSeek selects 10-second connect and 300-second header
+and SSE idle waits; other providers retain their existing policy.
+Stream failure codes enter provider diagnostics only when they satisfy the
+provider error token contract; invalid codes cannot panic error mapping.
+HTTP rejection errors preserve the actual dispatch status and bounded
+`Retry-After` metadata (seconds or HTTP date). Retry decisions belong to the
+frozen language policy, never the transport.
+Error-body collection has a 64 KiB byte limit and a five-minute absolute read
+deadline, including for streaming transports. An unreadable, oversized or timed-out
+error body falls back to the safe summary while preserving the received HTTP status.
 Cancellation is observed both before response headers and while the response
 body is being consumed. Bearer headers are constructed through temporary
 zeroizing storage and marked sensitive before entering the request header map.

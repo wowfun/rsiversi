@@ -48,11 +48,23 @@ but is never cache I/O authority. A failed final durability fence removes and
 syncs only the claimed directory's entry. Unprovable rollback poisons the
 catalog.
 
-On Windows, the marker handle denies delete sharing. Private staging begins
+On Windows, the cache directory must be an absolute path. Configuration rejects
+relative, drive-relative and root-relative paths before cache I/O or worker
+creation, so DLL mapping never relies on a working directory to satisfy its
+absolute-artifact contract.
+The marker handle denies delete sharing. Private staging begins
 with an exclusive writer, then reopens read-only with write/delete sharing
 denied and rechecks length and digest before mapping. The retained handle pins
 those bytes through unload. Windows behavior is claimed only when the real
 native suite runs on Windows.
+
+Windows mapping uses `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`.
+Dependencies are searched only beside the verified staging DLL and in SYSTEM32;
+the process working directory, PATH and application directory are not dependency
+authority. Required MSVC/UCRT runtime DLLs must be installed in SYSTEM32. Missing
+dependencies and OS policy refusals remain load errors; the loader does not retry
+with a broader search or install a runtime. This does not validate a dependency's
+bytes or change the trust granted to the selected native artifact.
 
 The loader maps the verified private artifact rather than reopening a durable
 pathname. Live workers, factories, instances, issued capabilities, and

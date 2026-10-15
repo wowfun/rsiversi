@@ -7,13 +7,15 @@
 use async_trait::async_trait;
 #[cfg(not(unix))]
 use cap_std::ambient_authority;
+#[cfg(not(unix))]
 use cap_std::fs::Dir;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader,
 };
 #[cfg(unix)]
 use rsi_files_native_fs::{
-    is_link_rejection, open_absolute_directory_no_follow, open_relative_file_no_follow,
+    Directory as Dir, is_link_rejection, open_absolute_directory_no_follow,
+    open_relative_file_no_follow,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_meta_contract::LocalContract;
@@ -239,6 +241,9 @@ impl ProjectAuthority {
 }
 
 fn open_directory_regular_file(directory: &Dir, relative: &Path) -> std::io::Result<Option<File>> {
+    // The non-Unix path fallback only filters the observed type before opening;
+    // it does not establish the Unix retained-handle/no-follow guarantee.
+    #[cfg(not(unix))]
     match directory.symlink_metadata(relative) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Ok(None),

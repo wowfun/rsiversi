@@ -6,16 +6,33 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub(super) const MAX_TEXT: usize = rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES;
+#[cfg(any(unix, test))]
 const MAX_FRAME: usize = 4096;
+#[cfg(any(unix, test))]
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Debug)]
 pub(super) enum Input {
+    #[cfg_attr(
+        not(any(unix, test)),
+        expect(
+            dead_code,
+            reason = "Native input is Unix-only; decoder tests construct this variant on every platform"
+        )
+    )]
     Terminal(Event),
+    #[cfg_attr(
+        not(any(unix, test)),
+        expect(
+            dead_code,
+            reason = "Native input is Unix-only; decoder tests construct this variant on every platform"
+        )
+    )]
     Rejected(&'static str),
     Closed,
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 pub(super) struct Framer {
     frame: Vec<u8>,
@@ -26,6 +43,7 @@ pub(super) struct Framer {
     discard_escape: bool,
 }
 
+#[cfg(any(unix, test))]
 impl Framer {
     pub(super) fn advance(&mut self, byte: u8) -> Option<Input> {
         if self.paste.is_some() {

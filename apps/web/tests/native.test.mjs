@@ -100,7 +100,7 @@ test('native delivers decoded frames and preserves exact acknowledgement identit
   const native=new NativeDocument();
   let finish;const done=new Promise(resolve=>finish=resolve);
   globalThis.fetch=async(path,init)=>{
-    requests.push([path,init.body]);
+    requests.push([path,init.body,init.method]);
     if(path.startsWith('/_frame'))return Response.json({view,assets});
     if(path==='/_ack'){native.terminate();finish();}
     return new Response('{}');
@@ -114,6 +114,7 @@ test('native delivers decoded frames and preserves exact acknowledgement identit
     };
     native.postMessage({kind:'call',id:1,method:'connect',payload:{}});
     await done;
+    assert.equal(requests.find(([path])=>path.startsWith('/_frame'))[2],'POST');
     assert.deepEqual(JSON.parse(requests.find(([path])=>path==='/_ack')[1]),{frame_id:view.frame_id,resync:true,renderer:{revision:assets.revision,accept:true}});
   }finally{globalThis.fetch=fetch;}
 });

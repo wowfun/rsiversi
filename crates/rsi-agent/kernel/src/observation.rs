@@ -384,15 +384,9 @@ pub(super) fn activation_outcome(
             code: "turn.interrupted".into(),
             message: reason.clone(),
         },
-        TurnOutcome::BudgetExceeded {
-            dimension,
-            consumed,
-            limit,
-        } => ActivationOutcome::Failed {
-            code: "turn.budget_exceeded".into(),
-            message: bounded_diagnostic(&format!(
-                "{dimension:?} consumed {consumed} with limit {limit}"
-            )),
+        TurnOutcome::MaxTokens => ActivationOutcome::Failed {
+            code: "max_tokens".into(),
+            message: "Model output reached its token limit.".into(),
         },
     }
 }
@@ -407,9 +401,7 @@ pub(super) fn completion_message(outcome: &TurnOutcome) -> String {
         TurnOutcome::Interrupted { reason, .. } => {
             bounded_diagnostic(&format!("Subagent activation was interrupted: {reason}"))
         }
-        TurnOutcome::BudgetExceeded { .. } => {
-            "Subagent activation exhausted its frozen Turn budget.".into()
-        }
+        TurnOutcome::MaxTokens => "Subagent model output reached its token limit.".into(),
     }
 }
 

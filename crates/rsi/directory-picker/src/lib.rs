@@ -185,88 +185,94 @@ struct Owner {
     work: Work,
 }
 impl Owner {
+    #[cfg(not(unix))]
+    fn unsupported<T>(
+        &self,
+        origin: &CallOrigin,
+        location: &ExecutionLocation,
+    ) -> std::future::Ready<rsi_api_protocol::Result<rsi_directory_picker_api::Result<T>>> {
+        let admission = if *location == ExecutionLocation::Local {
+            self.access.admit(origin).map(|_| ())
+        } else {
+            self.execution.admit(origin, location).map(|_| ())
+        };
+        std::future::ready(admission.map(|()| Err(Failure::Unsupported)))
+    }
+
+    #[cfg(not(unix))]
+    fn list(
+        &self,
+        origin: &CallOrigin,
+        location: &ExecutionLocation,
+        _: ListRequest,
+    ) -> std::future::Ready<rsi_api_protocol::Result<rsi_directory_picker_api::Result<Listing>>>
+    {
+        self.unsupported(origin, location)
+    }
+
+    #[cfg(not(unix))]
+    fn create(
+        &self,
+        origin: &CallOrigin,
+        location: &ExecutionLocation,
+        _: CreateRequest,
+    ) -> std::future::Ready<rsi_api_protocol::Result<rsi_directory_picker_api::Result<Created>>>
+    {
+        self.unsupported(origin, location)
+    }
+
+    #[cfg(unix)]
     async fn list(
         &self,
         origin: &CallOrigin,
-        location: ExecutionLocation,
+        location: &ExecutionLocation,
         request: ListRequest,
     ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<Listing>> {
-        if location != ExecutionLocation::Local {
-            #[cfg(unix)]
-            {
-                let execution = self.execution.lease(origin.clone(), &location)?;
-                return Ok(
-                    match self
-                        .work
-                        .remote(execution, target::Request::List(request))
-                        .await?
-                    {
-                        Ok(target::Reply::Listing(value)) => Ok(value),
-                        Ok(_) => Err(Failure::Invalid),
-                        Err(error) => Err(error),
-                    },
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                let _admission = self.execution.admit(origin, &location)?;
-                return Ok(Err(Failure::Unsupported));
-            }
+        if *location != ExecutionLocation::Local {
+            let execution = self.execution.lease(origin.clone(), location)?;
+            return Ok(
+                match self
+                    .work
+                    .remote(execution, target::Request::List(request))
+                    .await?
+                {
+                    Ok(target::Reply::Listing(value)) => Ok(value),
+                    Ok(_) => Err(Failure::Invalid),
+                    Err(error) => Err(error),
+                },
+            );
         }
         let grant = self.access.admit(origin)?;
-        #[cfg(unix)]
-        {
-            let home = self.home.clone();
-            self.work
-                .run(grant, false, move |stop| native::list(request, home, stop))
-                .await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (grant, request);
-            Ok(Err(Failure::Unsupported))
-        }
+        let home = self.home.clone();
+        self.work
+            .run(grant, false, move |stop| native::list(request, home, stop))
+            .await
     }
+    #[cfg(unix)]
     async fn create(
         &self,
         origin: &CallOrigin,
-        location: ExecutionLocation,
+        location: &ExecutionLocation,
         request: CreateRequest,
     ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<Created>> {
-        if location != ExecutionLocation::Local {
-            #[cfg(unix)]
-            {
-                let execution = self.execution.lease(origin.clone(), &location)?;
-                return Ok(
-                    match self
-                        .work
-                        .remote(execution, target::Request::Create(request))
-                        .await?
-                    {
-                        Ok(target::Reply::Created(value)) => Ok(value),
-                        Ok(_) => Err(Failure::OutcomeUnknown),
-                        Err(error) => Err(error),
-                    },
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                let _admission = self.execution.admit(origin, &location)?;
-                return Ok(Err(Failure::Unsupported));
-            }
+        if *location != ExecutionLocation::Local {
+            let execution = self.execution.lease(origin.clone(), location)?;
+            return Ok(
+                match self
+                    .work
+                    .remote(execution, target::Request::Create(request))
+                    .await?
+                {
+                    Ok(target::Reply::Created(value)) => Ok(value),
+                    Ok(_) => Err(Failure::OutcomeUnknown),
+                    Err(error) => Err(error),
+                },
+            );
         }
         let grant = self.access.admit(origin)?;
-        #[cfg(unix)]
-        {
-            self.work
-                .run(grant, true, move |stop| native::create(request, stop))
-                .await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (grant, request);
-            Ok(Err(Failure::Unsupported))
-        }
+        self.work
+            .run(grant, true, move |stop| native::create(request, stop))
+            .await
     }
 }
 /// Ordinary Service factory; no ambient home is read during activation.
@@ -337,7 +343,7 @@ impl PluginFactory for DirectoryPickerFactory {
                     let owner = list_owner.clone();
                     async move {
                         owner
-                            .list(&context.origin, request.location, request.request)
+                            .list(&context.origin, &request.location, request.request)
                             .await
                     }
                 }),
@@ -351,7 +357,7 @@ impl PluginFactory for DirectoryPickerFactory {
                     let owner = create_owner.clone();
                     async move {
                         owner
-                            .create(&context.origin, request.location, request.request)
+                            .create(&context.origin, &request.location, request.request)
                             .await
                     }
                 }),

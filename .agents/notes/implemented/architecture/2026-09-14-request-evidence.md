@@ -2,6 +2,9 @@
 name: Bounded request evidence inside ModelIntent
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Cumulative evidence accounting is superseded by per-package capacity; exact request capture and digest references remain required.
+
 ## Problem
 
 Prepared-call digests identify an actual request but cannot explain its system

@@ -4,7 +4,7 @@ use rsi_files_protocol::{
 use rsi_files_protocol::{FileToken, OpenedFile};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
-pub(super) struct Resource;
+pub(super) enum Resource {}
 pub(super) fn open(
     _: &FilesBinding,
     _: RelativePath,
@@ -14,19 +14,13 @@ pub(super) fn open(
     Err(FilesError::Unsupported)
 }
 impl Resource {
-    pub(super) fn describe(&self, token: FileToken) -> OpenedFile {
-        OpenedFile {
-            executable: false,
-            path: RelativePath::default(),
-            token,
-            kind: FileKind::File,
-            length: 0,
-        }
+    pub(super) fn describe(&self, _: FileToken) -> OpenedFile {
+        match *self {}
     }
     pub(super) fn read(&self, _: u64, _: usize, _: &CancellationToken) -> Result<FilePage> {
-        Err(FilesError::Unsupported)
+        match *self {}
     }
     pub(super) fn list(&self, _: usize, _: usize, _: &CancellationToken) -> Result<DirectoryPage> {
-        Err(FilesError::Unsupported)
+        match *self {}
     }
 }

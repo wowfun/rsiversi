@@ -233,11 +233,11 @@ impl AgentPresetManager {
 
 pub(crate) fn standard_agent_profile_compiler(
     paths: &HostPaths,
-    linux_tools_enabled: bool,
+    coding_tools_enabled: bool,
     addons: &crate::StandardAddonSet,
 ) -> Result<AgentPresetProfileCompiler> {
     Ok(AgentPresetProfileCompiler::new(
-        standard_agent_compiler(paths, linux_tools_enabled, addons)?,
+        standard_agent_compiler(paths, coding_tools_enabled, addons)?,
         addons
             .descriptions()
             .filter(|factory| factory.scope == crate::AddonScope::Agent)
@@ -248,13 +248,13 @@ pub(crate) fn standard_agent_profile_compiler(
 #[cfg(unix)]
 pub(crate) fn native_agent_profile_compiler(
     paths: &HostPaths,
-    linux_tools_enabled: bool,
+    coding_tools_enabled: bool,
     base: &crate::StandardAddonSet,
     selected: &[crate::NativeAddonRecord],
 ) -> Result<AgentPresetProfileCompiler> {
     use sha2::{Digest as _, Sha256};
     if selected.is_empty() {
-        return standard_agent_profile_compiler(paths, linux_tools_enabled, base);
+        return standard_agent_profile_compiler(paths, coding_tools_enabled, base);
     }
     // Callers have checked the complete selection against this frozen base.
     // ABI metadata belongs to the independently frozen executable catalog.
@@ -262,7 +262,7 @@ pub(crate) fn native_agent_profile_compiler(
     digest.update(b"rsi.native-agent-declarations/v1\0");
     digest.update(base.digest().map_err(host_boot)?.as_bytes());
     digest.update(serde_json::to_vec(selected).map_err(host_boot)?);
-    let compiler = agent_compiler(paths, linux_tools_enabled, hex::encode(digest.finalize()))?;
+    let compiler = agent_compiler(paths, coding_tools_enabled, hex::encode(digest.finalize()))?;
     Ok(AgentPresetProfileCompiler::new(
         compiler,
         base.descriptions()
@@ -279,10 +279,10 @@ pub(crate) fn native_agent_profile_compiler(
 
 pub(crate) fn standard_agent_compiler_identity(
     paths: &HostPaths,
-    linux_tools_enabled: bool,
+    coding_tools_enabled: bool,
     addons: &crate::StandardAddonSet,
 ) -> Result<String> {
-    let candidate = standard_agent_compiler(paths, linux_tools_enabled, addons)?
+    let candidate = standard_agent_compiler(paths, coding_tools_enabled, addons)?
         .compile(&ProfileProgram::from_profile(Profile::default()))
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     Ok(candidate.source_digest().to_owned())
@@ -290,18 +290,18 @@ pub(crate) fn standard_agent_compiler_identity(
 
 fn standard_agent_compiler(
     paths: &HostPaths,
-    linux_tools_enabled: bool,
+    coding_tools_enabled: bool,
     addons: &crate::StandardAddonSet,
 ) -> Result<ProfileCompiler> {
     agent_compiler(
         paths,
-        linux_tools_enabled,
+        coding_tools_enabled,
         addons.digest().map_err(host_boot)?,
     )
 }
 fn agent_compiler(
     paths: &HostPaths,
-    linux_tools_enabled: bool,
+    coding_tools_enabled: bool,
     declaration_digest: String,
 ) -> Result<ProfileCompiler> {
     let environment = ProfileEnvironment::new(
@@ -310,14 +310,25 @@ fn agent_compiler(
         paths.cache(),
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         BTreeMap::from([
-            ("standard_unix_files".to_owned(), Value::Bool(cfg!(unix))),
+            (
+                "standard_output_cache".to_owned(),
+                Value::Bool(coding_tools_enabled && cfg!(unix)),
+            ),
+            (
+                "standard_native_files".to_owned(),
+                Value::Bool(cfg!(any(unix, windows))),
+            ),
+            (
+                "standard_apply_patch".to_owned(),
+                Value::Bool(coding_tools_enabled && cfg!(target_os = "linux")),
+            ),
             (
                 "standard_host_profile_edits".to_owned(),
                 Value::Bool(cfg!(unix)),
             ),
             (
-                "standard_linux_coding_tools".to_owned(),
-                Value::Bool(linux_tools_enabled),
+                "standard_coding_tools".to_owned(),
+                Value::Bool(coding_tools_enabled),
             ),
             (
                 "rsi_standard_addons".to_owned(),

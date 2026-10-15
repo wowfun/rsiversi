@@ -15,7 +15,7 @@ pub struct ReferenceText<'a> {
     /// Original source coordinate, never an index-generated identity.
     pub record: ReferenceRecord,
     /// Full original field. Callers must enforce their own aggregate response budget.
-    pub text: &'a str,
+    pub text: std::borrow::Cow<'a, str>,
 }
 
 /// Enumerates the closed export surface of one already validated Fact.
@@ -27,7 +27,7 @@ pub fn reference_texts(fact: &SessionFact) -> Vec<ReferenceText<'_>> {
             kind,
             content_index,
         },
-        text,
+        text: std::borrow::Cow::Borrowed(text),
     };
     match fact.body() {
         SessionFactBody::TurnAccepted { text, .. } => {
@@ -50,15 +50,33 @@ pub fn reference_texts(fact: &SessionFact) -> Vec<ReferenceText<'_>> {
                 _ => None,
             })
             .collect(),
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: ModelEventPurpose::Conversation,
-            event:
-                LanguageEvent::ContentDelta {
+            attempt,
+            ..
+        } => {
+            let mut blocks = std::collections::BTreeMap::<u32, String>::new();
+            for (_, event) in attempt.events().filter_map(std::result::Result::ok) {
+                if let LanguageEvent::ContentDelta {
                     index,
                     delta: ContentDelta::Text(text),
-                },
-            ..
-        } => vec![item(ReferenceContentKind::Assistant, *index as usize, text)],
+                } = event
+                {
+                    blocks.entry(index).or_default().push_str(&text);
+                }
+            }
+            blocks
+                .into_iter()
+                .map(|(index, text)| ReferenceText {
+                    record: ReferenceRecord {
+                        sequence: fact.seq(),
+                        kind: ReferenceContentKind::Assistant,
+                        content_index: index as usize,
+                    },
+                    text: std::borrow::Cow::Owned(text),
+                })
+                .collect()
+        }
         SessionFactBody::ToolResult { result, .. } => result
             .content
             .iter()
@@ -198,7 +216,7 @@ impl References {
                 ReferenceSource::Native { binding: source },
                 context.target(),
                 selection,
-                original.text,
+                &original.text,
             )?;
             context.check()?;
             let reference = publish(&*store, envelope, &stop).await?;

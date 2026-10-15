@@ -197,10 +197,12 @@ async fn truncated_summary_stops_without_recovery_or_an_ordinary_resubmission() 
         purposes.as_slice(),
         [ModelPurpose::ContextCompaction(_)]
     ));
-    assert!(
-        !facts
+    assert_eq!(
+        facts
             .iter()
-            .any(|fact| matches!(fact.body(), SessionFactBody::ModelOutputRecovery { .. }))
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }))
+            .count(),
+        2
     );
     stack.dispose(language, executor).await;
 }
@@ -257,12 +259,18 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
                 assert!(matches!(purpose, ModelPurpose::ContextCompaction(_)));
                 assert!(effect.replace(effect_id.clone()).is_none());
             }
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 effect_id,
-                event: LanguageEvent::Finished { reason, .. },
+                attempt: log,
                 ..
             } if Some(effect_id) == effect.as_ref() => {
-                assert_eq!(*reason, FinishReason::Stop);
+                assert!(matches!(
+                    log.events().last().unwrap().unwrap().1,
+                    LanguageEvent::Finished {
+                        reason: FinishReason::Stop,
+                        ..
+                    }
+                ));
                 finished += 1;
             }
             _ => {}
@@ -347,7 +355,7 @@ async fn summary_capacity_retries_once_with_a_smaller_whole_source_batch() {
 }
 
 #[tokio::test]
-async fn summary_consumes_the_same_frozen_provider_attempt_budget() {
+async fn summary_and_answer_have_independent_settlements() {
     let stack = BaseStack::activate().await;
     let provider = fixture(
         &stack,
@@ -361,24 +369,13 @@ async fn summary_consumes_the_same_frozen_provider_attempt_budget() {
         .activate_language("test.language.summary-budget", provider.clone())
         .await;
     let executor = stack.activate_executor("summary-budget").await;
-    let budget = TurnBudget::new(30_000, 1, 256, 65_536, 64 * 1024 * 1024).unwrap();
     let (first, outcome) = stack
-        .submit_and_wait_with_header("older task", None, header_with_budget(budget))
+        .submit_and_wait_with_header("older task", None, header())
         .await;
     assert_eq!(outcome, TurnOutcome::Completed);
     let (_, outcome) = stack.resume_and_wait("continue", first.session_id).await;
-    assert!(
-        matches!(
-            outcome,
-            TurnOutcome::BudgetExceeded {
-                dimension: BudgetDimension::ProviderAttempts,
-                consumed: 2,
-                limit: 1
-            }
-        ),
-        "{outcome:?}"
-    );
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    assert!(matches!(outcome, TurnOutcome::Completed), "{outcome:?}");
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 3);
     stack.dispose(language, executor).await;
 }
 
@@ -484,9 +481,8 @@ async fn executor_loss_after_summary_finished_interrupts_original_turn_and_expli
         .facts;
     assert!(matches!(
         facts.last().unwrap().body(),
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
-            event: LanguageEvent::Finished { .. },
             ..
         }
     ));

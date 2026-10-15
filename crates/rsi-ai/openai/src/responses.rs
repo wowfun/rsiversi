@@ -91,13 +91,18 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
                         .await
                         .map_err(transport_connect_error)?;
                     if !(200..300).contains(&response.status) {
-                        return Err(http_failure(response.status, response.body).await);
+                        return Err(rsi_ai_transport::with_retry_after(
+                            http_failure(response.status, response.body).await,
+                            &response.headers,
+                            std::time::SystemTime::now(),
+                        ));
                     }
                     Ok(translate_responses(
-                        decode_sse(
+                        rsi_ai_transport::decode_sse_with_idle(
                             response.body,
                             SseTermination::Eof,
                             MAX_DEFERRED_CONTROL_BODY_BYTES,
+                            config.stream_idle_timeout,
                         ),
                         config.responses_state,
                     ))
@@ -1576,7 +1581,7 @@ fn translate_responses(
             ErrorPhase::Stream,
             DispatchStatus::Dispatched,
             "OpenAI Responses stream ended without response.completed",
-        )));
+        ).with_provider_code("sse.missing_terminal").expect("static code")));
     })
 }
 

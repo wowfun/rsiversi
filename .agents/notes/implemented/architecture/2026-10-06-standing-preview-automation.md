@@ -2,6 +2,9 @@
 name: Standing authority for bounded preview acceptance and exploration
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Per-Turn counters are superseded by the controller acceptance deadline; the independent two-round and cleanup boundaries remain.
+
 ## Problem
 
 An external deployment is not human Session input. Existing restart-disarmed

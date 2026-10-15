@@ -188,6 +188,10 @@ async fn dispatch(
     }
 }
 
+fn closed_handler_after_clean_eof(peer: &Peer, error: Error) -> bool {
+    error == Error::Closed && peer.handle().is_closed() && peer.handle().failure().is_none()
+}
+
 /// Runs one protocol connection, joining handler tasks and native backend cleanup.
 /// No prompts are automatically retried after handler or transport loss.
 pub async fn run(
@@ -202,7 +206,11 @@ pub async fn run(
         tokio::select! { biased;
             () = cancellation.cancelled() => break,
             result = tasks.join_next(), if !tasks.is_empty() => {
-                if !matches!(result, Some(Ok(Ok(())))) { healthy = false; break; }
+                match result {
+                    Some(Ok(Ok(()))) => {},
+                    Some(Ok(Err(error))) => { healthy = closed_handler_after_clean_eof(&peer, error); break; },
+                    _ => { healthy = false; break; },
+                }
             }
             incoming = peer.next() => {
                 let Some(incoming) = incoming else { break; };
@@ -231,7 +239,7 @@ pub async fn run(
                 });
                 match std::future::poll_fn(|cx| Poll::Ready(handling.as_mut().poll(cx))).await {
                     Poll::Ready(Ok(())) => {},
-                    Poll::Ready(Err(_)) => { healthy = false; break; },
+                    Poll::Ready(Err(error)) => { healthy = closed_handler_after_clean_eof(&peer, error); break; },
                     Poll::Pending => { tasks.spawn(handling); },
                 }
             }

@@ -103,11 +103,7 @@ impl Scenario {
         self.state
             .lock()
             .unwrap()
-            .apply(
-                request.action.clone(),
-                header.settings().turn_budget(),
-                true,
-            )
+            .apply(request.action.clone(), 256, true)
             .map_err(SessionError::Invalid)?;
         let armed = matches!(
             request.action,
@@ -203,6 +199,7 @@ impl Scenario {
         backend: &Backend,
         request: TurnJobsRequest,
     ) -> rsi_session_protocol::Result<JobsSnapshot> {
+        let header = backend.header().await?;
         self.jobs_reads.lock().unwrap().push(request.clone());
         if self.block_jobs.load(Ordering::SeqCst) {
             struct Active<'a>(&'a AtomicUsize);
@@ -216,7 +213,6 @@ impl Scenario {
             std::future::pending::<()>().await;
         }
         assert_eq!(request.turn_id.as_str(), "jobs-turn");
-        let header = backend.header().await?;
         let next = request.after.is_some();
         self.jobs.reserve_capture()?.retain(TurnJobsPage {
             session_id: header.session_id().clone(), header_sha256: header.fingerprint().unwrap(), turn_id: request.turn_id, generation: 7, after: request.after,

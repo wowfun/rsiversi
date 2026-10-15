@@ -20,6 +20,10 @@ siblings through the complete registry seed. Reports identify the exact build
 family and fixture provider; these are product behavior/visual observations,
 not live model evidence or DSH pixel-golden acceptance.
 
+Source-inspection geometry resolves the current connected resource, its title
+and controls in one document execution. A replaced resource is read again before
+measurement; invalid geometry on the current resource remains a failure.
+
 The opt-in `mcp-images-live.mjs` uses the authorized DeepSeek credential file,
 an isolated HTTP MCP server, the real Worker and durable Media CAS. It checks
 expanded template URIs, ordered durable Tool images, text-model follow-up,
@@ -108,6 +112,19 @@ Browser commands pass through the product Worker, API and Agent Kernel. The
 provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
+
+Stream fragments settle into one model-attempt Fact. Reopening a completed
+180-fragment response retains its first fragment and one exact source reference;
+fragment count does not manufacture history or source pagination. Settings checks
+use the current output-cap array, preserving exact JSON when the typed form cannot
+represent an integer. The document-only schema fixture covers numeric controls.
+
+`RSI_WEB_REPORT=/absolute/new/report node fixtures/rsi/web-product/settlement.mjs`
+uses the paired publication in Chromium to observe a gated Unicode stream,
+explicitly reconnect and reopen it after document refresh, then settle with `MaxTokens`. Desktop and
+narrow screenshots cover both preview and durable output. It verifies one source
+reference, no duplicate text, the visible stop reason and no automatic second
+model request. This fixture uses the isolated deterministic provider.
 
 The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
 clean document before recording success. Product notices fail the live check;

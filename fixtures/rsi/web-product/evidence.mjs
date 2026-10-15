@@ -1,3 +1,4 @@
+import {modelEvents} from './model-attempt.mjs';
 import assert from 'node:assert/strict';
 import {readFile, writeFile, readdir} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -39,7 +40,7 @@ export async function redactEvidence(directory, key) {
 }
 
 export function requireProviderUsage(facts) {
-  const usage = facts.filter(fact => fact.type === 'model_event' && fact.event?.type === 'usage').map(fact => fact.event.usage);
+  const usage = [...modelEvents(facts)].filter(fact => fact.event.type === 'usage').map(fact => fact.event.usage);
   assert(usage.length > 0, 'Actual provider usage is required');
   for (const entry of usage) {
     assert(entry && Number.isSafeInteger(entry.input_tokens) && entry.input_tokens > 0, 'Invalid provider input usage');

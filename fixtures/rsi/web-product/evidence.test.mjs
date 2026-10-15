@@ -70,7 +70,11 @@ test('redaction sanitizes all nested evidence before reporting and ignores links
 });
 
 test('live usage evidence cannot succeed on absent or invalid counts', () => {
-  const facts = usage => [{type: 'model_event', event: {type: 'usage', usage}}];
+  const integer = value => { const bytes=[]; do { const part=value&127; value=Math.floor(value/128); bytes.push(part|(value?128:0)); } while(value); return bytes; };
+  const record = event => { const body=Buffer.from(JSON.stringify(event)); return Buffer.concat([Buffer.from([0,0,...integer(body.length)]),body]); };
+  const facts = usage => [{type:'model_attempt_settled',attempt:{v:1,retain_context:true,chunks:[Buffer.concat([
+    record({type:'usage',usage}),record({type:'finished',reason:'max_tokens',replay:null}),
+  ]).toString('base64')]}}];
   for (const value of [[], facts(null), facts({}), facts({input_tokens: 2, output_tokens: NaN}), facts({input_tokens: 0, output_tokens: 2})]) {
     assert.throws(() => requireProviderUsage(value));
   }

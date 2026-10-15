@@ -1191,11 +1191,78 @@ pub(super) fn derived_session_root(
     ))
 }
 
+pub(super) const MODEL_COORDINATE_LOOKUP: &str = "SELECT 1 FROM facts WHERE session_id = ?1 AND json_extract(fact_json, '$.effect_id') = ?2 AND turn_id = ?4
+             AND json_extract(fact_json, '$.type') = ?3
+             AND json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')";
+
+#[test]
+fn model_coordinate_precheck_uses_the_unique_expression_index() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            crate::EXPECTED_TABLES
+                .iter()
+                .find(|(name, _)| *name == "facts")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            crate::EXPECTED_INDEXES
+                .iter()
+                .find(|(name, _)| *name == "model_effect_coordinates")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+    let mut query = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {MODEL_COORDINATE_LOOKUP}"))
+        .unwrap();
+    let details = query
+        .query_map(
+            params!["session", "effect", "model_started", "turn"],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("SEARCH facts USING")
+                && detail.contains("model_effect_coordinates")),
+        "{details:?}"
+    );
+}
+
 pub(super) fn insert_fact(
     transaction: &Transaction<'_>,
     session_id: &SessionId,
     fact: &SessionFact,
 ) -> Result<()> {
+    if let Some((effect, role)) = rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
+    {
+        let exists = transaction
+            .query_row(
+                MODEL_COORDINATE_LOOKUP,
+                params![
+                    session_id.as_str(),
+                    effect.as_str(),
+                    role,
+                    fact.body().turn_id().as_str()
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .is_some();
+        if exists {
+            return Err(StoreError::Invalid(
+                "duplicate model effect coordinate".into(),
+            ));
+        }
+    }
     transaction
         .execute(
             "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json)

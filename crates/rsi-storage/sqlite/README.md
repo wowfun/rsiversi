@@ -1,5 +1,9 @@
 # rsi-storage-sqlite
 
+Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
+and reports unavailable native capability as `MetaError::Activation`, the Meta
+category for plugin preparation and activation failure.
+
 This ordinary backend plugin stores routed non-session domains in one explicit
 SQLite database. It creates a strict versioned schema, enables foreign keys,
 uses WAL with explicit `synchronous=FULL`,
@@ -10,7 +14,20 @@ operation concurrency is one, including reads; WAL does not imply a read pool.
 Newly created path components and the database are private on Unix; existing
 caller-supplied parent directories retain their permissions. Unix activation
 requires the database and SQLite sidecars to be real regular files rather than
-symbolic links; the provider does not enforce that native file check off Unix.
+symbolic links. Windows requires fixed local NTFS and exact no-reparse acquisition.
+New database files are private at creation; existing database/sidecar objects are
+privatized only after a retained native handle proves a regular file owned by
+TokenUser. WAL and shared-memory sidecars are acquired or created with explicit
+TokenUser ownership before SQLite opens them, including with an elevated token
+whose default object owner is Administrators. Existing foreign-owned sidecars
+are refused. Native failures
+prevent activation. The final database directory must already have the native
+private descriptor (newly created directories do); a NamespaceLease retains it
+with the SQLite connection and every blocking worker. Existing higher ancestors
+keep their permissions. Other platforms reject before opening SQLite.
+Configuration identifiers and absolute-path syntax are checked without I/O
+before platform admission: malformed configuration returns `InvalidInput`,
+while valid configuration on an unsupported platform returns `Unsupported`.
 Opening creates and canonicalizes the parent once, then uses that fixed parent
 for the database and every sidecar; ancestor aliases are permitted.
 

@@ -3,7 +3,6 @@ use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessageSource, ExecutionCoordinates,
     ModelEventPurpose, SessionFact, SessionFactBody, SessionHeader, SessionId,
 };
-use rsi_ai_protocol::LanguageEvent;
 use serde::{Deserialize, Serialize};
 
 /// Validates one exact summary request before Store access.
@@ -238,12 +237,8 @@ pub fn is_activity_fact(body: &SessionFactBody) -> bool {
             | SessionFactBody::ImageOutput { .. }
             | SessionFactBody::ToolResult { .. }
             | SessionFactBody::ToolRejected { .. }
-            | SessionFactBody::ModelEvent {
+            | SessionFactBody::ModelAttemptSettled {
                 purpose: ModelEventPurpose::Conversation,
-                event: LanguageEvent::ContentDelta { .. }
-                    | LanguageEvent::Source { .. }
-                    | LanguageEvent::Finished { .. }
-                    | LanguageEvent::Failed { .. },
                 ..
             }
     )
@@ -258,15 +253,31 @@ mod tests {
     };
     #[test]
     fn conversation_content_counts_but_compaction_and_bookkeeping_do_not() {
-        let event = LanguageEvent::ContentDelta {
-            index: 0,
-            delta: rsi_ai_protocol::ContentDelta::Text("text".into()),
-        };
-        let body = |purpose| SessionFactBody::ModelEvent {
+        let body = |purpose| SessionFactBody::ModelAttemptSettled {
             turn_id: TurnId::new("turn").unwrap(),
             effect_id: EffectId::new("model").unwrap(),
-            event: event.clone(),
             purpose,
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    rsi_ai_protocol::LanguageEvent::ContentStarted {
+                        index: 0,
+                        content: rsi_ai_protocol::ContentStart::Text,
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text("text".into()),
+                    },
+                    rsi_ai_protocol::LanguageEvent::ContentFinished { index: 0 },
+                    rsi_ai_protocol::LanguageEvent::Finished {
+                        reason: rsi_ai_protocol::FinishReason::Stop,
+                        replay: None,
+                    },
+                ]
+                .into_iter()
+                .map(|event| (0, event)),
+                true,
+            )
+            .unwrap(),
         };
         assert!(is_activity_fact(&body(ModelEventPurpose::Conversation)));
         assert!(!is_activity_fact(&body(

@@ -65,6 +65,7 @@ impl ApiHandler for Handler {
             }
             Operation::GoalObserve => goal(service.as_ref(), input, budget, maximum).await,
             Operation::Projections => projections(service.as_ref(), input, budget, maximum).await,
+            Operation::ModelObserve => models(service.as_ref(), input, budget, maximum).await,
             Operation::Observe => {
                 let request: wire::Observe = serde_json::from_slice(input.as_bytes())
                     .map_err(|_| ApiError::Invalid("invalid Session observation request".into()))?;
@@ -216,6 +217,39 @@ async fn projections(
             }
             let json = budget.encode(&HandleReply { target: request.target.clone(), body: snapshot }, maximum)?;
             yield ApiMessage { json, binary: None };
+        }
+    })))
+}
+
+async fn models(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<()> = serde_json::from_slice(input.as_bytes())
+        .map_err(|_| ApiError::Invalid("invalid model observation request".into()))?;
+    let result = async {
+        handle(service, &request.target)
+            .await?
+            .observe_models()
+            .await
+    }
+    .await;
+    let mut source = match wire::domain(result)? {
+        Ok(source) => source,
+        Err(failure) => {
+            return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
+        }
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        let mut encoder = rsi_agent_turn_protocol::ModelLiveEncoder::default();
+        while let Some(snapshot) = source.next().await {
+            let snapshot = match wire::domain(snapshot)? { Ok(body) => body, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
+            for body in encoder.pages(&snapshot) {
+                let json = budget.encode(&HandleReply { target: request.target.clone(), body }, maximum)?;
+                yield ApiMessage { json, binary: None };
+            }
         }
     })))
 }

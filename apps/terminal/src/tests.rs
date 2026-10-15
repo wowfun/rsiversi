@@ -1,6 +1,227 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)] // One replay lifecycle checks ordering, suffix catch-up and credit release.
+fn model_prefix_before_started_is_replayed_once_when_start_arrives() {
+    use rsi_agent_session_protocol::{
+        EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionFact,
+    };
+    use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus, ObservationRetention};
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason};
+    let session_id = SessionId::new("session").unwrap();
+    let turn_id = TurnId::new("turn").unwrap();
+    let effect_id = EffectId::new("effect").unwrap();
+    let mut builder = ModelAttemptBuilder::new();
+    builder
+        .push(
+            0,
+            &LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+        )
+        .unwrap();
+    builder
+        .push(
+            1,
+            &LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text("head 界🦀".into()),
+            },
+        )
+        .unwrap();
+    let pool = ObservationRetention::default();
+    let model = CliEvent::Model {
+        snapshot: pool
+            .retain_model(Arc::new(ModelLiveSnapshot {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                effect_id: effect_id.clone(),
+                purpose: ModelEventPurpose::Conversation,
+                revision: 1,
+                prefix: builder.prefix(),
+                status: ModelLiveStatus::Streaming,
+            }))
+            .unwrap(),
+    };
+    let fact = |seq, body| CliEvent::Fact {
+        session_id: session_id.clone(),
+        fact: pool
+            .retain_facts(vec![Arc::new(SessionFact::new(seq, seq, body).unwrap())])
+            .unwrap()
+            .pop()
+            .unwrap(),
+        durable_seq: seq,
+    };
+    let started = fact(
+        1,
+        SessionFactBody::ModelStarted {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+        },
+    );
+    let mut renderer = CliRenderState::default();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    renderer
+        .write(&mut stdout, &mut stderr, OutputMode::Text, &model)
+        .unwrap();
+    assert!(stdout.is_empty());
+    renderer
+        .write(&mut stdout, &mut stderr, OutputMode::Text, &started)
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&stdout), "head 界🦀");
+    renderer
+        .write(&mut stdout, &mut stderr, OutputMode::Text, &model)
+        .unwrap();
+    builder
+        .push(
+            2,
+            &LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text(" tail".into()),
+            },
+        )
+        .unwrap();
+    builder
+        .push(3, &LanguageEvent::ContentFinished { index: 0 })
+        .unwrap();
+    builder
+        .push(
+            4,
+            &LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: None,
+            },
+        )
+        .unwrap();
+    let settled = fact(
+        2,
+        SessionFactBody::ModelAttemptSettled {
+            turn_id,
+            effect_id,
+            purpose: ModelEventPurpose::Conversation,
+            attempt: builder.finish(true).unwrap(),
+        },
+    );
+    renderer
+        .write(&mut stdout, &mut stderr, OutputMode::Text, &settled)
+        .unwrap();
+    renderer
+        .write(&mut stdout, &mut stderr, OutputMode::Text, &model)
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&stdout), "head 界🦀 tail");
+    drop(model);
+    drop(started);
+    drop(settled);
+    assert_eq!(pool.retained_bytes(), 0);
+}
+
+#[test]
+fn pending_model_credit_is_released_by_settlement_or_terminal() {
+    use rsi_agent_session_protocol::{
+        EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionFact,
+    };
+    use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus, ObservationRetention};
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason};
+    for settle in [false, true] {
+        let session_id = SessionId::new("session").unwrap();
+        let turn_id = TurnId::new("turn").unwrap();
+        let effect_id = EffectId::new("effect").unwrap();
+        let mut builder = ModelAttemptBuilder::new();
+        builder
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            )
+            .unwrap();
+        builder
+            .push(
+                1,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("pending".into()),
+                },
+            )
+            .unwrap();
+        let pool = ObservationRetention::default();
+        let mut renderer = CliRenderState::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        renderer
+            .write(
+                &mut stdout,
+                &mut stderr,
+                OutputMode::Text,
+                &CliEvent::Model {
+                    snapshot: pool
+                        .retain_model(Arc::new(ModelLiveSnapshot {
+                            session_id: session_id.clone(),
+                            turn_id: turn_id.clone(),
+                            effect_id: effect_id.clone(),
+                            purpose: ModelEventPurpose::Conversation,
+                            revision: 1,
+                            prefix: builder.prefix(),
+                            status: ModelLiveStatus::Streaming,
+                        }))
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(stdout.is_empty());
+        assert!(pool.retained_bytes() > 0);
+        let body = if settle {
+            builder
+                .push(2, &LanguageEvent::ContentFinished { index: 0 })
+                .unwrap();
+            builder
+                .push(
+                    3,
+                    &LanguageEvent::Finished {
+                        reason: FinishReason::Stop,
+                        replay: None,
+                    },
+                )
+                .unwrap();
+            SessionFactBody::ModelAttemptSettled {
+                turn_id,
+                effect_id,
+                purpose: ModelEventPurpose::Conversation,
+                attempt: builder.finish(true).unwrap(),
+            }
+        } else {
+            SessionFactBody::TurnTerminal {
+                turn_id,
+                outcome: TurnOutcome::Cancelled,
+                result: None,
+            }
+        };
+        renderer
+            .write(
+                &mut stdout,
+                &mut stderr,
+                OutputMode::Text,
+                &CliEvent::Fact {
+                    session_id,
+                    durable_seq: 1,
+                    fact: pool
+                        .retain_fact(Arc::new(SessionFact::new(1, 1, body).unwrap()))
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(pool.retained_bytes(), 0);
+        assert_eq!(
+            String::from_utf8_lossy(&stdout),
+            if settle { "pending" } else { "" }
+        );
+    }
+}
+
+#[test]
 fn cli_export_accepts_inline_values_for_every_short_option() {
     for arguments in [
         vec!["--export", "latest", "-f=json", "-i=h,m", "-o=out.json"],
@@ -128,6 +349,7 @@ pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) observations: std::sync::atomic::AtomicUsize,
     pub(crate) first_status_error: Option<SessionError>,
     pub(crate) interaction_polls: std::sync::atomic::AtomicUsize,
+    pub(crate) model_observations: std::sync::atomic::AtomicUsize,
     pub(crate) interaction_failures: std::sync::atomic::AtomicUsize,
     pub(crate) interaction_capacity: std::sync::atomic::AtomicUsize,
     pub(crate) capacity_error: Option<SessionError>,
@@ -298,6 +520,13 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         Err(SessionError::NotFound("fixture message body".into()))
     }
 
+    async fn observe_models(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
+        self.model_observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::pin(futures_util::stream::pending()))
+    }
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
@@ -1329,7 +1558,7 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
 }
 
 #[tokio::test]
-async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
+async fn headless_observations_start_only_after_claimed_turn_is_admitted() {
     use rsi_client::MessageSink;
     let handle = Arc::new(UnknownThenAcceptedHandle::default());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -1340,7 +1569,7 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
         cancellation: CancellationToken::new(),
         stopped: CancellationToken::new(),
         work: ApplicationWork::default(),
-        interactions: std::sync::Mutex::new(None),
+        observations: std::sync::Mutex::new(None),
     };
     let claimed = || rsi_client::MessageEvent::Claimed {
         session_id: SessionId::new("session").unwrap(),
@@ -1358,6 +1587,12 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
         0,
         "watcher acquired the live stream before Turn admission"
     );
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     receiver.recv().await.unwrap();
     delivery.await.unwrap();
     assert!(matches!(
@@ -1370,7 +1605,14 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
             .unwrap(),
         Some(CliRenderMessage::Event(CliEvent::Interactions { .. }))
     ));
-    sink.interactions.lock().unwrap().take();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    sink.observations.lock().unwrap().take();
     sink.stopped.cancel();
     let polls = handle
         .interaction_polls
@@ -1383,5 +1625,11 @@ async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
             .load(std::sync::atomic::Ordering::SeqCst),
         polls
     );
-    assert!(sink.interactions.lock().unwrap().is_none());
+    assert_eq!(
+        handle
+            .model_observations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(sink.observations.lock().unwrap().is_none());
 }

@@ -1,11 +1,8 @@
 //! Report-only measurement; the terminal I/O owner has separate PTY tests.
 use crate::test_state::{TestState, draw};
 use ratatui::{Terminal, backend::TestBackend};
-use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, TurnId,
-};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent, ModelRef};
+use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId};
+use rsi_ai_protocol::{ContentDelta, ModelRef};
 use std::{hint::black_box, time::Instant};
 
 fn cpu() -> u64 {
@@ -19,21 +16,12 @@ fn cpu() -> u64 {
 }
 
 fn delta(state: &mut TestState, seq: u64, block: usize, text: &str) {
-    state.transcript.apply(
-        &SessionFact::new(
-            seq,
-            seq,
-            SessionFactBody::ModelEvent {
-                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                turn_id: TurnId::new("performance").unwrap(),
-                effect_id: EffectId::new(format!("block-{block}")).unwrap(),
-                event: LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text(text.into()),
-                },
-            },
-        )
-        .unwrap(),
+    state.transcript.test_span(
+        seq,
+        "performance",
+        &format!("block-{block}"),
+        0,
+        ContentDelta::Text(text.into()),
     );
 }
 

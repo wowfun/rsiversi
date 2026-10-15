@@ -65,15 +65,13 @@ impl AgentKernel {
             || request.facts.iter().any(|body| {
                 matches!(
                     body,
-                    SessionFactBody::ModelOutputRecovery { .. }
-                        | SessionFactBody::BudgetExhausted { .. }
-                        | SessionFactBody::TurnTerminal { .. }
+                    SessionFactBody::TurnTerminal { .. }
+                        | SessionFactBody::ModelAttemptSettled { .. }
                 )
             })
         {
             return Err(TurnError::Invalid(
-                "domain mutation requires bounded business work without output recovery or ending records"
-                    .into(),
+                "domain mutation cannot publish model settlements or terminal records".into(),
             ));
         }
         let caller = if let Some(caller) = tool_caller {
@@ -215,10 +213,7 @@ impl AgentKernel {
         let original = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
-            if turn.terminal.is_some()
-                || turn.budget_exhausted.is_some()
-                || turn.conclusion.is_some()
-            {
+            if turn.terminal.is_some() || turn.conclusion.is_some() {
                 return Err(TurnError::Invalid(
                     "domain work follows the Turn ending boundary".into(),
                 ));
@@ -243,13 +238,6 @@ impl AgentKernel {
                 staged.conclusion = Some((fact.seq(), conclusion.clone()));
             }
         }
-        staged.budget_usage = turn_state::enforce_domain_budget(
-            claim.header().settings().turn_budget(),
-            &original,
-            &facts,
-            &control,
-            now,
-        )?;
         let bytes = facts
             .iter()
             .try_fold(control.encoded_len(), |bytes, fact| {

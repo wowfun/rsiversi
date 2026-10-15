@@ -5,6 +5,27 @@
 /// Maximum encoded UTF-8 bytes in a host path.
 pub const MAXIMUM_HOST_PATH_BYTES: usize = 16 * 1024;
 
+/// Represent native canonical local-drive paths without the OS-added verbatim prefix.
+/// Call only after canonicalization; this neither performs I/O nor grants authority.
+pub fn canonical_native_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next()
+            && let Prefix::VerbatimDisk(drive) = prefix.kind()
+            && matches!(components.next(), Some(Component::RootDir))
+        {
+            let mut normalized = std::path::PathBuf::from(format!("{}:\\", char::from(drive)));
+            for component in components {
+                normalized.push(component.as_os_str());
+            }
+            return normalized;
+        }
+    }
+    path
+}
+
 /// Accepts a host path as text or a bounded native path with non-UTF-8 bytes.
 pub fn is_absolute_path(path: &std::path::Path) -> bool {
     path.to_str()
@@ -94,6 +115,24 @@ fn unc(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn canonical_local_drive_representation_preserves_identity_components() {
+        assert_eq!(
+            canonical_native_path(r"\\?\D:\目录\workspace".into()),
+            std::path::PathBuf::from(r"D:\目录\workspace")
+        );
+        for original in [
+            r"D:\目录\workspace",
+            r"\\?\UNC\host\share\workspace",
+            r"\\.\device",
+        ] {
+            assert_eq!(
+                canonical_native_path(original.into()),
+                std::path::PathBuf::from(original)
+            );
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn native_non_utf8_bytes_remain_usable_without_becoming_serializable_host_text() {

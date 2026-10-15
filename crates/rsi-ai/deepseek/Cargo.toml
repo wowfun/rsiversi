@@ -11,6 +11,8 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+async-stream.workspace = true
+futures-util.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 rsi-ai-openai-compatible = { path = "../openai-compatible" }

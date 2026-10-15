@@ -57,6 +57,15 @@ pub type GoalStream = std::pin::Pin<
     Box<dyn futures_util::Stream<Item = Result<rsi_goal::GoalLiveState>> + Send + 'static>,
 >;
 
+/// Coalesced model snapshots, independently retained from durable observations.
+pub type ModelLiveStream = std::pin::Pin<
+    Box<
+        dyn futures_util::Stream<Item = Result<rsi_agent_turn_protocol::ObservedModel>>
+            + Send
+            + 'static,
+    >,
+>;
+
 /// Durable Fact/control observations with Session-domain or API item failures.
 pub type SessionObservationStream = std::pin::Pin<
     Box<dyn futures_util::Stream<Item = Result<SessionObservation>> + Send + 'static>,
@@ -563,6 +572,12 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<SessionHistoryPage>;
     /// Reconnectably observes durable control records and Facts after exact cursors.
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream>;
+    /// Observes live model prefixes without advancing durable cursors.
+    async fn observe_models(&self) -> Result<ModelLiveStream> {
+        Err(SessionError::Invalid(
+            "live model observation is unsupported".into(),
+        ))
+    }
     /// Observes a complete initial live interaction snapshot and coalesced changes.
     async fn observe_interactions(&self) -> Result<InteractionStream>;
     /// Observes complete extension views at one draft revision or durable dual cursor.

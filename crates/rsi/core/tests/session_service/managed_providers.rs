@@ -8,7 +8,7 @@ fn deployment(name: &str) -> ManagedProvider {
         provider: ProviderKind::Deepseek,
         config: json!({
             "deployment": name, "credential":{"owner":"rsi.ai.provider.deepseek","slot":"default"},
-            "endpoint":"http://127.0.0.1:1", "protocol":"chat-completions",
+            "endpoint":"http://127.0.0.1:1", "protocol":"chat-completions", "default_output_tokens":{"managed-model":4096},
             "language_models":{"managed-model":{"context_window_tokens":128_000,"default_output_reserve_tokens":4096,"max_output_reserve_tokens":16384}}
         }),
     }

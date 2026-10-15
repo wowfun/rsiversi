@@ -14,3 +14,10 @@ unsupported filesystem implementation.
 Typed native paths may contain non-UTF-8 bytes. The Path helpers preserve those
 values and apply their native component rules; serialization still requires
 UTF-8. That local process contract is separate from decoding a foreign wire path.
+
+Native canonicalization consumers use `canonical_native_path` after filesystem
+canonicalization. On Windows it represents a canonical verbatim local drive path
+as the same ordinary absolute drive path without changing its components. UNC
+and device spellings remain unchanged for the effect provider to admit or reject.
+Other targets preserve the canonical path. This changes representation only;
+it neither resolves aliases nor grants file authority.

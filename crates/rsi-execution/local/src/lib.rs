@@ -146,7 +146,7 @@ impl ExecutionBackend for NativeBackend {
                 "execution path is not a directory".into(),
             ));
         }
-        canonical
+        rsi_workspace_path::canonical_native_path(canonical)
             .into_os_string()
             .into_string()
             .map_err(|_| ProcessError::InvalidInput("execution path is not UTF-8".into()))

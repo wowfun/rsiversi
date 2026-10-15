@@ -607,7 +607,7 @@ async fn timed_out_or_aborted_resume_keeps_claim_retirement_owned_until_repaired
 }
 
 #[tokio::test]
-async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resuming() {
+async fn human_wait_parks_durably_and_reacquires_the_lane_before_resuming() {
     let store = Arc::new(MemoryStore::new());
     let clock = Arc::new(HumanClock(AtomicU64::new(100)));
     let kernel = AgentKernel::recover_with_clock(store.clone(), composition(), clock.clone())
@@ -635,7 +635,6 @@ async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resumin
         permit: Mutex::new(Some(pool.clone().acquire_owned().await.unwrap())),
         resumed: Notify::new(),
     });
-    let elapsed = kernel.elapsed_budget(&claim).unwrap();
     clock.0.store(110, Ordering::SeqCst);
     let waiting = kernel
         .park_human_wait(&claim, ToolLaneParkingAuthority::new(lane.clone()))
@@ -651,12 +650,10 @@ async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resumin
     );
     assert_eq!(pool.available_permits(), 1);
     clock.0.store(86_400_110, Ordering::SeqCst);
-    assert_eq!(elapsed.consumed_ms(), 10);
     let competing = pool.clone().acquire_owned().await.unwrap();
     let resumed = tokio::spawn(waiting.resume(CancellationToken::new()));
     tokio::task::yield_now().await;
     assert!(!resumed.is_finished());
-    assert_eq!(elapsed.consumed_ms(), 10);
     assert_eq!(
         store
             .inspect_session(&session)
@@ -677,7 +674,6 @@ async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resumin
         Some(StoreActivationPhase::Running)
     );
     clock.0.fetch_add(15, Ordering::SeqCst);
-    assert_eq!(elapsed.consumed_ms(), 25);
     kernel
         .finish_turn(&claim, &TurnOutcome::Completed)
         .await

@@ -54,10 +54,11 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
+#[cfg(unix)]
 use std::fs::File;
-#[cfg(not(unix))]
-use std::fs::{self, OpenOptions};
+#[cfg(unix)]
 use std::io::Read as _;
+#[cfg(unix)]
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -179,12 +180,12 @@ pub struct StandardComposition {
     native_catalog: Option<StandardAddonSet>,
 }
 
-/// Frozen process inputs required by the standard Linux coding-tool generation.
+/// Frozen process inputs required by the standard native coding-tool generation.
 #[derive(Clone, Debug)]
 pub struct StandardCodingTools {
     bash_producer: BashJobProducerFactory,
     bash_tool: BashToolFactory,
-    apply_patch: ApplyPatchToolFactory,
+    apply_patch: Option<ApplyPatchToolFactory>,
     execution_programs: std::collections::BTreeMap<String, rsi_execution::ResolvedProgram>,
 }
 
@@ -201,40 +202,61 @@ pub struct StandardHostPreview {
 
 impl StandardCodingTools {
     /// Validates explicit executable paths and freezes the supplied child environment.
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::needless_pass_by_value,
+            reason = "The Linux branch consumes the helper; Windows has no helper contribution."
+        )
+    )]
     pub fn new(
         bash: PathBuf,
         helper: PathBuf,
         child_environment: Vec<(OsString, OsString)>,
     ) -> crate::Result<Self> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (bash, helper, child_environment);
             Err(crate::RsiError::Boot(
-                "the standard Bash and apply-patch contributions require Linux".into(),
+                "the standard coding contributions require native Linux or Windows".into(),
             ))
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let bash_tool = BashToolFactory::new(bash, child_environment)
                 .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
-            let execution_programs = std::collections::BTreeMap::from([
-                (
-                    "bash".into(),
-                    rsi_execution::ResolvedProgram {
-                        program: bash_tool.executable().to_owned(),
-                        environment: bash_tool.environment_with_bash_defaults(),
-                    },
-                ),
-                (
+            #[cfg_attr(
+                windows,
+                allow(
+                    unused_mut,
+                    reason = "Linux appends its independent apply-patch helper"
+                )
+            )]
+            let mut execution_programs = std::collections::BTreeMap::from([(
+                "bash".into(),
+                rsi_execution::ResolvedProgram {
+                    program: bash_tool.executable().to_owned(),
+                    environment: bash_tool.environment_with_bash_defaults(),
+                },
+            )]);
+            #[cfg(target_os = "linux")]
+            let apply_patch = {
+                let tool = ApplyPatchToolFactory::new(helper)
+                    .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+                execution_programs.insert(
                     "apply_patch".into(),
                     rsi_execution::ResolvedProgram {
-                        program: helper.clone(),
+                        program: tool.executable().to_owned(),
                         environment: Vec::new(),
                     },
-                ),
-            ]);
-            let apply_patch = ApplyPatchToolFactory::new(helper)
-                .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+                );
+                Some(tool)
+            };
+            #[cfg(windows)]
+            let apply_patch = {
+                let _ = helper;
+                None
+            };
             Ok(Self {
                 execution_programs,
                 bash_producer: BashJobProducerFactory,
@@ -341,15 +363,25 @@ fn standard_agent_addon(
         Arc::new(rsi_agent_repeat_tool_reminder::RepeatToolReminderFactory),
     )?;
     if let Some(coding) = coding_tools {
-        register(
-            OUTPUT_READ_FACTORY,
-            Arc::new(crate::output_read::OutputReadToolFactory),
-        )?;
-        register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
-        register(APPLY_PATCH_FACTORY, Arc::new(coding.apply_patch.clone()))?;
+        register_coding_tools(&mut register, coding)?;
     }
     describe_agent_addon(&mut builder)?;
     builder.build()
+}
+
+fn register_coding_tools(
+    register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
+    coding: &StandardCodingTools,
+) -> rsi_host::Result<()> {
+    register(
+        OUTPUT_READ_FACTORY,
+        Arc::new(crate::output_read::OutputReadToolFactory),
+    )?;
+    register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
+    if let Some(tool) = &coding.apply_patch {
+        register(APPLY_PATCH_FACTORY, Arc::new(tool.clone()))?;
+    }
+    Ok(())
 }
 
 fn describe_agent_addon(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
@@ -372,15 +404,31 @@ fn describe_agent_addon(builder: &mut StandardAddonBuilder) -> rsi_host::Result<
     Ok(())
 }
 
+#[cfg(unix)]
 fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<PathBuf> {
     let cache = paths.cache().join("agent-presets").join("system");
     let digest = standard_agent_preset_digest();
 
-    #[cfg(unix)]
-    let result = materialize_standard_agent_preset_unix(&cache, &digest);
-    #[cfg(not(unix))]
-    let result = materialize_standard_agent_preset_portable(&cache, &digest);
-    result
+    materialize_standard_agent_preset_unix(&cache, &digest)
+}
+
+#[cfg(windows)]
+#[path = "composition/assets_windows.rs"]
+mod assets_windows;
+
+#[cfg(windows)]
+fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<PathBuf> {
+    assets_windows::materialize(
+        &paths.cache().join("agent-presets/system"),
+        &standard_agent_preset_digest(),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn materialize_standard_agent_preset(_: &HostPaths) -> rsi_host::Result<PathBuf> {
+    Err(rsi_host::HostError::Bootstrap(
+        "standard Agent preset filesystem protection is unsupported on this platform".into(),
+    ))
 }
 
 fn standard_agent_preset_digest() -> String {
@@ -401,124 +449,6 @@ pub(crate) fn standard_agent_preset_root_candidate(paths: &HostPaths) -> PathBuf
         .join("agent-presets")
         .join("system")
         .join(standard_agent_preset_digest())
-}
-
-#[cfg(not(unix))]
-fn materialize_standard_agent_preset_portable(
-    cache: &Path,
-    digest: &str,
-) -> rsi_host::Result<PathBuf> {
-    create_portable_cache_tree_without_links(cache)?;
-    let target = cache.join(digest);
-    if portable_real_directory_exists(&target)? {
-        verify_standard_agent_preset(&target)?;
-        return Ok(target);
-    }
-
-    let staging = create_asset_staging(&cache)?;
-    let mut cleanup = AssetStaging::new(staging.clone());
-    set_owner_directory_permissions(&staging)?;
-    for (name, profile, metadata) in SHIPPED_PRESETS {
-        let preset = staging.join(name);
-        fs::create_dir(&preset)
-            .map_err(|error| asset_error("create preset directory", &preset, &error))?;
-        set_owner_directory_permissions(&preset)?;
-        write_asset_file(&preset.join("agent.profile.toml"), profile)?;
-        write_asset_file(&preset.join("preset.toml"), metadata)?;
-    }
-
-    match fs::rename(&staging, &target) {
-        Ok(()) => cleanup.disarm(),
-        Err(_) if portable_real_directory_exists(&target)? => {
-            verify_standard_agent_preset(&target)?;
-        }
-        Err(error) => return Err(asset_error("publish preset cache", &target, &error)),
-    }
-    verify_standard_agent_preset(&target)?;
-    Ok(target)
-}
-
-#[cfg(not(unix))]
-fn create_portable_cache_tree_without_links(cache: &Path) -> rsi_host::Result<()> {
-    use std::path::Component;
-
-    let mut current = PathBuf::new();
-    for component in cache.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {
-                current.push(component.as_os_str());
-            }
-            Component::Normal(name) => {
-                current.push(name);
-                match fs::symlink_metadata(&current) {
-                    Ok(metadata) => ensure_portable_real_directory(&current, &metadata)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        match fs::create_dir(&current) {
-                            Ok(()) => {}
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                            Err(error) => {
-                                return Err(asset_error(
-                                    "create cache component",
-                                    &current,
-                                    &error,
-                                ));
-                            }
-                        }
-                        let metadata = fs::symlink_metadata(&current).map_err(|error| {
-                            asset_error("inspect created cache component", &current, &error)
-                        })?;
-                        ensure_portable_real_directory(&current, &metadata)?;
-                    }
-                    Err(error) => {
-                        return Err(asset_error("inspect cache component", &current, &error));
-                    }
-                }
-            }
-            Component::CurDir | Component::ParentDir => {
-                return Err(rsi_host::HostError::Bootstrap(format!(
-                    "standard Agent preset cache path is not normalized: {}",
-                    cache.display()
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn portable_real_directory_exists(path: &Path) -> rsi_host::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            ensure_portable_real_directory(path, &metadata)?;
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(asset_error("inspect preset directory", path, &error)),
-    }
-}
-
-#[cfg(not(unix))]
-fn ensure_portable_real_directory(path: &Path, metadata: &fs::Metadata) -> rsi_host::Result<()> {
-    if portable_metadata_is_link(metadata) || !metadata.file_type().is_dir() {
-        return Err(rsi_host::HostError::Bootstrap(format!(
-            "standard Agent preset cache `{}` is not a real directory",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn portable_metadata_is_link(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn portable_metadata_is_link(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
 }
 
 #[cfg(unix)]
@@ -862,130 +792,12 @@ pub fn standard_agent_preset_root(paths: &HostPaths) -> rsi_host::Result<PathBuf
     materialize_standard_agent_preset(paths)
 }
 
-#[cfg(not(unix))]
-fn create_asset_staging(root: &Path) -> rsi_host::Result<PathBuf> {
-    for _ in 0..16 {
-        let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(|error| {
-            rsi_host::HostError::Bootstrap(format!(
-                "standard Agent preset cache entropy failed: {error}"
-            ))
-        })?;
-        let path = root.join(format!(".staging-{}", hex::encode(random)));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(asset_error("create preset staging", &path, &error)),
-        }
-    }
-    Err(rsi_host::HostError::Bootstrap(
-        "standard Agent preset cache staging names were exhausted".into(),
-    ))
-}
-
-#[cfg(not(unix))]
-fn verify_standard_agent_preset(root: &Path) -> rsi_host::Result<()> {
-    ensure_directory_without_symlink(root)?;
-    for (preset_name, profile, metadata) in SHIPPED_PRESETS {
-        let preset = root.join(preset_name);
-        ensure_directory_without_symlink(&preset)?;
-        for (path, expected) in [
-            (preset.join("agent.profile.toml"), *profile),
-            (preset.join("preset.toml"), *metadata),
-        ] {
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| asset_error("inspect preset asset", &path, &error))?;
-            if !metadata.file_type().is_file() || portable_metadata_is_link(&metadata) {
-                return Err(rsi_host::HostError::Bootstrap(format!(
-                    "standard Agent preset asset `{}` is not a regular file",
-                    path.display()
-                )));
-            }
-            let mut actual = Vec::with_capacity(expected.len());
-            File::open(&path)
-                .and_then(|file| {
-                    std::io::Read::by_ref(&mut file.take(expected.len() as u64 + 1))
-                        .read_to_end(&mut actual)
-                })
-                .map_err(|error| asset_error("read preset asset", &path, &error))?;
-            if actual != expected {
-                return Err(rsi_host::HostError::Bootstrap(format!(
-                    "standard Agent preset asset `{}` failed byte verification",
-                    path.display()
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_directory_without_symlink(path: &Path) -> rsi_host::Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| asset_error("inspect preset directory", path, &error))?;
-    if portable_metadata_is_link(&metadata) || !metadata.file_type().is_dir() {
-        return Err(rsi_host::HostError::Bootstrap(format!(
-            "standard Agent preset cache `{}` is not a real directory",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_asset_file(path: &Path, bytes: &[u8]) -> rsi_host::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| asset_error("create preset asset", path, &error))?;
-    file.write_all(bytes)
-        .map_err(|error| asset_error("write preset asset", path, &error))?;
-    file.sync_all()
-        .map_err(|error| asset_error("sync preset asset", path, &error))?;
-    set_owner_file_permissions(path)
-}
-
-#[cfg(not(unix))]
-fn set_owner_directory_permissions(_path: &Path) -> rsi_host::Result<()> {
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_owner_file_permissions(_path: &Path) -> rsi_host::Result<()> {
-    Ok(())
-}
-
+#[cfg(unix)]
 fn asset_error(operation: &str, path: &Path, error: &std::io::Error) -> rsi_host::HostError {
     rsi_host::HostError::Bootstrap(format!(
         "standard Agent preset {operation} failed for `{}`: {error}",
         path.display()
     ))
-}
-
-#[cfg(not(unix))]
-struct AssetStaging {
-    path: Option<PathBuf>,
-}
-
-#[cfg(not(unix))]
-impl AssetStaging {
-    fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    fn disarm(&mut self) {
-        self.path = None;
-    }
-}
-
-#[cfg(not(unix))]
-impl Drop for AssetStaging {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ignored = fs::remove_dir_all(path);
-        }
-    }
 }
 
 impl StandardComposition {
@@ -1325,7 +1137,10 @@ impl StandardComposition {
                 .as_ref()
                 .map(|tools| CodingToolsLaunchIdentity {
                     bash: tools.bash_tool.executable(),
-                    apply_patch: tools.apply_patch.executable(),
+                    apply_patch: tools
+                        .apply_patch
+                        .as_ref()
+                        .map(ApplyPatchToolFactory::executable),
                 }),
             &self.applications,
         )
@@ -1387,8 +1202,8 @@ impl StandardComposition {
         agent_addons: &StandardAddonSet,
     ) -> rsi_host::Result<AgentPresetCatalog> {
         let paths = self.paths.clone();
-        let linux_tools_enabled = self.coding_tools.is_some();
-        let compiler = standard_agent_profile_compiler(&paths, linux_tools_enabled, agent_addons)
+        let coding_tools_enabled = self.coding_tools.is_some();
+        let compiler = standard_agent_profile_compiler(&paths, coding_tools_enabled, agent_addons)
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
         if let Some((presets, identity)) = &self.agent_presets {
             if identity
@@ -1478,7 +1293,7 @@ impl StandardComposition {
         AgentPresetLaunchIdentity,
         Vec<AddonFactoryDescription>,
     )> {
-        let linux_tools_enabled = self.coding_tools.is_some();
+        let coding_tools_enabled = self.coding_tools.is_some();
         let paths = self.paths.clone();
         let agent_addons = self.agent_addons()?;
         let (preset_settings, selection) = crate::agent_preset::ServicePresetSettingsFactory::new(
@@ -1560,10 +1375,16 @@ impl StandardComposition {
             )],
         ))?;
         register_preset_settings(&mut builder, preset_settings)?;
+        let review_git = self
+            .coding_tools
+            .as_ref()
+            .and_then(|tools| tools.bash_tool.executable().parent())
+            .map(|parent| parent.join("git.exe"));
         builder.register_fragment(base_fragment(
             &paths,
-            linux_tools_enabled,
+            coding_tools_enabled,
             self.user_home.as_deref(),
+            review_git.as_deref(),
         ))?;
         builder.register_local_contract::<rsi_session_protocol::WorkflowReadinessContract>()?;
         builder.register_local_contract::<rsi_session_protocol::SessionProtectionContract>()?;
@@ -1849,7 +1670,7 @@ fn register_runtime_factories(
         UpdateMode::RestartRequired,
         rsi_service_host::QuestionBrokerFactory,
     )?;
-    let sandbox_factory = if coding_tools.is_some() {
+    let sandbox_factory = if cfg!(target_os = "linux") && coding_tools.is_some() {
         rsi_sandbox_local::SandboxLocalFactory::default().require_restricted_backend()
     } else {
         rsi_sandbox_local::SandboxLocalFactory::default()
@@ -2126,7 +1947,7 @@ fn register(
 }
 
 fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     builder.register_local_contract::<crate::acp_inputs::InputsContract>()?;
     builder.register_local_contract::<rsi_files_protocol::FilesContract>()?;
     builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;
@@ -2208,6 +2029,7 @@ fn base_fragment(
     paths: &HostPaths,
     coding_tools: bool,
     user_home: Option<&Path>,
+    review_git: Option<&Path>,
 ) -> ProfileFragment {
     let mut entries = vec![
         ProfileEntry::new("rsi-files", FILES_FACTORY, Value::Null),
@@ -2263,10 +2085,11 @@ fn base_fragment(
         ProfileEntry::new(
             "rsi-sandbox",
             SANDBOX_FACTORY,
-            json!({
-                "bubblewrap": ["/usr/bin/bwrap"],
-                "landlock": []
-            }),
+            if cfg!(target_os = "linux") {
+                json!({"bubblewrap": ["/usr/bin/bwrap"], "landlock": []})
+            } else {
+                json!({})
+            },
         ),
         ProfileEntry::new(
             "rsi-process",
@@ -2287,7 +2110,7 @@ fn base_fragment(
         ProfileEntry::new(
             "rsi-workspace-review",
             "rsi.workspace-review",
-            json!({"directory":paths.cache().join("workspace-review/v1"),"program":if cfg!(windows){r"C:\Program Files\Git\bin\git.exe"}else{"/usr/bin/git"}}),
+            json!({"directory":paths.cache().join("workspace-review/v1"),"program":if cfg!(windows){review_git.unwrap_or_else(|| Path::new(r"C:\Program Files\Git\bin\git.exe"))}else{Path::new("/usr/bin/git")}}),
         ),
         ProfileEntry::new(
             "rsi-history",
@@ -2340,6 +2163,8 @@ fn base_fragment(
         "rsi.browser.runtime-pool",
         Value::Null,
     ));
+    #[cfg(not(unix))]
+    entries.retain(|entry| entry.plugin().as_str() != "rsi.mcp.api");
     #[cfg(unix)]
     entries.push(ProfileEntry::new(
         "rsi-native-addons",
@@ -2507,6 +2332,67 @@ fn register_preset_settings(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn unsupported_service_boot_does_not_turn_pure_preview_into_readiness() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let composition = StandardComposition::new(
+            paths,
+            BTreeMap::new(),
+            None,
+            crate::ApplicationCatalogMetadata::default(),
+        );
+        assert!(composition.build_for_preview().is_ok());
+        assert!(
+            composition
+                .build()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn unsupported_preset_materialization_preserves_missing_and_existing_cache() {
+        let temporary = tempfile::tempdir().unwrap();
+        for exists in [false, true] {
+            let cache = temporary
+                .path()
+                .join(if exists { "existing" } else { "missing" });
+            if exists {
+                std::fs::create_dir(&cache).unwrap();
+                std::fs::write(cache.join("retained"), b"old asset").unwrap();
+            }
+            let paths = HostPaths::new(
+                temporary.path().join("config"),
+                temporary.path().join("state"),
+                &cache,
+            )
+            .unwrap();
+            assert!(
+                super::standard_agent_preset_root(&paths)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported")
+            );
+            if exists {
+                assert_eq!(std::fs::read(cache.join("retained")).unwrap(), b"old asset");
+                assert_eq!(std::fs::read_dir(cache).unwrap().count(), 1);
+            } else {
+                assert!(!cache.exists());
+            }
+        }
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 1);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn local_execution_catalog_uses_the_bash_owners_scrubbed_environment() {
@@ -2537,24 +2423,52 @@ mod tests {
         );
     }
 
+    #[cfg(not(any(target_os = "linux", windows)))]
+    #[test]
+    fn standard_coding_tools_reject_before_constructing_linux_catalog_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let error = super::StandardCodingTools::new(
+            root.path().join("bash"),
+            root.path().join("helper"),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("require native Linux or Windows")
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
     use super::*;
+    #[cfg(unix)]
     use rsi_meta_profile::{
         ProfileCompiler, ProfileEnvironment, ProfileLimits, ProfileProgram, ProfileResolver,
     };
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::sync::{Arc, Barrier};
 
     #[test]
     fn default_skill_roots_use_only_explicit_home_and_rsi_wins_user_collisions() {
-        let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let home = temporary.path().join("home");
         for (home, expected) in [
-            (None, json!(["/config/skills"])),
+            (None, json!([paths.config().join("skills")])),
             (
-                Some(Path::new("/home/test")),
-                json!(["/config/skills", "/home/test/.agents/skills"]),
+                Some(home.as_path()),
+                json!([paths.config().join("skills"), home.join(".agents/skills")]),
             ),
         ] {
-            let fragment = base_fragment(&paths, false, home);
+            let fragment = base_fragment(&paths, false, home, None);
             let entry = fragment
                 .entries()
                 .iter()
@@ -2564,8 +2478,9 @@ mod tests {
             assert_eq!(
                 entry.config()["user_agent_roots"],
                 match home {
-                    None => json!(["/config/agents"]),
-                    Some(_) => json!(["/config/agents", "/home/test/.agents/agents"]),
+                    None => json!([paths.config().join("agents")]),
+                    Some(home) =>
+                        json!([paths.config().join("agents"), home.join(".agents/agents")]),
                 }
             );
         }
@@ -2619,8 +2534,14 @@ mod tests {
 
     #[test]
     fn standard_unconfined_preset_requires_approval() {
-        let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
-        let fragment = base_fragment(&paths, false, None);
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let fragment = base_fragment(&paths, false, None, None);
         let permissions = fragment
             .entries()
             .iter()
@@ -2633,6 +2554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn standard_agent_preset_is_digest_addressed_and_byte_verified() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
@@ -2661,6 +2583,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn private_acp_preset_reuses_standard_sources_without_entering_the_public_roster() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2718,6 +2641,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "One exhaustive projection keeps related state transitions and ownership visible together"
     )]
+    #[cfg(unix)]
     fn standard_agent_profile_compiles_to_exactly_the_platform_enabled_contributions() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
@@ -2728,7 +2652,7 @@ mod tests {
         .unwrap();
         let root = standard_agent_preset_root(&paths).unwrap();
         let profile = ProfileProgram::from_file(root.join("standard/agent.profile.toml"));
-        let compiler = |linux_tools_enabled, unix_files| {
+        let compiler = |coding_tools_enabled, unix_files| {
             ProfileCompiler::new(
                 ProfileEnvironment::new(
                     paths.config(),
@@ -2737,10 +2661,18 @@ mod tests {
                     "test-platform",
                     BTreeMap::from([
                         (
-                            "standard_linux_coding_tools".to_owned(),
-                            Value::Bool(linux_tools_enabled),
+                            "standard_output_cache".to_owned(),
+                            Value::Bool(coding_tools_enabled),
                         ),
-                        ("standard_unix_files".to_owned(), Value::Bool(unix_files)),
+                        (
+                            "standard_coding_tools".to_owned(),
+                            Value::Bool(coding_tools_enabled),
+                        ),
+                        ("standard_native_files".to_owned(), Value::Bool(unix_files)),
+                        (
+                            "standard_apply_patch".to_owned(),
+                            Value::Bool(coding_tools_enabled),
+                        ),
                         (
                             "standard_host_profile_edits".to_owned(),
                             Value::Bool(unix_files),
@@ -2838,6 +2770,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn concurrent_standard_agent_preset_materialization_converges_without_staging() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = Arc::new(

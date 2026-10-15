@@ -1,6 +1,36 @@
 # rsi-agent-store-sqlite
 
-Schema 32 holds exact execution-coordinate and activity projections on each Session
+The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
+directly from canonical Fact JSON for ModelIntent, ModelStarted and
+ModelAttemptSettled. It is schema-validated on open and enforced by both append
+paths; no separate mutable identity projection is trusted.
+The same index answers Kernel's pre-publication durable intent lookup.
+
+Public Store preparation and open require native filesystem protection on Unix
+or fixed local Windows NTFS. Windows validates exact no-reparse paths, private
+TokenUser owner/protected DACLs, handle-based directory publication and a retained
+namespace pin through the Store and blocking I/O. CAS creation is atomically
+private; reads retain no-follow native files and publication failures propagate.
+CAS staging, immutable publication, cleanup and directory sync retain the same
+directory authorities through the operation, including if their pathnames change.
+On Windows, the persistent empty private `.rsi-namespace-pin` in CAS and staging
+is namespace protection state. CAS inspection recognizes it only after no-follow
+private-file validation and an empty-length check; invalid guards remain issues.
+Startup staging cleanup retains this guard and refuses invalid guard state.
+Offline verification/inspection retain the same native namespace protection.
+Archival reset requires Unix rename-under-lease semantics and refuses on Windows
+before filesystem effects. Other platforms reject native acquisition before I/O.
+Static absolute-root validation precedes platform admission without I/O:
+malformed input returns `StoreError::Invalid`; valid unsupported acquisition
+returns `StoreError::Unsupported`. Factory preparation projects these as
+`MetaError::InvalidInput` and `MetaError::Activation` respectively.
+Default tests keep pure SQL, cache and codec invariants portable;
+tests that acquire this native backend run on their stated Unix or Windows target.
+Windows native acceptance covers private publication, exclusive writer ownership,
+CAS integrity, schema refusal and reopen; Unix-only process-crash and descriptor
+tests remain distinct.
+
+Schema 33 holds exact execution-coordinate and activity projections on each Session
 row. Global activity, location activity/membership, coordinate activity and coordinate membership each have a
 dedicated index. Append updates the projection in the same transaction as canonical
 records, using the Store protocol's closed activity whitelist. Activity and complete
@@ -53,10 +83,7 @@ waiter disappears. Publication computes the candidate digest once internally;
 callers cannot supply an unrelated digest name.
 Any failed publication step prevents new metadata publication. An unregistered
 complete object may remain and can be reused only after successful synchronization.
-Windows requires write access to flush an existing file, so a read-only restored
-object can be read but cannot acknowledge a repeated publication. Windows flushes
-file contents but does not promise power-loss durability for CAS directory
-entries. Staging cleanup is separate from existing-object publication.
+Staging cleanup is separate from existing-object publication.
 
 `SqliteStore::inspect_cas` is an explicit offline, read-only inspection under the
 existing writer lease, with the same no-create and nonempty-WAL refusal as
@@ -375,9 +402,6 @@ head decoder and its identity/budget checks. This exact pre-release schema rejec
 stores; there is no automatic migration. CAS reads reject symlinks, metadata/length
 changes, unexpected trailing bytes and digest mismatches while holding worker
 byte admission through returned buffer ownership.
-Windows CAS opens retain every parent directory without delete sharing and
-reject all reparse points before opening the leaf. Those retained handles prevent
-parent replacement during path traversal; native Windows tests own platform proof.
 An unexpected EOF within an admitted CAS body is corruption, not a retryable I/O fault.
 
 CAS payload and inspection reads retry interrupted trailing EOF probes. A signal

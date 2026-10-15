@@ -20,7 +20,9 @@ and upsert/remove patches reference stable block keys; reclassification never
 changes a block's content revision. Classification is recomputed only for Turns
 whose evidence or ordered window membership changed; text-only deltas reuse the
 existing index without rebuilding classification vectors. The frame baseline
-also shares its serialized Turn value and byte count until that index changes;
+retains unchanged live blocks across snapshot updates. Settlement replaces their
+transient text with durable source coordinates and invalidates only those blocks.
+It also shares its serialized Turn value and byte count until that index changes;
 cache identity includes the index lifetime, not only its numeric wire revision. An incomplete window is explicitly partial
 and never hides unknown content. Rust supplies explicit `running` and `foldable`
 flags; document folding never depends on the wording of the status label. Entries disappear with their last loaded block.
@@ -37,7 +39,7 @@ ContentFilter, Cancelled and Failed retain visible content without promoting it
 to an answer or folding the completed Turn’s process. Direct Image output is an
 answer of its own fact type. Missing evidence
 produces a completion row, not an invented answer. Failed, cancelled, interrupted,
-partially failed and budget-exhausted Turns retain content and expanded process.
+partially failed and MaxTokens Turns retain content and expanded process.
 
 The device-local detail mode is Compact, Standard (default), Detailed or Verbose.
 Verbose includes the former Trajectory view. Compact collapses successful process
@@ -99,7 +101,8 @@ Model events carry their intent-checked purpose even in partial history pages.
 Each request has one actual prepared model/effort, reported usage, duration and
 failure summary, folded by the shared pure RequestPresentation. Backfill fills
 missing metadata without inventing zero usage or substituting the current model.
-Internal summary text uses a Context compaction status block, never an Assistant
+Internal summary text and its request metadata stay outside the conversational
+process classification. Summary text uses a Context compaction status block, never an Assistant
 answer block; raw source paging preserves its exact Fact provenance.
 
 When composed, ordinary [workbench feature plugins](../workbench-ui/README.md)
@@ -537,3 +540,5 @@ Reopening resolves that coordinate against the current attachment and obtains a
 new presentation. Remote catalog pagination updates its existing view. A saved
 remote surface is selected through the current Session export scope and goes
 through the same Service selection validation as an ordinary catalog selection.
+
+Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.

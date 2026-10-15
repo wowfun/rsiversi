@@ -13,7 +13,11 @@ must contain its paired `rsi`, `assets/` and receipt. Missing inputs fail explic
 these tests never fall back to an ordinary Cargo executable and arbitrary assets.
 
 Headless process tests synchronize the phase they exercise before sending a
-signal. Provider entry establishes execution readiness; the cancellation-output
+signal. Windows ACP integration exercises the built native binary with isolated
+XDG paths and a loopback model fixture, including model/effort selection, cold
+resume and stdio EOF. Linux MCP fixtures remain Linux-only. Tests of unavailable
+capabilities continue to assert refusal before effects.
+Provider entry establishes execution readiness; the cancellation-output
 test also waits for the complete JSONL Turn record. These bounded waits retain
 captured output on failure and reap the child. The
 [terminal contract](../terminal/README.md) owns interruption and output deadlines.

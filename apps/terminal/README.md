@@ -1,5 +1,11 @@
 # rsi-terminal
 
+Text output retains at most one charged model snapshot that arrives before its
+matching `ModelStarted` Fact. Observing that start emits the retained prefix;
+later live revisions and settlement resume the same event cursor exactly once.
+Settlement or turn completion releases pending output. Durable replay remains
+authoritative, and a late live update cannot repeat an already settled attempt.
+
 The Plugins view displays the shared workbench last-update guidance separately from current Profile health and watcher status.
 
 `/export [PATH] [-f markdown|md|json] [-i INCLUDE]` exports the selected native
@@ -148,8 +154,10 @@ configuration. Rendering uses the shared application/Session scene protocol.
 
 
 
-The machine-readable JSONL envelope is version 5. It retains internal model
-events with their authenticated purpose tags. Plain answer output excludes
+The machine-readable JSONL envelope is version 6. Live model observations use
+bounded pages of encoded events; durable Facts retain complete settled attempts.
+One-shot messages observe live models and interactions until completion. Plain
+answer output emits live text and only the unsettled suffix at settlement, and excludes
 context-compaction text; the TUI renders it as an internal status block.
 
 The resident application owns raw terminal modes, input decoding, the sole output
@@ -353,7 +361,10 @@ close joins work. The caller owns text sanitization and the document format.
 ## Controller lifecycle and retained state
 
 Both stdin and stdout must be terminals; rejection precedes Host bootstrap.
-Native input currently requires Unix. The terminal application owns input,
+Native input currently requires Unix, including cancellable stdin reads for
+Headless and `--stdin`; non-Unix reads
+refuse before consuming process input. Native signal admission also refuses
+until its platform implementation exists. The terminal application owns
 rendering, signals and cleanup. An attached Session has one durable observer and
 one live-interaction observer. Child browsing uses finite reads and does not
 acquire execution. Switching rejects unresolved sends and queue mutations, including receipt queries,

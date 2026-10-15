@@ -225,42 +225,8 @@ async fn publication_staging_releases_global_state_but_keeps_session_admission()
         .await
         .unwrap()
         .unwrap();
-    let effect = EffectId::new("publication-effect").unwrap();
-    for body in [
-        SessionFactBody::ModelIntent {
-            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-            },
-            price_quote: None,
-            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-            turn_id: first.turn_id().clone(),
-            effect_id: effect.clone(),
-            snapshot: snapshot(),
-        },
-        SessionFactBody::ModelStarted {
-            turn_id: first.turn_id().clone(),
-            effect_id: effect.clone(),
-        },
-    ] {
-        let facts = kernel
-            .publish(&first, vec![body])
-            .await
-            .unwrap()
-            .published();
-        kernel
-            .flush(&first, facts.last().unwrap().seq())
-            .await
-            .unwrap();
-    }
-    let event = || SessionFactBody::ModelEvent {
-        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-        turn_id: first.turn_id().clone(),
-        effect_id: effect.clone(),
-        event: LanguageEvent::ContentDelta {
-            index: 0,
-            delta: ContentDelta::Text("x".repeat(1024 * 1024)),
-        },
-    };
+    tool_origin::flush_bodies(&kernel, &first, vec![start_step(first.turn_id())]).await;
+    let event = || touched(first.turn_id(), &"x".repeat(3000));
     let body = event();
     let (entered, captured) = tokio::sync::oneshot::channel();
     let (release, barrier) = std::sync::mpsc::channel();

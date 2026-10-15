@@ -29,6 +29,8 @@ pub(super) fn ending_facts(
             step_id: step_id.clone(),
             outcome: if matches!(outcome, TurnOutcome::Completed) {
                 StepOutcome::Completed
+            } else if matches!(outcome, TurnOutcome::MaxTokens) {
+                StepOutcome::MaxTokens
             } else {
                 StepOutcome::Stopped {
                     reason: bounded_diagnostic(&format!("Turn ended with {outcome:?}")),
@@ -36,28 +38,8 @@ pub(super) fn ending_facts(
             },
         });
     }
-    if let TurnOutcome::BudgetExceeded {
-        dimension,
-        consumed,
-        limit,
-    } = outcome
-        && original.budget_exhausted.is_none()
-    {
-        bodies.push(SessionFactBody::BudgetExhausted {
-            turn_id: claim.turn_id().clone(),
-            dimension: *dimension,
-            consumed: *consumed,
-            limit: *limit,
-        });
-    }
     bodies.push(terminal);
     let staged = execution::stage_execution_facts(kernel, claim, original, base_seq, bodies)?;
-    enforce_turn_budget(
-        claim.header().settings().turn_budget(),
-        original,
-        &staged.facts,
-        kernel.inner.clock.now_ms().max(1),
-    )?;
     Ok(staged.facts)
 }
 

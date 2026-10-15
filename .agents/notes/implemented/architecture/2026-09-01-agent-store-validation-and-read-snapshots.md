@@ -116,10 +116,14 @@ CAS publication cannot recover a failed synchronization from visible readback.
 An existing target is verified and synchronized through the same handle before
 its namespace is synchronized. Filesystem publication and metadata commit remain
 separate: process failure can retain a complete unregistered object, and a retry
-must re-establish durability before admitting metadata. Unix directory sync and
-Windows file flushing have different guarantees; Windows does not claim namespace
-power-loss durability. These platform limits do not weaken error reporting for
-operations that are actually required.
+must re-establish durability before admitting metadata. Unix file and directory
+synchronization failures prevent acknowledgement; visible bytes alone do not
+establish the required durability.
+
+The [Windows admission decision](../bug-fix/2026-10-11-windows-compile-admission.md)
+gates non-Unix Store acquisition and offline operations on native filesystem
+protection, including internal CAS opens and directory inspection. Native
+directory mechanics alone do not admit a Windows Store.
 
 A digest-only process-local publication set is not a durability proof for a
 later filesystem observation: the name can refer to another inode after the

@@ -378,6 +378,8 @@ impl ServiceHostPaths {
 #[derive(Debug)]
 pub struct HostOwnerLease {
     file: Option<File>,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
     paths: ServiceHostPaths,
     published_epoch: Mutex<Option<HostEpoch>>,
     pub(crate) endpoint: tokio::sync::Mutex<Option<(String, rsi_api_protocol::EndpointId)>>,
@@ -387,6 +389,12 @@ impl HostOwnerLease {
     /// Attempts to acquire the single owner lease without waiting.
     pub fn try_acquire(paths: ServiceHostPaths) -> Result<Self, ServiceHostError> {
         create_private_directories(paths.owner_directory())?;
+        #[cfg(windows)]
+        let directory =
+            rsi_files_native_fs::open_absolute_directory_no_follow(paths.owner_directory())
+                .map_err(io_error)?;
+        #[cfg(windows)]
+        let namespace = directory.pin_namespace().map_err(io_error)?;
         reject_symlink(paths.owner_lock(), "owner lease")?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
@@ -397,7 +405,34 @@ impl HostOwnerLease {
                 .mode(0o600)
                 .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
+        #[cfg(not(windows))]
         let file = options.open(paths.owner_lock()).map_err(io_error)?;
+        #[cfg(windows)]
+        let file = {
+            let name = paths
+                .owner_lock()
+                .file_name()
+                .ok_or_else(|| ServiceHostError::Invalid("owner lock has no name".into()))?;
+            match rsi_files_native_fs::create_relative_private_file_no_follow(
+                &directory,
+                Path::new(name),
+            ) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    rsi_files_native_fs::set_relative_private_file_permissions_no_follow(
+                        &directory,
+                        Path::new(name),
+                    )
+                    .map_err(io_error)?;
+                    rsi_files_native_fs::open_relative_private_file_no_follow(
+                        &directory,
+                        Path::new(name),
+                    )
+                    .map_err(io_error)?
+                }
+                Err(e) => return Err(io_error(e)),
+            }
+        };
         validate_open_regular_file(paths.owner_lock(), &file, "owner lease")?;
         #[cfg(unix)]
         set_file_mode(&file, 0o600)?;
@@ -409,6 +444,8 @@ impl HostOwnerLease {
         validate_open_regular_file(paths.owner_lock(), &file, "owner lease")?;
         Ok(Self {
             file: Some(file),
+            #[cfg(windows)]
+            _namespace: namespace,
             paths,
             published_epoch: Mutex::new(None),
             endpoint: tokio::sync::Mutex::new(None),
@@ -585,20 +622,31 @@ fn validate_socket_path(path: &Path) -> Result<(), ServiceHostError> {
 }
 
 fn create_private_directories(path: &Path) -> Result<(), ServiceHostError> {
-    fs::create_dir_all(path).map_err(io_error)?;
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(ServiceHostError::Invalid(format!(
-            "private path is not a directory: {}",
-            path.display()
-        )));
-    }
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+        let _directory = rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(path)
+            .map_err(io_error)?;
+        rsi_files_native_fs::set_private_directory_permissions_no_follow(path)
+            .map(|_| ())
+            .map_err(io_error)
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        fs::create_dir_all(path).map_err(io_error)?;
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ServiceHostError::Invalid(format!(
+                "private path is not a directory: {}",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+        }
+        Ok(())
+    }
 }
 
 fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceHostError> {

@@ -123,19 +123,18 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
     kernel.shutdown(workers).await.unwrap();
 }
 
-fn contribution_budget_header() -> SessionHeader {
+fn contribution_header() -> SessionHeader {
     SessionHeader::new_local(
         SessionId::new("contribution-budget").unwrap(),
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentSettings::new_with_budget(
+        FrozenAgentSettings::new(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),
             SandboxMode::WorkspaceWrite,
             false,
-            TurnBudget::new(1_800_000, 64, 1, 12, 67_108_864).unwrap(),
         )
         .unwrap(),
     )
@@ -143,7 +142,7 @@ fn contribution_budget_header() -> SessionHeader {
 }
 
 #[tokio::test]
-async fn contribution_capture_rejects_cancelled_and_budget_ending_turns() {
+async fn contribution_capture_rejects_cancelled_and_terminal_turns() {
     for cancelled in [true, false] {
         let store = Arc::new(MemoryStore::new());
         let kernel = kernel(store).await;
@@ -155,12 +154,9 @@ async fn contribution_capture_rejects_cancelled_and_budget_ending_turns() {
             .await
             .unwrap()
             .unwrap();
-        let cancelled_stage = CancellationToken::new();
-        cancelled_stage.cancel();
-        assert!(matches!(
-            kernel.contribution_context(&claim, cancelled_stage).await,
-            Err(TurnError::Invalid(_))
-        ));
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        assert!(kernel.contribution_context(&claim, stopped).await.is_err());
         assert_eq!(
             kernel.read_facts(&claim, 0, 16).await.unwrap().through_seq,
             1
@@ -175,45 +171,23 @@ async fn contribution_capture_rejects_cancelled_and_budget_ending_turns() {
                 .await
                 .unwrap();
         } else {
-            let limit = claim
-                .header()
-                .settings()
-                .turn_budget()
-                .maximum_provider_attempts();
             kernel
-                .publish(
-                    &claim,
-                    vec![SessionFactBody::BudgetExhausted {
-                        turn_id: submitted.turn_id.clone(),
-                        dimension: BudgetDimension::ProviderAttempts,
-                        consumed: limit + 1,
-                        limit,
-                    }],
-                )
+                .finish_turn(&claim, &TurnOutcome::MaxTokens)
                 .await
                 .unwrap();
         }
-        assert!(matches!(
+        assert!(
             kernel
                 .contribution_context(&claim, CancellationToken::new())
-                .await,
-            Err(TurnError::Invalid(_))
-        ));
-        let outcome = if cancelled {
-            TurnOutcome::Cancelled
-        } else {
-            let limit = claim
-                .header()
-                .settings()
-                .turn_budget()
-                .maximum_provider_attempts();
-            TurnOutcome::BudgetExceeded {
-                dimension: BudgetDimension::ProviderAttempts,
-                consumed: limit + 1,
-                limit,
-            }
-        };
-        kernel.finish_turn(&claim, &outcome).await.unwrap();
+                .await
+                .is_err()
+        );
+        if cancelled {
+            kernel
+                .finish_turn(&claim, &TurnOutcome::Cancelled)
+                .await
+                .unwrap();
+        }
         drop(lease);
         kernel.shutdown(workers).await.unwrap();
     }
@@ -221,7 +195,7 @@ async fn contribution_capture_rejects_cancelled_and_budget_ending_turns() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // The same rejected operation is observed and replayed against both Stores.
-async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
+async fn rejection_is_single_assignment_and_replays_on_both_stores() {
     for sqlite in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let store: Arc<dyn SessionStore> = if sqlite {
@@ -237,7 +211,7 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
         let submitted = kernel
             .submit(SubmitTurn {
                 reasoning_effort: None,
-                session: fresh(contribution_budget_header()),
+                session: fresh(contribution_header()),
                 turn_id: client_turn_id(),
                 text: "work".into(),
                 model: None,
@@ -289,34 +263,31 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
             kernel.publish(&claim, vec![denied]).await,
             Err(TurnError::Invalid(_))
         ));
-        assert!(matches!(
-            kernel.publish(&claim, vec![other_denied]).await,
-            Err(TurnError::BudgetExceeded {
-                dimension: BudgetDimension::ToolCalls,
-                consumed: 2,
-                limit: 1
-            })
-        ));
-        assert!(matches!(
-            kernel
-                .publish(&claim, vec![plugin_input(&submitted.turn_id)])
-                .await,
-            Err(TurnError::BudgetExceeded {
-                dimension: BudgetDimension::GeneratedRecords,
-                consumed: 13,
-                limit: 12
-            })
-        ));
-        let page = store
-            .read_facts(&submitted.session_id, 10, 16)
+        let more = kernel
+            .publish(
+                &claim,
+                vec![other_denied.clone(), plugin_input(&submitted.turn_id)],
+            )
+            .await
+            .unwrap()
+            .published();
+        kernel
+            .flush(&claim, more.last().unwrap().seq())
             .await
             .unwrap();
+        let page = store
+            .read_facts(&submitted.session_id, published[0].seq() - 1, 16)
+            .await
+            .unwrap();
+        let mut expected = bodies.clone();
+        expected.push(other_denied);
+        expected.push(plugin_input(&submitted.turn_id));
         assert_eq!(
             page.facts
                 .iter()
                 .map(|f| f.body().clone())
                 .collect::<Vec<_>>(),
-            bodies
+            expected
         );
         kernel
             .finish_turn(&claim, &TurnOutcome::Completed)
@@ -330,7 +301,7 @@ async fn rejection_is_charged_without_an_intent_and_replays_on_both_stores() {
             rsi_agent_store_sqlite::SqliteStore::verify(root.path()).unwrap();
             let reopened = rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap();
             let page = reopened
-                .read_facts(&submitted.session_id, 10, 16)
+                .read_facts(&submitted.session_id, published[0].seq() - 1, 16)
                 .await
                 .unwrap();
             assert_eq!(

@@ -54,17 +54,14 @@ struct DomainRun {
 }
 
 #[tokio::test]
-async fn domain_mutation_cannot_consume_executor_owned_output_recovery() {
+async fn domain_mutation_cannot_forge_executor_owned_model_settlement() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
-    for body in super::output_recovery::source_bodies(run.claim.turn_id()) {
+    let run = DomainRun::start(store.clone()).await;
+    let mut bodies = super::model_attempts::source_bodies(run.claim.turn_id());
+    let recovery = bodies.pop().unwrap();
+    for body in bodies {
         super::tool_origin::flush_bodies(&run.kernel, &run.claim, vec![body]).await;
     }
-    let recovery = SessionFactBody::ModelOutputRecovery {
-        turn_id: run.claim.turn_id().clone(),
-        source_model_effect_id: EffectId::new("cut").unwrap(),
-        ordinal: 1,
-    };
     let before = store.read_watermarks(run.claim.session_id()).await.unwrap();
     let result = run
         .kernel
@@ -93,7 +90,7 @@ async fn domain_mutation_cannot_consume_executor_owned_output_recovery() {
 #[tokio::test]
 async fn domain_mutation_cannot_forge_kernel_owned_supersession() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     super::tool_origin::publish_model_source(&run.kernel, &run.claim, "call", "read", &snapshot())
         .await;
     let before = store.read_watermarks(run.claim.session_id()).await.unwrap();
@@ -126,7 +123,7 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
     for mode in ["before", "after", "unknown", "cancelled"] {
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let run = DomainRun::start(store.clone()).await;
         let caller = control_tool_caller(&run.kernel, &run.claim).await;
         let result = SessionFactBody::ToolResult {
             turn_id: run.claim.turn_id().clone(),
@@ -315,7 +312,7 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
 #[tokio::test]
 async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store, TurnBudget::default()).await;
+    let run = DomainRun::start(store).await;
     let scope = CancellationToken::new();
     let context = run
         .kernel
@@ -376,27 +373,22 @@ async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() 
 }
 
 impl DomainRun {
-    async fn start(store: Arc<dyn SessionStore>, budget: TurnBudget) -> Self {
-        Self::start_with_clock(store, budget, Arc::new(FixedClock)).await
+    async fn start(store: Arc<dyn SessionStore>) -> Self {
+        Self::start_with_clock(store, Arc::new(FixedClock)).await
     }
-    async fn start_with_clock(
-        store: Arc<dyn SessionStore>,
-        budget: TurnBudget,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
+    async fn start_with_clock(store: Arc<dyn SessionStore>, clock: Arc<dyn Clock>) -> Self {
         let (composition, handle) = domain_composition();
         let header = SessionHeader::new_local(
             SessionId::new("domain-exec").unwrap(),
             42,
             "/workspace",
             AgentPresetId::new("test-agent").unwrap(),
-            FrozenAgentSettings::new_with_budget(
+            FrozenAgentSettings::new(
                 "default",
                 "system",
                 ModelRef::new("deployment", "model").unwrap(),
                 SandboxMode::WorkspaceWrite,
                 false,
-                budget,
             )
             .unwrap(),
         )
@@ -465,7 +457,7 @@ impl DomainRun {
 #[tokio::test]
 async fn mixed_domain_mutations_bind_facts_revisions_generation_and_precommit_failure() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     let first = run
         .kernel
         .commit_domains(
@@ -562,14 +554,10 @@ async fn mixed_domain_mutations_bind_facts_revisions_generation_and_precommit_fa
 }
 
 #[tokio::test]
-async fn lost_domain_acknowledgements_reconcile_exact_receipts_and_charge_once() {
+async fn lost_domain_acknowledgements_reconcile_exact_receipts_without_reapplying() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-    let run = DomainRun::start(
-        store.clone(),
-        TurnBudget::new(1_800_000, 64, 256, 1, 67_108_864).unwrap(),
-    )
-    .await;
+    let run = DomainRun::start(store.clone()).await;
     store.fail_domain_after_apply.store(true, Ordering::Release);
     let first = run
         .kernel
@@ -583,23 +571,18 @@ async fn lost_domain_acknowledgements_reconcile_exact_receipts_and_charge_once()
             .unwrap(),
         first
     );
-    assert!(matches!(
-        run.kernel
-            .commit_domains(&run.claim, run.mutation("next", 2, false, vec![]))
-            .await,
-        Err(TurnError::BudgetExceeded {
-            consumed: 2,
-            limit: 1,
-            ..
-        })
-    ));
+
+    run.kernel
+        .commit_domains(&run.claim, run.mutation("next", 2, false, vec![]))
+        .await
+        .unwrap();
     assert_eq!(
         memory
             .read_turn_domain_usage(run.claim.session_id(), run.claim.turn_id())
             .await
             .unwrap()
             .records,
-        1
+        2
     );
     run.stop().await;
 }
@@ -608,7 +591,7 @@ async fn lost_domain_acknowledgements_reconcile_exact_receipts_and_charge_once()
 async fn unresolvable_domain_commit_closes_execution_but_preserves_queryable_history() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     let caller = run.kernel.agent_caller(&run.claim).unwrap();
     store.fail_domain_after_apply.store(true, Ordering::Release);
     store
@@ -686,14 +669,10 @@ async fn unresolvable_domain_commit_closes_execution_but_preserves_queryable_his
 }
 
 #[tokio::test]
-async fn dropped_domain_waiter_retains_source_and_installs_budget_before_claim_handoff() {
+async fn dropped_domain_waiter_installs_committed_revision_before_claim_handoff() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let run = DomainRun::start(
-        store.clone(),
-        TurnBudget::new(1_800_000, 64, 256, 1, 67_108_864).unwrap(),
-    )
-    .await;
+    let run = DomainRun::start(store.clone()).await;
     store
         .pause_agent_commit_after_apply
         .store(true, Ordering::Release);
@@ -720,87 +699,53 @@ async fn dropped_domain_waiter_retains_source_and_installs_budget_before_claim_h
     .unwrap()
     .unwrap();
     assert_ne!(next.claim_id(), run.claim.claim_id());
-    assert!(matches!(
-        run.kernel
-            .commit_domains(&next, run.mutation("next", 2, false, vec![]))
-            .await,
-        Err(TurnError::BudgetExceeded {
-            consumed: 2,
-            limit: 1,
-            ..
-        })
-    ));
+
+    run.kernel
+        .commit_domains(&next, run.mutation("next", 2, false, vec![]))
+        .await
+        .unwrap();
     run.stop().await;
 }
 
 #[tokio::test]
-async fn control_only_domain_work_exhausts_record_budget_and_rejects_the_whole_mixed_batch() {
+async fn domain_work_and_mixed_fact_batches_have_no_cumulative_record_limit() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(
-        store.clone(),
-        TurnBudget::new(1_800_000, 64, 256, 1, 67_108_864).unwrap(),
-    )
-    .await;
-    run.kernel
-        .commit_domains(&run.claim, run.mutation("first", 1, true, vec![]))
-        .await
-        .unwrap();
-    let before = store
-        .read_domain_states(run.claim.session_id(), None)
-        .await
-        .unwrap();
-    assert!(matches!(
+    let run = DomainRun::start(store.clone()).await;
+    for revision in 1..=70 {
         run.kernel
             .commit_domains(
                 &run.claim,
-                run.mutation("over", 2, false, vec![run.step("rejected")])
+                run.mutation(
+                    &format!("mutation-{revision}"),
+                    revision,
+                    revision % 2 == 0,
+                    vec![],
+                ),
             )
-            .await,
-        Err(TurnError::BudgetExceeded {
-            dimension: BudgetDimension::GeneratedRecords,
-            consumed: 3,
-            limit: 1
-        })
-    ));
-    assert_eq!(
-        store
-            .read_domain_states(run.claim.session_id(), None)
             .await
-            .unwrap(),
-        before
-    );
-    let outcome = TurnOutcome::BudgetExceeded {
-        dimension: BudgetDimension::GeneratedRecords,
-        consumed: 3,
-        limit: 1,
-    };
-    let terminal = run
-        .kernel
-        .publish(
+            .unwrap();
+    }
+    run.kernel
+        .commit_domains(
             &run.claim,
-            vec![
-                SessionFactBody::BudgetExhausted {
-                    turn_id: run.claim.turn_id().clone(),
-                    dimension: BudgetDimension::GeneratedRecords,
-                    consumed: 3,
-                    limit: 1,
-                },
-                SessionFactBody::TurnTerminal {
-                    turn_id: run.claim.turn_id().clone(),
-                    outcome,
-                    result: None,
-                },
-            ],
+            run.mutation("mixed", 71, true, vec![run.step("open")]),
         )
         .await
-        .unwrap()
-        .published();
+        .unwrap();
+    assert_eq!(
+        run.kernel
+            .domain_states(run.claim.session_id())
+            .await
+            .unwrap()[0]
+            .revision,
+        DomainRevision::new(72)
+    );
     run.kernel
-        .flush(&run.claim, terminal.last().unwrap().seq())
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
         .await
         .unwrap();
     let controls = store
-        .read_controls(run.claim.session_id(), 0, 8)
+        .read_controls(run.claim.session_id(), 0, 256)
         .await
         .unwrap();
     assert!(matches!(
@@ -825,12 +770,8 @@ async fn prepared_session(
 }
 
 #[tokio::test]
-async fn an_open_step_can_end_after_its_generated_record_budget_is_full() {
-    let run = DomainRun::start(
-        Arc::new(MemoryStore::new()),
-        TurnBudget::new(1_800_000, 64, 256, 2, 67_108_864).unwrap(),
-    )
-    .await;
+async fn an_open_step_closes_atomically_with_max_tokens() {
+    let run = DomainRun::start(Arc::new(MemoryStore::new())).await;
     run.kernel
         .commit_domains(
             &run.claim,
@@ -839,14 +780,7 @@ async fn an_open_step_can_end_after_its_generated_record_budget_is_full() {
         .await
         .unwrap();
     run.kernel
-        .finish_turn(
-            &run.claim,
-            &TurnOutcome::BudgetExceeded {
-                dimension: BudgetDimension::GeneratedRecords,
-                consumed: 3,
-                limit: 2,
-            },
-        )
+        .finish_turn(&run.claim, &TurnOutcome::MaxTokens)
         .await
         .unwrap();
     run.stop().await;
@@ -861,15 +795,10 @@ impl Clock for DomainClock {
 }
 
 #[tokio::test]
-async fn elapsed_domain_work_is_rejected_while_atomic_ending_closes_the_open_step() {
+async fn domain_work_has_no_elapsed_limit_and_ending_closes_the_open_step() {
     let clock = Arc::new(DomainClock(std::sync::atomic::AtomicU64::new(42)));
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start_with_clock(
-        store.clone(),
-        TurnBudget::new(10, 64, 256, 65_536, 67_108_864).unwrap(),
-        clock.clone(),
-    )
-    .await;
+    let run = DomainRun::start_with_clock(store.clone(), clock.clone()).await;
     run.kernel
         .commit_domains(
             &run.claim,
@@ -877,38 +806,25 @@ async fn elapsed_domain_work_is_rejected_while_atomic_ending_closes_the_open_ste
         )
         .await
         .unwrap();
-    clock.0.store(52, Ordering::Release);
-    assert!(matches!(
-        run.kernel
-            .contribution_context(&run.claim, CancellationToken::new())
-            .await,
-        Err(TurnError::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            consumed: 10,
-            limit: 10
-        })
-    ));
-    assert!(matches!(
-        run.kernel
-            .commit_domains(&run.claim, run.mutation("late", 2, false, vec![]))
-            .await,
-        Err(TurnError::BudgetExceeded {
-            dimension: BudgetDimension::Elapsed,
-            consumed: 10,
-            limit: 10
-        })
-    ));
-    let outcome = TurnOutcome::BudgetExceeded {
-        dimension: BudgetDimension::Elapsed,
-        consumed: 10,
-        limit: 10,
-    };
-    let terminal = run.kernel.finish_turn(&run.claim, &outcome).await.unwrap();
+    clock.0.store(86_400_042, Ordering::Release);
+    run.kernel
+        .contribution_context(&run.claim, CancellationToken::new())
+        .await
+        .unwrap();
+    run.kernel
+        .commit_domains(&run.claim, run.mutation("late", 2, false, vec![]))
+        .await
+        .unwrap();
+    let terminal = run
+        .kernel
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
     let ending = store
         .read_facts(run.claim.session_id(), 2, 8)
         .await
         .unwrap();
-    assert_eq!(ending.facts.len(), 3);
+    assert_eq!(ending.facts.len(), 2);
     assert_eq!(ending.durable_seq, terminal.seq());
     assert!(matches!(
         ending.facts[0].body(),
@@ -916,26 +832,15 @@ async fn elapsed_domain_work_is_rejected_while_atomic_ending_closes_the_open_ste
     ));
     assert!(matches!(
         ending.facts[1].body(),
-        SessionFactBody::BudgetExhausted {
-            dimension: BudgetDimension::Elapsed,
-            ..
-        }
+        SessionFactBody::TurnTerminal { .. }
     ));
-    assert_eq!(
-        store
-            .read_turn_domain_usage(run.claim.session_id(), run.claim.turn_id())
-            .await
-            .unwrap()
-            .records,
-        1
-    );
     run.stop().await;
 }
 
 #[tokio::test]
 async fn failed_direct_ending_keeps_business_closed_and_allows_retry_without_partial_closure() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     run.kernel
         .commit_domains(
             &run.claim,
@@ -980,7 +885,7 @@ async fn ending_store_refusals_skip_reconciliation_and_preserve_retry() {
         for refusal in [StoreError::ValidationBusy, StoreError::ReadCapacity] {
             let memory = Arc::new(MemoryStore::new());
             let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-            let mut run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+            let mut run = DomainRun::start(store.clone()).await;
             if mailbox {
                 run.kernel
                     .finish_turn(&run.claim, &TurnOutcome::Completed)
@@ -1049,7 +954,7 @@ async fn lost_terminal_acknowledgements_resolve_direct_and_mailbox_endings() {
     for mailbox in [false, true] {
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-        let mut run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let mut run = DomainRun::start(store.clone()).await;
         if mailbox {
             run.kernel
                 .finish_turn(&run.claim, &TurnOutcome::Completed)
@@ -1108,7 +1013,7 @@ async fn lost_terminal_acknowledgements_resolve_direct_and_mailbox_endings() {
 async fn unknown_terminal_result_keeps_release_and_canonical_outcome_query_available() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     store
         .fail_terminal_after_apply
         .store(true, Ordering::Release);
@@ -1144,7 +1049,7 @@ async fn unknown_terminal_result_keeps_release_and_canonical_outcome_query_avail
 async fn sqlite_domain_execution_reopens_with_a_new_codec_generation_and_exact_receipts() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     let receipt = run
         .kernel
         .commit_domains(
@@ -1224,7 +1129,7 @@ async fn sqlite_domain_execution_reopens_with_a_new_codec_generation_and_exact_r
 }
 
 #[tokio::test]
-async fn domain_byte_budget_charges_complete_canonical_envelopes() {
+async fn domain_usage_measures_complete_canonical_envelopes() {
     use rsi_agent_session_protocol::{
         AgentControlRecord, DomainMutationSource, DomainRequestId, DomainStateCommit,
         DomainStateUpdate,
@@ -1250,11 +1155,7 @@ async fn domain_byte_budget_charges_complete_canonical_envelopes() {
     .unwrap()
     .encoded_len() as u64;
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(
-        store.clone(),
-        TurnBudget::new(1_800_000, 64, 256, 65_536, expected_bytes).unwrap(),
-    )
-    .await;
+    let run = DomainRun::start(store.clone()).await;
     run.kernel
         .commit_domains(&run.claim, run.mutation("a", 1, true, vec![]))
         .await
@@ -1267,26 +1168,22 @@ async fn domain_byte_budget_charges_complete_canonical_envelopes() {
             .bytes,
         expected_bytes
     );
-    assert!(
-        matches!(run.kernel.commit_domains(&run.claim, run.mutation("b", 2, false, vec![])).await,
-        Err(TurnError::BudgetExceeded { dimension: BudgetDimension::GeneratedRecordBytes, consumed, limit }) if consumed > expected_bytes && limit == expected_bytes)
-    );
+    run.kernel
+        .commit_domains(&run.claim, run.mutation("b", 2, false, vec![]))
+        .await
+        .unwrap();
     run.stop().await;
 }
 
 #[tokio::test]
-async fn cold_recovery_restores_turn_control_usage_and_excludes_command_controls() {
+async fn cold_recovery_accepts_domain_history_from_turns_and_commands_without_cumulative_caps() {
     use rsi_agent_session_protocol::{
         AgentControlRecord, DomainMutationSource, DomainRequestId, DomainStateCommit,
         DomainStateUpdate,
     };
     for turn_source in [false, true] {
         let store = Arc::new(MemoryStore::new());
-        let run = DomainRun::start(
-            store.clone(),
-            TurnBudget::new(1_800_000, 64, 256, 1, 67_108_864).unwrap(),
-        )
-        .await;
+        let run = DomainRun::start(store.clone()).await;
         run.kernel
             .commit_domains(&run.claim, run.mutation("first", 1, true, vec![]))
             .await
@@ -1346,14 +1243,7 @@ async fn cold_recovery_restores_turn_control_usage_and_excludes_command_controls
         let (composition, _) = domain_composition();
         let recovered =
             AgentKernel::recover_with_clock(store, composition, Arc::new(FixedClock)).await;
-        if turn_source {
-            assert!(matches!(
-                recovered,
-                Err(rsi_agent_kernel::KernelError::Invariant(_))
-            ));
-        } else {
-            recovered.unwrap();
-        }
+        recovered.unwrap();
     }
 }
 
@@ -1678,7 +1568,7 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
 }
 
 #[tokio::test]
-async fn evidence_byte_budget_accounts_for_the_complete_fact_and_domain_batch() {
+async fn request_evidence_capacity_is_independent_for_fact_and_domain_batches() {
     use rsi_agent_session_protocol::{EvidencePart, EvidenceUnavailable, RequestEvidence};
     for mixed in [false, true] {
         let store = Arc::new(MemoryStore::new());
@@ -1690,20 +1580,14 @@ async fn evidence_byte_budget_accounts_for_the_complete_fact_and_domain_batch() 
             price_quote: None,
             evidence: RequestEvidence::Available {
                 configuration: EvidencePart::inline("{}".into()),
-                system: EvidencePart::inline("x".repeat(1024)),
+                system: EvidencePart::inline(
+                    "x".repeat(rsi_agent_session_protocol::MAXIMUM_REQUEST_EVIDENCE_BYTES),
+                ),
                 tools: EvidencePart::inline("[]".into()),
                 manifest: vec![],
             },
         };
-        let bytes = SessionFact::new(3, 42, intent.clone())
-            .unwrap()
-            .encoded_len() as u64
-            + 1;
-        let run = DomainRun::start(
-            store.clone(),
-            TurnBudget::new(1_800_000, 64, 256, 65536, bytes).unwrap(),
-        )
-        .await;
+        let run = DomainRun::start(store.clone()).await;
         let before = run
             .kernel
             .read_facts(&run.claim, 0, 128)
@@ -1720,7 +1604,7 @@ async fn evidence_byte_budget_accounts_for_the_complete_fact_and_domain_batch() 
             run.kernel.publish(&run.claim, facts).await.map(|_| ())
         };
         assert!(
-            matches!(result, Err(TurnError::EvidenceBudget)),
+            matches!(result, Err(TurnError::Invalid(_))),
             "mixed={mixed}: {result:?}"
         );
         assert_eq!(
@@ -1780,7 +1664,7 @@ impl AgentComposition for RecordingRestore {
 #[tokio::test]
 async fn cold_projection_and_resume_supply_original_baseline_before_composition_not_latest_state() {
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     let session = run.claim.session_id().clone();
     let baseline = store
         .read_domain_states(&session, Some(1))
@@ -1942,7 +1826,7 @@ async fn started_tool_domain_mutations_reconcile_receipts_and_reject_retired_aut
     for mode in ["before", "after", "unknown", "retired", "cancelled"] {
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let run = DomainRun::start(store.clone()).await;
         let caller = control_tool_caller(&run.kernel, &run.claim).await;
         let mutation = || run.mutation("started-tool-mutation", 1, true, vec![]);
         assert!(
@@ -2036,7 +1920,7 @@ async fn started_tool_domain_mutations_reconcile_receipts_and_reject_retired_aut
 async fn domain_read_guards_reject_stale_authority_but_preserve_committed_receipts() {
     use rsi_agent_turn_protocol::DomainReadGuard;
     let store = Arc::new(MemoryStore::new());
-    let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+    let run = DomainRun::start(store.clone()).await;
     let domains = run
         .kernel
         .domain_states(run.claim.session_id())
@@ -2084,7 +1968,7 @@ async fn store_admission_domain_refusal_preserves_known_prewrite_capacity() {
     for refusal in [StoreError::ValidationBusy, StoreError::ReadCapacity] {
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-        let run = DomainRun::start(store.clone(), TurnBudget::default()).await;
+        let run = DomainRun::start(store.clone()).await;
         let before = memory
             .read_watermarks(run.claim.session_id())
             .await

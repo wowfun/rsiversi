@@ -1,19 +1,23 @@
+#![cfg(unix)]
+
 #[path = "headless/child.rs"]
 mod child;
 use child::CommandOutput as _;
-#[cfg(unix)]
+
 use child::ObservedChild;
 
-use axum::{
-    Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
-};
+use axum::extract::State;
+use axum::{Router, body::Body, http::StatusCode, response::Response, routing::post};
 use futures_util::StreamExt as _;
 use rsi::{RunningRsi, StandardCodingTools, StandardComposition};
+
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentMessageContent, AgentPresetId, MessageId, SessionFact,
     SessionFactBody, SessionId, TurnId, TurnOutcome,
 };
+
 use rsi_agent_store_protocol::SessionStore as _;
+
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_turn_protocol::{MessageReceipt, ObservationCursor, SessionObservation};
 use rsi_ai_protocol::{ImageRequest, ModelRef};
@@ -21,18 +25,23 @@ use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
 use rsi_sandbox::SandboxMode;
+
+use rsi_session_protocol::SessionService as _;
 use rsi_session_protocol::{
-    CreateSession, SessionHandle, SessionInput, SessionService as _, SubmitDirectImage,
-    SubmitInput, TurnReceipt,
+    CreateSession, SessionHandle, SessionInput, SubmitDirectImage, SubmitInput, TurnReceipt,
 };
 use std::collections::BTreeMap;
+
 use std::fmt::Write as _;
+use std::sync::Arc;
+
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
+
 use tokio::sync::Notify;
 
 const CHILD_PROVIDER_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -640,6 +649,7 @@ async fn image_server() -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[derive(Clone, Debug)]
+
 struct CrashServerState {
     calls: Arc<AtomicUsize>,
     first_request_started: Arc<Notify>,
@@ -830,13 +840,10 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     assert!(first_durable_seq >= first_facts.last().unwrap().seq());
     assert!(first_facts.iter().any(|fact| matches!(
         fact.body(),
-        SessionFactBody::ModelEvent {
-            event: rsi_ai_protocol::LanguageEvent::ContentDelta {
-                delta: rsi_ai_protocol::ContentDelta::Text(text),
-                ..
-            },
-            ..
-        } if text == "hello"
+        SessionFactBody::ModelAttemptSettled { attempt, .. }
+            if attempt.events().any(|event| matches!(event, Ok((_, rsi_ai_protocol::LanguageEvent::ContentDelta {
+                delta: rsi_ai_protocol::ContentDelta::Text(text), ..
+            })) if text == "hello"))
     )));
     let first_history = first_handle.history_before(None, 64).await.unwrap();
     assert!(first_history.facts.iter().any(|fact| matches!(
@@ -964,7 +971,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.first().unwrap()["type"], "message");
-    assert_eq!(lines.first().unwrap()["version"], 5);
+    assert_eq!(lines.first().unwrap()["version"], 6);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
@@ -1492,7 +1499,6 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     server.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let (endpoint, first_request_started, _calls, server) = crash_server().await;
@@ -1618,7 +1624,6 @@ fn assert_sigkill_recovery_order(facts: &[SessionFact]) {
     assert!(started < interrupted && interrupted < completed);
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let (endpoint, first_request_started, calls, server) = crash_server().await;
@@ -1774,7 +1779,6 @@ async fn question_then_chat(
     }
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One real Host lifecycle per adapter validates the same question protocol.
 async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
@@ -2201,24 +2205,29 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
     http.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_exits_with_an_undrained_stdout_pipe() {
-    verify_undrained_stdout(None).await;
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(None, output).await;
+    }
 }
-#[cfg(unix)]
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn built_binary_sigint_after_model_completion_still_stops_blocked_output() {
-    verify_undrained_stdout(Some(0)).await;
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(Some(0), output).await;
+    }
 }
-#[cfg(unix)]
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn built_binary_sigint_after_model_completion_with_a_full_renderer_queue() {
-    verify_undrained_stdout(Some(64)).await;
+async fn built_binary_sigint_after_fragmented_model_completion_stops_blocked_output() {
+    for output in ["text", "jsonl"] {
+        verify_undrained_stdout(Some(64), output).await;
+    }
 }
-#[cfg(unix)]
+
 #[allow(clippy::too_many_lines)] // Bounded pipe setup, completion evidence and signal cleanup share one child.
-async fn verify_undrained_stdout(deltas: Option<usize>) {
+async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
     use std::time::Duration;
     use tokio::io::AsyncReadExt as _;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2259,7 +2268,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
             "--session-id",
             "backpressure",
             "--output",
-            "jsonl",
+            output,
         ])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -2281,10 +2290,16 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     tokio::time::timeout(CHILD_PROVIDER_START_TIMEOUT, sent.notified())
         .await
         .unwrap();
-    // Confirm streamed model bytes reached the pipe, then retain it without draining.
+    // Text exposes live bytes; JSONL exposes live and settled encoded events.
+    // Confirm either reached the pipe, then retain it without draining.
+    let marker: &[u8] = if output == "jsonl" {
+        b"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4"
+    } else {
+        &[b'x'; 32]
+    };
     let mut stdout = child.stdout.take().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut prefix = Vec::new();
+    let mut prefix = Vec::new();
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut chunk = [0; 4096];
         loop {
             let count = stdout.read(&mut chunk).await.unwrap();
@@ -2306,7 +2321,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
                 );
             }
             prefix.extend_from_slice(&chunk[..count]);
-            if prefix.windows(32).any(|bytes| bytes == [b'x'; 32]) {
+            if prefix.windows(marker.len()).any(|bytes| bytes == marker) {
                 break;
             }
             assert!(
@@ -2315,10 +2330,15 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
             );
         }
     })
-    .await
-    .unwrap();
-    if let Some(count) = deltas {
-        wait_for_completed_output(&fixture, count).await;
+    .await;
+    assert!(
+        received.is_ok(),
+        "model output did not reach stdout ({} bytes): {}",
+        prefix.len(),
+        String::from_utf8_lossy(&prefix[prefix.len().saturating_sub(4096)..])
+    );
+    if deltas.is_some() {
+        wait_for_completed_output(&fixture).await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(child.try_wait().unwrap().is_none());
@@ -2341,8 +2361,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>) {
     let _ = server.await;
 }
 
-#[cfg(unix)]
-async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
+async fn wait_for_completed_output(fixture: &Fixture) {
     use std::time::Duration;
     // Read-only WAL visibility proves completion without acquiring the running
     // Store's exclusive writer lease or unblocking the product's output pipe.
@@ -2357,7 +2376,7 @@ async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
                     "SELECT count(*), coalesce(sum(fact_kind = 'terminal'), 0) FROM facts WHERE session_id = ?1",
                     ["backpressure"], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).unwrap();
-                if terminal > 0 { assert!(facts > i64::try_from(count).unwrap()); break; }
+                if terminal > 0 { assert!((1..64).contains(&facts), "stream fragmentation must not create durable Facts"); break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();

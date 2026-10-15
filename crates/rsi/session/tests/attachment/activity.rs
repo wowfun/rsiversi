@@ -175,7 +175,9 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
     let store = Arc::new(MemoryStore::new());
     let id = SessionId::new("attention-running").unwrap();
     let abandoned = SessionId::new("attention-abandoned").unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = rsi_workspace_protocol::canonical_native_path(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+    );
     for session in [&id, &abandoned] {
         let header = SessionHeader::new_local(
             session.clone(),

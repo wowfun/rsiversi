@@ -47,6 +47,7 @@ pub struct GoalFactory;
 #[derive(Debug)]
 pub(crate) struct GoalPlugin {
     pub(crate) state: DomainHandle<GoalState>,
+    default_max_rounds: u64,
 }
 
 impl GoalPlugin {
@@ -96,7 +97,7 @@ impl SessionCommand for Command {
                 .apply(
                     serde_json::from_value::<GoalAction>(arguments.value().clone())
                         .map_err(invalid)?,
-                    context.header.settings().turn_budget(),
+                    self.plugin.default_max_rounds,
                     matches!(context.revision, CommandRevision::Draft { .. }),
                 )
                 .map_err(invalid)?,
@@ -195,20 +196,33 @@ impl SessionProjection for GoalPlugin {
 #[async_trait]
 impl PluginFactory for GoalFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        if !desired.is_null() {
-            return Err(MetaError::InvalidInput(
-                "Goal configuration must be null".into(),
-            ));
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Config {
+            #[serde(default = "default_max_rounds")]
+            default_max_rounds: u64,
         }
-        Ok(PreparedActivation::with_state(ConfigValue::Null, (), 0)
+        fn default_max_rounds() -> u64 {
+            crate::DEFAULT_MAX_ROUNDS
+        }
+        let rounds = if desired.is_null() {
+            crate::DEFAULT_MAX_ROUNDS
+        } else {
+            serde_json::from_value::<Config>(desired.clone())
+                .map_err(|error| MetaError::InvalidInput(error.to_string()))?
+                .default_max_rounds
+        };
+        crate::validate_max_rounds(rounds).map_err(MetaError::InvalidInput)?;
+        Ok(PreparedActivation::with_state(desired.clone(), rounds, 8)
             .requiring_local::<DomainRegistrarContract>()
             .requiring_local::<ContributionRegistrarContract>()
             .requiring_local::<ToolRegistrarContract>())
     }
+    #[allow(clippy::too_many_lines)] // Registration leases share one rollback scope.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let (): () = plan.take_state()?;
+        let default_max_rounds: u64 = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(GOAL_DOMAIN, 1).map_err(activation)?,
+            DomainIdentity::new(GOAL_DOMAIN, 2).map_err(activation)?,
             &GoalState::default(),
             GoalState::validate,
         )
@@ -217,7 +231,10 @@ impl PluginFactory for GoalFactory {
         let (state, domain_lease) = definition
             .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
             .map_err(activation)?;
-        let plugin = Arc::new(GoalPlugin { state });
+        let plugin = Arc::new(GoalPlugin {
+            state,
+            default_max_rounds,
+        });
         let registrar = plan.local::<ContributionRegistrarContract>()?;
         let mut leases = Vec::new();
         for (id, name, operation, internal) in [

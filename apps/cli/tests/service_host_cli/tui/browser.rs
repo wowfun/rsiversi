@@ -3,6 +3,10 @@ use std::io::BufRead as _;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit Linux confined browser and real TUI image-source acceptance"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one production TUI browser lifecycle and image-source verification"
+)]
 async fn session_browser_tui_uses_production_local_grant_and_renders_the_shared_png() {
     struct Server(std::process::Child);
     impl Drop for Server {

@@ -1,5 +1,12 @@
 # rsi-session
 
+Native workspace canonicalization uses the shared
+[path representation](../../rsi-workspace/path/README.md) after verifying the
+physical directory.
+
+An unsupported Media or Agent Store capability becomes Session API unavailability,
+not invalid caller input; backend diagnostics do not cross that projection.
+
 Metrics acquisition supplies each Session's immutable output budget table to its
 reducer, including separate child tables during tree scans. It never derives a
 historical request cap from the current live model catalog.

@@ -2,6 +2,9 @@
 name: Tool-bound model origin for child Sessions
 ---
 
+Partially superseded by [model attempt settlement](../../implemented/architecture/2026-10-14-model-attempt-settlement.md).
+Model completion evidence is superseded by a single attempt settlement; exact complete ToolCalls provenance remains required.
+
 ## Problem
 
 A claim identifies a Turn, which can contain several requests and concurrent

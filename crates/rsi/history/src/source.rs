@@ -340,9 +340,10 @@ impl ProductHistorySearch {
                 batch.through = window.through_seq;
                 for fact in &window.facts {
                     check(stop)?;
-                    let fields = rsi_agent_references::reference_texts(fact)
-                        .into_iter()
-                        .map(|field| (field.record, field.text));
+                    let texts = rsi_agent_references::reference_texts(fact);
+                    let fields = texts
+                        .iter()
+                        .map(|field| (field.record.clone(), field.text.as_ref()));
                     if !batch.append_original(&source.identity, fields, fact.encoded_len())? {
                         batch.through = fact.seq() - 1;
                         batch.has_more = true;
@@ -442,7 +443,7 @@ impl ProductHistorySearch {
                 if field.text.len() > MAXIMUM_REFERENCE_TEXT_BYTES {
                     return Err(invalid("original text exceeds limit"));
                 }
-                (field.text.to_owned(), window.encoded_bytes)
+                (field.text.into_owned(), window.encoded_bytes)
             }
             ReferenceSource::Observed { .. } => {
                 let (id, epoch) = observed(&source.identity)?;

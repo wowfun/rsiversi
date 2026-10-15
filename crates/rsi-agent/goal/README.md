@@ -5,9 +5,9 @@ effect-free state commands, ordinary-request context, pure projections and the
 `report_goal` Tool. It holds no Store writer, Turn service or scheduling loop.
 The Host controller owns live continuation authority and aggregate driving.
 
-A Goal freezes an explicit positive round maximum and the Header's immutable
-five-dimensional TurnBudget. Checked products describe automatic parent-Turn
-allowances, excluding monetary/token accounting and descendant budgets. Round
+A Goal freezes its resolved positive safe-integer round maximum (at most
+9,007,199,254,740,991). Omitted creation limits use the Goal plugin default,
+256 unless configured otherwise. There is no aggregate Turn allowance. Round
 reservation and input acceptance commit together, without refunds after acceptance.
 Busy admission changes neither the allocated count nor the live lease. Resume
 preserves that count. Each reservation freezes its deterministic message identity,
@@ -28,7 +28,7 @@ text. It cannot create a Goal, increase its cap or arm a driver. The
 call must be the sole, final Tool call after the model's work and checks. A post-Tool
 contribution checks the exact named Tool intent/result before recording a report
 with its source Turn. Completion is a claim until that Turn is canonically
-Completed. Failed, PartialFailed, Interrupted and BudgetExceeded take precedence
+Completed. Failed, PartialFailed, Interrupted and MaxTokens take precedence
 and block; Cancelled pauses. A failed Turn retains its unverified completion
 claim. Pause stops future scheduling; an already committed completion report
 can still settle Completed when its in-flight Turn completes successfully.

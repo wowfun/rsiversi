@@ -57,7 +57,7 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
     };
     let policy =
         DelegationPolicy::freeze(Some(&role), ["echo".into()].into_iter().collect(), None).unwrap();
-    let restricted = header_for_session("restricted", TurnBudget::default())
+    let restricted = header_for_session("restricted")
         .with_delegation_policy(Some(policy))
         .unwrap();
     let (submitted, outcome) = stack
@@ -432,7 +432,7 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
+async fn parallel_results_above_the_old_cumulative_byte_budget_both_publish() {
     let stack = BaseStack::activate().await;
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
@@ -446,12 +446,13 @@ async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
         })
         .unwrap();
     let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_calls_script(
-            &[
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_calls_script(&[
                 ("large-call", "uneven", r#"{"position":"first"}"#),
                 ("small-call", "uneven", r#"{"position":"second"}"#),
-            ],
-        ))])),
+            ])),
+            StartOutcome::Stream(answer_script()),
+        ])),
         requests: Mutex::new(vec![]),
         starts: Arc::new(AtomicUsize::new(0)),
         store: stack.store.clone(),
@@ -463,19 +464,12 @@ async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
     let executor_fiber = stack
         .activate_executor("executor-parallel-publication-failure")
         .await;
-    let budget = TurnBudget::new(1_800_000, 64, 256, 65_536, 16 * 1024).unwrap();
 
     let (submitted, outcome) = stack
-        .submit_and_wait_with_header("run uneven tools", None, header_with_budget(budget))
+        .submit_and_wait_with_header("run uneven tools", None, header())
         .await;
 
-    assert!(matches!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::GeneratedRecordBytes,
-            ..
-        }
-    ));
+    assert!(matches!(outcome, TurnOutcome::Completed));
     let facts = stack
         .store
         .read_facts(&submitted.session_id, 0, 64)
@@ -488,6 +482,7 @@ async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
             if result.value.get("position") == Some(&Value::String("second".into()))
     )));
 
+    assert!(facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { result, .. } if result.value.get("position") == Some(&json!("first")))));
     drop(tool_lease);
     drop(tools);
     stack.dispose(language_fiber, executor_fiber).await;
@@ -686,7 +681,7 @@ async fn unknown_tool_is_rejected_before_any_effect_is_published() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_attempt_budget_stops_a_model_tool_loop_with_durable_evidence() {
+async fn model_tool_loop_keeps_independent_attempt_settlements() {
     let stack = BaseStack::activate().await;
     let tool_calls = Arc::new(AtomicUsize::new(0));
     let tools = Arc::clone(&stack.tool_registrar);
@@ -716,20 +711,12 @@ async fn provider_attempt_budget_stops_a_model_tool_loop_with_durable_evidence()
         .activate_language("test.language.budget", fixture.clone())
         .await;
     let executor_fiber = stack.activate_executor("executor-budget").await;
-    let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
     let (submitted, outcome) = stack
-        .submit_and_wait_with_header("keep calling tools", None, header_with_budget(budget))
+        .submit_and_wait_with_header("keep calling tools", None, header())
         .await;
 
-    assert_eq!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::ProviderAttempts,
-            consumed: 2,
-            limit: 1,
-        }
-    );
-    assert_eq!(starts.load(Ordering::Acquire), 1);
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(starts.load(Ordering::Acquire), 2);
     assert_eq!(tool_calls.load(Ordering::Acquire), 1);
     assert_eq!(fixture.requests.lock().unwrap().len(), 2);
     let page = stack
@@ -742,7 +729,14 @@ async fn provider_attempt_budget_stops_a_model_tool_loop_with_durable_evidence()
         .iter()
         .map(|fact| fact_kind(fact.body()))
         .collect::<Vec<_>>();
-    assert!(kinds.ends_with(&["budget_exhausted", "terminal"]));
+    assert!(kinds.ends_with(&["step_ended", "terminal"]));
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == "model_attempt_settled")
+            .count(),
+        2
+    );
 
     drop(tool_lease);
     drop(tools);
@@ -750,7 +744,7 @@ async fn provider_attempt_budget_stops_a_model_tool_loop_with_durable_evidence()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
+async fn finalizer_failure_replaces_success_with_one_durable_terminal() {
     let stack = BaseStack::activate().await;
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
@@ -795,10 +789,9 @@ async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
         )
         .unwrap();
     let executor_fiber = stack.activate_executor("executor-finalizer-budget").await;
-    let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
 
     let (submitted, outcome) = stack
-        .submit_and_wait_with_header("fail finalization", None, header_with_budget(budget))
+        .submit_and_wait_with_header("fail finalization", None, header())
         .await;
 
     assert!(matches!(
@@ -811,10 +804,12 @@ async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
         .await
         .unwrap()
         .facts;
-    assert!(
-        !facts
+    assert_eq!(
+        facts
             .iter()
-            .any(|fact| matches!(fact.body(), SessionFactBody::BudgetExhausted { .. }))
+            .filter(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }))
+            .count(),
+        1
     );
 
     drop(finalizer_lease);
@@ -873,7 +868,7 @@ async fn completion_blocker_replaces_only_an_otherwise_successful_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal_durability() {
+async fn successful_tool_result_retires_the_retained_identity_after_terminal_durability() {
     let stack = BaseStack::activate().await;
     let tools = Arc::clone(&stack.tool_registrar);
     let tool_lease = tools
@@ -888,7 +883,10 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
         })
         .unwrap();
     let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
         requests: Mutex::new(vec![]),
         starts: Arc::new(AtomicUsize::new(0)),
         store: stack.store.clone(),
@@ -898,23 +896,12 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
         .activate_language("test.language.tool-result-budget", fixture)
         .await;
     let executor_fiber = stack.activate_executor("executor-tool-result-budget").await;
-    // One Step start, Model intent/start, all scripted events, then Tool intent/start.
-    // Admit execution and make the result the first over-budget generated record.
-    let record_limit = u64::try_from(tool_script().len()).unwrap() + 5;
-    let budget = TurnBudget::new(1_800_000, 64, 256, record_limit, 67_108_864).unwrap();
 
     let (submitted, outcome) = stack
-        .submit_and_wait_with_header("budget the result", None, header_with_budget(budget))
+        .submit_and_wait_with_header("budget the result", None, header())
         .await;
 
-    assert_eq!(
-        outcome,
-        TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::GeneratedRecords,
-            consumed: record_limit + 1,
-            limit: record_limit,
-        }
-    );
+    assert_eq!(outcome, TurnOutcome::Completed);
     let facts = stack
         .store
         .read_facts(&submitted.session_id, 0, 64)
@@ -936,7 +923,7 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
         }
     })
     .await
-    .expect("the durable budget failure must retire its retained Tool identity");
+    .expect("the durable successful result must retire its retained Tool identity");
 
     drop(tool_lease);
     drop(tools);
@@ -954,7 +941,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::ImageRequested { .. } => "image_requested",
         SessionFactBody::ModelIntent { .. } => "model_intent",
         SessionFactBody::ModelStarted { .. } => "model_started",
-        SessionFactBody::ModelEvent { .. } => "model_event",
+        SessionFactBody::ModelAttemptSettled { .. } => "model_attempt_settled",
         SessionFactBody::ImageIntent { .. } => "image_intent",
         SessionFactBody::ImageStarted { .. } => "image_started",
         SessionFactBody::ImageOutput { .. } => "image_output",
@@ -964,9 +951,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::ToolResult { .. } => "tool_result",
         SessionFactBody::TurnTerminal { .. } => "terminal",
         SessionFactBody::CancelRequested { .. } => "cancel",
-        SessionFactBody::BudgetExhausted { .. } => "budget_exhausted",
         SessionFactBody::ToolCallsSuperseded { .. } => "tool_calls_superseded",
-        SessionFactBody::ModelOutputRecovery { .. } => "model_output_recovery",
     }
 }
 
@@ -1078,10 +1063,7 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
         .lookup_local::<TurnServiceContract>()
         .unwrap();
     let id = SessionId::new("supersession").unwrap();
-    let header = header_for_session(
-        "supersession",
-        TurnBudget::new(1_800_000, 64, 1, 65_536, 67_108_864).unwrap(),
-    );
+    let header = header_for_session("supersession");
     turns
         .submit_message(SubmitMessage {
             session: stack.fresh(header.clone()).await,

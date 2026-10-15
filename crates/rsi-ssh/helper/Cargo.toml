@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-cap-std.workspace = true
 hex.workspace = true
 rsi-execution-local = { path = "../../rsi-execution/local" }
 rsi-files = { path = "../../rsi-files/core" }

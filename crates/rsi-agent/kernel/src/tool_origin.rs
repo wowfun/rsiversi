@@ -11,7 +11,6 @@ pub(super) struct ToolSource {
     effect_id: EffectId,
     selection: Option<ModelSelection>,
     completed: bool,
-    truncated: bool,
     bytes: usize,
     calls: BTreeMap<u32, Arc<Call>>,
 }
@@ -113,7 +112,6 @@ impl ToolSource {
             effect_id,
             selection,
             completed: false,
-            truncated: false,
             bytes: 0,
             calls: BTreeMap::new(),
         })
@@ -232,25 +230,9 @@ impl ToolSource {
                     return Err(invalid("model finished with an open call"));
                 }
                 self.completed = matches!(reason, rsi_ai_protocol::FinishReason::ToolCalls);
-                self.truncated = matches!(reason, rsi_ai_protocol::FinishReason::MaxTokens);
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    pub(super) fn truncated_source(&self) -> Option<&EffectId> {
-        self.truncated.then_some(&self.effect_id)
-    }
-
-    pub(super) fn recover(&mut self, source: &EffectId) -> TurnResult<()> {
-        if self.truncated_source() != Some(source) {
-            return Err(invalid(
-                "recovery requires an unused truncated Conversation",
-            ));
-        }
-        self.truncated = false;
-        self.calls.clear();
         Ok(())
     }
 

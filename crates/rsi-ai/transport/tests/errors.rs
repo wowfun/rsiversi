@@ -10,6 +10,33 @@ fn body(value: &'static str) -> ByteStream {
     Box::pin(stream::iter([Ok(Bytes::from_static(value.as_bytes()))]))
 }
 
+#[tokio::test(start_paused = true)]
+async fn stalled_error_body_settles_with_received_status_and_retry_metadata() {
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(301),
+        provider_http_error(
+            429,
+            Box::pin(stream::pending()),
+            ErrorPhase::FirstEvent,
+            "provider rejected the request",
+        ),
+    )
+    .await
+    .expect("error-body read has its own finite deadline");
+    assert_eq!(started.elapsed(), std::time::Duration::from_mins(5));
+    let headers = http::HeaderMap::from_iter([(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("2"),
+    )]);
+    let error = rsi_ai_transport::with_retry_after(error, &headers, std::time::SystemTime::now());
+    assert_eq!(error.kind(), ErrorKind::RateLimited);
+    assert_eq!(error.status(), Some(429));
+    assert_eq!(error.dispatch_status(), DispatchStatus::Dispatched);
+    assert_eq!(error.retry_after_ms(), Some(2000));
+    assert_eq!(error.safe_summary(), "provider rejected the request");
+}
+
 #[tokio::test]
 async fn shared_http_error_mapping_preserves_provider_code_and_sanitizes_summary() {
     let error = provider_http_error(
@@ -120,6 +147,12 @@ fn stream_transport_mapping_preserves_cancellation_and_timeout() {
         "HTTP request timed out",
     ));
     assert_eq!(timed_out.kind(), ErrorKind::Timeout);
+    assert_eq!(timed_out.provider_code(), Some("http.timeout"));
+
+    let invalid = transport_stream_error(TransportError::new("invalid code\n", "invalid code"));
+    assert_eq!(invalid.kind(), ErrorKind::Protocol);
+    assert_eq!(invalid.dispatch_status(), DispatchStatus::Dispatched);
+    assert_eq!(invalid.provider_code(), None);
 }
 
 #[test]

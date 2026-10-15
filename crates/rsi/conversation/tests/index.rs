@@ -5,7 +5,7 @@ use rsi_conversation::{
 fn source(seq: u64) -> SourceRef {
     SourceRef {
         seq,
-        field: FactField::ModelText,
+        field: FactField::ModelText { index: 0 },
     }
 }
 

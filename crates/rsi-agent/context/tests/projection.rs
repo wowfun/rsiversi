@@ -22,28 +22,23 @@ mod contributions;
 mod images;
 
 #[test]
-fn truncated_call_and_recovery_hint_have_identical_checkpoint_and_replay_views() {
+fn truncated_call_diagnostics_have_identical_checkpoint_and_replay_views() {
     let mut bodies: Vec<_> = tool_result_facts(ToolResult::new(json!({}), vec![], false).unwrap())
         .into_iter()
         .map(SessionFact::into_body)
         .take_while(|body| !matches!(body, SessionFactBody::ToolIntent { .. }))
         .collect();
-    let source = EffectId::new("model-1").unwrap();
     let turn = TurnId::new("turn-1").unwrap();
     for body in &mut bodies {
-        if let SessionFactBody::ModelEvent {
-            event: LanguageEvent::Finished { reason, .. },
-            ..
-        } = body
-        {
-            *reason = FinishReason::MaxTokens;
+        if let SessionFactBody::ModelAttemptSettled { attempt, .. } = body {
+            let mut events = attempt.events().collect::<Result<Vec<_>, _>>().unwrap();
+            if let LanguageEvent::Finished { reason, .. } = &mut events.last_mut().unwrap().1 {
+                *reason = FinishReason::MaxTokens;
+            }
+            *attempt =
+                rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true).unwrap();
         }
     }
-    bodies.push(SessionFactBody::ModelOutputRecovery {
-        turn_id: turn.clone(),
-        source_model_effect_id: source,
-        ordinal: 1,
-    });
     let history = facts(bodies);
     let mut fold = ContextFold::with_limits(
         header("system"),
@@ -57,7 +52,7 @@ fn truncated_call_and_recovery_hint_have_identical_checkpoint_and_replay_views()
         .request(ContextLimits::default(), options.clone())
         .unwrap();
     let wire = serde_json::to_string(&request).unwrap();
-    assert!(wire.contains("split large files"));
+    assert!(!wire.contains("split large files"));
     assert!(!wire.contains("tool-call"));
     let bytes = fold.checkpoint_bytes().unwrap();
     let mut restored = ContextFold::from_checkpoint(
@@ -243,42 +238,42 @@ fn tool_result_facts(result: ToolResult) -> Vec<SessionFact> {
             turn_id: turn.clone(),
             effect_id: effect.clone(),
         },
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
-            event: LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::ToolCall {
-                    id: "tool-call".into(),
-                    name: "lookup".into(),
-                    kind: ToolCallKind::Function,
-                },
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn.clone(),
-            effect_id: effect.clone(),
-            event: LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::ToolArguments("{}".into()),
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn.clone(),
-            effect_id: effect.clone(),
-            event: LanguageEvent::ContentFinished { index: 0 },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: turn.clone(),
-            effect_id: effect,
-            event: LanguageEvent::Finished {
-                reason: FinishReason::ToolCalls,
-                replay: None,
-            },
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    (
+                        0,
+                        LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: ContentStart::ToolCall {
+                                id: "tool-call".into(),
+                                name: "lookup".into(),
+                                kind: ToolCallKind::Function,
+                            },
+                        },
+                    ),
+                    (
+                        0,
+                        LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: ContentDelta::ToolArguments("{}".into()),
+                        },
+                    ),
+                    (0, LanguageEvent::ContentFinished { index: 0 }),
+                    (
+                        0,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::ToolCalls,
+                            replay: None,
+                        },
+                    ),
+                ],
+                true,
+            )
+            .unwrap(),
         },
         SessionFactBody::ToolIntent {
             turn_id: turn.clone(),
@@ -376,38 +371,38 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
             turn_id: previous.clone(),
             effect_id: effect.clone(),
         },
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect.clone(),
-            event: LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::Reasoning,
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: previous.clone(),
-            effect_id: effect.clone(),
-            event: LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Reasoning("private reasoning".into()),
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: previous.clone(),
-            effect_id: effect.clone(),
-            event: LanguageEvent::ContentFinished { index: 0 },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: previous.clone(),
-            effect_id: effect,
-            event: LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: Some(replay.clone()),
-            },
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    (
+                        0,
+                        LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: ContentStart::Reasoning,
+                        },
+                    ),
+                    (
+                        0,
+                        LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: ContentDelta::Reasoning("private reasoning".into()),
+                        },
+                    ),
+                    (0, LanguageEvent::ContentFinished { index: 0 }),
+                    (
+                        0,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::Stop,
+                            replay: Some(replay.clone()),
+                        },
+                    ),
+                ],
+                true,
+            )
+            .unwrap(),
         },
         SessionFactBody::TurnTerminal {
             turn_id: previous,
@@ -475,38 +470,38 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
         },
-        SessionFactBody::ModelEvent {
+        SessionFactBody::ModelAttemptSettled {
             purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
-            event: LanguageEvent::ContentStarted {
-                index: 0,
-                content: ContentStart::Text,
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: parent_turn.clone(),
-            effect_id: parent_effect.clone(),
-            event: LanguageEvent::ContentDelta {
-                index: 0,
-                delta: ContentDelta::Text("parent output".into()),
-            },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: parent_turn.clone(),
-            effect_id: parent_effect.clone(),
-            event: LanguageEvent::ContentFinished { index: 0 },
-        },
-        SessionFactBody::ModelEvent {
-            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-            turn_id: parent_turn.clone(),
-            effect_id: parent_effect,
-            event: LanguageEvent::Finished {
-                reason: FinishReason::Stop,
-                replay: Some(replay.clone()),
-            },
+            attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                [
+                    (
+                        0,
+                        LanguageEvent::ContentStarted {
+                            index: 0,
+                            content: ContentStart::Text,
+                        },
+                    ),
+                    (
+                        0,
+                        LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: ContentDelta::Text("parent output".into()),
+                        },
+                    ),
+                    (0, LanguageEvent::ContentFinished { index: 0 }),
+                    (
+                        0,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::Stop,
+                            replay: Some(replay.clone()),
+                        },
+                    ),
+                ],
+                true,
+            )
+            .unwrap(),
         },
         SessionFactBody::TurnTerminal {
             turn_id: parent_turn,
@@ -1264,14 +1259,21 @@ fn failed_fact_releases_workspace_and_fences_all_projection_entry_points() {
                 sandbox: SandboxMode::WorkspaceWrite,
                 require_approval: false,
             },
-            SessionFactBody::ModelEvent {
+            SessionFactBody::ModelAttemptSettled {
                 turn_id: TurnId::new("bad-fact").unwrap(),
                 effect_id: EffectId::new("missing-intent").unwrap(),
                 purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
-                event: LanguageEvent::ContentStarted {
-                    index: 0,
-                    content: ContentStart::Text,
-                },
+                attempt: rsi_agent_session_protocol::ModelAttemptLog::from_events(
+                    [(
+                        0,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::MaxTokens,
+                            replay: None,
+                        },
+                    )],
+                    true,
+                )
+                .unwrap(),
             },
         ]);
         let apply = |fold: &mut ContextFold, input: &[SessionFact]| match path {
