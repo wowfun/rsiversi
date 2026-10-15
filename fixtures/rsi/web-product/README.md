@@ -20,6 +20,10 @@ siblings through the complete registry seed. Reports identify the exact build
 family and fixture provider; these are product behavior/visual observations,
 not live model evidence or DSH pixel-golden acceptance.
 
+Source-inspection geometry resolves the current connected resource, its title
+and controls in one document execution. A replaced resource is read again before
+measurement; invalid geometry on the current resource remains a failure.
+
 The opt-in `mcp-images-live.mjs` uses the authorized DeepSeek credential file,
 an isolated HTTP MCP server, the real Worker and durable Media CAS. It checks
 expanded template URIs, ordered durable Tool images, text-model follow-up,

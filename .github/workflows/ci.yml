@@ -1086,7 +1086,7 @@ jobs:
         run: cargo test --locked -p rsi-serve --all-targets --no-fail-fast
       - name: Test native Desktop protocol and lifecycle boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
-        timeout-minutes: 10
+        timeout-minutes: 19
         run: cargo test --locked -p rsi-desktop --all-targets --no-fail-fast
       - name: Test Session portable behavior and error projections
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}

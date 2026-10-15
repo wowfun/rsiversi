@@ -242,7 +242,7 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     for gate in [job, tools] {
         assert_windows_architecture_admission(gate);
     }
-    assert_native_fs_test_budget(job);
+    assert_native_test_budgets(job);
     assert!(tools["steps"].as_array().unwrap().iter().any(|step| {
         let Some(command) = step["run"].as_str() else {
             return false;
@@ -266,18 +266,21 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     }
 }
 
-fn assert_native_fs_test_budget(job: &serde_json::Value) {
-    let native = job["steps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|step| {
-            step["run"]
-                .as_str()
-                .is_some_and(|run| run.contains("-p rsi-files-native-fs"))
-        })
-        .unwrap();
-    assert!(native["timeout-minutes"].as_u64().unwrap() >= 10);
+fn assert_native_test_budgets(job: &serde_json::Value) {
+    for (package, minimum) in [("rsi-files-native-fs", 10), ("rsi-desktop", 15)] {
+        let selector = format!("-p {package}");
+        let native = job["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains(&selector))
+            })
+            .unwrap();
+        assert!(native["timeout-minutes"].as_u64().unwrap() >= minimum);
+    }
 }
 
 fn assert_windows_architecture_admission(job: &serde_json::Value) {

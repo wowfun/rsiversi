@@ -52,6 +52,10 @@ Both product and repository-tool Windows jobs verify AMD64 before admitting the
 native toolchain. Native filesystem behavior has at least ten minutes of step
 budget; the owning workflow retains aggregate setup headroom within the hosted
 runner limit. These are deadlines, not claims about measured remote CI time.
+Desktop's test deadline includes compilation of its own cold native feature
+graph. Earlier workspace checks and differently selected product tests do not
+establish that this graph is ready to execute; narrowing its test targets would
+hide required behavior rather than remove that build cost.
 SSH native lifecycle, cache/execution, watchdog, source-reader and actual-SSH
 checks have independent steps after their shared toolchain, helper and native
 prerequisites. The native manager/namespace preflight does not require the helper

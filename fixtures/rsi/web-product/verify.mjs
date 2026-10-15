@@ -1,4 +1,4 @@
-import {closeDetails,details,openResource,resources} from "./controls.mjs";
+import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import './paired-env.mjs';
@@ -261,12 +261,8 @@ try {
       const blockSources = details(page).locator('.block-sources');
       assert.equal(await blockSources.locator(".source-reference").count(), 1);
       assert.equal(await blockSources.getByRole("button", { name: "Next sources", exact: true }).isEnabled(), false);
-      assert.equal(await details(page).evaluate(dialog => {
-        const bounds = dialog.getBoundingClientRect();
-        const heading = dialog.closest("[data-dockkit-content]").querySelector("[data-dockkit-strip]").getBoundingClientRect();
-        const controls = dialog.querySelector(".block-sources > .actions").getBoundingClientRect();
-        return heading.bottom <= bounds.top + 2 && controls.bottom <= innerHeight && dialog.scrollTop === 0;
-      }), true, "source inspection keeps title and controls in view");
+      const sourceGeometry=await sourceInspectionGeometry(page);
+      assert.equal(sourceGeometry.headingBottom<=sourceGeometry.contentTop+2&&sourceGeometry.controlsBottom<=sourceGeometry.viewportHeight&&sourceGeometry.scrollTop===0,true,"source inspection keeps title and controls in view");
       await page.screenshot({ path: join(report, `${name}-block-sources.png`) });
       await blockSources.locator(".source-reference").first().click();
       await page.locator(".source-text").filter({ hasText: "segment" }).waitFor();

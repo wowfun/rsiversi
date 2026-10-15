@@ -2,13 +2,49 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
-import { clickUiControl } from './controls.mjs';
+import { clickUiControl, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
 import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: source inspection reads the replacement resource without reusing a retired node`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      const panel='<aside class="resource-dock"><div data-dockkit-content><header data-dockkit-strip style="height:32px">Sources</header><div class="resource-content" style="height:200px;overflow:auto"><section class="block-sources"><div class="actions">Controls</div></section></div></div></aside>';
+      await page.setContent(panel);
+      let replacements=0;
+      const replace=async()=>{replacements++;await page.evaluate(()=>{
+        const body=document.querySelector('.resource-content');body.replaceWith(body.cloneNode(true));
+      });};
+      const changingPage={
+        locator:()=>({last:()=>({evaluate:async read=>{
+          const retired=await page.locator(resourceSelector).elementHandle();
+          await replace();
+          try{return await retired.evaluate(read);}finally{await retired.dispose();}
+        }})}),
+        waitForFunction:async(...args)=>{await replace();return page.waitForFunction(...args);},
+      };
+      const geometry=await sourceInspectionGeometry(changingPage);
+      assert.equal(replacements,1);
+      assert(geometry.headingBottom<=geometry.contentTop+2);
+      assert(geometry.controlsBottom<=geometry.viewportHeight);
+      assert.equal(geometry.scrollTop,0);
+    } finally {await browser.close();}
+  });
+  test(`${name}: source inspection preserves invalid geometry and bounds missing-resource readiness`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<aside class="resource-dock"><div data-dockkit-content><header data-dockkit-strip>Sources</header><div class="resource-content"><section class="block-sources"><div class="actions" style="height:2000px">Controls</div></section></div></div></aside>');
+      const geometry=await sourceInspectionGeometry(page);
+      assert(geometry.controlsBottom>geometry.viewportHeight);
+      await page.setContent('<main>No resource</main>');
+      await assert.rejects(sourceInspectionGeometry(page,{timeout:100}),{name:'TimeoutError'});
+    } finally {await browser.close();}
+  });
   test(`${name}: navigation evidence preserves gestures, owner-scoped replies and bounds without private payloads`, async () => {
     const browser = await engine.launch({headless:true});
     try {
