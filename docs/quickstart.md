@@ -1,5 +1,10 @@
 # Developer quick start
 
+To install and use the application with your own model provider, follow the
+[RSI user tutorial](../crates/rsi/docs/user/first-conversation.md)
+([中文](../crates/rsi/docs/user/first-conversation.zh.md)). This page is for
+contributors using isolated development environments.
+
 Run from the repository root with the Rust toolchain in `rust-toolchain.toml`.
 On Linux or WSL, this builds the real product and starts an isolated TUI with a
 local test provider. No API key is needed:

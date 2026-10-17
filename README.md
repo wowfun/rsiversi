@@ -3,6 +3,11 @@
 RSIversi is a pre-release Rust workspace for composing independently usable
 runtime products from ordinary `rsi-meta` plugins.
 
+[中文](README.zh.md)
+
+To use RSI, start with [your first conversation](crates/rsi/docs/user/first-conversation.md).
+It covers source installation, model setup and returning to saved conversations.
+
 The repository-wide ownership and dependency rules live in
 [the architecture](docs/architecture.md). Each product owns its public contract,
 setup, security, and verification documentation below its own subtree.

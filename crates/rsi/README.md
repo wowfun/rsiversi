@@ -4,9 +4,14 @@ RSI composes the Agent and capability products into terminal, line, Headless,
 Web and Linux Desktop applications. Its [architecture](docs/architecture.md)
 defines product ownership and the shared Service Host.
 
+For ordinary use, follow [your first conversation](docs/user/first-conversation.md)
+([中文](docs/user/first-conversation.zh.md)).
+
 Windows native Agent/ACP workspaces and private state require fixed local NTFS;
 ReFS Dev Drives, exFAT and network roots are refused by the current filesystem
-backend. The local `serve` host requires Unix. Windows SQLite storage requires
+backend. Windows Web, TUI and ACP own an embedded Service with one owner per Host;
+stop it before another application or the offline `devices` manager uses that Host.
+Windows SQLite storage requires
 private parent directories, including pre-existing ones. See the owning
 [filesystem contract](../rsi-files/native-fs/README.md) and
 [Serve contract](../../apps/serve/README.md) for platform boundaries.
