@@ -182,6 +182,9 @@ including cancellation during child bootstrap; no scoped Host owns parent shutdo
 Local selection takes this application Context for both modes: embedded service
 plugins and remote connection/domain-client plugins mount isolated child Profiles.
 The application disposes its connection subtree before shutting down its Runtime.
+Embedded connections use the same negotiated Output client as remote connections.
+An absent completed-output cache leaves conversation available and returns the
+[Output domain's unavailable result](../../rsi-process/output-api/README.md) on reads.
 
 `StandardServiceDaemon::start_in` mounts the publishing daemon in a caller-owned
 Runtime with the same isolated child-Profile lifetime. It consumes the exact

@@ -14,5 +14,12 @@ page while copying into the reserved response. Client pages retain their wire
 allocation through byte clones and slices. Missing/evicted output remains an
 unavailable cache result, never an empty stream or Session archive.
 
+The cache is optional on a connected Host. When `output/read/1` is absent from
+the negotiated operations, the client still activates but returns
+`ApiError::Unavailable` for valid reads without sending a request. This permits
+the standard application to connect to Hosts without a completed-output cache.
+An advertised operation with different metadata is a protocol mismatch and
+rejects client activation; it must not be treated as an absent capability.
+
 Tests exercise real local output capture, arbitrary bytes and cursors through
 the public API, malformed metadata, lease retention and plugin withdrawal.

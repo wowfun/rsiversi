@@ -127,20 +127,29 @@ pub fn register_output(
 #[derive(Debug)]
 pub struct OutputClient {
     api: Arc<dyn ApiClient>,
+    available: bool,
 }
 impl OutputClient {
-    /// Requires exact read metadata before exposing the cache contract.
+    /// Accepts an absent cache, but requires exact metadata when advertised.
     pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if !api.operations().contains(&operation()) {
-            return Err(ApiError::Unavailable);
+        let expected = operation();
+        let advertised = api.operations().iter().find(|spec| spec.id == expected.id);
+        if advertised.is_some_and(|spec| spec != &expected) {
+            return Err(ApiError::Invalid(
+                "incompatible output read metadata".into(),
+            ));
         }
-        Ok(Self { api })
+        let available = advertised.is_some();
+        Ok(Self { api, available })
     }
 }
 #[async_trait]
 impl ProcessOutputCache for OutputClient {
     async fn read(&self, id: &str, offset: u64, limit: usize) -> rsi_process::Result<OutputPage> {
         validate_output_read(id, limit)?;
+        if !self.available {
+            return Err(ProcessError::Api(ApiError::Unavailable));
+        }
         let operation = operation();
         let input = self
             .api

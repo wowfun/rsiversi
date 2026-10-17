@@ -6,6 +6,8 @@ markers. Native UDS, native HTTP and browser application composition use the sam
 ordered domain entries. Callers add their transport and application plugins and
 select the Profile lifetime; this library activates nothing and creates no
 Runtime. Domains still own their API descriptors and proxy implementations.
+The [Output client](../../rsi-process/output-api/README.md) admits a Host without
+the optional completed-output cache and returns an unavailable result on reads.
 
 The external-conversation client is an independent authenticated domain proxy.
 It publishes configured endpoint selection and exact conversation control without

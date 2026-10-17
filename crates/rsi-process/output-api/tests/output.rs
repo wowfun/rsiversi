@@ -1,21 +1,18 @@
 use async_trait::async_trait;
 use rsi_api_protocol::{
-    ApiClient, ApiDispatchContract, ApiError, ApiMessage, ApiOutput, ByteBudget,
+    ApiClient, ApiClientContract, ApiDispatchContract, ApiError, ApiMessage, ApiOutput, ByteBudget,
     ConnectionDescription, EndpointId, HostEpoch, OperationClass, OperationSpec, RetainedBytes,
 };
 #[cfg(unix)]
-use rsi_api_protocol::{ApiClientContract, ApiDispatch, CallOrigin};
-#[cfg(unix)]
+use rsi_api_protocol::{ApiDispatch, CallOrigin};
 use rsi_meta::{ActivationPlan, PreparedActivation};
 use rsi_meta::{PluginFactory, ResolvedFactory, Runtime, UpdateMode};
 #[cfg(unix)]
-use rsi_process::{ProcessContract, ProcessOutputCacheContract};
-use rsi_process::{ProcessError, ProcessOutputCache};
+use rsi_process::ProcessContract;
+use rsi_process::{ProcessError, ProcessOutputCache, ProcessOutputCacheContract};
 #[cfg(unix)]
 use rsi_process_output_api::OutputApiFactory;
-use rsi_process_output_api::OutputClient;
-#[cfg(unix)]
-use rsi_process_output_api::OutputClientFactory;
+use rsi_process_output_api::{OutputClient, OutputClientFactory};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -49,10 +46,8 @@ impl ApiClient for Connection {
             .await
     }
 }
-#[cfg(unix)]
 #[derive(Debug)]
 struct ConnectionFactory(Arc<dyn ApiClient>);
-#[cfg(unix)]
 #[async_trait]
 impl PluginFactory for ConnectionFactory {
     fn prepare(&self, _: &Value) -> rsi_meta::Result<PreparedActivation> {
@@ -83,7 +78,6 @@ fn description() -> ConnectionDescription {
         host_epoch: HostEpoch::from_bytes([2; 16]),
     }
 }
-#[cfg(unix)]
 async fn client_runtime(api: Arc<dyn ApiClient>) -> Runtime {
     let runtime = Runtime::default();
     for (name, factory) in [
@@ -282,6 +276,64 @@ async fn read_spec() -> OperationSpec {
     lease.close().await;
     assert!(runtime.shutdown().await.is_clean());
     spec
+}
+
+#[tokio::test]
+async fn absent_cache_activates_without_dispatch_but_incompatible_metadata_rejects() {
+    #[derive(Debug)]
+    struct NoCache(ConnectionDescription);
+    #[async_trait]
+    impl ApiClient for NoCache {
+        fn description(&self) -> &ConnectionDescription {
+            &self.0
+        }
+        fn operations(&self) -> &[OperationSpec] {
+            &[]
+        }
+        fn input_budget(&self, _: OperationClass) -> ByteBudget {
+            panic!("absent output must not allocate a request")
+        }
+        async fn call(
+            &self,
+            _: &OperationSpec,
+            _: RetainedBytes,
+        ) -> rsi_api_protocol::Result<ApiOutput> {
+            panic!("absent output must not dispatch")
+        }
+    }
+    let runtime = client_runtime(Arc::new(NoCache(description()))).await;
+    let output = runtime
+        .root()
+        .lookup_local::<ProcessOutputCacheContract>()
+        .unwrap();
+    assert!(matches!(
+        output.read(&"a".repeat(32), 0, 1).await,
+        Err(ProcessError::Api(ApiError::Unavailable))
+    ));
+    assert!(matches!(
+        output.read("invalid", 0, 1).await,
+        Err(ProcessError::InvalidInput(_))
+    ));
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<ProcessOutputCacheContract>()
+            .is_none()
+    );
+
+    let mut incompatible = read_spec().await;
+    incompatible.maximum_request_bytes += 1;
+    assert!(matches!(
+        OutputClient::new(Arc::new(Peer {
+            description: description(),
+            operations: vec![incompatible],
+            metadata: Value::Null,
+            binary: false,
+            budget: ByteBudget::default(),
+        })),
+        Err(ApiError::Invalid(_))
+    ));
 }
 
 #[tokio::test]

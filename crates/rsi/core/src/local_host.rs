@@ -382,12 +382,17 @@ impl BootedServiceHost {
     async fn from_running(running: RunningRsi) -> crate::Result<Self> {
         let running = Arc::new(running);
         let result = (|| {
+            let api = crate::local_api_client::client(&running)?;
+            let output_cache = Arc::new(
+                rsi_process_output_api::OutputClient::new(api.clone())
+                    .map_err(|error| RsiError::Boot(error.to_string()))?,
+            );
             Ok(Self {
-                api: crate::local_api_client::client(&running)?,
+                api,
                 description: running.connection_description()?,
                 broker: running.approval_broker()?,
                 application: running.session_service()?,
-                output_cache: running.output_cache()?,
+                output_cache,
                 model_catalog: running.language_models()?,
                 workspace: running.workspace_registry()?,
                 media: running.media_service()?,
