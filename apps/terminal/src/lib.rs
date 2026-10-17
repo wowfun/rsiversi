@@ -491,23 +491,28 @@ pub(crate) async fn resolve_application_handle(
                 .await
                 .map_err(HandleError::Session)?;
             if let Some(cwd) = cwd {
-                let canonical = tokio::fs::canonicalize(cwd)
-                    .await
-                    .map_err(|error| RsiError::Boot(format!("workspace: {error}")))?;
                 let header = handle
                     .header()
                     .await
                     .map_err(|error| RsiError::Run(error.to_string()))?;
-                if canonical.to_str() != Some(header.canonical_cwd()) {
-                    return Err(RsiError::Boot(
-                        "--cwd does not match the durable Session workspace".into(),
-                    )
-                    .into());
-                }
+                check_resume_workspace(&cwd, header.canonical_cwd()).await?;
             }
             Ok(handle)
         }
     }
+}
+
+async fn check_resume_workspace(cwd: &std::path::Path, expected: &str) -> Result<()> {
+    let canonical = tokio::fs::canonicalize(cwd)
+        .await
+        .map_err(|error| RsiError::Boot(format!("workspace: {error}")))?;
+    let canonical = rsi_workspace_protocol::canonical_native_path(canonical);
+    if canonical.to_str() != Some(expected) {
+        return Err(RsiError::Boot(
+            "--cwd does not match the durable Session workspace".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) const CLI_RENDER_CHANNEL_CAPACITY: usize = 32;

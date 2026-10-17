@@ -1,5 +1,33 @@
 use super::*;
 
+#[tokio::test]
+async fn resume_workspace_accepts_same_directory_and_rejects_different_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap());
+    let workspace = root.join("workspace");
+    let other = root.join("other");
+    std::fs::create_dir_all(workspace.join("child")).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    // This is the ordinary absolute path accepted at the user-facing boundary.
+    let expected = workspace.to_str().unwrap();
+    check_resume_workspace(&workspace, expected).await.unwrap();
+    check_resume_workspace(&workspace.join("child").join(".."), expected)
+        .await
+        .unwrap();
+    let mismatch = check_resume_workspace(&other, expected).await.unwrap_err();
+    assert!(
+        mismatch
+            .to_string()
+            .contains("does not match the durable Session workspace")
+    );
+    assert!(
+        check_resume_workspace(&temporary.path().join("missing"), expected)
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // One replay lifecycle checks ordering, suffix catch-up and credit release.
 fn model_prefix_before_started_is_replayed_once_when_start_arrives() {

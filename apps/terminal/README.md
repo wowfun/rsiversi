@@ -1,5 +1,10 @@
 # rsi-terminal
 
+An explicit `--cwd` on resume must resolve to the durable Session workspace.
+Canonical local paths use the workspace protocol's native representation before
+comparison, including removal of Windows local-drive verbatim prefixes. A different
+directory remains an error; resume never changes the Session's workspace.
+
 Text output retains at most one charged model snapshot that arrives before its
 matching `ModelStarted` Fact. Observing that start emits the retained prefix;
 later live revisions and settlement resume the same event cursor exactly once.
