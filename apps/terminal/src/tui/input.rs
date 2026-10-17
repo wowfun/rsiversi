@@ -2,19 +2,21 @@
 #[cfg(unix)]
 use std::time::Duration;
 use termina::Event;
+#[cfg(not(windows))]
 use tokio::sync::mpsc;
+#[cfg(not(windows))]
 use tokio_util::sync::CancellationToken;
 
 pub(super) const MAX_TEXT: usize = rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const MAX_FRAME: usize = 4096;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Debug)]
 pub(super) enum Input {
     #[cfg_attr(
-        not(any(unix, test)),
+        not(any(unix, windows, test)),
         expect(
             dead_code,
             reason = "Native input is Unix-only; decoder tests construct this variant on every platform"
@@ -22,7 +24,7 @@ pub(super) enum Input {
     )]
     Terminal(Event),
     #[cfg_attr(
-        not(any(unix, test)),
+        not(any(unix, windows, test)),
         expect(
             dead_code,
             reason = "Native input is Unix-only; decoder tests construct this variant on every platform"
@@ -32,7 +34,7 @@ pub(super) enum Input {
     Closed,
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 #[derive(Debug, Default)]
 pub(super) struct Framer {
     frame: Vec<u8>,
@@ -43,7 +45,7 @@ pub(super) struct Framer {
     discard_escape: bool,
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 impl Framer {
     pub(super) fn advance(&mut self, byte: u8) -> Option<Input> {
         if self.paste.is_some() {
@@ -225,7 +227,10 @@ pub(super) fn spawn(
     Ok(receiver)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) use super::windows::input as spawn;
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn spawn(
     _: CancellationToken,
     _: &tokio_util::task::TaskTracker,

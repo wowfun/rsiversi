@@ -1,5 +1,47 @@
 # rsi-terminal
 
+Windows fullscreen input supports Windows Terminal (PowerShell or Git Bash).
+Entry checks require its session marker and usable console handles; inherited
+environment variables do not attest the host's ancestry. Missing prerequisites
+receive an actionable rejection. mintty and classic conhost remain unsupported. The terminal owner
+uses VT key/paste/mouse bytes plus native resize events from one console reader.
+Committed text carried by an Alt-release event is input too; ordinary key-release
+events do not duplicate typed characters. UTF-16 surrogate pairs remain intact.
+Console-mode acquisition runs on an owned native worker with a two-second caller
+deadline. A timed-out acquisition retains its handles, rolls back when the host
+responds, and refuses another owner until that rollback ends.
+It disables QuickEdit and waits on cancellation alongside input. The native reader
+also checks cancellation on each bounded wait, even when runtime tasks cannot run.
+Output has one
+dedicated cancellable worker. Idle output and cancellation owners wait on events;
+only cancellation of an unsettled native write uses repeated cancellation attempts.
+UTF-8 frames are decoded once and written through
+the Unicode console API with a fixed 4 KiB UTF-16 scratch buffer, preserving scalar
+boundaries independently of the console's code page. The owner never changes that
+code page. Stop fences later frames before restoring the screen
+and exact original input/output modes. Cancellation releases frame waiters without
+waiting for the console host. Restoration has a 200 ms foreground budget, including
+writer settlement:
+Windows console mode calls can block while ConPTY's host stops reading output.
+The foreground path does not cancel restoration I/O after the budget: even that
+cancellation call can block on a stalled console. Output cancellation stays on
+its dedicated worker.
+One retained restoration worker waits for the writer to end before touching the
+screen or modes, including when a frame was cancelled or failed. Writer admission
+and retirement share the console owner fence; a delayed task cannot install a
+writer after restoration, and a second writer is refused. Output ownership is
+published only after both native workers start; failed startup admits a retry.
+The restoration worker
+owns those handles until the host resumes; another
+terminal owner is rejected meanwhile. Shutdown does not wait indefinitely for an
+unresponsive host, and cannot promise screen or mode restoration before forced exit.
+If the restoration worker cannot start, re-entry remains disabled for that process:
+the original modes no longer have a restoration owner, so clearing a flag would
+not establish recovery. Restart the terminal tab as the diagnostic requests.
+Ctrl+C, Ctrl+Break, close,
+logoff and shutdown enter owned cleanup; Windows may shorten close-event grace.
+Line-mode redirected input remains outside this Windows fullscreen contract.
+
 An explicit `--cwd` on resume must resolve to the durable Session workspace.
 Canonical local paths use the workspace protocol's native representation before
 comparison, including removal of Windows local-drive verbatim prefixes. A different

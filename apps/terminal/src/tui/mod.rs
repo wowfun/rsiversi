@@ -2362,7 +2362,22 @@ fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {}, _ = hangup.recv() => {}, _ = quit.recv() => {} }
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+        let mut interrupt = ctrl_c()?;
+        let mut break_signal = ctrl_break()?;
+        let mut close = ctrl_close()?;
+        let mut logoff = ctrl_logoff()?;
+        let mut shutdown = ctrl_shutdown()?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => (), _ = break_signal.recv() => (),
+                _ = close.recv() => (), _ = logoff.recv() => (), _ = shutdown.recv() => (),
+            }
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     Err::<std::future::Pending<()>, _>(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "terminal signals require native Unix support",
@@ -2376,3 +2391,6 @@ fn markdown_status(enabled: bool) -> &'static str {
         "Markdown rendering off (original text; this process)"
     }
 }
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;

@@ -1,6 +1,8 @@
 //! One coalescing writer receives complete frames. Input never reads through Crossterm.
-use crossterm::{cursor, event, terminal};
+use crossterm::terminal;
 #[cfg(unix)]
+use crossterm::{cursor, event};
+#[cfg(any(unix, windows))]
 use ratatui::backend::{Backend as _, CrosstermBackend};
 use ratatui::buffer::Buffer;
 #[cfg(unix)]
@@ -16,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const RESTORE: &[u8] =
     b"\x1b[<u\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l";
 
@@ -24,7 +26,12 @@ pub(super) fn check() -> Result<(), &'static str> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("tui requires terminal stdin and stdout");
     }
-    if !cfg!(unix) {
+    if cfg!(windows) && std::env::var_os("WT_SESSION").is_none() {
+        return Err(
+            "Open PowerShell or Git Bash inside Windows Terminal; mintty and classic conhost are unsupported",
+        );
+    }
+    if !cfg!(any(unix, windows)) {
         return Err("tui terminal input currently requires Unix");
     }
     Ok(())
@@ -55,13 +62,17 @@ pub(super) struct Terminal {
 
 impl Terminal {
     pub(super) fn enter(tasks: &tokio_util::task::TaskTracker) -> io::Result<Self> {
+        #[cfg(unix)]
         terminal::enable_raw_mode()?;
+        #[cfg(windows)]
+        super::windows::enter()?;
         ACTIVE.store(true, Ordering::Release);
         let (frames, receiver) = watch::channel(None);
         let (presented_sender, presented) = watch::channel(None);
         let stop = CancellationToken::new();
         let (commands, command_receiver) = mpsc::channel(2);
         let mut setup = Vec::new();
+        #[cfg(unix)]
         crossterm::execute!(
             setup,
             terminal::EnterAlternateScreen,
@@ -72,6 +83,10 @@ impl Terminal {
                 event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             )
         )?;
+        #[cfg(windows)]
+        setup.extend_from_slice(
+            b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[>1u",
+        );
         // The only reader recognizes protocol responses; legacy terminals ignore this query.
         setup.extend_from_slice(b"\x1b[?u");
         let task = tasks.spawn(writer(
@@ -136,7 +151,10 @@ fn restore() {
             }
         }
     }
+    #[cfg(unix)]
     let _ = terminal::disable_raw_mode();
+    #[cfg(windows)]
+    super::windows::restore(RESTORE);
 }
 
 #[cfg(unix)]
@@ -256,7 +274,44 @@ async fn write_bytes(
     Ok(WriteStatus::Complete)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn writer(
+    mut frames: watch::Receiver<Option<Arc<RenderedFrame>>>,
+    mut commands: mpsc::Receiver<String>,
+    presented: watch::Sender<Option<Arc<RenderedFrame>>>,
+    setup: Vec<u8>,
+    stop: CancellationToken,
+) -> io::Result<()> {
+    let output = match super::windows::Output::new(stop.clone()) {
+        Ok(output) => output,
+        Err(_) if stop.is_cancelled() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let result = async {
+        output.write(setup).await?;
+        let mut last: Option<Arc<RenderedFrame>> = None;
+        loop {
+            tokio::select! { biased;
+                () = stop.cancelled() => return Ok(()),
+                Some(command) = commands.recv() => { output.write(command.into_bytes()).await?; },
+                changed = frames.changed() => {
+                    if changed.is_err() { return Ok(()); }
+                    let Some(next) = frames.borrow_and_update().clone() else { continue; };
+                    if last.as_ref().is_some_and(|last| next.revision <= last.revision) { continue; }
+                    let previous = last.as_ref().filter(|last| last.generation == next.generation && last.presentation == next.presentation);
+                    output.write(frame(&next.buffer, previous.map(|last| &last.buffer))?).await?;
+                    if stop.is_cancelled() || !ACTIVE.load(Ordering::Acquire) { return Ok(()); }
+                    last = Some(next.clone()); presented.send_replace(Some(next));
+                },
+            }
+        }
+    }.await;
+    let cancelled = stop.is_cancelled();
+    drop(output);
+    if cancelled { Ok(()) } else { result }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn writer(
     _: watch::Receiver<Option<Arc<RenderedFrame>>>,
     _: mpsc::Receiver<String>,
@@ -270,7 +325,7 @@ fn writer(
     )))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn frame(buffer: &Buffer, previous: Option<&Buffer>) -> io::Result<Vec<u8>> {
     use unicode_width::UnicodeWidthStr as _;
     let mut bytes = Vec::new();
