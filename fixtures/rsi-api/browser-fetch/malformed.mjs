@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { gzipSync } from "node:zlib";
 import { executeWorker } from "./worker.mjs";
+import { WebSocketServer } from "ws";
+
+const streamFrames = {
+  "missing-end": "event: item\ndata: 1\n\n",
+  trailing: "event: end\ndata: {}\n\nx",
+  opening: ": ready\n\n: ready\n\nevent: end\ndata: {}\n\n",
+  "domain-without-end": "event: domain-error\ndata: {}\n\n",
+  "invalid-item": "event: item\ndata: {broken\n\nevent: end\ndata: {}\n\n",
+};
 
 export async function malformedProbe(browser, glue, wasm, catalog) {
   const calls = new Map();
@@ -56,18 +65,31 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
         }
       } else {
         headers["content-type"] = "text/event-stream";
-        const frames = {
-          "missing-end": "event: item\ndata: 1\n\n",
-          trailing: "event: end\ndata: {}\n\nx",
-          opening: ": ready\n\n: ready\n\nevent: end\ndata: {}\n\n",
-          "domain-without-end": "event: domain-error\ndata: {}\n\n",
-          "invalid-item": "event: item\ndata: {broken\n\nevent: end\ndata: {}\n\n",
-        };
-        assert(Object.hasOwn(frames, name));
-        body = Buffer.from(frames[name]);
+        assert(Object.hasOwn(streamFrames, name));
+        body = Buffer.from(streamFrames[name]);
       }
       if (!headers["content-length"]) headers["content-length"] = String(body.length);
       response.writeHead(status, headers).end(body);
+    });
+  });
+  const sockets = new WebSocketServer({ server, maxPayload: 1024, perMessageDeflate: false });
+  sockets.on("connection", (socket, request) => {
+    assert.equal(socket.protocol, `rsi-stream-v1.${"06".repeat(16)}.${"03".repeat(16)}.2`);
+    const name = request.url.split("/")[4];
+    assert(Object.hasOwn(streamFrames, name));
+    let sent = -1;
+    socket.on("message", (bytes, binary) => {
+      assert(binary);
+      if (sent === -1) {
+        assert.equal(bytes.toString(), "{}");
+        calls.set(request.url, (calls.get(request.url) || 0) + 1);
+        socket.send(Buffer.from(JSON.stringify({ status: 200, endpoint: "02".repeat(16), epoch: "03".repeat(16), content_type: "text/event-stream", content_length: null })));
+        sent = 0;
+      } else {
+        assert.deepEqual(bytes, Buffer.from([1]));
+        socket.send(sent++ === 0 ? Buffer.from(streamFrames[name]) : Buffer.alloc(0));
+        if (sent === 2) socket.close();
+      }
     });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -78,10 +100,10 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     const result = await executeWorker(page, glue, wasm, "run_malformed_probe");
     assert.equal(result.malformed_cases, 27);
-    assert.equal(result.fetch_calls.length, 31);
+    assert.equal(result.transport_calls.length, 31);
     const retransmissions = [];
-    for (const [path, count] of result.fetch_calls) {
-      assert.equal(count, 1, `RSI replayed Fetch ${path}`);
+    for (const [path, count] of result.transport_calls) {
+      assert.equal(count, 1, `RSI replayed request ${path}`);
       assert(calls.has(path), `request never arrived ${path}`);
       const delivered = calls.get(path);
       if (path === "/api/v1/login" || path.includes("head-loss")) {
@@ -90,7 +112,7 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
     }
     assert.equal(calls.size, 31);
     assert.equal(redirects, 0, "browser followed a forbidden redirect");
-    delete result.fetch_calls;
+    delete result.transport_calls;
     const callerFaults=[];
     for (callerFault of ["json","binary","local","missing-device","invalid-device","unknown-field"]) {
       const outcome=await executeWorker(page,glue,wasm,"run_caller_fault_probe");
@@ -99,7 +121,10 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
     }
     return { ...result, retransmissions, callerFaults };
   } finally {
-    await context.close(); server.closeAllConnections();
+    await context.close();
+    for (const socket of sockets.clients) socket.terminate();
+    await new Promise(resolve => sockets.close(resolve));
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
 }

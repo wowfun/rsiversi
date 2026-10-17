@@ -42,6 +42,7 @@ impl LocalHttpService {
                 access: Access::Local(compatibility),
                 execution,
                 unclassified: Arc::new(Semaphore::new(32)),
+                socket_scratch: rsi_api_protocol::ByteBudget::default(),
             }),
             connections: Arc::new(Semaphore::new(128)),
             uid: rustix::process::geteuid().as_raw(),

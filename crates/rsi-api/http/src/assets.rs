@@ -107,8 +107,11 @@ impl DocumentPolicy {
                         .collect::<Vec<_>>()
                         .join(" ")
                 };
+                let socket = origin
+                    .strip_prefix("http://")
+                    .map_or_else(String::new, |authority| format!(" ws://{authority}"));
                 Ok(format!(
-                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; worker-src 'self'; img-src 'self' blob:; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
+                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'{socket}; worker-src 'self'; img-src 'self' blob:; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
                 ))
             }
             Self::SandboxLocal | Self::SandboxHttps => {
@@ -190,6 +193,14 @@ mod tests {
     use super::*;
     #[test]
     fn document_origins_and_frame_paths_cannot_inject_directives() {
+        assert!(
+            DocumentPolicy::Application {
+                frame_paths: vec![]
+            }
+            .content_security_policy("http://127.0.0.1:8787")
+            .unwrap()
+            .contains("connect-src 'self' ws://127.0.0.1:8787;")
+        );
         for origin in ["https://localhost:8443", "rsi://localhost"] {
             let policy = DocumentPolicy::Application {
                 frame_paths: vec!["/preview-local.html".into(), "/downloads/".into()],

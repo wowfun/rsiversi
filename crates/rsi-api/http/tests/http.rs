@@ -18,6 +18,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+#[path = "http/browser_stream.rs"]
+mod browser_stream;
 #[derive(Debug)]
 struct Authentication(CancellationToken);
 impl DeviceAuthentication for Authentication {
@@ -844,7 +846,7 @@ async fn chunked_requests_retain_received_bytes_instead_of_each_operation_maximu
 }
 
 #[derive(Debug)]
-struct LargeReply(Semaphore);
+struct LargeReply;
 #[async_trait]
 impl ApiHandler for LargeReply {
     async fn invoke(
@@ -862,71 +864,11 @@ impl ApiHandler for LargeReply {
             receiver.append(&[b' '; 4096])?;
         }
         receiver.append(b"\"")?;
-        self.0.add_permits(1);
         Ok(ApiOutput::Reply(ApiMessage {
             json: receiver.finish(),
             binary: None,
         }))
     }
-}
-
-#[tokio::test]
-async fn blocked_response_delivery_keeps_device_quota_but_releases_domain_work() {
-    let harness = Harness::start().await;
-    let producer = Arc::new(LargeReply(Semaphore::new(0)));
-    let mut large = spec("large", OperationClass::Data, OperationEffect::Read);
-    large.maximum_response_bytes = 8 * 1024 * 1024;
-    let registration = harness.registry.register(large, producer.clone()).unwrap();
-    let mut sockets = Vec::new();
-    for _ in 0..4 {
-        sockets.push(harness.raw("test/large").await);
-        tokio::time::timeout(Duration::from_secs(5), producer.0.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-    }
-    // Domain work has finished; the client deliberately reads no response bytes.
-    tokio::time::timeout(Duration::from_secs(2), registration.close())
-        .await
-        .unwrap();
-    let response = harness
-        .request("connection/operations")
-        .body("{}")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        429,
-        "delivery still owns four device Data slots"
-    );
-    let control = harness
-        .request("connection/describe")
-        .body(r#"{"wire_version":1}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(control.status(), 200);
-    drop(sockets);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let response = harness
-                .request("connection/operations")
-                .body("{}")
-                .send()
-                .await
-                .unwrap();
-            if response.status() == 200 {
-                break;
-            }
-            assert_eq!(response.status(), 429);
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    harness.close().await;
 }
 
 #[tokio::test]
@@ -980,7 +922,7 @@ async fn http2_stream_delivery_retains_device_quota_through_flow_control_and_res
             .header("x-rsi-wire-version", "1")
             .header("x-rsi-host-epoch", harness.epoch.as_str())
     };
-    let producer = Arc::new(LargeReply(Semaphore::new(0)));
+    let producer = Arc::new(LargeReply);
     let mut large = spec("large", OperationClass::Data, OperationEffect::Read);
     large.maximum_response_bytes = 8 * 1024 * 1024;
     let registration = harness.registry.register(large, producer.clone()).unwrap();

@@ -106,7 +106,15 @@ impl Bridge {
             .map_err(|_| ApiError::Capacity)?;
         let lane = usize::from(request.class != OperationClass::Control);
         let send = self.send[lane].reserve(request.body.len())?;
-        let local = LocalRequest::new(request)?;
+        // origin() admits HTTP only for explicit loopback; the HTTP endpoint's
+        // browser-stream and CSP policies reserve WebSockets for that same case.
+        let local = if request.class == OperationClass::Subscription
+            && request.url.starts_with("http://")
+        {
+            LocalTransport::Socket(request)
+        } else {
+            LocalTransport::Fetch(LocalRequest::new(request)?)
+        };
         let stopped = self.stopped.child_token();
         let guard = CancelOnDrop(stopped.clone());
         let (head_tx, head) = oneshot::channel();
@@ -122,9 +130,17 @@ impl Bridge {
         wasm_bindgen_futures::spawn_local(async move {
             let _lease = lease;
             let _send = send;
-            local
-                .run(head_tx, pull_rx, stopped, window, chunk, dispatched)
-                .await;
+            match local {
+                LocalTransport::Fetch(local) => {
+                    local
+                        .run(head_tx, pull_rx, stopped, window, chunk, dispatched)
+                        .await;
+                }
+                LocalTransport::Socket(data) => {
+                    crate::socket::run(data, head_tx, pull_rx, stopped, window, chunk, dispatched)
+                        .await;
+                }
+            }
         });
         let source = Box::pin(async_stream::try_stream! {
             let _guard = guard;
@@ -177,7 +193,12 @@ pub(crate) struct Pending {
     pub source: ResponseBytes,
     pub started: Arc<AtomicBool>,
 }
-type Pull = oneshot::Sender<Result<Option<RetainedBytes>>>;
+pub(crate) type Pull = oneshot::Sender<Result<Option<RetainedBytes>>>;
+
+enum LocalTransport {
+    Fetch(LocalRequest),
+    Socket(RequestData),
+}
 
 struct LocalRequest {
     worker: DedicatedWorkerGlobalScope,

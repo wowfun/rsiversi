@@ -28,6 +28,8 @@ mod connection;
 #[cfg(target_arch = "wasm32")]
 mod plugin;
 #[cfg(target_arch = "wasm32")]
+mod socket;
+#[cfg(target_arch = "wasm32")]
 mod transport;
 #[cfg(target_arch = "wasm32")]
 pub use bridge::BrowserResourceSnapshot;

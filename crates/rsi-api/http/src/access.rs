@@ -106,15 +106,30 @@ impl Access {
             }
             _ => return Err(ApiError::Unauthorized),
         };
-        if token.len() != 64 {
+        authenticate_token(authentication.as_ref(), token)
+    }
+
+    pub fn authenticate_socket(
+        &self,
+        headers: &http::HeaderMap,
+        expected: &DeviceId,
+    ) -> Result<Caller> {
+        let (policy, authentication) = self.remote()?;
+        if policy.secure
+            || one(headers, "origin")? != Some(policy.origin.as_str())
+            || one(headers, "authorization")?.is_some()
+        {
             return Err(ApiError::Unauthorized);
         }
-        let secret = SecretValue::new(token).map_err(|_| ApiError::Unauthorized)?;
-        let device = authentication.authenticate(&secret)?;
-        if device.revoked.is_cancelled() {
+        let token = device_cookie(headers)?.ok_or(ApiError::Unauthorized)?;
+        let device = authenticate_token(authentication.as_ref(), token)?;
+        if &device.id != expected {
             return Err(ApiError::Unauthorized);
         }
-        Ok(device)
+        Ok(Caller {
+            revoked: device.revoked.clone(),
+            origin: CallOrigin::Device(device),
+        })
     }
 
     pub fn bootstrap(
@@ -212,6 +227,21 @@ impl Access {
         );
         Ok(response)
     }
+}
+
+fn authenticate_token(
+    authentication: &dyn DeviceAuthentication,
+    token: &str,
+) -> Result<AuthenticatedDevice> {
+    if token.len() != 64 {
+        return Err(ApiError::Unauthorized);
+    }
+    let secret = SecretValue::new(token).map_err(|_| ApiError::Unauthorized)?;
+    let device = authentication.authenticate(&secret)?;
+    if device.revoked.is_cancelled() {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(device)
 }
 
 fn expected_device(headers: &http::HeaderMap) -> Result<Option<DeviceId>> {

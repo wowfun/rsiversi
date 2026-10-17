@@ -9,6 +9,7 @@ import { chromium, firefox } from "playwright";
 import { buildWorkerProbe } from "../../tools/browser-worker.mjs";
 import { executeWorker } from "./worker.mjs";
 import { malformedProbe } from "./malformed.mjs";
+import { socketCloseProbe } from "./socket-close.mjs";
 
 const fixture = dirname(fileURLToPath(import.meta.url));
 const stem = "rsi_api_browser_fetch";
@@ -38,6 +39,8 @@ try {
     const browser = await engine.launch({ headless: true });
     try {
       if (!secure) {
+        const socketClose = await socketCloseProbe(browser, glue, wasm, malformedCatalog);
+        console.log(JSON.stringify({ browser: name, version: browser.version(), socket_close: socketClose }));
         const malformed = await malformedProbe(browser, glue, wasm, malformedCatalog);
         console.log(JSON.stringify({ browser: name, version: browser.version(), malformed }));
         const lifecycle = await browser.newContext();
@@ -89,10 +92,10 @@ try {
           assert.equal(result.active_alarms, 0);
           assert.equal((await context.cookies()).length, 0, "logout removed the device cookie");
           console.log(JSON.stringify({ browser: name, version: browser.version(), worker, ...result }));
-          if (secure) {
+          {
             const pool = await executeWorker(page, glue, wasm, "run_pool_probe");
-            console.log(JSON.stringify({ browser: name, version: browser.version(), worker, tls_pool: pool }));
-            assert.equal(pool.control_completed, true, "idle subscriptions preserve HTTP/2 control progress");
+            console.log(JSON.stringify({ browser: name, version: browser.version(), worker, secure, subscription_pool: pool }));
+            assert.equal(pool.control_completed, true, "idle subscriptions preserve control progress");
           }
         } finally { await context.close(); }
       }

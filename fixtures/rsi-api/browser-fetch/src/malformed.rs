@@ -4,12 +4,68 @@ use rsi_api_browser_client::{BrowserClient, BrowserClientConfig, BrowserResource
 use rsi_api_protocol::*;
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::Execution;
+use std::time::Duration;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn diagnostic(message: &str);
+}
+
+#[wasm_bindgen]
+pub async fn run_socket_close_probe(_: bool) -> std::result::Result<String, JsValue> {
+    std::panic::set_hook(Box::new(|info| diagnostic(&info.to_string())));
+    let execution = Execution::browser().unwrap();
+    let client = BrowserClient::connect(
+        execution.clone(),
+        BrowserClientConfig {
+            endpoint_id: EndpointId::from_bytes([2; 16]),
+            allow_loopback_http: true,
+        },
+    )
+    .await
+    .unwrap();
+    let operation = malformed_specs()
+        .into_iter()
+        .find(|op| op.id.name() == "missing-end")
+        .unwrap();
+    let stream = client
+        .call(
+            &operation,
+            client.input_budget(operation.class).copy(b"{}").unwrap(),
+        )
+        .await
+        .unwrap();
+    drop(stream);
+    let result = execution
+        .deadline_after(Duration::from_secs(6))
+        .timeout(client.close())
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Err(ApiError::Backend(_))),
+        "unsettled socket reported clean cleanup: {result:?}"
+    );
+    let retained = client.resource_snapshot();
+    assert_eq!(retained.active_requests, 1);
+    assert_eq!(retained.send_bytes, 2);
+    assert_eq!(retained.window_bytes, 0);
+    assert_eq!(retained.chunk_bytes, 0);
+    execution
+        .deadline_after(Duration::from_secs(5))
+        .timeout(async {
+            while client.resource_snapshot() != BrowserResourceSnapshot::default() {
+                execution.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+    let timers = rsi_meta_execution::browser_resource_snapshot();
+    assert_eq!(timers.pending_timers, 0);
+    assert_eq!(timers.active_alarms, 0);
+    Ok(serde_json::json!({"cleanup":"bounded-failure","retained_requests":1,"retained_send_bytes":2,"active_requests":0,"pending_timers":0,"active_alarms":0}).to_string())
 }
 
 #[wasm_bindgen]

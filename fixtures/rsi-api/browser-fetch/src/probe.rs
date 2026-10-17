@@ -83,7 +83,7 @@ pub async fn run_pool_probe(secure: bool) -> std::result::Result<String, JsValue
         .await
         .unwrap();
     let mut streams = Vec::new();
-    let count = if secure { 8 } else { 6 };
+    let count = 8;
     for _ in 0..count {
         streams.push(call(&client, "idle").await.unwrap());
     }

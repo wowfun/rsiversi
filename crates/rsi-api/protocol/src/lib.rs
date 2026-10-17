@@ -5,6 +5,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod authentication;
+pub mod browser_stream;
 mod budget;
 mod client;
 mod identity;

@@ -15,6 +15,13 @@ This library owns validated API operation identities and immutable, accounted
 transport buffers. It contains no platform runtime, network stack, authentication
 store or domain implementation.
 
+The browser stream DTOs define the bounded WebSocket preface and response head.
+Transport admission, authentication and pull-credit semantics belong to the
+[HTTP adapter](../http/README.md); the protocol library supplies only their
+closed representation and canonical identity decoding.
+Malformed prefaces, including invalid device or epoch identities, are uniformly
+unauthorized; they do not disclose a different authentication outcome.
+
 A byte budget rejects excess retention before copying or encoding. A reservation
 may be transferred to immutable bytes, which retain that charge through clones
 and slices until the last owner drops. Encoding measures the same serde value

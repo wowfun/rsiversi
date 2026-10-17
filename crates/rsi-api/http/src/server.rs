@@ -29,6 +29,9 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) type Body = UnsyncBoxBody<Bytes, io::Error>;
+#[cfg(test)]
+#[path = "server/delivery_tests.rs"]
+mod delivery_tests;
 
 /// Explicit capabilities and identities belonging to one served generation.
 #[derive(Clone, Debug)]
@@ -55,6 +58,7 @@ pub(crate) struct State {
     pub access: Access,
     pub execution: Execution,
     pub unclassified: Arc<Semaphore>,
+    pub socket_scratch: rsi_api_protocol::ByteBudget,
 }
 
 /// Native listener whose shutdown releases transports independently of admitted mutations.
@@ -139,6 +143,7 @@ impl HttpServer {
                 },
                 execution,
                 unclassified: Arc::new(Semaphore::new(32)),
+                socket_scratch: rsi_api_protocol::ByteBudget::default(),
             },
             tls,
         }
@@ -249,10 +254,34 @@ pub(crate) async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 
     let socket = crate::bounded_io::WriteBound::new(socket, state.execution.clone());
     // Hyper may drop the Body after queuing its last frame, before writing it.
     let delivery = connection.clone();
+    let upgraded = Arc::new(std::sync::Mutex::new(None));
+    let pending = upgraded.clone();
+    let owner = state.clone();
     let service = service_fn(move |request| {
         let state = state.clone();
         let connection = connection.clone();
-        async move { Ok::<_, Infallible>(state.response(request, &connection).await) }
+        let pending = pending.clone();
+        async move {
+            let mut response = if crate::browser_stream::is_upgrade(&request) {
+                match crate::browser_stream::prepare(&state, request, &connection) {
+                    Ok((response, socket)) => {
+                        *pending.lock().expect("upgrade slot poisoned") = Some(socket);
+                        state.decorate(response, http::Version::HTTP_11)
+                    }
+                    Err(error) => state.decorate(failure(error), http::Version::HTTP_11),
+                }
+            } else {
+                state.response(request, &connection).await
+            };
+            // Permit the upgrade handshake; ordinary HTTP/1 exchanges still
+            // own exactly one connection and never enter an idle keepalive pool.
+            if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+                response
+                    .headers_mut()
+                    .insert("connection", http::HeaderValue::from_static("close"));
+            }
+            Ok::<_, Infallible>(response)
+        }
     });
     let mut builder = http1::Builder::new();
     builder
@@ -260,14 +289,18 @@ pub(crate) async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 
         .header_read_timeout(Duration::from_secs(10))
         .max_buf_size(32 * 1024)
         .max_headers(64)
-        .keep_alive(false)
+        .keep_alive(true)
         .writev(true);
     tokio::select! {
         biased;
         () = stop.cancelled() => {},
-        result = builder.serve_connection(TokioIo::new(socket), service) => {
+        result = builder.serve_connection(TokioIo::new(socket), service).with_upgrades() => {
             if result.is_err() { diagnostics.connection_failure(); }
         },
+    }
+    let pending = upgraded.lock().expect("upgrade slot poisoned").take();
+    if let Some(pending) = pending {
+        pending.run(owner, stop).await;
     }
     drop(delivery);
 }
@@ -476,7 +509,7 @@ impl State {
     }
 }
 
-fn operation(path: &str) -> Result<OperationId> {
+pub(crate) fn operation(path: &str) -> Result<OperationId> {
     let parts: Vec<_> = path.split('/').collect();
     if parts.len() != 6 || parts[..3] != ["", "api", "v1"] {
         return Err(ApiError::Unavailable);

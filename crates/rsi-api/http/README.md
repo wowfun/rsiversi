@@ -110,6 +110,33 @@ in the codec; after their final owner drops, authority remains retained until th
 transport's next completed flush or socket disposal. A connection-wide lease
 cannot represent independently multiplexed operations.
 
+Loopback browser subscriptions use an independent WebSocket connection per
+operation, so idle subscriptions do not exhaust the HTTP/1 browser Fetch pool.
+Only registered read subscriptions may upgrade; finite calls and mutations keep
+the existing HTTP path. Exact Host and Origin, the HttpOnly device cookie, and
+the expected device and Host epoch are checked before admission. Authentication
+precedes the epoch comparison, so unauthenticated requests cannot probe it. The closed
+`rsi-stream-v1` subprotocol carries those non-secret fences and the exact input
+length; no URL contains credentials and no remote request obtains Local authority.
+Socket authentication consumes the cookie and parsed device directly, requiring
+the exact browser Origin. It does not synthesize HTTP CSRF or expected-device
+headers; those remain the ordinary HTTP authentication contract.
+Input admission and separate transport scratch precede message allocation.
+
+The first binary message is the bounded request. The server returns a bounded
+typed response head, then sends at most one 64 KiB body chunk per one-byte pull.
+An empty chunk is EOF; the existing finite/error and SSE codecs remain authoritative.
+Extra credit, text messages, wrong lengths and malformed handshakes close the
+connection. Ping and Pong control frames are handled independently of application
+input and credit, including while domain work is pending. They neither grant
+credit nor restart the handshake deadline. Response heads are measured against
+their fixed admitted bound before encoding. Each socket retains its ordinary connection and operation admission;
+disconnect, revocation, retirement and listener shutdown cancel the read and
+release them. There is no reconnect or replay. The handshake/input deadline is
+15 seconds, writes retain the existing bounded-write deadline, and idle admitted
+subscriptions have no read deadline. TLS browser traffic continues to require
+HTTP/2 and does not use this loopback-only transport.
+
 `connection/describe/1` and `connection/operations/1` are ordinary registered read
 operations owned by the independent API connection plugin. The HTTP listener
 consumes them and never registers or retires them. The former negotiates wire
@@ -121,7 +148,8 @@ retains its independent executable/launch-key checks.
 Finite JSON replies retain exact Rust JSON bytes. Binary replies use
 `application/vnd.rsi.binary`: an eight-byte big-endian metadata length, an
 eight-byte big-endian binary length, then those exact payloads. Subscriptions use
-POST fetch SSE. The server immediately writes `: ready\n\n` before polling its
+POST Fetch SSE, or carry that same SSE body through the loopback browser socket.
+The server immediately writes `: ready\n\n` before polling its
 domain source so browser Fetch can resolve even for an idle subscription. This
 fixed opening comment carries no event or sequence number. It is followed by
 `item`, `error` or `domain-error`, then an explicit `end`

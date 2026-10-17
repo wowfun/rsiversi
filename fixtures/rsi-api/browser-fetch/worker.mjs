@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 
 export async function executeWorker(page, glue, wasm, entry = "run_probe") {
-  assert(["run_probe", "run_pool_probe", "run_shared_pool_probe", "run_malformed_probe", "run_caller_fault_probe", "run_bootstrap_cancel_probe"].includes(entry));
+  assert(["run_probe", "run_pool_probe", "run_shared_pool_probe", "run_malformed_probe", "run_caller_fault_probe", "run_bootstrap_cancel_probe", "run_socket_close_probe"].includes(entry));
   return page.evaluate(({ glue, wasm, entry }) => new Promise((resolve, reject) => {
     const source = glue + `\nconst fetchCalls = new Map();
     const nativeFetch = self.fetch.bind(self);
@@ -9,6 +9,14 @@ export async function executeWorker(page, glue, wasm, entry = "run_probe") {
       const url = new URL(args[0] instanceof Request ? args[0].url : args[0], self.origin);
       fetchCalls.set(url.pathname, (fetchCalls.get(url.pathname) || 0) + 1);
       return nativeFetch(...args);
+    };
+    const NativeWebSocket = self.WebSocket;
+    self.WebSocket = class extends NativeWebSocket {
+      constructor(...args) {
+        super(...args);
+        const url = new URL(args[0]);
+        fetchCalls.set(url.pathname, (fetchCalls.get(url.pathname) || 0) + 1);
+      }
     };
     if (${JSON.stringify(entry)} === "run_bootstrap_cancel_probe") {
       let state = 0;
@@ -25,7 +33,7 @@ export async function executeWorker(page, glue, wasm, entry = "run_probe") {
       const bytes = Uint8Array.from(atob(${JSON.stringify(wasm)}), c => c.charCodeAt(0));
       await __wbg_init({ module_or_path: bytes });
       const result = JSON.parse(await ${entry}(self.origin.startsWith("https://")));
-      if (${JSON.stringify(entry)} === "run_malformed_probe") result.fetch_calls = [...fetchCalls];
+      if (${JSON.stringify(entry)} === "run_malformed_probe") result.transport_calls = [...fetchCalls];
       self.postMessage({ result });
     } catch (error) { self.postMessage({ error: String(error) }); } };`;
     const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));

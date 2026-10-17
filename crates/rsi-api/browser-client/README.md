@@ -27,10 +27,17 @@ an old connection execute as the replacement device. Explicit logout retains
 the same expected device even after logical connection cleanup.
 
 HTTPS browser connections require the endpoint to report actual HTTP/2 negotiation.
-HTTP/1 browser connection pools cannot preserve control progress once idle
-subscriptions occupy every socket. Explicit loopback HTTP remains a transport
-debugging mode with that limitation; multi-surface product delivery requires TLS
-and HTTP/2. Native HTTP clients retain their independent transport policy.
+For explicit loopback HTTP, read subscriptions use the
+[bounded pull-based WebSocket transport](../http/README.md), preserving Fetch
+connections for finite calls and controls. It retains the same authenticated
+device and generation fences, byte pools, task limit and cancellation owner.
+At most one admitted JavaScript receive window and one requested body chunk are
+pending per socket. Unsolicited or oversized messages close the transport.
+The socket task retains its slot and source-byte admission until the browser's
+close event. An error event or a local close request does not prove settlement.
+The connection's five-second cleanup deadline reports failure if the close event
+has not arrived; admission remains charged until it does, including after failure.
+Native HTTP clients retain their independent transport policy.
 
 The shared connection owns negotiation, operation admission, immutable response
 retention and retirement. Worker-local tasks own Fetch, AbortController and BYOB
