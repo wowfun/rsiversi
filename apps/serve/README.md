@@ -12,9 +12,10 @@ no backend or Runtime: an ordinary
 HttpFactory child owns the listener and its requests within the invoking Profile.
 The standard product composes its independently owned service generation beside
 this application.
-Native signal ownership currently requires Unix. Non-Unix preparation rejects
-before creating the HTTP child or acquiring a listener; a Ctrl-C-only waiter
-does not establish the application's native stop and reload lifecycle.
+Native signal ownership supports Unix and Windows. Windows handles Ctrl+C,
+Ctrl+Break, console close, logoff and shutdown; the OS can bound the grace period
+for the last three. Profile reload remains available through its API; SIGHUP is
+Unix-only. Unsupported platforms reject before creating the HTTP child or listener.
 Complete static HTTP/argument validation precedes platform admission. Malformed
 configuration returns `MetaError::InvalidInput`; valid configuration requiring
 unavailable signals returns `MetaError::Activation`. The retained application
@@ -62,6 +63,8 @@ supplies frozen executable-relative assets and SSH/browser-opening inputs.
 Assets activate before the Service. Missing bundles identify the selected path
 and build command. Opening never builds assets or replaces an existing Host.
 The loopback listener derives its exact Origin from the socket it actually owns.
+Local listener failure reports the requested port and suggests `rsi web --port 0`
+to select a free port, including Windows reserved-port failures.
 
 Explicit startup rotates a product-managed browser device credential while
 retaining its DeviceId, then grants configuration access through the product's

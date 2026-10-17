@@ -68,7 +68,7 @@ fn extras(scope: AddonScope, entry: Arc<Entry>) -> StandardAddonSet {
 }
 
 #[tokio::test]
-async fn application_extra_survives_bootstrap_and_catalog_refresh_without_changing_host_identity() {
+async fn application_extra_runs_without_changing_host_identity() {
     let temp = tempfile::tempdir().unwrap();
     let service = composition(temp.path());
     let profile = rsi::ProfileCatalog::new(service.paths().clone(), rsi_app_catalog::metadata())
@@ -108,18 +108,21 @@ async fn application_extra_survives_bootstrap_and_catalog_refresh_without_changi
             .unwrap(),
         37
     );
-    let source = catalog
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("application source inherited");
+    let source = catalog.lock().unwrap().clone();
+    #[cfg(unix)]
     source
+        .expect("native bootstrap publishes the inherited Application catalog")
         .snapshot()
         .unwrap()
         .profile_input(program)
         .unwrap()
         .preflight_linked(&std::collections::BTreeSet::default())
         .unwrap();
+    #[cfg(not(unix))]
+    assert!(
+        source.is_none(),
+        "direct startup has no native staging catalog"
+    );
     assert!(running.shutdown().await.is_clean());
 }
 

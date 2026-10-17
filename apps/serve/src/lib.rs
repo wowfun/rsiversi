@@ -141,7 +141,7 @@ impl PluginFactory for ServeFactory {
                 self.record_failure("Serve HTTP configuration exceeds 64 KiB"),
             ));
         }
-        if !cfg!(unix) {
+        if !cfg!(any(unix, windows)) {
             return Err(MetaError::Activation(self.record_failure(
                 "native Serve signals are unsupported on this platform",
             )));
@@ -163,6 +163,7 @@ impl PluginFactory for ServeFactory {
             prepared
         })
     }
+    #[allow(clippy::too_many_lines)] // Listener admission, launch ticket and teardown form one activation transaction.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<HttpConfig>()?;
         let mut origin = config.public_origin.clone();
@@ -222,7 +223,7 @@ impl PluginFactory for ServeFactory {
                 if self.local_web.is_some() {
                     serde_json::json!(config.bind.port())
                 } else {
-                    serde_json::to_value(config).map_err(|error| self.failure(error))?
+                    serde_json::to_value(&config).map_err(|error| self.failure(error))?
                 },
             )
             .await?;
@@ -232,6 +233,14 @@ impl PluginFactory for ServeFactory {
             let detail = local_listener
                 .and_then(|factory| factory.take_diagnostic())
                 .unwrap_or_else(|| format!("HTTP listener activation failed: {state:?}"));
+            let detail = if self.local_web.is_some() {
+                format!(
+                    "{detail}; cannot listen on 127.0.0.1:{}; stop the other listener or use rsi web --port 0",
+                    config.bind.port()
+                )
+            } else {
+                detail
+            };
             return Err(self.failure(format!(
                 "{detail}; {} cleanup failures",
                 report.total_failures()
@@ -355,7 +364,7 @@ impl Runner {
                     () = self.stop.cancelled() => return Ok(()),
                     result = &mut open, if opening => { result?; opening = false; },
                     event = signals.next(reloading.is_none()) => match event {
-                        #[cfg(unix)]
+                        #[cfg(any(unix, windows))]
                         service::SignalEvent::Stop => return Ok(()),
                         #[cfg(unix)]
                         service::SignalEvent::Reload => {
@@ -438,7 +447,7 @@ mod unsupported_platform_tests {
             })
             .unwrap();
             let result = factory.prepare(&config);
-            if cfg!(unix) {
+            if cfg!(any(unix, windows)) {
                 result.unwrap();
             } else {
                 assert!(matches!(result, Err(MetaError::Activation(_))));

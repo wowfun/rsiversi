@@ -2,8 +2,8 @@ use crate::{ApplicationComposition, Result, RsiError};
 use rsi_host::{ProfileProgram, RunningHost};
 use std::ffi::OsString;
 
-/// Starts the product's stable bootstrap and its ordinary Application child Profile.
-/// Native staging precedes child catalog construction and shares the same Runtime.
+/// Starts the Application Profile, including its explicitly supplied extras.
+/// Unix stages native addons in a stable bootstrap first; other platforms start directly.
 pub async fn start_application(
     composition: ApplicationComposition,
     arguments: Vec<OsString>,

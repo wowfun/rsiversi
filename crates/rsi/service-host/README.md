@@ -9,6 +9,11 @@ remain embedded-only.
 Windows embedded ownership creates a TokenUser-owned protected private directory
 through Native Files, opens its owner lock without following reparse points, and
 retains a namespace pin and exclusive file lease through provider cleanup.
+Contention reports that the other Web, TUI, ACP or offline device process must
+stop first; deleting its lock is never a recovery action.
+Embedded metadata publication flushes its staged file before replacement and
+synchronizes the pinned private directory through Native Files on Windows.
+It does not use a plain file open for a Windows directory or ignore flush errors.
 
 Linux lifecycle checks require a matching process start token and exclude an
 exited, unreaped zombie. A foreground owner's caller may reap it only after

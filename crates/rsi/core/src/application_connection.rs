@@ -1,9 +1,7 @@
-#[cfg(windows)]
-mod acp_embedded;
 mod http;
 #[cfg(target_os = "linux")]
 mod operator;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod service;
 use crate::{
     AgentPresetManager, HostProfileDocument, HostProfileId, ProfileCatalog, RsiError,
@@ -235,11 +233,9 @@ pub const BASE_APPLICATION_PLUGINS: &[&str] = &[
     "rsi.directory-picker.client",
     "rsi.credentials.local",
     "rsi.application.http",
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     "rsi.application.service",
-    #[cfg(target_os = "linux")]
-    "rsi.application.acp-service",
-    #[cfg(windows)]
+    #[cfg(any(target_os = "linux", windows))]
     "rsi.application.acp-service",
     #[cfg(target_os = "linux")]
     "rsi.application.operator",
@@ -269,20 +265,15 @@ pub fn base_application_catalog(
             "rsi.application.http",
             Arc::new(http::HttpFactory(connection.clone())),
         ),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         (
             "rsi.application.service",
             Arc::new(service::ServiceFactory(connection.clone(), false)),
         ),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         (
             "rsi.application.acp-service",
             Arc::new(service::ServiceFactory(connection.clone(), true)),
-        ),
-        #[cfg(windows)]
-        (
-            "rsi.application.acp-service",
-            Arc::new(acp_embedded::Factory(connection.clone())),
         ),
         #[cfg(target_os = "linux")]
         (

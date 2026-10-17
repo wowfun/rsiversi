@@ -1,6 +1,6 @@
 # rsi
 
-The standard Windows ACP composition exposes native Files and explicit native
+The standard Windows Web, TUI and ACP composition exposes native Files and explicit native
 Bash tools. Full Process output caching and its `output_read` contribution are
 enabled only where the Process owner publishes the cache capability. CLI and
 Desktop use `capture_standard_bash`, which selects Bash from the absolute Git for Windows installation recorded
@@ -8,9 +8,13 @@ by its installer. It fails clearly if that installation is absent; it never
 substitutes the Windows WSL launcher. On Unix it resolves `/bin/bash`.
 Windows does not advertise the Linux
 apply-patch helper or PTY terminal contribution. These are independent optional
-capabilities, rather than prerequisites for the native ACP coding pipeline.
+capabilities, rather than prerequisites for native Windows conversations.
 Native Unix MCP profile management is also omitted from the standard Windows
 Service; the private ACP integration owns its own explicit MCP inputs.
+Native application Service entry acquires the Host lease before starting its child
+Profile and injects that exact owner into the composition. An occupied Windows Host
+therefore reports the actionable owner-conflict diagnostic before child bootstrap;
+it does not wait for a daemon discovery endpoint.
 
 The product MCP management API requires the Unix Profile-management authority.
 On non-Unix hosts its factory rejects preparation and activation explicitly;
@@ -99,7 +103,7 @@ new leases; previously issued leases retain their exact provider, while each new
 effect checks the live Use gate. The wire contract belongs to
 [configuration API](../configuration-api/README.md).
 
-The native Application bootstrap publishes its immutable role catalog source to
+The Unix native Application bootstrap publishes its immutable role catalog source to
 descendant presentation Profiles before starting the Application. Descendants use
 the ordinary Profile update owner; they do not mutate the catalog or start a
 second Runtime. Terminal presentation factories are available in the Application
@@ -132,9 +136,13 @@ submission reconciliation and observation cursor/retry policy live in
 [rsi-client](../client/README.md).
 
 The standard catalog links providers but does not select or enable a deployment.
-Windows ACP uses an application-owned embedded Service and the same private
+Windows Web, TUI and ACP use an application-owned embedded Service and the same private
 Session composition and durable backend as other native consumers. Its backend
 retires before that Service; it does not start or impersonate the Linux daemon.
+The Windows `devices` Profile explicitly opens this embedded composition for offline
+administration. A running Web or TUI must be stopped first; ownership contention
+fails without replacing or taking over the running Host. Other operator Profiles
+retain their Linux local-transport requirement.
 The [ACP application](../../../apps/acp/README.md) owns stdio and signal policy.
 A missing default model is a valid unconfigured Agent defaults document. The
 defaults plugin and its Settings namespace remain active; new Session creation
@@ -185,6 +193,9 @@ The application disposes its connection subtree before shutting down its Runtime
 Embedded connections use the same negotiated Output client as remote connections.
 An absent completed-output cache leaves conversation available and returns the
 [Output domain's unavailable result](../../rsi-process/output-api/README.md) on reads.
+On Windows, an occupied owner lease returns its actionable conflict immediately:
+there is no local daemon endpoint to await. Linux discovery retains its bounded
+wait for an existing daemon or starting owner.
 
 `StandardServiceDaemon::start_in` mounts the publishing daemon in a caller-owned
 Runtime with the same isolated child-Profile lifetime. It consumes the exact
@@ -493,7 +504,7 @@ failure. It never rotates the Loader or its cache to bypass admission closure.
 These explicit library operations do not start background work; callers supervise
 blocking refresh and retain its owner to completion.
 
-`start_application` starts one stable linked bootstrap in the Host's Runtime.
+On Unix, `start_application` starts one stable linked bootstrap in the Host's Runtime.
 Linked argument/configuration preflight precedes staging directory creation;
 complete native-aware preflight follows staging. Actual Service activation
 preflights linked configuration before opening the application preset Profile,
@@ -510,6 +521,10 @@ Only unlocked slots can be reused; exhaustion rejects startup. A slot remains
 fixed for the entire owner lifetime, including retained failed finalization;
 the owner never rotates it to bypass a closed Loader. The staging and Application control
 markers are explicitly isolated before capabilities are forwarded.
+
+On non-Unix platforms, `start_application` starts the linked Application Profile
+directly. Application-only extras and Service identity isolation still apply;
+there is no native-addon staging owner or inherited `ProfileCatalogContract`.
 
 Application, Service and Client input followers (both HTTP and daemon UDS clients)
 coalesce successful staging publications and submit complete inputs through their

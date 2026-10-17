@@ -27,6 +27,7 @@ pub(super) fn builtins() -> impl Iterator<Item = (ApplicationProfileId, Vec<u8>)
         (id, bytes)
     })
 }
+#[allow(clippy::too_many_lines)] // Literal Profile documents stay beside their application bindings.
 fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
     if id.as_str() == WEB_PROFILE {
         return Some(
@@ -54,15 +55,19 @@ plugin = "rsi.application.web"
         TUI_PROFILE => ("rsi.application.tui", "rsi.application.connection"),
         SERVE_PROFILE => ("rsi.application.serve", "rsi.application.service"),
         ACP_PROFILE => ("rsi.application.acp", "rsi.application.acp-service"),
-        DEVICES_PROFILE => ("rsi.application.devices", "rsi.application.operator"),
+        DEVICES_PROFILE => (
+            "rsi.application.devices",
+            if cfg!(windows) {
+                "rsi.application.connection"
+            } else {
+                "rsi.application.operator"
+            },
+        ),
         ADDONS_PROFILE => ("rsi.application.addons", "rsi.application.operator"),
         INSPECTOR_PROFILE => ("rsi.application.inspector", "rsi.application.operator"),
         _ => return None,
     };
-    let config = if matches!(
-        id.as_str(),
-        DEVICES_PROFILE | INSPECTOR_PROFILE | ADDONS_PROFILE
-    ) {
+    let config = if connection == "rsi.application.operator" {
         ""
     } else {
         "config = { host_profile = \"standard\" }"

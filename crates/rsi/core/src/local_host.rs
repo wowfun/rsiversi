@@ -8,11 +8,14 @@ use rsi_service_host::{
 use rsi_service_host::{LocalApiListener, ServiceHostDiagnostics, owner_process_is_current};
 use rsi_session_protocol::SessionService;
 use std::sync::Arc;
+#[cfg(not(windows))]
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(windows))]
 const OWNER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(not(windows))]
 const OWNER_DISCOVERY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Selected standard Service Host ownership mode.
@@ -203,6 +206,7 @@ impl EmbeddedServiceHost {
 /// The caller owns its parent lifecycle, including cancellation during bootstrap.
 /// This never starts a daemon. A live starting, embedded, incompatible, or unresponsive owner is
 /// waited for only within a fixed bound and is never bypassed by a second Host.
+/// Windows has no daemon endpoint; an occupied lease is reported immediately.
 pub async fn connect_or_embed_service_host(
     parent: &rsi_meta::Context,
     composition: StandardComposition,
@@ -221,80 +225,89 @@ pub async fn connect_or_embed_service_host(
         })?;
         return boot_embedded(parent, composition, host_profile, launch_key, lease).await;
     }
-    let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
-    loop {
-        if let Some(metadata) = paths.read_metadata().map_err(host_error)? {
-            #[cfg(target_os = "linux")]
-            if owner_process_is_current(&metadata).map_err(host_error)? {
-                if !metadata.is_compatible_with_current().map_err(host_error)? {
+    #[cfg(windows)]
+    {
+        let lease = HostOwnerLease::try_acquire(paths).map_err(host_error)?;
+        boot_embedded(parent, composition, host_profile, launch_key, lease).await
+    }
+    #[cfg(not(windows))]
+    {
+        let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
+        loop {
+            if let Some(metadata) = paths.read_metadata().map_err(host_error)? {
+                #[cfg(target_os = "linux")]
+                if owner_process_is_current(&metadata).map_err(host_error)? {
+                    if !metadata.is_compatible_with_current().map_err(host_error)? {
+                        return Err(RsiError::Boot(format!(
+                            "the active Service Host has an incompatible protocol or product build; run `rsi host restart --profile {}`",
+                            host_profile.id
+                        )));
+                    }
+                    match metadata.mode {
+                        HostOwnerMode::Daemon => {
+                            if metadata.launch_key != launch_key {
+                                return Err(RsiError::Boot(format!(
+                                    "the active Service Host has a different launch identity; run `rsi host restart --profile {}`",
+                                    host_profile.id
+                                )));
+                            }
+                            let remote = tokio::time::timeout_at(
+                                deadline,
+                                crate::client_composition::connect(&metadata, parent, &composition),
+                            )
+                            .await;
+                            let remote = match remote {
+                                Ok(Ok(remote)) => remote,
+                                Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                                    tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+                                    continue;
+                                }
+                                Ok(Err(error)) => {
+                                    return Err(RsiError::Boot(format!(
+                                        "the active compatible Service Host did not become responsive within {} seconds: {error}",
+                                        OWNER_DISCOVERY_TIMEOUT.as_secs()
+                                    )));
+                                }
+                                Err(_) => {
+                                    return Err(RsiError::Boot(format!(
+                                        "the active compatible Service Host did not become responsive within {} seconds",
+                                        OWNER_DISCOVERY_TIMEOUT.as_secs()
+                                    )));
+                                }
+                            };
+                            return ServiceHostConnection::from_remote(remote).await;
+                        }
+                        HostOwnerMode::Embedded => {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err(RsiError::Boot(
+                                    "an embedded Service Host owns the standard paths".into(),
+                                ));
+                            }
+                            tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+                            continue;
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = metadata;
+            }
+
+            match HostOwnerLease::try_acquire(paths.clone()) {
+                Ok(lease) => {
+                    return boot_embedded(parent, composition, host_profile, launch_key, lease)
+                        .await;
+                }
+                Err(ServiceHostError::OwnerActive) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+                }
+                Err(ServiceHostError::OwnerActive) => {
                     return Err(RsiError::Boot(format!(
-                        "the active Service Host has an incompatible protocol or product build; run `rsi host restart --profile {}`",
-                        host_profile.id
+                        "a Service Host owner is active but did not publish a usable endpoint within {} seconds",
+                        OWNER_DISCOVERY_TIMEOUT.as_secs()
                     )));
                 }
-                match metadata.mode {
-                    HostOwnerMode::Daemon => {
-                        if metadata.launch_key != launch_key {
-                            return Err(RsiError::Boot(format!(
-                                "the active Service Host has a different launch identity; run `rsi host restart --profile {}`",
-                                host_profile.id
-                            )));
-                        }
-                        let remote = tokio::time::timeout_at(
-                            deadline,
-                            crate::client_composition::connect(&metadata, parent, &composition),
-                        )
-                        .await;
-                        let remote = match remote {
-                            Ok(Ok(remote)) => remote,
-                            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
-                                tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-                                continue;
-                            }
-                            Ok(Err(error)) => {
-                                return Err(RsiError::Boot(format!(
-                                    "the active compatible Service Host did not become responsive within {} seconds: {error}",
-                                    OWNER_DISCOVERY_TIMEOUT.as_secs()
-                                )));
-                            }
-                            Err(_) => {
-                                return Err(RsiError::Boot(format!(
-                                    "the active compatible Service Host did not become responsive within {} seconds",
-                                    OWNER_DISCOVERY_TIMEOUT.as_secs()
-                                )));
-                            }
-                        };
-                        return ServiceHostConnection::from_remote(remote).await;
-                    }
-                    HostOwnerMode::Embedded => {
-                        if tokio::time::Instant::now() >= deadline {
-                            return Err(RsiError::Boot(
-                                "an embedded Service Host owns the standard paths".into(),
-                            ));
-                        }
-                        tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-                        continue;
-                    }
-                }
+                Err(error) => return Err(host_error(error)),
             }
-            #[cfg(not(target_os = "linux"))]
-            let _ = metadata;
-        }
-
-        match HostOwnerLease::try_acquire(paths.clone()) {
-            Ok(lease) => {
-                return boot_embedded(parent, composition, host_profile, launch_key, lease).await;
-            }
-            Err(ServiceHostError::OwnerActive) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-            }
-            Err(ServiceHostError::OwnerActive) => {
-                return Err(RsiError::Boot(format!(
-                    "a Service Host owner is active but did not publish a usable endpoint within {} seconds",
-                    OWNER_DISCOVERY_TIMEOUT.as_secs()
-                )));
-            }
-            Err(error) => return Err(host_error(error)),
         }
     }
 }

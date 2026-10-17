@@ -542,7 +542,13 @@ impl Drop for HostOwnerLease {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ServiceHostError {
     /// Another embedded or daemon owner holds the standard paths.
-    #[error("another Service Host owner is active")]
+    #[cfg_attr(
+        windows,
+        error(
+            "another RSI application owns these data directories; stop the other Web, TUI, ACP or offline device process first (do not delete owner.lock)"
+        )
+    )]
+    #[cfg_attr(not(windows), error("another Service Host owner is active"))]
     OwnerActive,
     /// Durable or wire input violated its bounded contract.
     #[error("invalid Service Host state: {0}")]
@@ -678,6 +684,9 @@ fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceHostErro
         #[cfg(unix)]
         set_file_mode(&file, 0o600)?;
         fs::rename(&temporary, path).map_err(io_error)?;
+        #[cfg(windows)]
+        return rsi_files_native_fs::sync_absolute_directory_no_follow(parent).map_err(io_error);
+        #[cfg(not(windows))]
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(io_error)

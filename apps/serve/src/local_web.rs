@@ -33,6 +33,8 @@ pub trait BrowserOpener: std::fmt::Debug + Send + Sync {
 pub struct SystemBrowserOpener {
     /// Explicit executable, normally xdg-open or wslview on Linux/WSL.
     pub command: OsString,
+    /// Fixed OS launcher arguments preceding the separately passed URL.
+    pub arguments: Vec<OsString>,
     /// Only desktop/session discovery variables, never provider credentials.
     pub environment: BTreeMap<OsString, OsString>,
 }
@@ -40,6 +42,7 @@ pub struct SystemBrowserOpener {
 impl BrowserOpener for SystemBrowserOpener {
     async fn open(&self, url: &str) -> Result<(), String> {
         let mut child = tokio::process::Command::new(&self.command)
+            .args(&self.arguments)
             .arg(url)
             .env_clear()
             .envs(&self.environment)

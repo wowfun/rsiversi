@@ -82,7 +82,7 @@ struct DomainExport {
 pub(crate) enum DomainLookup<'a> {
     Local(&'a crate::ServiceHostConnection),
     Remote(&'a crate::ProfileOwner),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     Service(&'a crate::RunningRsi),
 }
 impl DomainLookup<'_> {
@@ -90,7 +90,7 @@ impl DomainLookup<'_> {
         match self {
             Self::Local(connection) => connection.lookup_addon::<C>(),
             Self::Remote(profile) => profile.lookup_local::<C>(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             Self::Service(service) => service.lookup_addon::<C>(),
         }
     }

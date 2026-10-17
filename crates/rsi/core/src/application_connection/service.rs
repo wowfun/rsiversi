@@ -9,6 +9,7 @@ use rsi_credentials_protocol::SecretValue;
 use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::watch;
+#[cfg(target_os = "linux")]
 use tokio_util::sync::CancellationToken;
 
 /// Product composition, without owning HTTP or process-signal policy.
@@ -20,17 +21,73 @@ impl PluginFactory for ServiceFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         self.0.prepare(desired)
     }
+    #[allow(clippy::too_many_lines)] // Keep capability publication and ordered owner teardown together.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (profile, composition) = self.0.compose(&mut plan).await?;
         let paths = rsi_service_host::ServiceHostPaths::from_host_paths(self.0.composition.paths())
             .map_err(|error| self.0.diagnosed(error))?;
-        let owner = rsi_service_host::HostOwnerLease::try_acquire(paths)
+        let lease = rsi_service_host::HostOwnerLease::try_acquire(paths)
             .map_err(|error| self.0.diagnosed(error))?;
-        let daemon =
-            crate::StandardServiceDaemon::start_in(composition, &profile, owner, plan.context())
-                .await
+        #[cfg(target_os = "linux")]
+        let (running, stopped) = {
+            let daemon = crate::StandardServiceDaemon::start_in(
+                composition,
+                &profile,
+                lease,
+                plan.context(),
+            )
+            .await
+            .map_err(|error| self.0.diagnosed(error))?;
+            let running = daemon.running();
+            let stop = CancellationToken::new();
+            let guard = stop.clone().drop_guard();
+            let (sender, stopped) = watch::channel(None);
+            let task = plan.context().runtime().execution().spawn(async move {
+                let result = daemon.run(stop).await.map_err(|error| error.to_string());
+                sender.send_replace(Some(result.clone()));
+                result
+            });
+            plan.defer(
+                "drain application service",
+                Box::new(move || {
+                    Box::pin(async move {
+                        drop(guard);
+                        task.await.map_err(|error| error.to_string())?
+                    })
+                }),
+            )?;
+            (running, stopped)
+        };
+        #[cfg(windows)]
+        let (running, stopped) = {
+            let epoch =
+                rsi_api_protocol::HostEpoch::generate().map_err(|error| self.0.diagnosed(error))?;
+            let composition = composition
+                .with_service_owner(Arc::new(lease), epoch)
                 .map_err(|error| self.0.diagnosed(error))?;
-        let running = daemon.running();
+            let running = Arc::new(
+                crate::RunningRsi::boot_host_profile_in(composition, &profile, plan.context())
+                    .await
+                    .map_err(|error| self.0.diagnosed(error))?,
+            );
+            let (sender, stopped) = watch::channel(None);
+            let owned = running.clone();
+            plan.defer(
+                "drain embedded application Service",
+                Box::new(move || {
+                    Box::pin(async move {
+                        let result = if owned.shutdown().await.is_clean() {
+                            Ok(())
+                        } else {
+                            Err("embedded application Service cleanup failed".to_owned())
+                        };
+                        sender.send_replace(Some(result.clone()));
+                        result
+                    })
+                }),
+            )?;
+            (running, stopped)
+        };
         running
             .api_dispatch()
             .map_err(|error| self.0.diagnosed(error))?;
@@ -43,23 +100,6 @@ impl PluginFactory for ServiceFactory {
         let description = running
             .connection_description()
             .map_err(|error| self.0.diagnosed(error))?;
-        let stop = CancellationToken::new();
-        let guard = stop.clone().drop_guard();
-        let (sender, stopped) = watch::channel(None);
-        let task = plan.context().runtime().execution().spawn(async move {
-            let result = daemon.run(stop).await.map_err(|error| error.to_string());
-            sender.send_replace(Some(result.clone()));
-            result
-        });
-        plan.defer(
-            "drain application service",
-            Box::new(move || {
-                Box::pin(async move {
-                    drop(guard);
-                    task.await.map_err(|error| error.to_string())?
-                })
-            }),
-        )?;
         self.0
             .composition
             .addons()

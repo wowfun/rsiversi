@@ -2,6 +2,104 @@ use rsi::{ApplicationProfileId, ProfileCatalog, standard_application_host};
 use rsi_host::HostPaths;
 use std::collections::BTreeMap;
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_application_reports_occupied_owner_without_endpoint_discovery_wait() {
+    let temporary = tempfile::tempdir().unwrap();
+    let paths = HostPaths::new(
+        temporary.path().join("config"),
+        temporary.path().join("state"),
+        temporary.path().join("cache"),
+    )
+    .unwrap();
+    let owner_paths = rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap();
+    let lease = rsi_service_host::HostOwnerLease::try_acquire(owner_paths.clone()).unwrap();
+    for plugin in [
+        "rsi.application.connection",
+        "rsi.application.service",
+        "rsi.application.acp-service",
+    ] {
+        let (host, diagnostics) = standard_application_host(
+            rsi_app_catalog::compose(rsi::StandardComposition::new(
+                paths.clone(),
+                BTreeMap::new(),
+                None,
+                rsi_app_catalog::metadata(),
+            ))
+            .unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            host.start(rsi_host::Profile::new(vec![rsi_host::ProfileEntry::new(
+                "connection",
+                plugin,
+                serde_json::json!({"host_profile":"standard"}),
+            )])),
+        )
+        .await
+        .expect("Windows must report the owner conflict without waiting for a daemon endpoint");
+        assert!(result.is_err());
+        let diagnostic = format!("{:?}", diagnostics.take());
+        assert!(
+            diagnostic.contains("stop the other Web, TUI, ACP"),
+            "{plugin}: result={result:?}; diagnostic={diagnostic}"
+        );
+        assert!(owner_paths.read_metadata().unwrap().is_none());
+        assert!(rsi_service_host::HostOwnerLease::try_acquire(owner_paths.clone()).is_err());
+    }
+    drop(lease);
+    drop(rsi_service_host::HostOwnerLease::try_acquire(owner_paths).unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test]
+async fn embedded_application_connection_starts_without_optional_process_capabilities() {
+    let temporary = tempfile::tempdir().unwrap();
+    let paths = HostPaths::new(
+        temporary.path().join("config"),
+        temporary.path().join("state"),
+        temporary.path().join("cache"),
+    )
+    .unwrap();
+    let (host, diagnostics) = standard_application_host(
+        rsi_app_catalog::compose(rsi::StandardComposition::new(
+            paths.clone(),
+            BTreeMap::new(),
+            None,
+            rsi_app_catalog::metadata(),
+        ))
+        .unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let running = host
+        .start(rsi_host::Profile::new(vec![rsi_host::ProfileEntry::new(
+            "connection",
+            "rsi.application.connection",
+            serde_json::json!({"host_profile":"standard"}),
+        )]))
+        .await
+        .unwrap_or_else(|error| panic!("{error}; {:?}", diagnostics.take()));
+    let sessions = running
+        .lookup_local::<rsi_session_protocol::SessionContract>()
+        .unwrap();
+    assert!(
+        sessions
+            .list_recent(None, 8)
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    drop(sessions);
+    assert!(running.shutdown().await.is_clean());
+    let owner_paths = rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap();
+    let replacement = rsi_service_host::HostOwnerLease::try_acquire(owner_paths).unwrap();
+    drop(replacement);
+}
+
 #[tokio::test]
 async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend() {
     let temporary = tempfile::tempdir().unwrap();
@@ -56,15 +154,15 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
             arguments.into_iter().map(Into::into).collect(),
         )
         .unwrap();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let program = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
             .application(&ApplicationProfileId::new("devices").unwrap())
             .unwrap()
             .program()
             .unwrap();
-        // The standard operator transport is Linux-only. Exercise the same
+        // Other platforms lack the standard operator transport. Exercise the same
         // portable application factory directly where that backend is absent.
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         let program = rsi_host::ProfileProgram::from_profile(rsi_host::Profile::new(vec![
             rsi_host::ProfileEntry::new(
                 "application",
@@ -80,7 +178,7 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[tokio::test]
 async fn invalid_serve_transport_policy_is_rejected_before_service_activation() {
     for args in [
@@ -144,7 +242,7 @@ async fn invalid_serve_transport_policy_is_rejected_before_service_activation() 
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_listener_and_owner() {
     use rsi_api_protocol::{
@@ -155,12 +253,6 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         temporary.path().join("config"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
-    )
-    .unwrap();
-    std::fs::create_dir_all(paths.config()).unwrap();
-    std::fs::write(
-        paths.config().join("settings.json"),
-        br#"{"rsi.agent":{"default_model":{"deployment":"fixture","model":"unused"}}}"#,
     )
     .unwrap();
     let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
@@ -195,6 +287,17 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
     assert_eq!(count("rsi.session"), 1);
     assert_eq!(count("rsi.api"), 1);
     assert_eq!(count("rsi.serve.http"), 1);
+    let conflict = rsi_service_host::HostOwnerLease::try_acquire(
+        rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(conflict, rsi_service_host::ServiceHostError::OwnerActive);
+    #[cfg(windows)]
+    assert!(
+        conflict
+            .to_string()
+            .contains("stop the other Web, TUI, ACP")
+    );
     let description = running
         .lookup_local::<ConnectionDescriptionContract>()
         .unwrap();
@@ -243,7 +346,7 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
     .unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn http_description(address: std::net::SocketAddr, token: Option<&str>) -> String {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -340,7 +443,7 @@ async fn ordinary_application_source_errors_are_rejected_by_the_shared_compiler_
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[tokio::test]
 async fn retained_service_observation_does_not_keep_native_ownership_after_shutdown() {
     let temporary = tempfile::tempdir().unwrap();
@@ -348,12 +451,6 @@ async fn retained_service_observation_does_not_keep_native_ownership_after_shutd
         temporary.path().join("config"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
-    )
-    .unwrap();
-    std::fs::create_dir_all(paths.config()).unwrap();
-    std::fs::write(
-        paths.config().join("settings.json"),
-        br#"{"rsi.agent":{"default_model":{"deployment":"fixture","model":"unused"}}}"#,
     )
     .unwrap();
     let (host, _) = rsi::standard_application_host(

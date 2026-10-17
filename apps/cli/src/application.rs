@@ -103,6 +103,11 @@ fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
     let environment = [
         "PATH",
         "HOME",
+        "SystemRoot",
+        "WINDIR",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XDG_RUNTIME_DIR",
@@ -114,16 +119,26 @@ fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
     .into_iter()
     .filter_map(|key| std::env::var_os(key).map(|value| (std::ffi::OsString::from(key), value)))
     .collect();
-    let command = if std::env::var_os("WSL_INTEROP").is_some() {
-        "wslview"
+    let (command, arguments) = if cfg!(windows) {
+        let system = std::env::var_os("SystemRoot")
+            .ok_or_else(|| RsiError::Boot("SystemRoot is missing".into()))?;
+        (
+            std::path::PathBuf::from(system)
+                .join("System32/rundll32.exe")
+                .into_os_string(),
+            vec!["url.dll,FileProtocolHandler".into()],
+        )
+    } else if std::env::var_os("WSL_INTEROP").is_some() {
+        ("wslview".into(), Vec::new())
     } else {
-        "xdg-open"
+        ("xdg-open".into(), Vec::new())
     };
     Ok(rsi_serve::WebLaunchEnvironment {
         assets,
         ssh,
         opener: Some(std::sync::Arc::new(rsi_serve::SystemBrowserOpener {
-            command: command.into(),
+            command,
+            arguments,
             environment,
         })),
     })
