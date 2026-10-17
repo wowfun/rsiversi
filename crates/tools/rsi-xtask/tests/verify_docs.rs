@@ -568,3 +568,68 @@ fn application_docs_have_the_same_taxonomy_gate() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("apps/terminal/docs/specs"));
 }
+#[test]
+fn user_translations_require_pairs_links_and_matching_platform_commands() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "crates/rsi/AGENTS.md",
+        "Govern the RSI product.\n",
+    );
+    write(
+        repository.path(),
+        "crates/rsi/README.md",
+        "# RSI\n\nOwn the application product.\n",
+    );
+    let original = "# Start\n\n[中文](start.zh.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nrsi.ps1 doctor\n```\n";
+    let translated = "# 开始\n\n[English](start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nrsi.ps1 doctor\n```\n";
+    write(repository.path(), "crates/rsi/docs/user/start.md", original);
+    assert!(stderr(&verify(repository.path())).contains("English/Chinese pair"));
+    write(
+        repository.path(),
+        "crates/rsi/docs/user/start.zh.md",
+        translated,
+    );
+    assert!(verify(repository.path()).status.success());
+    for (platform, language, valid) in [
+        ("windows", "bash", false),
+        ("linux", "powershell", false),
+        ("git-bash", "powershell", false),
+        ("all", "rust", false),
+        ("linux", "bash", true),
+        ("git-bash", "bash", true),
+        ("all", "bash", true),
+        ("all", "powershell", true),
+    ] {
+        for (name, contents) in [("start.md", original), ("start.zh.md", translated)] {
+            write(
+                repository.path(),
+                &format!("crates/rsi/docs/user/{name}"),
+                &contents
+                    .replace("platform=windows", &format!("platform={platform}"))
+                    .replace("```powershell", &format!("```{language}")),
+            );
+        }
+        let result = verify(repository.path());
+        assert_eq!(result.status.success(), valid, "{platform}/{language}");
+        if !valid {
+            assert!(
+                stderr(&result).contains("fence language"),
+                "{platform}/{language}"
+            );
+        }
+    }
+    write(repository.path(), "crates/rsi/docs/user/start.md", original);
+    write(
+        repository.path(),
+        "crates/rsi/docs/user/start.zh.md",
+        &translated.replace("rsi.ps1 doctor", "rsi.ps1 setup"),
+    );
+    assert!(stderr(&verify(repository.path())).contains("command examples differ"));
+    write(
+        repository.path(),
+        "crates/rsi/docs/user/start.zh.md",
+        &translated.replace("[English](start.md)", "English"),
+    );
+    assert!(stderr(&verify(repository.path())).contains("link to its translation"));
+}

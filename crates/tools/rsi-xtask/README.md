@@ -44,6 +44,22 @@ under `fixtures/<product>/<fixture>` in an existing product namespace and retain
 their own README. Generated outputs and installed dependencies are excluded;
 authored fixture documentation is checked.
 
+RSI user tutorials under `crates/rsi/docs/user` pair `name.md` with `name.zh.md`,
+link to each other, and share executable examples verbatim. An example marker
+`<!-- rsi-example id=NAME platform=windows|linux|git-bash|all -->` immediately
+precedes its fenced block. IDs are unique across English pages; the Chinese pair
+uses the same IDs, platforms and commands. Windows examples use `powershell`
+fences; Linux and Git Bash use `bash`. The `all` label accepts either shell.
+The whole RSI user subtree is checked. CommonMark links must resolve to the
+paired page; images and code samples do not count as navigation. Fenced examples
+accept CommonMark indentation, quote/list containers, fence delimiters and info strings, comparing the
+normalized shell language and command body. Each malformed marker, duplicate ID,
+or unterminated fence (including an over-indented apparent closing fence),
+command mismatch and filesystem error has its own diagnostic; one error does
+not suppress independent checks.
+Verification checks these contracts;
+executing an example remains an explicit, platform-specific integration check.
+
 `cargo xtask verify-agent-notes` checks Note lifecycle and archive integrity.
 Only its explicit `--write` mode may append archive seals; it never replaces an
 existing seal. [Agent Notes](../../../.agents/notes/README.md) own that lifecycle.

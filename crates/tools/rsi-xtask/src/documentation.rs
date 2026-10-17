@@ -1,3 +1,7 @@
+mod user_translations;
+
+use user_translations::validate as validate_user_translations;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -62,6 +66,7 @@ struct MarkdownHeading {
 
 #[derive(Debug)]
 struct Link {
+    is_image: bool,
     destination: String,
     line: usize,
 }
@@ -74,6 +79,7 @@ pub(crate) fn verify(repository: &Path) -> Vec<String> {
     validate_docs_taxonomy(repository, &mut diagnostics);
     validate_package_readmes(repository, &mut diagnostics);
     validate_markdown_links(repository, &mut diagnostics);
+    validate_user_translations(repository, &mut diagnostics);
     diagnostics.sort();
     diagnostics
         .into_iter()
@@ -757,7 +763,13 @@ fn markdown_links(contents: &str) -> Vec<Link> {
     parser(contents)
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
-            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => Some(Link {
+            Event::Start(Tag::Link { dest_url, .. }) => Some(Link {
+                is_image: false,
+                destination: dest_url.into_string(),
+                line: line_number(contents, range.start),
+            }),
+            Event::Start(Tag::Image { dest_url, .. }) => Some(Link {
+                is_image: true,
                 destination: dest_url.into_string(),
                 line: line_number(contents, range.start),
             }),
