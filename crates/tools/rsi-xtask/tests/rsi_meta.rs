@@ -205,6 +205,7 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     for package in [
         "rsi",
         "rsi-cli",
+        "rsi-app-catalog",
         "rsi-agent-store-sqlite",
         "rsi-storage-json",
         "rsi-storage-sqlite",
@@ -237,21 +238,9 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     assert!(!commands.iter().any(|command| {
         command.starts_with(&["cargo", "test"]) && command.contains(&"--workspace")
     }));
-    let tools = &workflow["jobs"]["windows-repository-tools"];
-    assert_eq!(tools["runs-on"], "windows-2025");
-    for gate in [job, tools] {
-        assert_windows_architecture_admission(gate);
-    }
+    assert_windows_architecture_admission(job);
     assert_native_test_budgets(job);
-    assert!(tools["steps"].as_array().unwrap().iter().any(|step| {
-        let Some(command) = step["run"].as_str() else {
-            return false;
-        };
-        let command = command.split_whitespace().collect::<Vec<_>>();
-        whole_package_command(&command, "test")
-            && command.contains(&"--no-fail-fast")
-            && cargo_packages(&command).contains("rsi-xtask")
-    }));
+    assert_windows_tooling_gate(&workflow);
     for step in job["steps"]
         .as_array()
         .unwrap()
@@ -263,6 +252,27 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
             "${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}"
         );
         assert!(step["timeout-minutes"].as_u64().is_some());
+    }
+}
+
+fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
+    let tools = &workflow["jobs"]["windows-repository-tools"];
+    assert_eq!(tools["runs-on"], "windows-2025");
+    assert_windows_architecture_admission(tools);
+    for package in ["rsi-xtask", "rsi-app-tools", "rsi-build-info"] {
+        assert!(
+            tools["steps"].as_array().unwrap().iter().any(|step| {
+                let Some(command) = step["run"].as_str() else {
+                    return false;
+                };
+                let command = command.split_whitespace().collect::<Vec<_>>();
+                whole_package_command(&command, "test")
+                    && command.contains(&"--no-fail-fast")
+                    && command.contains(&"--all-targets")
+                    && cargo_packages(&command).contains(package)
+            }),
+            "{package} needs native Windows tooling regression coverage"
+        );
     }
 }
 

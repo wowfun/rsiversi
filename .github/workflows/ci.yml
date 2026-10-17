@@ -1069,10 +1069,10 @@ jobs:
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
         run: cargo test --locked -p rsi-agent-store-sqlite --all-targets --no-fail-fast
-      - name: Test Windows CLI parsing and built binary admission boundaries
+      - name: Test Windows CLI and application ownership boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 30
-        run: cargo test --locked -p rsi-cli --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-cli -p rsi-app-catalog --all-targets --no-fail-fast
       - name: Test the standard product default Windows targets
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 40
@@ -1121,10 +1121,10 @@ jobs:
         timeout-minutes: 5
         with:
           workspaces: . -> target
-      - name: Test repository tooling and Windows CI coverage invariants
+      - name: Test repository tooling, source entry and Windows CI coverage invariants
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-xtask --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-xtask -p rsi-app-tools -p rsi-build-info --all-targets --no-fail-fast
 
   rsi-ssh-linux:
     runs-on: ubuntu-24.04

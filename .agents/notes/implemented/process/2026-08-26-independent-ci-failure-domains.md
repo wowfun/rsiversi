@@ -139,6 +139,9 @@ roots through Cargo and runs full locked metadata, aggregating stale, missing
 and orphaned lock diagnostics. Its explicit online mode fetches dependencies;
 local verification defaults to offline. This detects manifest drift that a
 vulnerability audit of old dependency versions cannot establish.
+The lockfile job also installs the source bootstrap's pinned npm tools with
+`npm ci --ignore-scripts`. Declaration-equality tests catch pin drift, while
+the install establishes that npm accepts the resolved package and integrity data.
 
 Platform-dependent filesystem and process fixtures cannot establish portable
 behavior merely because their input types compile. Git metadata equality also
