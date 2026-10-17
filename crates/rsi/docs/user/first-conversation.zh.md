@@ -40,4 +40,3 @@ Windows 当前支持对话和原生文件访问，受限 Shell 命令暂不可�
 Windows 上请先停止 Web，再启动[终端界面](terminal.zh.md)或使用离线设备管理。
 
 成功收到第一次回复后，可以继续阅读[日常使用](daily-use.zh.md)。
-

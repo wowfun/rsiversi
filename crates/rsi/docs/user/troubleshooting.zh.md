@@ -39,4 +39,3 @@ Linux SSH 目标、Web PTY、Browser/Automation、原生桌面发行、
 Agent Store 状态重置、已完成进程的输出缓存和 MCP Profile 管理也不在本轮 Windows 支持范围内。
 界面上的部分操作可能返回明确的不可用提示。
 需要这些 Linux 工作流时请使用 Linux/WSL，不要把 Windows 构建成功理解为全部能力都已对齐。
-

@@ -43,4 +43,3 @@ OpenAI compatible（OpenAI 兼容）连接还需要 **Request path（请求路�
 
 修改默认值后，新建对话并发送一条简短文本。
 认证错误、未知模型和本地沙箱拒绝的原因不同，请按[故障排查](troubleshooting.zh.md)中的对应步骤处理。
-

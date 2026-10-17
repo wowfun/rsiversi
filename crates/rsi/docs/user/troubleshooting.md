@@ -41,4 +41,3 @@ Agent Store reset, completed process output cache and MCP Profile management are
 also outside this Windows release scope. A visible action may return a specific
 unavailable diagnostic. Use Linux/WSL for those supported Linux workflows; do not
 interpret the Windows build as full platform parity.
-

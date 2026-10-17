@@ -44,4 +44,3 @@ conversation from history. On Windows, stop Web before starting the
 [terminal interface](terminal.md) or using the offline device manager.
 
 Continue with [daily use](daily-use.md) once the first response succeeds.
-

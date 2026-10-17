@@ -45,4 +45,3 @@ screenshots or shared logs.
 After changing defaults, start a new conversation and send a short text message.
 An authentication error, unknown-model error and local sandbox refusal have
 different causes; use the corresponding [troubleshooting steps](troubleshooting.md).
-

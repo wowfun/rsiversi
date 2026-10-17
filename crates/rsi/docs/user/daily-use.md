@@ -46,4 +46,3 @@ the application is stopped; keep credentials private. Do not delete these direct
 to fix a build failure: build outputs live under the checkout's `target` directory.
 
 The [Host path contract](../../core/README.md) owns exact path resolution.
-

@@ -31,4 +31,3 @@ exit and handled cancellation when the terminal host responds. A forced process
 kill or an unresponsive terminal host cannot promise complete cleanup. Restart
 the terminal tab if either leaves it altered. The
 [terminal ownership contract](../../../../apps/terminal/README.md) defines cleanup guarantees.
-

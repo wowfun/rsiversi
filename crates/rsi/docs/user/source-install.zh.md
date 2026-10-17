@@ -72,4 +72,3 @@ mintty 可以启动 Web；全屏 TUI 需要在 Windows Terminal 中运行 Git Ba
 
 接下来[完成第一次对话](first-conversation.zh.md)。
 构建失败和长路径问题见[故障排查](troubleshooting.zh.md)。
-
