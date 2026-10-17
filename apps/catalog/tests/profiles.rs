@@ -130,11 +130,16 @@ fn legacy_application_documents_and_the_retired_name_require_explicit_recreation
 #[test]
 fn copy_list_and_delete_touch_only_the_owned_document_directory() {
     let temp = tempfile::tempdir().unwrap();
-    let catalog = catalog(temp.path());
+    let catalog = catalog(&temp.path().join("profile roots with spaces"));
     let session = ApplicationProfileId::new("cli").unwrap();
     let custom = ApplicationProfileId::new("my-session").unwrap();
     let path = catalog.copy_application(&session, &custom).unwrap();
     assert_eq!(path, catalog.application_path(&custom));
+    let entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries, std::slice::from_ref(&path));
     assert_eq!(
         catalog.application(&custom).unwrap().contents,
         catalog.application(&session).unwrap().contents

@@ -79,6 +79,12 @@ asset or activate the selected Host Profile.
 Catalog listing includes only regular profile documents; a symbolic-link
 document is neither opened nor advertised as an available profile.
 
+Copy writes and syncs a temporary file, installs it into a new profile directory,
+then syncs that directory before reporting success. Windows uses the
+[native filesystem](../../../rsi-files/native-fs/README.md) directory flush;
+Unix syncs its opened directory file. A synchronization error remains an error
+and may leave the installed document; copy never overwrites an existing identity.
+
 On Unix, `ProfileCatalog::preview_host_edit` and `preview_application_edit`
 select one existing user document and borrow an explicit frozen Host. Builtins
 are immutable; includes and linked fragments have no writable selection. The

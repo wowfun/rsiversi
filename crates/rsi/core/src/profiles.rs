@@ -5,7 +5,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -686,9 +686,11 @@ fn create_new_document(path: &Path, bytes: &[u8]) -> Result<(), ProfileCatalogEr
             .and_then(|()| file.sync_all())
             .map_err(|error| io("write", &temporary, error))?;
         fs::rename(&temporary, path).map_err(|error| io("install", path, error))?;
-        File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| io("sync", directory, error))
+        #[cfg(windows)]
+        let synced = rsi_files_native_fs::sync_absolute_directory_no_follow(directory);
+        #[cfg(not(windows))]
+        let synced = fs::File::open(directory).and_then(|file| file.sync_all());
+        synced.map_err(|error| io("sync", directory, error))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
