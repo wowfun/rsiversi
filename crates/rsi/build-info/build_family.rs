@@ -11,6 +11,9 @@ pub fn validate(root: &Path, value: &Value) -> Result<Vec<PathBuf>, String> {
     if value.get("format").and_then(Value::as_u64) != Some(1) {
         return Err("unsupported paired build manifest schema".into());
     }
+    if value.get("managed").and_then(Value::as_bool).is_none() {
+        return Err("paired build manifest has no boolean managed flag".into());
+    }
     let files = value
         .get("files")
         .and_then(Value::as_object)

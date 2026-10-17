@@ -14,7 +14,7 @@ test("recovery and tasks retain frozen binary identity when browser startup fail
     const bytes = "unused executable\n";
     await writeFile(binary, bytes, { mode: 0o700 });
     const family = 'a'.repeat(64);
-    await writeFile(join(directory, 'receipt.json'), JSON.stringify({format:1,family_sha256:family,artifacts:{rsi:createHash('sha256').update(bytes).digest('hex')}}));
+    await writeFile(join(directory, 'receipt.json'), JSON.stringify({format:2,family_sha256:family,artifacts:{rsi:createHash('sha256').update(bytes).digest('hex')}}));
     await writeFile(join(directory, 'rsi-build.json'), JSON.stringify({format:1,family_sha256:family}));
     for (const probe of ["recovery", "tasks"]) {
       const report = join(directory, probe);

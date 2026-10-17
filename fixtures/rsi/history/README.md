@@ -6,7 +6,7 @@ It indexes a native source, opens the verified original, selects a Unicode
 fragment, freezes it for an unpublished target and preserves the existing draft.
 Screenshots cover matches, selected original, frozen review and narrow rendering.
 Build the paired publication first with `pnpm -C apps/web build --debug`.
-The fixture takes its binary and assets from `target/rsi-app/current`;
+The fixture resolves its binary and assets using the `target/rsi-app/current` generation record;
 `RSI_PAIRED_BUNDLE` selects another complete paired publication. This
 fixture does not install source copies, use credentials or claim native desktop
 or live-provider coverage.

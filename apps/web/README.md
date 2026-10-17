@@ -151,9 +151,12 @@ From the repository, run `pnpm -C apps/web install --frozen-lockfile --ignore-sc
 and `pnpm -C apps/web build --debug`. The producer freezes the current source,
 uses the installed wasm32 target and wasm-bindgen 0.2.127, and publishes a paired
 native executable and complete asset bundle. The command reports the concrete
-bundle directory; `target/rsi-app/current/rsi web` launches the latest managed
+bundle directory; `bash rsi.sh web` launches the latest managed
 publication. Omit `--debug` for release. The optional absolute output directory
 must be new and remains caller-owned.
+Local compilation has no fixed per-command deadline: a cold Windows release
+build can exceed ten minutes in the Worker stage alone. CI owns its job deadlines;
+the producer waits for the compiler and publishes only a complete successful bundle.
 
 A standalone `cargo build -p rsi-cli --bin rsi` does not have a Web build family.
 Product Web entry rejects it before starting a Service. A paired executable checks
@@ -502,7 +505,7 @@ For the local product entrypoint, publish a paired generation, then launch it:
 ```bash
 pnpm -C apps/web install --frozen-lockfile --ignore-scripts
 pnpm -C apps/web build --debug
-target/rsi-app/current/rsi web
+bash rsi.sh web
 ```
 
 The installed layout is `rsi` beside the complete `assets/` directory. Startup

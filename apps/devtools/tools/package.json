@@ -1,0 +1,6 @@
+{
+  "name": "rsi-source-tools",
+  "private": true,
+  "version": "0.0.1",
+  "dependencies": { "pnpm": "12.6.0" }
+}

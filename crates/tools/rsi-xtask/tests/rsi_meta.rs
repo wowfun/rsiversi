@@ -1069,13 +1069,13 @@ fn paired_web_consumers_have_independent_failure_domains() {
         );
     }
     let probes = step("web_integrations")["run"].as_str().unwrap();
-    assert!(probes.contains("run-paired.py"));
+    assert!(probes.contains("cargo run --locked -p rsi-app-tools -- dist addon-workbench"));
     assert!(probes.contains("--ignored --exact --list"));
     assert!(
         !step("web_product")["run"]
             .as_str()
             .unwrap()
-            .contains("run-paired.py")
+            .contains("dist addon-workbench")
     );
 }
 

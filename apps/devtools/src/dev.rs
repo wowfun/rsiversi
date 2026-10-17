@@ -390,12 +390,12 @@ async fn start_development(
         dev.log.display()
     );
     if options.surface == "web" {
-        let mut build = tokio::process::Command::new("python3");
+        let mut build = tokio::process::Command::new(std::env::current_exe().map_err(problem)?);
         build
             .env_clear()
             .envs(dev.build_environment())
             .current_dir(&dev.root)
-            .arg(dev.root.join("apps/devtools/distribution.py"))
+            .arg("dist")
             .arg("web")
             .arg(dev.directory.join("publication"))
             .arg("--debug");

@@ -16,7 +16,7 @@ struct Receipt {
     profile: String,
     kind: String,
     mode: String,
-    helper_target: String,
+    helper_target: Option<String>,
     artifacts: BTreeMap<String, String>,
 }
 /// The adjacent receipt is installed with the binary, never supplied by an API caller.
@@ -38,11 +38,11 @@ fn receipt(executable: &Path, running_image: &Path) -> Result<(PathBuf, [u8; 32]
         serde_json::from_slice(&bounded(&directory.join("receipt.json"), 1024 * 1024)?)
             .map_err(|_| ())?;
     let cpu = std::env::consts::ARCH;
-    if receipt.format != 1
+    if receipt.format != 2
         || receipt.mode != "published"
         || !matches!(receipt.profile.as_str(), "debug" | "release")
         || !matches!(receipt.kind.as_str(), "web" | "desktop")
-        || receipt.helper_target != format!("{cpu}-unknown-linux-musl")
+        || receipt.helper_target.as_deref() != Some(format!("{cpu}-unknown-linux-musl").as_str())
         || receipt.target != format!("{cpu}-unknown-linux-gnu")
         || receipt.artifacts.len() > 1024
     {
@@ -117,7 +117,7 @@ mod tests {
         std::fs::write(&executable, b"fixture-host-executable").unwrap();
         std::fs::write(root.path().join("build-family.json"), b"fixture-family").unwrap();
         let mut value = serde_json::json!({
-            "format":1, "family_sha256":hex::encode(Sha256::digest(b"fixture-family")),
+            "format":2, "family_sha256":hex::encode(Sha256::digest(b"fixture-family")),
             "target":format!("{}-unknown-linux-gnu", std::env::consts::ARCH),
             "helper_target":format!("{}-unknown-linux-musl", std::env::consts::ARCH),
             "profile":"debug", "kind":"web", "mode":"published",
@@ -160,7 +160,7 @@ mod tests {
         std::fs::write(&running, b"running-image").unwrap();
         std::fs::write(root.path().join("build-family.json"), b"family").unwrap();
         let mut value = serde_json::json!({
-            "format":1, "family_sha256":hex::encode(Sha256::digest(b"family")),
+            "format":2, "family_sha256":hex::encode(Sha256::digest(b"family")),
             "target":format!("{}-unknown-linux-gnu", std::env::consts::ARCH),
             "helper_target":format!("{}-unknown-linux-musl", std::env::consts::ARCH),
             "profile":"debug", "kind":"web", "mode":"published",
