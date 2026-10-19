@@ -216,7 +216,8 @@ pub(crate) fn file_uri(workspace: &Path, path: &str) -> Result<String> {
 }
 fn contained_path(workspace: &Path, uri: &str) -> Result<String> {
     let uri = url::Url::parse(uri).map_err(|_| Error::Protocol)?;
-    if uri.query().is_some()
+    if uri.scheme() != "file"
+        || uri.query().is_some()
         || uri.fragment().is_some()
         || uri.host_str().is_some_and(|h| h != "localhost")
     {
@@ -238,6 +239,7 @@ fn contained_path(workspace: &Path, uri: &str) -> Result<String> {
     relative(&path).map_err(|_| Error::Protocol)?;
     Ok(path)
 }
+
 fn part(value: &serde_json::Value) -> Result<&str> {
     value
         .as_str()
@@ -357,5 +359,57 @@ pub fn byte_offset(text: &str, position: Position) -> Result<usize> {
         Ok(base + row.len())
     } else {
         Err(Error::Invalid)
+    }
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::*;
+
+    #[test]
+    fn locations_accept_only_contained_file_uris() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path();
+        let path = "src/中文 space%#.rs";
+        let valid = file_uri(workspace, path).unwrap();
+        let range = serde_json::json!({
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1}
+        });
+        let outside = url::Url::from_file_path(workspace.parent().unwrap().join("outside.rs"))
+            .unwrap()
+            .to_string();
+        let rejected = [
+            valid.replacen("file:", "https:", 1),
+            valid.replacen("file:", "custom:", 1),
+            format!("{valid}?query"),
+            format!("{valid}#fragment"),
+            "file://other-host/share/source.rs".into(),
+            "file:///".into(),
+            url::Url::from_directory_path(workspace)
+                .unwrap()
+                .to_string(),
+            outside,
+        ];
+        for link in [false, true] {
+            let location = |uri: &str| {
+                if link {
+                    serde_json::json!({"targetUri": uri, "targetSelectionRange": range})
+                } else {
+                    serde_json::json!({"uri": uri, "range": range})
+                }
+            };
+            let result = normalize(workspace, Operation::Definition, location(&valid)).unwrap();
+            let QueryResult::Locations { locations } = result else {
+                panic!("locations")
+            };
+            assert_eq!(locations[0].path, path);
+            for uri in &rejected {
+                assert!(
+                    normalize(workspace, Operation::Definition, location(uri)).is_err(),
+                    "{uri}"
+                );
+            }
+        }
     }
 }
