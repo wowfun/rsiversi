@@ -166,6 +166,8 @@ async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
             image: Arc::new(ImageFixture {
                 events: Mutex::new(VecDeque::new()),
                 store: Arc::clone(&store),
+                prepare_gate: Mutex::new(None),
+                starts: Arc::new(AtomicUsize::new(0)),
             }),
             media: Arc::new(MediaFixture {
                 imports: AtomicUsize::new(0),

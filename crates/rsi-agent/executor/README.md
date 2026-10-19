@@ -287,11 +287,16 @@ dispatcher; actual Turn cancellation and Host stop remain authoritative.
 An uncertain Tool effect produces `Interrupted` with Tool effect kind and no
 Tool result Fact. Retained recovery preserves this classification and never
 invokes the Tool again. Pre-terminal finalizers can report the same uncertainty
-for background work; it takes precedence over ordinary completion blockers,
-cleanup errors and cancellation once all admitted cleanup has settled.
+for background work; it takes precedence over ordinary completion blockers
+and cleanup errors once all admitted cleanup has settled. Kernel's
+[Turn terminal policy](../docs/subsystems/turns-and-agent-trees.md) remains authoritative: a durable
+cancellation request canonicalizes the terminal outcome to `Cancelled`.
 
 Each model or image attempt admits the original claim's execution delegation
 before provider preparation and retains that finite operation through settlement.
+Image preparation observes Host stop and durable Turn cancellation, with stop
+then cancellation taking precedence over a simultaneously ready preparation.
+Cancellation before preparation completes publishes no Image intent or start.
 Revocation prevents the next attempt without preventing publication of an already
 accepted result. Unavailable delegation interrupts the Turn; the executor never
 substitutes a current provider or retries a request under different authority.

@@ -1,5 +1,134 @@
 use super::*;
 
+#[tokio::test]
+async fn image_prepare_cancellation_releases_the_only_execution_lane() {
+    for release_with_cancel in [false, true] {
+        let stack = BaseStack::activate().await;
+        let entered = Arc::new(Notify::new());
+        let release = CancellationToken::new();
+        *stack.image.prepare_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let language = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let language_fiber = stack
+            .activate_language("test.language.image-cancel", language.clone())
+            .await;
+        let executor_fiber = stack
+            .activate_executor_with_config(
+                json!({"executor_id":"image-prepare-cancel", "maximum_active_turns":1}),
+            )
+            .await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let submitted = turns
+            .submit_image(SubmitImage {
+                turn_id: client_turn_id(),
+                session: stack.fresh(header()).await,
+                model: ModelRef::new("deployment", "image-model").unwrap(),
+                request: ImageRequest::new("pending preparation", 1).unwrap(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        turns
+            .cancel(&submitted.session_id, &submitted.turn_id, None)
+            .await
+            .unwrap();
+        if release_with_cancel {
+            release.cancel();
+        }
+        assert_eq!(
+            wait_for_outcome(&turns, &submitted).await,
+            TurnOutcome::Cancelled
+        );
+        let next = stack
+            .submit_fresh(&turns, "after-image-cancel", "answer")
+            .await;
+        assert_eq!(
+            wait_for_outcome(&turns, &next).await,
+            TurnOutcome::Completed
+        );
+        assert_eq!(language.starts.load(Ordering::SeqCst), 1);
+        release.cancel();
+        tokio::task::yield_now().await;
+        assert_eq!(stack.image.starts.load(Ordering::SeqCst), 0);
+        let page = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64)
+            .await
+            .unwrap();
+        assert!(!page.facts.iter().any(|fact| matches!(
+            fact.body(),
+            SessionFactBody::ImageIntent { .. } | SessionFactBody::ImageStarted { .. }
+        )));
+        drop(turns);
+        stack.dispose(language_fiber, executor_fiber).await;
+    }
+}
+
+#[tokio::test]
+async fn host_stop_during_image_prepare_never_starts_or_publishes_an_intent() {
+    let stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    *stack.image.prepare_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language_fiber = stack
+        .activate_language("test.language.image-stop", language)
+        .await;
+    let executor_fiber = stack.activate_executor("image-prepare-stop").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = turns
+        .submit_image(SubmitImage {
+            turn_id: client_turn_id(),
+            session: stack.fresh(header()).await,
+            model: ModelRef::new("deployment", "image-model").unwrap(),
+            request: ImageRequest::new("pending preparation", 1).unwrap(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let report = tokio::time::timeout(std::time::Duration::from_secs(1), executor_fiber.dispose())
+        .await
+        .unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    release.cancel();
+    tokio::task::yield_now().await;
+    assert_eq!(stack.image.starts.load(Ordering::SeqCst), 0);
+    let page = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64)
+        .await
+        .unwrap();
+    assert!(!page.facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ImageIntent { .. } | SessionFactBody::ImageStarted { .. }
+    )));
+    drop(turns);
+    stack.dispose(language_fiber, executor_fiber).await;
+}
+
 fn partial_image_script() -> Vec<std::result::Result<ImageEvent, AiError>> {
     vec![
         Ok(ImageEvent::OutputStarted {

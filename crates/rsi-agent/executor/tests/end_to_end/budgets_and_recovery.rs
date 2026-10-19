@@ -1,5 +1,109 @@
 use super::*;
 
+#[derive(Debug)]
+struct UnknownFinalizer {
+    entered: Notify,
+    release: CancellationToken,
+    settled: AtomicUsize,
+}
+#[async_trait]
+impl TurnFinalizer for UnknownFinalizer {
+    async fn finalize(
+        &self,
+        _: &TurnFinalizationContext,
+    ) -> FinalizationResult<TurnFinalizationReport> {
+        self.entered.notify_one();
+        self.release.cancelled().await;
+        self.settled.fetch_add(1, Ordering::SeqCst);
+        Err(TurnFinalizationError::OutcomeUnknown)
+    }
+}
+
+#[tokio::test]
+async fn unknown_finalizer_settles_before_kernel_classifies_durable_cancellation() {
+    for cancel in [false, true] {
+        let stack = BaseStack::activate().await;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let fixture = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+            requests: Mutex::new(vec![]),
+            starts: starts.clone(),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let language = stack
+            .activate_language("test.language.finalizer-unknown", fixture)
+            .await;
+        let (owner, context) =
+            rsi_agent_testkit::activate_contribution_owner(&stack.runtime.root())
+                .await
+                .unwrap();
+        let finalizer = Arc::new(UnknownFinalizer {
+            entered: Notify::new(),
+            release: CancellationToken::new(),
+            settled: AtomicUsize::new(0),
+        });
+        let lease = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnFinalizationContract>()
+            .unwrap()
+            .register(
+                &context.registration_context().unwrap(),
+                "unknown-finalizer".into(),
+                finalizer.clone(),
+            )
+            .unwrap();
+        let executor = stack.activate_executor("executor-finalizer-unknown").await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let submitted = stack
+            .submit_fresh(&turns, "session-e2e", "finish once")
+            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            finalizer.entered.notified(),
+        )
+        .await
+        .unwrap();
+        if cancel {
+            turns
+                .cancel(&submitted.session_id, &submitted.turn_id, None)
+                .await
+                .unwrap();
+        }
+        assert!(
+            turns
+                .outcome(&submitted.session_id, &submitted.turn_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        finalizer.release.cancel();
+        let outcome = wait_for_outcome(&turns, &submitted).await;
+        if cancel {
+            assert_eq!(outcome, TurnOutcome::Cancelled);
+        } else {
+            assert!(matches!(
+                outcome,
+                TurnOutcome::Interrupted {
+                    effect: Some(rsi_agent_session_protocol::EffectKind::Tool),
+                    ..
+                }
+            ));
+        }
+        assert_eq!(finalizer.settled.load(Ordering::SeqCst), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        drop(turns);
+        drop(lease);
+        assert!(owner.dispose().await.is_clean());
+        stack.dispose(language, executor).await;
+    }
+}
+
 #[tokio::test]
 async fn cancellation_bounds_a_provider_prepare_that_never_returns() {
     let stack = BaseStack::activate().await;

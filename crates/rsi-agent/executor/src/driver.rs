@@ -550,11 +550,19 @@ impl Driver {
         }
         let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
         let expected_outputs = usize::from(request.count());
-        let prepared = self
-            .image
-            .prepare(model, request)
-            .await
-            .map_err(|error| image_ai_failure(&error, Vec::new()))?;
+        let prepared = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+            result = self.image.prepare(model, request) =>
+                result.map_err(|error| image_ai_failure(&error, Vec::new()))?,
+        };
+        if stop.is_cancelled() {
+            return Err(DriveFailure::Stopped);
+        }
+        if cancellation.is_cancelled() {
+            return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+        }
         let snapshot = prepared.snapshot().clone();
         let effect_id = next_effect_id().map_err(fatal)?;
         let intent = self

@@ -563,6 +563,7 @@ struct PreparedImageScript {
     snapshot: PreparedCallSnapshot,
     events: Vec<std::result::Result<ImageEvent, AiError>>,
     store: Arc<MemoryStore>,
+    starts: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -575,6 +576,7 @@ impl PreparedImageCall for PreparedImageScript {
         self: Box<Self>,
         _cancellation: CancellationToken,
     ) -> std::result::Result<ImageStream, AiError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
         assert_latest_is(&self.store, |body| {
             matches!(body, SessionFactBody::ImageStarted { .. })
         })
@@ -587,6 +589,8 @@ impl PreparedImageCall for PreparedImageScript {
 struct ImageFixture {
     events: Mutex<VecDeque<Vec<std::result::Result<ImageEvent, AiError>>>>,
     store: Arc<MemoryStore>,
+    prepare_gate: Mutex<Option<(Arc<Notify>, CancellationToken)>>,
+    starts: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -600,6 +604,11 @@ impl ImageCall for ImageFixture {
         model: ModelRef,
         _request: ImageRequest,
     ) -> std::result::Result<Box<dyn PreparedImageCall>, AiError> {
+        let gate = self.prepare_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.cancelled().await;
+        }
         Ok(Box::new(PreparedImageScript {
             snapshot: PreparedCallSnapshot {
                 language_settings: None,
@@ -623,6 +632,7 @@ impl ImageCall for ImageFixture {
                 .pop_front()
                 .expect("image script"),
             store: self.store.clone(),
+            starts: self.starts.clone(),
         }))
     }
 }
@@ -1426,6 +1436,8 @@ impl BaseStack {
         let image = Arc::new(ImageFixture {
             events: Mutex::new(VecDeque::new()),
             store: store.clone(),
+            prepare_gate: Mutex::new(None),
+            starts: Arc::new(AtomicUsize::new(0)),
         });
         let media = Arc::new(MediaFixture {
             imports: AtomicUsize::new(0),
