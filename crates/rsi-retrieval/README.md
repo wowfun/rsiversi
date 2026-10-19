@@ -17,8 +17,12 @@ retain the separate syntactic HTTP/S link contract.
 The public-destination broker accepts canonical IP text or lowercase DNS names
 with nonempty labels of at most 63 bytes, alphanumeric label edges and no trailing
 dot. Its 80/443 port contract is independent of Browser's narrower HTTPS policy.
-`PublicDestinationResolver` owns one lazily initialized system resolver for its
-consumer generation. Connections repeat complete-answer validation; resolver
+`PublicDestinationResolver` owns one lazily initialized system resolver per
+instance. A Retrieval generation shares one instance between fetch and Exa;
+the public-destination broker owns a separate instance with the same policy.
+Retrieval activation performs no DNS initialization. Fetch retains its parsed
+HTTP/S URL policy, including absolute DNS names with a trailing dot; the broker
+retains its stricter canonical host syntax. Connections repeat complete-answer validation; resolver
 reuse supplies only the existing bounded DNS cache, never connection authority.
 Canonical destination policy is checked before resolver initialization. Public
 IPv4 literals need no DNS; IPv6 literals still require DNS64 discovery.

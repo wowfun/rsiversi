@@ -13,7 +13,7 @@ type Result<T> = std::result::Result<T, RetrievalError>;
 /// Per-operation work whose admission remains held by real blocking work.
 #[derive(Clone, Debug)]
 pub(crate) struct Work {
-    pub(crate) dns: Result<Arc<hickory_resolver::TokioResolver>>,
+    pub(crate) dns: Arc<crate::PublicDestinationResolver>,
     stop: CancellationToken,
     tasks: TaskTracker,
     _permit: Arc<OwnedSemaphorePermit>,
@@ -47,7 +47,7 @@ impl Drop for Cancel {
 /// Settings-aware service. No request is made by configuration or history reads.
 #[derive(Debug)]
 pub struct RetrievalService {
-    pub(crate) dns: Result<Arc<hickory_resolver::TokioResolver>>,
+    pub(crate) dns: Arc<crate::PublicDestinationResolver>,
     pub(crate) settings: Arc<dyn SettingsScope>,
     pub(crate) credentials: Arc<dyn CredentialsResolve>,
     pub(crate) permits: Arc<Semaphore>,

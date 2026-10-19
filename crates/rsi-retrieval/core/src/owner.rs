@@ -41,7 +41,7 @@ impl PluginFactory for RetrievalFactory {
             validator:Arc::new(ValidateWith(|value: &Value| serde_json::from_value::<RetrievalConfig>(value.clone()).map(|_|()).map_err(|_| SettingsError::InvalidInput("Retrieval settings require only web_fetch and web_search boolean flags".into())))),
         }).map_err(|error| MetaError::Activation(error.to_string()))?;
         let service = Arc::new(RetrievalService {
-            dns: crate::network::system_resolver(),
+            dns: Arc::new(crate::PublicDestinationResolver::new()),
             settings: registration.scope.clone(),
             credentials: plan.local::<CredentialsResolveContract>()?,
             permits: Arc::new(Semaphore::new(8)),

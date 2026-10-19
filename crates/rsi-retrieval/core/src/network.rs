@@ -328,7 +328,7 @@ where
 pub(crate) async fn fetch(value: &str, work: &Work) -> Result<Body, Error> {
     walk(value, |url| async move {
         // Every admitted hop resolves, checks all answers, and pins the actual connection.
-        let addresses = resolve(&url, &work.dns).await?;
+        let addresses = work.dns.resolve_url(&url).await?;
         let response = send(&url, &addresses, None).await?;
         if response.status().is_redirection() {
             if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
@@ -347,7 +347,7 @@ pub(crate) async fn fetch(value: &str, work: &Work) -> Result<Body, Error> {
 }
 pub(crate) async fn exa(key: HeaderValue, bytes: Vec<u8>, work: &Work) -> Result<Body, Error> {
     let url = parse_url("https://api.exa.ai/search")?;
-    let addresses = resolve(&url, &work.dns).await?;
+    let addresses = work.dns.resolve_url(&url).await?;
     let response = send(&url, &addresses, Some((key, bytes))).await?;
     // Exa is an exact credential target; redirects never receive the key.
     body(url, response).await

@@ -51,7 +51,7 @@ async fn corrupt_or_unreadable_configuration_is_distinct_from_disabled_access() 
     ] {
         let fixture = Arc::new(SettingsFixture(value));
         let service = Arc::new(RetrievalService {
-            dns: Err(RetrievalError::Resolution),
+            dns: Arc::new(crate::PublicDestinationResolver::new()),
             settings: fixture.clone(),
             credentials: fixture,
             permits: Arc::new(Semaphore::new(1)),
@@ -64,13 +64,17 @@ async fn corrupt_or_unreadable_configuration_is_distinct_from_disabled_access() 
                 .await,
             Err(expected)
         );
+        assert!(
+            service.dns.dns.get().is_none(),
+            "rejected access never initializes DNS"
+        );
         service.shutdown().await;
     }
 }
 #[tokio::test]
 async fn worker_panics_are_not_content_decode_or_cancellation_errors() {
     let work = Work {
-        dns: Err(RetrievalError::Resolution),
+        dns: Arc::new(crate::PublicDestinationResolver::new()),
         stop: CancellationToken::new(),
         tasks: TaskTracker::new(),
         _permit: Arc::new(Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap()),
@@ -136,7 +140,7 @@ async fn abandoned_blocking_work_retains_admission_and_owner_shutdown_until_actu
     let permits = Arc::new(Semaphore::new(1));
     let tasks = TaskTracker::new();
     let work = Work {
-        dns: Err(RetrievalError::Resolution),
+        dns: Arc::new(crate::PublicDestinationResolver::new()),
         stop: CancellationToken::new(),
         tasks: tasks.clone(),
         _permit: Arc::new(permits.clone().try_acquire_owned().unwrap()),
@@ -213,7 +217,9 @@ async fn dns_deadlines_release_all_operation_slots_and_do_not_hold_shutdown() {
         json!({"web_fetch":true,"web_search":false}),
     )));
     let service = Arc::new(RetrievalService {
-        dns: Ok(Arc::new(builder.build().unwrap())),
+        dns: Arc::new(crate::PublicDestinationResolver {
+            dns: tokio::sync::OnceCell::new_with(Some(Arc::new(builder.build().unwrap()))),
+        }),
         settings: fixture.clone(),
         credentials: fixture,
         permits: Arc::new(Semaphore::new(8)),

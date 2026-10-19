@@ -144,6 +144,41 @@ async fn public_resolver_retries_initialization_and_reuses_only_success() {
 }
 
 #[tokio::test]
+async fn fetch_urls_share_retryable_initialization_without_broker_syntax_changes() {
+    let fixture = dns_fixture().await;
+    let resolver = crate::PublicDestinationResolver::new();
+    let url = parse_url("https://public.example./path").unwrap();
+    assert_eq!(
+        resolver
+            .resolve_url_with(&url, || Err(Error::Resolution))
+            .await,
+        Err(Error::Resolution)
+    );
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let initialize = || {
+        attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(fixture.resolver.clone())
+    };
+    let (first, second) = tokio::join!(
+        resolver.resolve_url_with(&url, initialize),
+        resolver.resolve_url_with(&url, initialize),
+    );
+    assert_eq!(first.unwrap().len(), 2);
+    assert_eq!(second.unwrap().len(), 2);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        resolver.resolve("public.example.", 443).await,
+        Err(Error::BlockedUrl)
+    );
+    assert_eq!(
+        resolver.resolve("public.example", 443).await.unwrap().len(),
+        2
+    );
+    fixture.server.abort();
+    assert!(fixture.server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn real_dns_answers_are_checked_and_dns64_discovery_is_cached_without_fallback() {
     let DnsFixture {
         resolver,

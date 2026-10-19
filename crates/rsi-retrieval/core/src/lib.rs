@@ -27,9 +27,10 @@ impl PublicDestinationResolver {
         host: &str,
         port: u16,
     ) -> Result<Vec<std::net::SocketAddr>, RetrievalError> {
-        self.resolve_with(host, port, network::system_resolver)
+        self.resolve_url(&network::destination_url(host, port)?)
             .await
     }
+    #[cfg(test)]
     async fn resolve_with(
         &self,
         host: &str,
@@ -40,6 +41,22 @@ impl PublicDestinationResolver {
         >,
     ) -> Result<Vec<std::net::SocketAddr>, RetrievalError> {
         let url = network::destination_url(host, port)?;
+        self.resolve_url_with(&url, initialize).await
+    }
+    async fn resolve_url(
+        &self,
+        url: &url::Url,
+    ) -> Result<Vec<std::net::SocketAddr>, RetrievalError> {
+        self.resolve_url_with(url, network::system_resolver).await
+    }
+    async fn resolve_url_with(
+        &self,
+        url: &url::Url,
+        initialize: impl FnOnce() -> Result<
+            std::sync::Arc<hickory_resolver::TokioResolver>,
+            RetrievalError,
+        >,
+    ) -> Result<Vec<std::net::SocketAddr>, RetrievalError> {
         let dns = if matches!(url.host(), Some(url::Host::Ipv4(_))) {
             Err(RetrievalError::Resolution)
         } else {
@@ -48,6 +65,6 @@ impl PublicDestinationResolver {
                 .await
                 .cloned()
         };
-        network::resolve(&url, &dns).await
+        network::resolve(url, &dns).await
     }
 }
