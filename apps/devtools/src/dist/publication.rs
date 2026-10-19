@@ -278,10 +278,9 @@ mod tests {
     fn current_rejects_special_files_without_waiting_for_a_writer() {
         let root = tempfile::tempdir().unwrap();
         let record = root.path().join("current");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
+        nix::unistd::mkfifo(
             &record,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
         )
         .unwrap();
         assert!(

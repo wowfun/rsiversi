@@ -9,16 +9,89 @@ renderer watching. The frontend invokes `dev web`; its Vite document source over
 is explicitly outside the immutable bootstrap claim, while the upstream native and
 Worker stay paired. Provider secrets are not inherited by build or default dev.
 
-The source entrypoints `rsi.sh` and `rsi.ps1` own prerequisite diagnosis, explicit
+The source entrypoints `scripts/rsiversi.sh` and `scripts/rsiversi.ps1` own prerequisite diagnosis, explicit
 setup and direct published launch. The Rust builder owns all publication; Python
 is not a source-install prerequisite. `build` defaults to release; `--debug` is
-explicit. Windows requires Windows 11 24H2+ x64 and an MSVC/SDK toolchain.
+explicit. The default source target is `tui`; `web` and `desktop` are explicit.
+Windows requires Windows 11 24H2+ x64 and an MSVC/SDK toolchain.
 Windows build runs a private copy of the builder so concurrent Cargo invocations
 can relink the shared tool. Publication itself remains serialized by its lock.
 Missing optional installation-directory environment variables do not suppress
 other prerequisite diagnostics. Private-runner cleanup is best effort and cannot
 replace the build result. Linux Web prerequisites include both the WebAssembly
 and same-CPU musl Rust targets; `pkg-config` belongs to Desktop preparation.
+
+Entrypoints resolve the repository from their own parent directory, independently
+of the caller's working directory. No arguments or a leading `--help`/`-h` print
+general help to stdout and exit successfully. For `doctor`, `setup`, `build` and
+`path`, either help flag anywhere in the arguments prints command help before
+prerequisite checks or side effects, without requiring a publication or build
+tools. `web`, `tui` and `desktop` forward their arguments, including help flags, to the
+published application under the existing platform/terminal requirements.
+Unknown commands fail with guidance to the entrypoint's help. Help text stays
+English and the PowerShell script stays ASCII-compatible with PowerShell 5.1.
+Published applications inherit the caller's working directory; management tools
+run from the repository. Recovery diagnostics name the selected setup target and
+any requested SSH helper. Web/Desktop doctor checks npm as well as Node, and an
+explicit `RSI_MUSL_CC` must be absolute, matching the builder's admission rule.
+
+## Build targets and launch selection
+
+`doctor`, `setup`, `build` and `path` accept an optional first `tui`, `web` or
+`desktop` target, defaulting to `tui`. Build additionally accepts one new absolute
+output, `--debug`, `--with-ssh-helper` and `--verbose`. Doctor/setup accept only
+the helper option. Unknown and duplicate arguments fail before prerequisites.
+Output paths use the host grammar: Linux/WSL accepts `/...`; Windows accepts
+drive-rooted paths and UNC paths with either slash spelling. Git Bash converts
+its absolute POSIX paths with `cygpath` before passing them to PowerShell.
+Drive-relative and ordinary relative paths are rejected. Path syntax admission
+does not establish filesystem availability or override publication validation.
+TUI prepares/builds the native `rsi` only, keeping the complete catalog, CLI,
+Headless, ACP, HTTP API and management commands. It needs no Node, pnpm,
+wasm-bindgen, WASM target or graphical libraries. This is a stage selection,
+not a Cargo feature split or runtime Profile dependency resolver.
+
+Linux TUI includes the release musl helper only with `--with-ssh-helper`.
+Linux Web/Desktop include it by default; that flag is an idempotent confirmation.
+Windows rejects an explicit helper request. Without the helper, product SSH
+execution is unavailable; ordinary SSH login to run local TUI is unaffected.
+System dependencies remain explicit; setup never installs GTK or system runtimes.
+Windows Terminal is needed only to run TUI, not to build or display source help.
+
+`tui [--from tui|web|desktop]` and `web [--from web|desktop]` select that target's
+current bundle, defaulting to their own target. Only the leading selector is
+interpreted; `--` ends source options. Remaining application arguments retain
+their boundaries. `desktop` launches the Desktop binary directly. Applications
+own their help and resource arguments. Missing publications name the exact build
+command; readers never search history or fall back to the legacy global current.
+Linux Web and `tui --from web` can share the same compatible Host. Different
+families remain incompatible; Windows retains one embedded owner per Host.
+
+The lower-level grammar is `dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug]
+[--with-ssh-helper] [--verbose]`, `gc [tui|web|desktop|all]` (default all), or
+`dist addon-workbench ABSOLUTE_NEW_REPORT`. The old `dist gc` alias is not accepted.
+The builder's global `--help` and `-h` list its commands, including fixture entrypoints,
+without requiring a checkout or build tools.
+
+Each target owns `target/rsi-app/<target>/{current,generations,leases,trash}` and
+`target/rsi-app/build/<target>/{source,build-family.json,target}`. One global
+build lock serializes capture, publication and GC. Tool downloads and pnpm store
+remain shared. A target switch does not rewrite another target's manifest or
+capture. Separate first builds and larger caches preserve strict producer identity
+without pretending that different toolchains or package selections are compatible.
+Receipt format 2 keeps its existing fields and admits `kind=tui`; absent helper
+is recorded as null, never inferred merely from a missing file.
+
+Build diagnostics go to stderr: selection, stage, elapsed time, command, log and
+result. Waiting/long-running stages report every 15 seconds. `--verbose` mirrors
+both child streams to stderr; stdout remains the final JSON result. Failures
+include bounded first-error context and a log tail from the failing command only,
+including Cargo, Node and pnpm errors; unrecognized failures use that command's tail.
+First-error context includes following bytes across read boundaries. Identical
+context and tail are printed once; scanning and retained context remain bounded.
+Progress output is best effort: a closed stderr cannot abort a build or its cleanup.
+Without a jobs environment
+override, concurrency is described as Cargo-configured, not an inferred number.
 
 `dist web` publishes rsi and assets on Linux and Windows, plus a same-CPU Linux musl SSH helper on Linux; `dist desktop`
 also publishes the Desktop executable and its rsi companion. The helper always
@@ -35,9 +108,9 @@ exclusively. A detected path change aborts before artifact/report writes; any em
 directory created during the race is left for inspection. Checkout, cache and
 output ancestors are caller-controlled directories, not a sandbox against another
 process continuously replacing paths. Without an output, managed generations live
-under target/rsi-app.
-`--debug` selects a debug build. Source capture is serialized at one stable path,
-with shared Cargo and pnpm caches. Capture resolves the checkout root before
+under the selected target publication root.
+`--debug` selects a debug build. Source capture is serialized at one stable path per target,
+with a Cargo cache per target and a shared pnpm store. Capture resolves the checkout root before
 checking relative symlink containment; captured symlinks retain their literal targets.
 Frozen bytes, symlinks and read-only file modes
 are checked before and after compilation. Source capture checks bytes, content
@@ -59,7 +132,7 @@ cannot replace its diagnostic. Once current is published, collection failure is
 reported separately and cannot turn that successful publication into a build failure.
 Paired build children receive `CI=true`, including local debug publications.
 
-The ASCII `target/rsi-app/current` file contains exactly 20 decimal digits followed
+The ASCII `target/rsi-app/<target>/current` file contains exactly 20 decimal digits followed
 by one LF byte (21 bytes total). The identifier is Unix-epoch nanoseconds padded
 with leading zeroes; values exceeding 20 digits are rejected before creating output.
 The Rust publisher opens the final component without following links and validates
@@ -86,7 +159,9 @@ directory remains, and retries orphan lease removal;
 it never removes a lease still held by a live process. Windows source captures retain writable file attributes while
 hash/metadata checks detect capture changes; Unix captures retain read-only modes.
 
-`gc` retains current, the previous successful generation, the newest failed
+`gc` visits the selected target, or all three targets, and each retains the two most
+recent successful generations (normally current and previous), plus current if it
+is older, the newest failed
 build diagnostic and every locked live generation. A failure marker takes
 precedence over a completed receipt when publication fails. Successful publication and ordinary managed build failures also
 run collection under the build lock. Explicit `gc` and addon builds wait for that
@@ -95,7 +170,6 @@ A cleanup failure is reported without
 hiding the original build failure. Running native processes pin managed publications, including a
 daemon after its launcher exits. Development supervisors own external publications
 for the lifetime of their processes and watchers. No full build tree is copied to /tmp.
-
 
 ## Development supervision
 
@@ -142,10 +216,10 @@ cleanup and retains the environment. Builds and default runs never load provider
 keys from the developer's environment or `.local/dev/.env`.
 
 Paired publication requires Linux, WSL, or native Windows, the repository's pinned
-Rust toolchain with `wasm32-unknown-unknown`, Node 22.18+, pnpm 12.6.0, and
-`wasm-bindgen-cli` 0.2.127 on PATH (or `RSI_WASM_BINDGEN`). Desktop publication
+Rust toolchain. Web/Desktop additionally require `wasm32-unknown-unknown`, Node 22.18+, pnpm 12.6.0, and
+`wasm-bindgen-cli` 0.2.127 on PATH (or `RSI_WASM_BINDGEN`). Linux Desktop publication
 also requires `pkg-config` and GTK 3 / WebKitGTK 4.1 development libraries.
-Linux publication additionally needs the same-CPU musl Rust target and `musl-gcc`
+Linux publications that include the SSH helper additionally need the same-CPU musl Rust target and `musl-gcc`
 (or an explicit absolute `RSI_MUSL_CC`); Windows does not build an SSH helper.
 The Rust publisher validates and records versions in the build family. Doctor
 reports an absent pinned Rust toolchain with the setup command and collects
@@ -163,4 +237,9 @@ the example digest separately. Precondition failures leave the requested report
 path unused. Once work starts, a failure retains logs and a bounded `failure.json`
 stage; `fixture-receipt.json` is written only after browser verification succeeds.
 An existing report directory is refused with guidance to choose a new path.
-It shares capture validation with publication.
+Report path confinement is checked before hashing the captured source tree.
+It requires a format-2 published Web receipt and a `wasm32-unknown-unknown` worker
+target before consuming a report path, reads its immutable manifest, verifies the Web
+capture, and replays that manifest's profile, flags and Cargo features. The
+`fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT` CI entrypoint uses the same verified capture and recipe; it returns the binary path and digest in JSON. Other targets cannot
+replace this capture. It shares capture validation with publication.

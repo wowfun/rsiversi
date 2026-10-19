@@ -11,6 +11,9 @@ would export authority unintentionally.
 
 ## Decision
 
+The [application build-target decision](../process/2026-10-18-application-build-targets.md)
+partially supersedes source build defaults, cache layout and optional helper packaging.
+
 SSH builds on the [execution foundation](../architecture/2026-09-29-execution-location-foundation.md).
 It extends the scoped grant machinery from
 [Host Profile leaf management](../../implemented/architecture/2026-09-20-host-profile-leaf-management.md),
@@ -83,10 +86,13 @@ heartbeat and reaper tasks hold no authority-owning reference back to that lifet
 This prevents a background task cycle from keeping an abandoned connection alive.
 
 The product manager caches successful receipt verification once per service
-generation, retaining the verified immutable bytes rather than rereading a path
+generation, retaining verified helper bytes or a verified TUI helper omission
+rather than rereading a path
 on every connection. Replacing or removing the installed family does not revoke
 those bytes; adopting another family requires service restart. Failed verification
-is never cached, and live target grants remain independently checked.
+is never cached, and live target grants remain independently checked. A verified
+omission is immutable publication metadata, not a transient load failure;
+caching it avoids hashing the running image on every unavailable connection.
 
 The cache uses a persistent writer inode and independently opened artifact leases.
 Lock guards explicitly unlock when their owner finishes; CLOEXEC alone does not

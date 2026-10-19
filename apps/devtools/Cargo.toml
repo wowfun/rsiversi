@@ -19,6 +19,9 @@ rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
 rustix.workspace = true
 nix = { version = "0.29", features = ["signal", "term"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["fs"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 

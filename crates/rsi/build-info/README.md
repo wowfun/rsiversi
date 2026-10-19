@@ -11,7 +11,7 @@ Native processes launched from a managed publication retain its generation lock
 through shutdown, including daemon mode. Garbage collection can remove only
 unlocked, inactive publications. The compiled manifest requires an explicit boolean
 `managed` field; missing or mistyped flags reject the build before identity is emitted.
-Its lease lives at `target/rsi-app/leases/<generation-id>`, outside the directory
+Its lease lives at `target/rsi-app/<target>/leases/<generation-id>`, outside the directory
 that GC renames; acquisition is nonblocking and missing managed leases fail closed.
 After acquiring the shared lock, the client rechecks that the managed marker
 still exists. An opened lease handle alone does not pin a generation: collection

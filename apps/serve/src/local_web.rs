@@ -182,7 +182,7 @@ impl PluginFactory for LocalWebAssetsFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         rsi_web_assets::PairedWebAssetsFactory::new(rsi_build_info::family()).activate(plan).await.map_err(|error| {
             let path = self.0.options().map(|o| o.assets.display().to_string()).unwrap_or_default();
-            self.0.failure(format!("Web bundle unavailable at {path}: {error}. Run pnpm -C apps/web build and launch its paired rsi executable"))
+            self.0.failure(format!("Web bundle unavailable at {path}: {error}. Run scripts/rsiversi.sh build web, then scripts/rsiversi.sh web (Windows: scripts/rsiversi.ps1 build web, then scripts/rsiversi.ps1 web)"))
         })
     }
 }

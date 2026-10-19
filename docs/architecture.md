@@ -101,6 +101,9 @@ standalone schemas, fixtures and examples retain their product namespaces.
 Repository verification tools live below `crates/tools/`; application development
 and distribution belong to the application layer. Current behavior is documented
 at its owning product or package rather than duplicated at root.
+RSIversi user tutorials live in `docs/user`; their links lead to those owning
+contracts for implementation details. Thin source entrypoints live in `scripts`,
+while application development and publication logic stays in `apps/devtools`.
 
 Workspace crates share one `serde_json` policy from the root dependency table:
 object insertion order and exact JSON number text are preserved. No leaf crate

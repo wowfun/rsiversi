@@ -4647,6 +4647,7 @@ dependencies = [
  "rsi-automation",
  "rsi-automation-api",
  "rsi-browser",
+ "rsi-build-info",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",

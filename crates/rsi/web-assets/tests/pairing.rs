@@ -57,7 +57,8 @@ fn standalone_product_entry_rejects_before_asset_io() {
     );
     let diagnostic = factory.take_diagnostic().unwrap().to_string();
     assert!(
-        diagnostic.contains("no build family") && diagnostic.contains("pnpm -C apps/web build")
+        diagnostic.contains("no build family")
+            && diagnostic.contains("scripts/rsiversi.sh build web")
     );
     assert!(factory.take_diagnostic().is_none());
 }

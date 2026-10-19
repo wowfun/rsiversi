@@ -12,6 +12,9 @@ under the proposed Low integrity write-restricted token.
 
 ## Decision
 
+The [application build-target decision](../process/2026-10-18-application-build-targets.md)
+partially supersedes source build defaults, cache layout and optional helper packaging.
+
 Documentation verification checks English/Chinese RSI user-page pairs, reciprocal
 links and identical platform-labelled command examples. This is a narrow product
 tutorial contract, not a repository navigation inventory or a translation mandate
@@ -22,12 +25,16 @@ The gate uses CommonMark links and fences throughout the RSI user subtree and
 reports independent marker, comparison, identity and filesystem errors together.
 An invalid example does not suppress checks of the remaining examples.
 
-Keep executable tooling in apps and user tutorials in the RSI product. Shell
-entrypoints diagnose prerequisites before Rust exists and launch published
-binaries directly. Rust owns frozen-source publication and generation leases;
+Keep application tooling in apps, thin source entrypoints in scripts, and
+RSIversi user tutorials in root docs/user so ordinary users can find installation
+and usage independently of the Rust package layout. Internal architecture and
+package contracts remain product-owned. Shell entrypoints diagnose prerequisites
+before Rust exists and launch published binaries directly. Their own help works
+without build tools; application help remains owned by the published executable.
+Rust owns frozen-source publication and generation leases;
 a bounded text current-generation record replaces directory symlinks. English
 user pages have matching `.zh.md` translations, updated together; owning English
-contracts remain authoritative. Root documents link to the product tutorial.
+contracts remain authoritative. Root documents link to the user tutorial.
 
 Windows 11 24H2+ x64 uses embedded Host ownership for Web and TUI, one owner per
 HostPaths. Windows Terminal is the supported TUI host, including Git Bash.

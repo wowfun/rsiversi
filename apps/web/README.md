@@ -164,7 +164,7 @@ From the repository, run `pnpm -C apps/web install --frozen-lockfile --ignore-sc
 and `pnpm -C apps/web build --debug`. The producer freezes the current source,
 uses the installed wasm32 target and wasm-bindgen 0.2.127, and publishes a paired
 native executable and complete asset bundle. The command reports the concrete
-bundle directory; `bash rsi.sh web` launches the latest managed
+bundle directory; `bash scripts/rsiversi.sh web` launches the latest managed
 publication. Omit `--debug` for release. The optional absolute output directory
 must be new and remains caller-owned.
 Local compilation has no fixed per-command deadline: a cold Windows release
@@ -518,7 +518,7 @@ For the local product entrypoint, publish a paired generation, then launch it:
 ```bash
 pnpm -C apps/web install --frozen-lockfile --ignore-scripts
 pnpm -C apps/web build --debug
-bash rsi.sh web
+bash scripts/rsiversi.sh web
 ```
 
 The installed layout is `rsi` beside the complete `assets/` directory. Startup

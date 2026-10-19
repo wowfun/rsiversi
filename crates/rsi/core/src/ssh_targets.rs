@@ -88,7 +88,7 @@ pub(crate) struct Manager {
     configuration: Arc<rsi_configuration_access::ConfigurationAccess>,
     epoch: HostEpoch,
     service: String,
-    artifact: tokio::sync::OnceCell<rsi_ssh_client::HelperArtifact>,
+    artifact: tokio::sync::OnceCell<Option<rsi_ssh_client::HelperArtifact>>,
     state: Mutex<State>,
     writer: Arc<Semaphore>,
     target_writers: TargetWriters,
@@ -427,8 +427,11 @@ impl Manager {
         )
         .map_err(|_| ApiError::Unavailable)?;
         drop(identity);
-        let Ok(artifact) = self.artifact.get_or_try_init(artifact::installed).await else {
-            return Ok(Err(wire::Failure::HelperUnavailable {}));
+        let artifact = match self.artifact.get_or_try_init(artifact::installed).await {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) | Err(_) => {
+                return Ok(Err(wire::Failure::HelperUnavailable {}));
+            }
         };
         let (epoch, previous) = {
             let mut state = self.state.lock().expect("SSH connection reservation");

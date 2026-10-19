@@ -91,7 +91,17 @@ API responses; connection preparation copies the verified bounded file into priv
 connection-owned storage. Replacing that file requires another Local confirmation.
 
 Connection requests require target Use independently of configuration or management
-grants. The manager caches only a successful, fully verified immutable helper image for its service generation; failed initialization is not cached, and service restart establishes a fresh cache. Installed application families remain immutable during that lifetime; changing the family requires a service restart. The manager verifies the installed helper against the adjacent distribution receipt before caching it. Each connection uploads that complete image and publishes one new connection epoch after initialization. Target edits and connection
+grants. The manager caches a fully verified immutable helper image or verified
+TUI helper omission for its service generation. Invalid artifacts and failed
+initialization remain retryable; service restart establishes a fresh cache.
+Installed application families remain immutable during that lifetime; changing
+the family requires a service restart. The manager verifies the helper against
+the adjacent distribution receipt before caching it. The native image, compiled
+family and immutable manifest must agree before an omission is classified.
+Both omission and invalid artifacts return `HelperUnavailable`; presentation
+owns the rebuild guidance, and the service does not write to the terminal.
+Each connection uploads the complete image and publishes one new connection
+epoch after initialization. Target edits and connection
 publication share a bounded writer; a lost API waiter does not abandon accepted work.
 Connection epochs increase within a Host and start from a nonzero 63-bit seed
 derived from its fresh Host identity. This removes deterministic unit-name reuse

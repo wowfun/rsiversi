@@ -581,15 +581,11 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
         "crates/rsi/README.md",
         "# RSI\n\nOwn the application product.\n",
     );
-    let original = "# Start\n\n[中文](start.zh.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nrsi.ps1 doctor\n```\n";
-    let translated = "# 开始\n\n[English](start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nrsi.ps1 doctor\n```\n";
-    write(repository.path(), "crates/rsi/docs/user/start.md", original);
+    let original = "# Start\n\n[中文](start.zh.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
+    let translated = "# 开始\n\n[English](start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
+    write(repository.path(), "docs/user/start.md", original);
     assert!(stderr(&verify(repository.path())).contains("English/Chinese pair"));
-    write(
-        repository.path(),
-        "crates/rsi/docs/user/start.zh.md",
-        translated,
-    );
+    write(repository.path(), "docs/user/start.zh.md", translated);
     assert!(verify(repository.path()).status.success());
     for (platform, language, valid) in [
         ("windows", "bash", false),
@@ -604,7 +600,7 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
         for (name, contents) in [("start.md", original), ("start.zh.md", translated)] {
             write(
                 repository.path(),
-                &format!("crates/rsi/docs/user/{name}"),
+                &format!("docs/user/{name}"),
                 &contents
                     .replace("platform=windows", &format!("platform={platform}"))
                     .replace("```powershell", &format!("```{language}")),
@@ -619,16 +615,16 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
             );
         }
     }
-    write(repository.path(), "crates/rsi/docs/user/start.md", original);
+    write(repository.path(), "docs/user/start.md", original);
     write(
         repository.path(),
-        "crates/rsi/docs/user/start.zh.md",
-        &translated.replace("rsi.ps1 doctor", "rsi.ps1 setup"),
+        "docs/user/start.zh.md",
+        &translated.replace("scripts/rsiversi.ps1 doctor", "scripts/rsiversi.ps1 setup"),
     );
     assert!(stderr(&verify(repository.path())).contains("command examples differ"));
     write(
         repository.path(),
-        "crates/rsi/docs/user/start.zh.md",
+        "docs/user/start.zh.md",
         &translated.replace("[English](start.md)", "English"),
     );
     assert!(stderr(&verify(repository.path())).contains("link to its translation"));

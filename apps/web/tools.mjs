@@ -6,7 +6,7 @@ if (!['dev', 'build'].includes(operation)) throw new Error('Expected dev or buil
 const windows = process.platform === 'win32';
 const program = operation === 'build' && windows ? 'powershell.exe' : 'cargo';
 const command = operation === 'dev' ? ['run', '--locked', '-p', 'rsi-app-tools', '--', 'dev', 'web', ...args]
-  : windows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'rsi.ps1', 'build', ...args]
+  : windows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/rsiversi.ps1', 'build', 'web', ...args]
   : ['run', '--locked', '-p', 'rsi-app-tools', '--', 'dist', 'web', ...args];
 const child = spawn(program, command, { cwd: root, stdio: 'inherit' });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));

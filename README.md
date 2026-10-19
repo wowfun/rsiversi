@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 RSIversi is a pre-release Rust workspace for composing independently usable
 runtime products from ordinary `rsi-meta` plugins.
 
-To use RSIversi, start with [your first conversation](crates/rsi/docs/user/first-conversation.md).
+To use RSIversi, start with [your first conversation](docs/user/first-conversation.md).
 It covers source installation, model setup and returning to saved conversations.
 
 The repository-wide ownership and dependency rules live in

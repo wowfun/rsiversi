@@ -13,20 +13,20 @@
 刷新页面和新开标签页会使用当前浏览器的 Cookie。
 如果清除了 Cookie、撤销了浏览器设备，或丢失了未使用的启动链接，
 请重新启动 Web 并使用新链接。启动链接中的票据有效期为十分钟，只能使用一次；
-具体行为由 [Web 启动契约](../../../../apps/serve/README.md)定义。
+具体行为由 [Web 启动契约](../../apps/serve/README.md)定义。
 
 ## 停止与切换界面
 
 在启动终端按 Ctrl+C，并等待退出。
 Windows 的服务运行在这个进程内，Web 和 TUI 不能同时使用同一组 Host 数据目录，
 切换前要先停止当前界面。强制关闭终端可能缩短清理时间，请尽量用 Ctrl+C。
-详见 [Host 所有权契约](../../core/README.md)。
+详见 [Host 所有权契约](../../crates/rsi/core/README.md)。
 
 Windows 上撤销浏览器设备前，先停止 Web，再在 PowerShell 中执行：
 
 <!-- rsi-example id=devices-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command '& (Join-Path (& .\rsi.ps1 path) rsi.exe) --profile devices list'
+powershell -NoProfile -ExecutionPolicy Bypass -Command '& (Join-Path (& .\scripts\rsiversi.ps1 path web) rsi.exe) --profile devices list'
 ```
 
 随后把列出的设备 ID 传给 `--profile devices revoke DEVICE_ID`。
@@ -44,4 +44,4 @@ Linux 使用对应的 XDG 位置。
 恢复历史时要使用同一组位置。备份配置和状态前先停止应用，并妥善保管凭据。
 不要为修复构建失败而删除这些目录，构建产物位于仓库的 `target` 下。
 
-精确的路径解析规则由 [Host 路径契约](../../core/README.md)定义。
+精确的路径解析规则由 [Host 路径契约](../../crates/rsi/core/README.md)定义。

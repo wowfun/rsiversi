@@ -30,8 +30,10 @@ requires the existing Native ABI and Portable boundaries.
 `cargo xtask verify-docs` is read-only and requires the virtual workspace root.
 It checks documentation taxonomy, governance boundaries, active `AGENTS.md` word
 budgets, Cargo package README identity and minimum prose, relative Markdown links,
-and active Agent Notes. `--structure-only` omits Agent Notes so CI can report
-structure independently of archive-baseline availability. Independent diagnostics are reported in stable path,
+and active Agent Notes. `--structure-only` omits only Agent Notes; it still checks
+the real repository's bilingual tutorials and command examples. CI uses that mode
+to report documentation independently of archive-baseline availability, and checks
+Agent Notes separately. Independent diagnostics are reported in stable path,
 line and message order. Root instructions have a 400-word budget; descendant
 instructions have 300 words. A reasoned, path-specific override is the last resort.
 
@@ -44,7 +46,7 @@ under `fixtures/<product>/<fixture>` in an existing product namespace and retain
 their own README. Generated outputs and installed dependencies are excluded;
 authored fixture documentation is checked.
 
-RSI user tutorials under `crates/rsi/docs/user` pair `name.md` with `name.zh.md`,
+RSIversi user tutorials under `docs/user` pair `name.md` with `name.zh.md`,
 link to each other, and share executable examples verbatim. An example marker
 `<!-- rsi-example id=NAME platform=windows|linux|git-bash|all -->` immediately
 precedes its fenced block. IDs are unique across English pages; the Chinese pair

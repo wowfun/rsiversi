@@ -1,7 +1,11 @@
 //! Native paired publication; build inputs never inherit provider secrets.
 mod addon;
+mod options;
+mod progress;
 mod publication;
 mod source;
+use options::{Kind, Options, USAGE};
+use progress::{Runner, Stage, build_lock};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,40 +23,28 @@ pub fn run(arguments: &[String]) -> std::result::Result<(), String> {
 fn execute(arguments: &[String]) -> Result<()> {
     let root = command_path(std::env::current_dir()?.canonicalize()?);
     crate::require_repository_root(&root)?;
-    if arguments == ["--help"] {
-        println!(
-            "usage: rsi-app-tools dist web|desktop [ABSOLUTE_OUTPUT] [--debug] | gc | addon-workbench ABSOLUTE_NEW_REPORT"
-        );
+    if arguments
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("{USAGE}");
         return Ok(());
     }
     let options = Options::parse(arguments)?;
     if !cfg!(any(target_os = "linux", windows)) {
         return Err("paired publication requires Linux or Windows".into());
     }
-    if cfg!(windows) && options.kind == "desktop" {
-        return Err("Windows Desktop publication is not supported".into());
-    }
     let cache = root.join("target/rsi-app");
-    fs::create_dir_all(&cache)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(cache.join("build.lock"))?;
-    eprintln!("Waiting for the paired build owner...");
-    lock.lock()?;
-    if options.kind == "gc" {
-        let removed = publication::collect(&cache)?;
-        println!("{}", json!({"event":"application-gc", "removed":removed}));
-        return Ok(());
-    }
+    let started = std::time::Instant::now();
+    describe(&options);
+    let lock = build_lock(&cache)?;
     if let Some(output) = &options.output {
         validate_external_output(&cache, output)?;
     }
-    if options.kind == "addon-workbench" {
+    if options.kind == Kind::AddonWorkbench {
         return addon::run(&root, &cache, &options, lock);
     }
+    let publication = cache.join(options.kind.name());
     let managed = options.output.is_none();
     let id = format!(
         "{:020}",
@@ -66,7 +58,7 @@ fn execute(arguments: &[String]) -> Result<()> {
     let output = options
         .output
         .clone()
-        .unwrap_or_else(|| cache.join("generations").join(&id));
+        .unwrap_or_else(|| publication.join("generations").join(&id));
     if output.exists() {
         return Err("output must be a new absolute directory".into());
     }
@@ -81,16 +73,79 @@ fn execute(arguments: &[String]) -> Result<()> {
         })?
     };
     if managed {
-        fs::create_dir_all(cache.join("leases"))?;
-        fs::File::create_new(cache.join("leases").join(&id))?;
+        fs::create_dir_all(publication.join("leases"))?;
+        fs::File::create_new(publication.join("leases").join(&id))?;
     }
+    diagnostic!(
+        "Output: {}\nLog: {}",
+        output.display(),
+        output.join("build.log").display()
+    );
     finish_build(
         || build(&root, &cache, &output, &options, managed),
-        &cache,
+        &publication,
         &output,
         managed,
         &id,
-    )
+    )?;
+    let binary = if options.kind == Kind::Desktop {
+        "rsi-desktop"
+    } else {
+        "rsi"
+    };
+    diagnostic!(
+        "Finished {} in {:.1}s.\nRun: \"{}\" {}",
+        options.kind.name(),
+        started.elapsed().as_secs_f64(),
+        output.join("bundle").join(executable(binary)).display(),
+        if options.kind == Kind::Desktop {
+            ""
+        } else {
+            options.kind.name()
+        }
+    );
+    Ok(())
+}
+fn describe(options: &Options) {
+    if options.kind == Kind::AddonWorkbench {
+        diagnostic!(
+            "Building workbench fixture from the current Web publication's recorded recipe"
+        );
+        return;
+    }
+    diagnostic!(
+        "Building {} ({}, {})",
+        options.kind.name(),
+        if options.debug { "debug" } else { "release" },
+        std::env::consts::OS
+    );
+    diagnostic!(
+        "Cargo jobs: {}",
+        std::env::var("CARGO_BUILD_JOBS").map_or_else(
+            |_| "determined by Cargo configuration".into(),
+            |jobs| format!("{jobs} (CARGO_BUILD_JOBS)")
+        )
+    );
+    diagnostic!(
+        "Includes: native rsi{}, SSH helper: {}",
+        if options.kind == Kind::Desktop {
+            ", Web assets/Worker and Desktop"
+        } else if options.kind.web() {
+            ", Web assets/Worker"
+        } else {
+            " (TUI, CLI, Headless, ACP, HTTP API and management)"
+        },
+        if options.helper() {
+            "release"
+        } else {
+            "not included"
+        }
+    );
+    if options.kind == Kind::Tui && !options.helper() && cfg!(target_os = "linux") {
+        diagnostic!(
+            "SSH targets unavailable in this package; rebuild with --with-ssh-helper for product remote execution."
+        );
+    }
 }
 fn finish_build(
     build: impl FnOnce() -> Result<String>,
@@ -112,15 +167,11 @@ fn finish_build(
     match result {
         Ok(family) => {
             if managed && let Err(cleanup) = publication::collect(cache) {
-                eprintln!("publication succeeded; collection: {cleanup}");
+                diagnostic!("publication succeeded; collection: {cleanup}");
             }
             println!(
                 "{}",
                 json!({"event":"application-distribution-built", "bundle":output.join("bundle"), "family_sha256":family})
-            );
-            eprintln!(
-                "Run: \"{}\" web",
-                output.join("bundle").join(executable("rsi")).display()
             );
             Ok(())
         }
@@ -129,13 +180,13 @@ fn finish_build(
                 output.join("failure.json"),
                 json!({"stage":"paired-build", "error_type":category}).to_string(),
             ) {
-                eprintln!("failure evidence: {evidence}");
+                diagnostic!("failure evidence: {evidence}");
             }
             if managed
                 && category != "panic"
                 && let Err(cleanup) = publication::collect(cache)
             {
-                eprintln!("collection: {cleanup}");
+                diagnostic!("collection: {cleanup}");
             }
             Err(format!("{error}; evidence: {}", output.display()).into())
         }
@@ -183,45 +234,51 @@ fn claim_external_output(
     validate_external_output(cache, &output)?;
     Ok(output)
 }
-struct Options {
-    kind: String,
-    output: Option<PathBuf>,
-    debug: bool,
-}
-impl Options {
-    fn parse(args: &[String]) -> Result<Self> {
-        let Some(kind) = args
-            .first()
-            .filter(|s| matches!(s.as_str(), "web" | "desktop" | "gc" | "addon-workbench"))
-        else {
+pub fn fixture_build(arguments: &[String]) -> std::result::Result<(), String> {
+    (|| -> Result<()> {
+        let [name, report] = arguments else {
             return Err(
-                "usage: rsi-app-tools dist web|desktop [ABSOLUTE_OUTPUT] [--debug] | gc | addon-workbench ABSOLUTE_NEW_REPORT".into(),
+                "usage: rsi-app-tools fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT".into(),
             );
         };
-        let mut value = Self {
-            kind: kind.clone(),
-            output: None,
-            debug: false,
-        };
-        for arg in &args[1..] {
-            if arg == "--debug" && !value.debug {
-                value.debug = true;
-            } else if value.output.is_none() && Path::new(arg).is_absolute() {
-                value.output = Some(arg.into());
-            } else if value.output.is_none() && !arg.starts_with('-') {
-                return Err(format!("output must be an absolute directory: {arg}").into());
-            } else {
-                return Err(format!("unknown or duplicate distribution argument: {arg}").into());
-            }
+        if name != "profile-leaf-probe" || !Path::new(report).is_absolute() {
+            return Err(
+                "fixture-build requires profile-leaf-probe and a new absolute report directory"
+                    .into(),
+            );
         }
-        if kind == "gc" && args.len() != 1 {
-            return Err("gc takes no output or profile".into());
+        let root = command_path(std::env::current_dir()?.canonicalize()?);
+        crate::require_repository_root(&root)?;
+        let cache = root.join("target/rsi-app");
+        let _lock = build_lock(&cache)?;
+        addon::build_probe(&cache, Path::new(report))
+    })()
+    .map_err(|error| error.to_string())
+}
+pub fn gc(arguments: &[String]) -> std::result::Result<(), String> {
+    collect_selected(arguments).map_err(|error| format!("application collection: {error}"))
+}
+fn collect_selected(arguments: &[String]) -> Result<()> {
+    let kinds = match arguments {
+        [] => Kind::APPLICATIONS.to_vec(),
+        [value] if value == "all" => Kind::APPLICATIONS.to_vec(),
+        [value] if matches!(value.as_str(), "tui" | "web" | "desktop") => vec![Kind::parse(value)?],
+        [value] if matches!(value.as_str(), "--help" | "-h") => {
+            println!("usage: rsi-app-tools gc [tui|web|desktop|all]");
+            return Ok(());
         }
-        if kind == "addon-workbench" && (value.output.is_none() || value.debug) {
-            return Err("addon-workbench requires one new absolute report directory".into());
-        }
-        Ok(value)
+        _ => return Err("usage: rsi-app-tools gc [tui|web|desktop|all]".into()),
+    };
+    let root = command_path(std::env::current_dir()?.canonicalize()?);
+    crate::require_repository_root(&root)?;
+    let cache = root.join("target/rsi-app");
+    let _lock = build_lock(&cache)?;
+    let mut removed = BTreeMap::new();
+    for kind in kinds {
+        removed.insert(kind.name(), publication::collect(&cache.join(kind.name()))?);
     }
+    println!("{}", json!({"event":"application-gc", "removed":removed}));
+    Ok(())
 }
 fn executable(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
@@ -265,7 +322,7 @@ fn build(
     options: &Options,
     managed: bool,
 ) -> Result<String> {
-    let work = cache.join("build");
+    let work = cache.join("build").join(options.kind.name());
     let captured = work.join("source");
     fs::create_dir_all(&work)?;
     let manifest_path = work.join("build-family.json");
@@ -280,15 +337,17 @@ fn build(
         }
         Err(error) => return Err(error),
     };
-    eprintln!("Capturing source bytes...");
+    let capture = Stage::new("Capture and verify source");
     let files = source::capture(root, &captured, previous.get("files"))?;
+    capture.complete();
     let profile = if options.debug { "debug" } else { "release" };
-    let mut runner = Runner {
-        cwd: captured.clone(),
-        environment: environment(cache)?,
-        log: fs::File::create(output.join("build.log"))?,
-        log_path: output.join("build.log"),
-    };
+    let mut runner = Runner::new(
+        captured.clone(),
+        environment(cache)?,
+        output.join("build.log"),
+        options.verbose,
+    )?;
+    let tools_stage = Stage::new("Validate selected toolchains");
     let rustc = runner.version("rustc", &["-vV"])?;
     let cargo = runner.version("cargo", &["-V"])?;
     let target = rustc
@@ -296,7 +355,12 @@ fn build(
         .find_map(|l| l.strip_prefix("host: "))
         .ok_or("rustc did not report a host")?
         .to_owned();
-    let helper_target = helper_target(&target)?;
+    let supported_helper = helper_target(&target)?;
+    let helper_target = if options.helper() {
+        supported_helper
+    } else {
+        None
+    };
     let helper = if let Some(target) = &helper_target {
         let cc = std::env::var("RSI_MUSL_CC").unwrap_or_else(|_| "musl-gcc".into());
         if std::env::var_os("RSI_MUSL_CC").is_some() && !Path::new(&cc).is_absolute() {
@@ -321,79 +385,100 @@ fn build(
     } else {
         Value::Null
     };
-    let pnpm_script = root.join("target/rsi-tools/pnpm/node_modules/pnpm/bin/pnpm.mjs");
-    let pnpm = if pnpm_script.is_file() {
-        vec![
-            "node".to_owned(),
-            pnpm_script.to_string_lossy().into_owned(),
-        ]
-    } else if cfg!(windows) {
-        return Err("missing repository pnpm; run rsi.ps1 setup".into());
-    } else {
-        vec!["pnpm".into()]
-    };
-    let bindgen = std::env::var("RSI_WASM_BINDGEN").unwrap_or_else(|_| {
-        let path = root
-            .join("target/rsi-tools/wasm-bindgen/bin")
-            .join(executable("wasm-bindgen"));
-        if path.is_file() {
-            path.to_string_lossy().into_owned()
+    let (pnpm, tools) = if options.kind.web() {
+        let pnpm_script = root.join("target/rsi-tools/pnpm/node_modules/pnpm/bin/pnpm.mjs");
+        let pnpm = if pnpm_script.is_file() {
+            vec![
+                "node".to_owned(),
+                pnpm_script.to_string_lossy().into_owned(),
+            ]
+        } else if cfg!(windows) {
+            return Err(format!(
+                "missing repository pnpm; run scripts/rsiversi.ps1 setup {}",
+                options.kind.name()
+            )
+            .into());
         } else {
-            "wasm-bindgen".into()
+            vec!["pnpm".into()]
+        };
+        let bindgen = std::env::var("RSI_WASM_BINDGEN").unwrap_or_else(|_| {
+            let path = root
+                .join("target/rsi-tools/wasm-bindgen/bin")
+                .join(executable("wasm-bindgen"));
+            if path.is_file() {
+                path.to_string_lossy().into_owned()
+            } else {
+                "wasm-bindgen".into()
+            }
+        });
+        runner
+            .environment
+            .insert("RSI_WASM_BINDGEN".into(), bindgen.clone().into());
+        let node = runner.version("node", &["--version"])?;
+        let pnpm_version = runner.version(
+            &pnpm[0],
+            &pnpm[1..]
+                .iter()
+                .map(String::as_str)
+                .chain(["--version"])
+                .collect::<Vec<_>>(),
+        )?;
+        let bindgen_version = runner.version(&bindgen, &["--version"])?;
+        let package: Value =
+            serde_json::from_slice(&fs::read(captured.join("apps/web/package.json"))?)?;
+        let expected = package["packageManager"]
+            .as_str()
+            .ok_or("missing packageManager")?
+            .strip_prefix("pnpm@")
+            .ok_or("expected pinned pnpm")?;
+        if pnpm_version != expected {
+            return Err(format!(
+                "pnpm {expected} required; run setup {} (found {pnpm_version})",
+                options.kind.name()
+            )
+            .into());
         }
-    });
-    runner
-        .environment
-        .insert("RSI_WASM_BINDGEN".into(), bindgen.clone().into());
-    let node = runner.version("node", &["--version"])?;
-    let pnpm_version = runner.version(
-        &pnpm[0],
-        &pnpm[1..]
-            .iter()
-            .map(String::as_str)
-            .chain(["--version"])
-            .collect::<Vec<_>>(),
-    )?;
-    let bindgen_version = runner.version(&bindgen, &["--version"])?;
-    let package: Value =
-        serde_json::from_slice(&fs::read(captured.join("apps/web/package.json"))?)?;
-    let expected = package["packageManager"]
-        .as_str()
-        .ok_or("missing packageManager")?
-        .strip_prefix("pnpm@")
-        .ok_or("expected pinned pnpm")?;
-    if pnpm_version != expected {
-        return Err(format!("pnpm {expected} required; run setup (found {pnpm_version})").into());
+        let lock: toml::Value = toml::from_str(&fs::read_to_string(captured.join("Cargo.lock"))?)?;
+        let expected_bindgen = lock["package"]
+            .as_array()
+            .and_then(|p| {
+                p.iter()
+                    .find(|p| p["name"].as_str() == Some("wasm-bindgen"))
+            })
+            .and_then(|p| p["version"].as_str())
+            .ok_or("missing wasm-bindgen version")?;
+        if bindgen_version != format!("wasm-bindgen {expected_bindgen}") {
+            return Err(format!(
+                "wasm-bindgen version differs from Cargo.lock; run setup {}",
+                options.kind.name()
+            )
+            .into());
+        }
+        let mut tools = json!({"node":node,"pnpm":pnpm_version,"wasm_bindgen":bindgen_version});
+        if options.kind == Kind::Desktop && cfg!(target_os = "linux") {
+            tools["gtk3"] = runner
+                .version("pkg-config", &["--modversion", "gtk+-3.0"])?
+                .into();
+            tools["webkitgtk41"] = runner
+                .version("pkg-config", &["--modversion", "webkit2gtk-4.1"])?
+                .into();
+        }
+        (pnpm, tools)
+    } else {
+        (Vec::new(), json!({}))
+    };
+    tools_stage.complete();
+    let mut packages = vec!["rsi-cli"];
+    if options.kind.web() {
+        packages.push("rsi-web");
     }
-    let lock: toml::Value = toml::from_str(&fs::read_to_string(captured.join("Cargo.lock"))?)?;
-    let expected_bindgen = lock["package"]
-        .as_array()
-        .and_then(|p| {
-            p.iter()
-                .find(|p| p["name"].as_str() == Some("wasm-bindgen"))
-        })
-        .and_then(|p| p["version"].as_str())
-        .ok_or("missing wasm-bindgen version")?;
-    if bindgen_version != format!("wasm-bindgen {expected_bindgen}") {
-        return Err("wasm-bindgen version differs from Cargo.lock; run setup".into());
-    }
-    let mut tools = json!({"node":node,"pnpm":pnpm_version,"wasm_bindgen":bindgen_version});
-    if options.kind == "desktop" {
-        tools["gtk3"] = runner
-            .version("pkg-config", &["--modversion", "gtk+-3.0"])?
-            .into();
-        tools["webkitgtk41"] = runner
-            .version("pkg-config", &["--modversion", "webkit2gtk-4.1"])?
-            .into();
-    }
-    let mut packages = vec!["rsi-cli", "rsi-web"];
-    if options.kind == "desktop" {
+    if options.kind == Kind::Desktop {
         packages.push("rsi-desktop");
     }
     if helper_target.is_some() {
         packages.push("rsi-ssh-helper-app");
     }
-    let manifest = json!({"format":1,"files":files,"rustc":rustc,"cargo":cargo,"target":target,"worker_target":"wasm32-unknown-unknown","profile":profile,"helper":helper,"document_toolchain":tools,"packages":packages,"default_features":true,"features":[],"managed":managed,"flags":{"RUSTFLAGS":std::env::var("RUSTFLAGS").unwrap_or_default(),"CARGO_ENCODED_RUSTFLAGS":std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default()}});
+    let manifest = json!({"format":1,"files":files,"rustc":rustc,"cargo":cargo,"target":target,"worker_target":if options.kind.web() { Some("wasm32-unknown-unknown") } else { None },"profile":profile,"helper":helper,"document_toolchain":tools,"packages":packages,"default_features":true,"features":[],"managed":managed,"flags":{"RUSTFLAGS":std::env::var("RUSTFLAGS").unwrap_or_default(),"CARGO_ENCODED_RUSTFLAGS":std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default()}});
     let bytes = serde_json::to_vec(&manifest)?;
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("source manifest exceeds 16 MiB".into());
@@ -420,15 +505,16 @@ fn build(
     let mut native = vec![
         "build", "--locked", "--target", &target, "-p", "rsi-cli", "--bins",
     ];
-    if options.kind == "desktop" {
+    if options.kind == Kind::Desktop {
         native.extend(["-p", "rsi-desktop"]);
     }
     if !options.debug {
         native.push("--release");
     }
-    runner.run("cargo", &native)?;
+    runner.run("Compile native applications", "cargo", &native)?;
     if let Some(target) = &helper_target {
         runner.run(
+            "Compile SSH helper (release)",
             "cargo",
             &[
                 "build",
@@ -441,31 +527,34 @@ fn build(
             ],
         )?;
     }
-    runner.cwd = captured.join("apps/web");
-    let store = cache.join("pnpm-store");
-    let mut install = pnpm[1..].iter().map(String::as_str).collect::<Vec<_>>();
-    install.extend([
-        "install",
-        "--frozen-lockfile",
-        "--ignore-scripts",
-        "--store-dir",
-        store.to_str().ok_or("non-Unicode store path")?,
-    ]);
-    runner.run(&pnpm[0], &install)?;
-    runner.cwd.clone_from(&captured);
     let assets = bundle.join("assets");
-    let mut args = vec![
-        "apps/web/build.mjs",
-        assets.to_str().ok_or("non-Unicode output path")?,
-    ];
-    if options.debug {
-        args.push("--dev");
+    if options.kind.web() {
+        runner.cwd = captured.join("apps/web");
+        let store = cache.join("pnpm-store");
+        let mut install = pnpm[1..].iter().map(String::as_str).collect::<Vec<_>>();
+        install.extend([
+            "install",
+            "--frozen-lockfile",
+            "--ignore-scripts",
+            "--store-dir",
+            store.to_str().ok_or("non-Unicode store path")?,
+        ]);
+        runner.run("Install locked frontend dependencies", &pnpm[0], &install)?;
+        runner.cwd.clone_from(&captured);
+        let mut args = vec![
+            "apps/web/build.mjs",
+            assets.to_str().ok_or("non-Unicode output path")?,
+        ];
+        if options.debug {
+            args.push("--dev");
+        }
+        runner.run("Build Worker and Web resources", "node", &args)?;
     }
-    runner.run("node", &args)?;
+    let packaging = Stage::new("Verify captured inputs and publish artifacts");
     source::verify(&captured, &files)?;
     let mut artifacts = BTreeMap::new();
     let mut binaries = vec!["rsi"];
-    if options.kind == "desktop" {
+    if options.kind == Kind::Desktop {
         binaries.push("rsi-desktop");
     }
     for binary in binaries {
@@ -489,22 +578,25 @@ fn build(
         source::executable(&destination)?;
         artifacts.insert("rsi-ssh-helper".into(), hash_file(&destination)?);
     }
-    for entry in fs::read_dir(&assets)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            artifacts.insert(
-                format!("assets/{}", entry.file_name().to_string_lossy()),
-                hash_file(&entry.path())?,
-            );
+    if options.kind.web() {
+        for entry in fs::read_dir(&assets)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                artifacts.insert(
+                    format!("assets/{}", entry.file_name().to_string_lossy()),
+                    hash_file(&entry.path())?,
+                );
+            }
         }
     }
     fs::write(bundle.join("build-family.json"), &bytes)?;
     fs::write(
         bundle.join("receipt.json"),
         serde_json::to_vec_pretty(
-            &json!({"format":2,"family_sha256":family,"target":target,"profile":profile,"kind":options.kind,"mode":"published","helper_target":helper_target,"artifacts":artifacts}),
+            &json!({"format":2,"family_sha256":family,"target":target,"profile":profile,"kind":options.kind.name(),"mode":"published","helper_target":helper_target,"artifacts":artifacts}),
         )?,
     )?;
+    packaging.complete();
     Ok(family)
 }
 fn helper_target(native: &str) -> Result<Option<String>> {
@@ -582,12 +674,6 @@ fn environment(cache: &Path) -> Result<BTreeMap<OsString, OsString>> {
     values.insert("CI".into(), "true".into());
     Ok(values)
 }
-struct Runner {
-    cwd: PathBuf,
-    environment: BTreeMap<OsString, OsString>,
-    log: fs::File,
-    log_path: PathBuf,
-}
 fn read_manifest(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&manifest_bytes(path)?)?)
 }
@@ -610,49 +696,6 @@ fn resolve_program(name: &str, path: Option<&OsString>) -> Result<PathBuf> {
         .map(|part| part.join(name))
         .find(|path| path.is_file())
         .ok_or_else(|| format!("tool not found: {name}").into())
-}
-impl Runner {
-    fn command(&self, program: &str, args: &[&str]) -> Command {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .current_dir(&self.cwd)
-            .env_clear()
-            .envs(&self.environment);
-        command
-    }
-    fn version(&self, program: &str, args: &[&str]) -> Result<String> {
-        let result = self
-            .command(program, args)
-            .output()
-            .map_err(|e| format!("{program}: {e}; run the source entrypoint's doctor"))?;
-        if !result.status.success() {
-            return Err(format!(
-                "{program} version check failed: {}",
-                String::from_utf8_lossy(&result.stderr)
-            )
-            .into());
-        }
-        Ok(String::from_utf8(result.stdout)?.trim().into())
-    }
-    fn run(&mut self, program: &str, args: &[&str]) -> Result<()> {
-        eprintln!(
-            "{} {} (log: {})",
-            program,
-            args.join(" "),
-            self.log_path.display()
-        );
-        let status = self
-            .command(program, args)
-            .stdin(Stdio::null())
-            .stdout(self.log.try_clone()?)
-            .stderr(self.log.try_clone()?)
-            .status()?;
-        if !status.success() {
-            return Err(format!("{program} failed: {status}").into());
-        }
-        Ok(())
-    }
 }
 #[cfg(test)]
 mod tests {

@@ -7,7 +7,7 @@ Product Web startup requires a paired distribution from `pnpm -C apps/web build`
 a plain Cargo executable remains usable for applications without Web assets.
 
 Product Web integration tests are opt-in: build a complete paired publication,
-then run `RSI_PAIRED_BUNDLE="$(bash rsi.sh path)" cargo test --locked -p
+then run `RSI_PAIRED_BUNDLE="$(bash scripts/rsiversi.sh path web)" cargo test --locked -p
 rsi-cli --features paired-web-tests --test service_host_cli web::`. The directory
 must contain its paired `rsi`, `assets/` and receipt. Missing inputs fail explicitly;
 these tests never fall back to an ordinary Cargo executable and arbitrary assets.

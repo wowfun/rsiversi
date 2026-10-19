@@ -1,8 +1,8 @@
 # Developer quick start
 
 To install and use the application with your own model provider, follow the
-[RSI user tutorial](../crates/rsi/docs/user/first-conversation.md)
-([中文](../crates/rsi/docs/user/first-conversation.zh.md)). This page is for
+[RSIversi user tutorial](user/first-conversation.md)
+([中文](user/first-conversation.zh.md)). This page is for
 contributors using isolated development environments.
 
 Run from the repository root with the Rust toolchain in `rust-toolchain.toml`.
@@ -63,8 +63,15 @@ above, and run from a graphical session:
 
 ```bash
 cargo run --locked -p rsi-app-tools -- dist desktop /absolute/new/output --debug
-/absolute/new/output/bundle/rsi-desktop --assets /absolute/new/output/bundle/assets
+/absolute/new/output/bundle/rsi-desktop
 ```
+
+On native Windows, use `scripts/rsiversi.ps1 setup desktop`,
+`scripts/rsiversi.ps1 build desktop --debug`, then `scripts/rsiversi.ps1 desktop`.
+MSVC/Windows SDK are build prerequisites; WebView2 is checked at launch.
+For a managed minimal native package, use `scripts/rsiversi.sh build tui`
+(or PowerShell equivalent). See [source installation](user/source-install.md)
+for target dependencies, release defaults and same-bundle client selection.
 
 The [desktop contract](../apps/desktop/README.md) owns persistent state,
 Host selection and paired-companion requirements.

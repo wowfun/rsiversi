@@ -30,7 +30,7 @@ DeepSeek 的接口地址通常以 `https://api.deepseek.com` 开头。
 应用服务商前，展开 **Context and output limits（上下文与输出限制）**。
 预填数字只是示例，不是自动查询到的模型容量。`context window tokens` 是总上下文容量，
 `max output reserve tokens` 是模型允许的最大输出容量。对于 DeepSeek，这个上限还须容纳
-配置的[默认请求输出量](../../../rsi-ai/deepseek/README.md#generation-policy)。
+配置的[默认请求输出量](../../crates/rsi-ai/deepseek/README.md#generation-policy)。
 调低 `default output reserve tokens` 不会改变该请求默认值。
 如果 **Apply provider** 提示 `invalid API input`，先核对这些容量，再检查密钥；
 这一步尚未向服务商发送推理请求。
@@ -38,7 +38,7 @@ DeepSeek 的接口地址通常以 `https://api.deepseek.com` 开头。
 OpenAI compatible（OpenAI 兼容）连接还需要 **Request path（请求路径）**，
 常见值为 `/chat/completions`。只有选定模型支持图片时才启用图片输入。
 
-凭据由原生凭据组件保存在 RSI 私有配置目录中，保存后的设置视图不会返回密钥。
+凭据由原生凭据组件保存在 RSIversi 私有配置目录中，保存后的设置视图不会返回密钥。
 应用不会自动导入仓库的 `.env` 文件。不要把密钥放入命令、截图或分享的日志中。
 
 修改默认值后，新建对话并发送一条简短文本。

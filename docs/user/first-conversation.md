@@ -2,14 +2,14 @@
 
 [中文](first-conversation.zh.md)
 
-RSI is a local AI workspace with a browser interface and an optional terminal
+RSIversi is a local AI workspace with a browser interface and an optional terminal
 interface. You bring a model provider account and API key. The provider may charge
-for requests. RSI is pre-release; saved formats can change between revisions.
+for requests. RSIversi is pre-release; saved formats can change between revisions.
 
 ## Install and open
 
 Follow [Install from source](source-install.md), then run the Web command from
-your checkout. Keep that terminal open while using RSI. The browser opens a
+your checkout. Keep that terminal open while using RSIversi. The browser opens a
 one-time sign-in link automatically. If opening fails, copy the complete link
 printed in the terminal. Treat it as a password; do not share it.
 
@@ -38,7 +38,7 @@ failure. See [platform limits and troubleshooting](troubleshooting.md).
 
 ## Leave and return
 
-Closing a browser tab leaves the service running. To stop RSI, press Ctrl+C in
+Closing a browser tab leaves the service running. To stop RSIversi, press Ctrl+C in
 the terminal that started it and wait for exit. Start Web again and reopen a
 conversation from history. On Windows, stop Web before starting the
 [terminal interface](terminal.md) or using the offline device manager.

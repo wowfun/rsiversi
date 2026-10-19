@@ -118,6 +118,8 @@ publication. A metadata change discards the presentation seed, never the device'
 saved order. Activity changes leave the seed valid. Background head observations
 mark newer activity without replacing a continued page or its controls.
 
+The SSH panel presents helper-unavailable rebuild guidance through its normal
+command error state, including the optional Linux TUI helper and restart step.
 The SSH panel retains only the bounded caller-visible target catalog, one resolved
 target directory and a safe outcome. Candidate edits, trust and connection controls
 use the exact displayed Host, target revision and connection epoch. Trust is offered

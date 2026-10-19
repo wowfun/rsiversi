@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, io::Read as _, path::Path, sync::Mutex};
 
 const RECEIPT: &str = "rsi-build.json";
 const MAXIMUM_RECEIPT_BYTES: u64 = 32 * 1024;
-const REBUILD: &str = "Build and launch the paired output with: pnpm -C apps/web build";
+const REBUILD: &str = "Build Web assets with scripts/rsiversi.sh build web (Windows: scripts/rsiversi.ps1 build web), then launch scripts/rsiversi.sh web (Windows: scripts/rsiversi.ps1 web)";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

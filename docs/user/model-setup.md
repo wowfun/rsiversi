@@ -29,7 +29,7 @@ Expand **Context and output limits** before applying the provider. The prefilled
 numbers are examples, not discovered model capacities. `context window tokens`
 is the total context capacity; `max output reserve tokens` is the model's maximum
 output capacity. For DeepSeek, this maximum must also accommodate the configured
-[request output default](../../../rsi-ai/deepseek/README.md#generation-policy).
+[request output default](../../crates/rsi-ai/deepseek/README.md#generation-policy).
 Reducing `default output reserve tokens` does not change that request default.
 If **Apply provider** reports `invalid API input`, check these limits before
 changing your key; no inference request has been sent at this step.
@@ -37,7 +37,7 @@ changing your key; no inference request has been sent at this step.
 OpenAI compatible connections additionally use **Request path**, commonly
 `/chat/completions`. Only enable image input when the selected model supports it.
 
-Credentials are stored by the native credential owner in the private RSI config
+Credentials are stored by the native credential owner in the private RSIversi config
 directory. Saved setup views never return the secret. The application does not
 automatically import a repository `.env` file. Do not put keys in commands,
 screenshots or shared logs.

@@ -167,6 +167,7 @@ axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rsi-build-info = { path = "../build-info" }
 rsi-ssh-client = { path = "../../rsi-ssh/client" }
 rsi-ssh-protocol = { path = "../../rsi-ssh/protocol" }
 

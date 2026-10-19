@@ -8,7 +8,7 @@
 
 RSIversi 是一个预发布的 Rust 工作空间，通过普通的 `rsi-meta` 插件组合可独立使用的运行时产品。
 
-想使用 RSIversi，请从[完成第一次对话](crates/rsi/docs/user/first-conversation.zh.md)开始，
+想使用 RSIversi，请从[完成第一次对话](docs/user/first-conversation.zh.md)开始，
 按照教程安装源码、配置模型，并恢复已保存的对话。
 
 仓库级职责和依赖规则见[架构](docs/architecture.md)。

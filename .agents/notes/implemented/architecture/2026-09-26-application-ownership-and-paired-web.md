@@ -12,6 +12,9 @@ plugin reservations, so moving only launchers cannot establish dependency direct
 
 ## Decision
 
+The [application build-target decision](../process/2026-10-18-application-build-targets.md)
+partially supersedes source build defaults, cache layout and optional helper packaging.
+
 Root-level apps owns the standard product's entrypoints and explicit application
 catalog. Core consumes frozen application metadata and a catalog provider, while
 retaining Service lifecycle and native staging. Clients and daemons share metadata.

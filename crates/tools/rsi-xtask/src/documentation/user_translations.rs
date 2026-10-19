@@ -9,7 +9,7 @@ struct Examples {
 }
 
 fn user_paths(repository: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<std::path::PathBuf> {
-    let directory = repository.join("crates/rsi/docs/user");
+    let directory = repository.join("docs/user");
     match directory.try_exists() {
         Ok(false) => return Vec::new(),
         Err(error) => {
@@ -268,7 +268,7 @@ mod tests {
 
     fn validate_pair(original: &[u8], translated: &[u8]) -> Vec<String> {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("crates/rsi/docs/user/nested");
+        let directory = root.path().join("docs/user/nested");
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("start.md"), original).unwrap();
         fs::write(directory.join("start.zh.md"), translated).unwrap();
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn marker_errors_do_not_suppress_other_comparisons_or_id_checks() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("crates/rsi/docs/user/sub");
+        let directory = root.path().join("docs/user/sub");
         fs::create_dir_all(&directory).unwrap();
         let example = "<!-- rsi-example id=a platform=all -->\n```bash\necho ok\n```\n";
         fs::write(
@@ -381,8 +381,8 @@ mod tests {
                 .any(|e| e.contains("examples differ") || e.contains("link to its translation"))
         );
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("crates/rsi/docs")).unwrap();
-        fs::write(root.path().join("crates/rsi/docs/user"), b"not a directory").unwrap();
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::write(root.path().join("docs/user"), b"not a directory").unwrap();
         let mut diagnostics = Vec::new();
         validate(root.path(), &mut diagnostics);
         assert!(
