@@ -1,7 +1,8 @@
+import {liveLimits,readDeepseekKey,deepseekProfile} from './live-limits.mjs';
 import './paired-env.mjs';
 // Explicit opt-in live service ownership, shared by product probes.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir} from 'node:fs/promises';
+import {writeFile,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {startService} from './service.mjs';
 import {redactEvidence} from './evidence.mjs';
@@ -9,10 +10,9 @@ import {cleanupAll} from './cleanup.mjs';
 export async function liveFixture({configure}={}) {
   const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS,model=process.env.RSI_LIVE_MODEL;
   assert(report && assets && model && process.env.RSI_LIVE_ENV_FILE,'explicit live environment, model and report required');
+  const limits=liveLimits();
   assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));
-  const source=await readFile(process.env.RSI_LIVE_ENV_FILE);assert(source.length<=65536);
-  const match=source.toString().match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);assert(match,'authorized key missing');
-  const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
+  const key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);
   await mkdir(report,{recursive:false});const binary=process.env.RSI_WEB_BINARY;
   let service;
   const redact=text=>String(text).replaceAll(key,'[REDACTED]');
@@ -25,7 +25,7 @@ export async function liveFixture({configure}={}) {
   try {
   service=await startService({binary,assets,report,deepseekKey:key,configure:async({config,workspace})=>{
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},default_reasoning_effort:'off'}}));
-    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),`format=1\n[[steps]]\nkind="plugin"\nid="live"\nplugin="rsi.ai.provider.deepseek"\n[steps.config]\ndeployment="live"\nendpoint="https://api.deepseek.com"\ncredential={owner="rsi.ai.provider.deepseek",slot="default"}\n[steps.config.language_models.${model}]\ncontext_window_tokens=128000\ndefault_output_reserve_tokens=4096\nmax_output_reserve_tokens=16384\n[steps.config.reasoning_efforts.${model}]\nsupported=["off","low","high","max"]\ndefault="off"\n`);
+    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits));
     await configure?.({config,workspace});
     const cli=join(config,'application-profiles/evidence-cli');await mkdir(cli,{recursive:true});await writeFile(join(cli,'application.profile.toml'),'format=1\n[[steps]]\nkind="plugin"\nid="connection"\nplugin="rsi.application.connection"\nconfig={host_profile="fixture"}\n[[steps]]\nkind="plugin"\nid="cli"\nplugin="rsi.application.cli"\n');
   }});

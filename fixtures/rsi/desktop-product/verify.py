@@ -24,7 +24,7 @@ from tasks import ProviderControl, verify as verify_tasks
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import fill as fill_input, asset_pressure, file_has_bytes
+from controls import fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -36,6 +36,9 @@ from native_window import request_close as native_window_close
 from session_export import verify as verify_export
 from automation import configure as configure_automation, verify as verify_automation
 from typed_results import verify as verify_typed, provider_reply as typed_reply
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from live import read_deepseek_key, live_limits
 
 parser = argparse.ArgumentParser(description=__doc__)
 for option in ('binary', 'driver', 'assets', 'report'):
@@ -83,13 +86,9 @@ if args.close_timeout and (args.restart or args.save_failure or args.ack_timeout
     parser.error('close timeout is a separate deterministic scenario')
 if args.automation_fixture and not args.daemon: parser.error('Automation requires the opt-in daemon')
 secret = None
+limits = live_limits() if args.live_env_file else None
 if args.live_env_file:
-    source = args.live_env_file.read_bytes()
-    if len(source) > 65536: raise ValueError('live environment exceeds its bound')
-    match = re.search(r'^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$', source.decode(), re.M)
-    if not match: raise ValueError('authorized DeepSeek key is absent')
-    secret = re.sub(r'''^(["'])(.*)\1$''', r'\2', match[1].strip())
-    if not secret: raise ValueError('authorized DeepSeek key is empty')
+    secret = read_deepseek_key(args.live_env_file)
 args.report.mkdir(parents=True, exist_ok=False)
 requests = []
 task_provider = ProviderControl()
@@ -316,6 +315,7 @@ try:
         script(r'const e=document.querySelector("select[aria-label=\"DeepSeek protocol\"]");e.value="chat-completions";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
     else: fill('[aria-label="Request path"]', '/v1/chat/completions')
     fill('[aria-label="Model identifier 1"]', args.live_model or 'fixture-model')
+    if secret: configure_live_limits(script, fill, limits)
     button('Apply provider')
     until(lambda: script(r'return document.body.textContent.includes("Desired 1 · Applied 1")'))
     model_label = f'{args.live_model or "fixture-model"} · desktop-provider'

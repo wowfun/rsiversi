@@ -258,6 +258,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_readiness.log") 2>&1
           node --test task-checks.test.mjs ../desktop-product/readiness.test.mjs evidence.test.mjs ../../../crates/rsi/browser/runtime/http-proxy.test.mjs ../../../crates/rsi/browser/runtime/proxy-flow.test.mjs ../../../crates/rsi/browser/runtime/session-helper.test.mjs
+          python3 ../../tools/python-tests.py ..
+          python3 ../../tools/python-tests.py ../acp
 
       - name: Preserve failed fixture readiness before the paired build
         if: ${{ !cancelled() && steps.web_readiness.outcome == 'failure' }}
@@ -402,6 +404,7 @@ jobs:
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/ssh-targets" node fixtures/rsi/web-product/ssh-targets.mjs
           cargo test --locked -p rsi-cli --features paired-web-tests --test service_host_cli web::web_alias_and_profile_serve_default_assets_with_stable_authorized_identity -- --exact
           npm ci --ignore-scripts --prefix fixtures/rsi/acp
+          node --test fixtures/rsi/acp/live-startup.test.mjs
           export RSI_ACP_SDK_NODE="$(command -v node)"
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
           # These two opt-in integrations are explicit release probes. Exact-name

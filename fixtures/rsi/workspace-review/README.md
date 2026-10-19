@@ -10,6 +10,9 @@ The shared surface renderer also has a native PTY integration test and the deskt
 product fixture's `--workspace-review` scenario exercises its real WebKit bridge.
 
 Opt-in live acceptance additionally supplies `RSI_LIVE_ENV_FILE` and
-`RSI_LIVE_MODEL`. Only this explicit mode reads `DEEPSEEK_API_KEY` from that file;
-it uses Chromium, the actual DeepSeek provider and the real native patch Tool.
+`RSI_LIVE_MODEL`. Only this explicit mode reads `DEEPSEEK_API_KEY` from that file.
+The [shared live limits](../web-product/README.md) must also be supplied explicitly.
+The bounded credential parser and quoted model tables are shared with the other
+Web live probes.
+Live mode uses Chromium, the actual DeepSeek provider and the real native patch Tool.
 No key is written into the report. The default scenario never reads credentials.

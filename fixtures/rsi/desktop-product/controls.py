@@ -27,3 +27,9 @@ def file_has_bytes(path, expected):
             return source.read(len(expected) + 1) == expected
     except FileNotFoundError:
         return False
+
+
+def configure_live_limits(script, fill_input, limits):
+    script('return [...document.querySelectorAll("summary")].find(e=>e.textContent.trim()==="Context and output limits").click()')
+    for field, value in limits.items():
+        fill_input(f'[aria-label="{field} 1"]', str(value))

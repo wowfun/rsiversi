@@ -33,6 +33,14 @@ The startup/cleanup failure test uses a real Node child with invalid readiness,
 stubbing only executable selection and certificate generation. It runs on
 Windows and Linux without a POSIX shell or OpenSSL installation.
 
+The document projection checks load shipped modules through the same routed
+ES-module harness. `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
+composer controls, shared drafts, unknown outcomes and capacity recovery in
+desktop and narrow viewports. A MutationObserver checks that repeated frames and
+unchanged input do not rewrite the live alert region. Accepted edits in a sibling
+pane clear stale capacity notices. These checks provide browser rendering evidence
+without claiming ACP transport or live-provider coverage.
+
 CI runs `navigation-order.mjs` and `device-storage.mjs` alongside the Dock probes.
 The storage probe exercises real IndexedDB migration, concurrent writes, rollback,
 and principal isolation in an isolated Chromium profile.
@@ -162,6 +170,24 @@ model request. This fixture uses the isolated deterministic provider.
 The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
 clean document before recording success. Product notices fail the live check;
 successful model output alone does not establish visual acceptance.
+`RSI_WEB_BROWSER` selects Chromium (default) or Firefox for this probe.
+The isolated GUI tool probe caps each model response at 4096 tokens and allows
+seven minutes for its turn, including the provider's finite connection retries.
+Live DeepSeek probes require `DEEPSEEK_CONTEXT_WINDOW_TOKENS`,
+`DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS` and `DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS`
+for the selected model, matching the provider's native live test. These explicit
+capacities replace form examples; the maximum must accommodate the provider's
+configured request output default. The fixture does not infer capacities from
+a model name or from successful credential discovery.
+Live probes share bounded credential-file parsing and profile construction;
+the maximum output reserve must be at least the default reserve. Failed-request
+diagnostics retain at most 64 entries with bounded fields and count omissions.
+
+`node verify.mjs --primary-only` runs pairing, local launch and the primary
+product scenarios in both browsers (or `RSI_WEB_BROWSER`). It omits the separate
+renderer, recovery, task, preview and plan probes and their native/Wasm fixture
+builds. The default command continues to run those probes too.
+
 The default runner includes `tasks.mjs`, which uses the same real Worker,
 Service and provider with explicit
 response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPORT`,

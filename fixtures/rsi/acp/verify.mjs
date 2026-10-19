@@ -1,3 +1,4 @@
+import {liveLimits,readDeepseekKey,deepseekProfile} from '../web-product/live-limits.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -29,14 +30,11 @@ let server;
 let requests = 0;
 let child;
 const live = !!values['live-env'];
+let profile;
 if (live) {
-  const source = await readFile(resolve(values['live-env']), 'utf8');
-  const match = source.match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);
-  assert(match, 'DEEPSEEK_API_KEY unavailable');
-  credential = match[1].replace(/^(['"])(.*)\1$/, '$2');
-  assert(credential.length > 0, 'DEEPSEEK_API_KEY empty');
-  endpoint = 'https://api.deepseek.com';
-  model = 'deepseek-flash';
+  model = process.env.RSI_LIVE_MODEL;
+  profile = deepseekProfile(model,liveLimits());
+  credential = await readDeepseekKey(resolve(values['live-env']));
 } else {
   server = createServer(async (request, response) => {
     for await (const chunk of request) { void chunk; }
@@ -50,20 +48,20 @@ if (live) {
   await once(server, 'listening');
   endpoint = `http://127.0.0.1:${server.address().port}`;
 }
-await writeFile(join(config, 'settings.json'), JSON.stringify({ 'rsi.agent': { default_model: { deployment: 'fixture', model }, require_approval: true } }));
+await writeFile(join(config, 'settings.json'), JSON.stringify({ 'rsi.agent': { default_model: { deployment: live ? 'live' : 'fixture', model }, require_approval: true } }));
 await mkdir(join(config, 'host-profiles/fixture'), { recursive: true });
 await mkdir(join(config, 'application-profiles/test-acp'), { recursive: true });
-await writeFile(join(config, 'host-profiles/fixture/host.profile.toml'), `format = 1
+await writeFile(join(config, 'host-profiles/fixture/host.profile.toml'), profile ?? `format = 1
 [[steps]]
 kind = "plugin"
 id = "fixture-provider"
-plugin = "rsi.ai.provider.${live ? 'deepseek' : 'openai-compatible'}"
+plugin = "rsi.ai.provider.openai-compatible"
 [steps.config]
 deployment = "fixture"
 endpoint = "${endpoint}"
-${live ? 'protocol = "chat-completions"' : 'path = "/v1/chat/completions"\nallow_image_input = false'}
+path = "/v1/chat/completions"
+allow_image_input = false
 credential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }
-${live ? `[steps.config.default_output_tokens]\n${model} = 4096` : ''}
 [steps.config.language_models.${model}]
 context_window_tokens = 128000
 default_output_reserve_tokens = 4096
@@ -82,6 +80,7 @@ plugin = "rsi.application.acp"
 `);
 const environment = { ...process.env, HOME: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'config'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'), XDG_RUNTIME_DIR: join(root, 'runtime'), RSI_OPENAI_COMPATIBLE_API_KEY: credential };
 for (const key of ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'RSI_DEEPSEEK_API_KEY', 'RSI_OPENAI_API_KEY']) delete environment[key];
+if (live) {delete environment.RSI_OPENAI_COMPATIBLE_API_KEY;environment.DEEPSEEK_API_KEY=credential;}
 const report = { sdk: '@agentclientprotocol/sdk@1.4.0', mode: live ? 'live' : 'deterministic', root, model, ok: false };
 let stderr = '';
 let phase = 'startup';

@@ -9,6 +9,14 @@ fixtures/rsi/acp/verify.mjs --binary target/debug/rsi --output OUTPUT`. The
 default fixture starts an isolated deterministic provider and fresh product
 configuration. Live verification is opt-in with `--live-env .local/dev/.env`;
 only `DEEPSEEK_API_KEY` is read, and reports contain no credential values.
+Live mode also requires `RSI_LIVE_MODEL` and the three explicit
+`DEEPSEEK_*_TOKENS` limits described by the [Web fixture](../web-product/README.md).
+It uses the same DeepSeek profile and credential owner as that fixture.
+`node --test fixtures/rsi/acp/live-startup.test.mjs` checks live configuration
+and child credential routing with synthetic inputs and a stub launch.
+The Python live launchers share the bounded, line-local key reader in
+`../live.py`; `python3 fixtures/tools/python-tests.py fixtures/rsi` verifies it
+with synthetic environment files.
 
 The fixture records initialization, new/prompt, paged native history load,
 resume, close and process exit. Protocol interoperability, real provider

@@ -3,10 +3,17 @@ import unittest
 from pathlib import Path
 import tempfile
 from unittest.mock import Mock
-from controls import FOCUS_INPUT, fill, file_has_bytes
+from controls import FOCUS_INPUT, fill, file_has_bytes, configure_live_limits
 
 
 class InputControlTest(unittest.TestCase):
+    def test_live_limits_are_expanded_and_filled_before_apply(self):
+        events = []
+        limits = dict(context_window_tokens=1048576, default_output_reserve_tokens=4096, max_output_reserve_tokens=393216)
+        configure_live_limits(lambda source: events.append(('expand', source)), lambda css, value: events.append(('fill', css, value)), limits)
+        self.assertEqual(events[0][0], 'expand')
+        self.assertIn('Context and output limits', events[0][1])
+        self.assertEqual(events[1:], [('fill', f'[aria-label="{field} 1"]', str(value)) for field, value in limits.items()])
     def test_created_empty_and_partial_files_are_not_completed_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'result'

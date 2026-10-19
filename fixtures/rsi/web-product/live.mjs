@@ -4,27 +4,32 @@ import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir,readdir,lstat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
-import {chromium} from 'playwright';
+import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
 import {assertNoNotices} from './task-checks.mjs';
+import {liveLimits,readDeepseekKey} from './live-limits.mjs';
 
 const envPath=process.env.RSI_LIVE_ENV_FILE, report=process.env.RSI_WEB_REPORT;
 if(!envPath || !report || !process.env.RSI_WEB_ASSETS || !process.env.RSI_LIVE_MODEL) throw new Error('Set explicit RSI_LIVE_ENV_FILE, RSI_LIVE_MODEL, RSI_WEB_REPORT and RSI_WEB_ASSETS');
-const source=await readFile(envPath);assert(source.length<=65536,'live environment file exceeds its bound');
-const match=source.toString('utf8').match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);
-assert(match,'authorized DeepSeek key is absent');
-const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
+const limits=liveLimits();
+const key=await readDeepseekKey(envPath);
 await mkdir(report,{recursive:true});
 const binary=process.env.RSI_WEB_BINARY;
-const browser=await chromium.launch();let service,page;
-const errors=[];const started=Date.now();
+const browserName=process.env.RSI_WEB_BROWSER??'chromium';
+assert(['chromium','firefox'].includes(browserName),'Unknown live browser');
+const browser=await ({chromium,firefox})[browserName].launch();let service,page;
+const errors=[],networkFailures=[];let omittedNetworkFailures=0;const started=Date.now();
 try {
   service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report,deepseekKey:key,configure:async({config})=>{
-    await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{}}));
+    await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{output_budgets:[{model:{deployment:'live-deepseek',model:process.env.RSI_LIVE_MODEL},max_output_tokens:4096}]}}));
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\nsteps = []\n');
   }});
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
+  page.on('requestfailed',request=>{
+    if(networkFailures.length===64){omittedNetworkFailures++;return;}
+    networkFailures.push({method:request.method().slice(0,32),path:new URL(request.url()).pathname.slice(0,2048),error:request.failure()?.errorText?.slice(0,1024),elapsed_ms:Date.now()-started});
+  });
   await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register('isolated live GUI')));
   await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
   await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(service.workspace);
@@ -36,6 +41,8 @@ try {
   assert(await page.getByRole('button',{name:'Save credential',exact:true}).isEnabled());
   await page.getByLabel('Deployment name').fill('live-deepseek');await page.getByLabel('Provider endpoint').fill('https://api.deepseek.com');
   await page.getByLabel('DeepSeek protocol').selectOption('chat-completions');await page.getByLabel('Model identifier 1',{exact:true}).fill(process.env.RSI_LIVE_MODEL);
+  await page.getByText('Context and output limits',{exact:true}).click();
+  for(const [field,value] of Object.entries(limits)) await page.getByLabel(`${field} 1`,{exact:true}).fill(String(value));
   await page.getByRole('button',{name:'Apply provider',exact:true}).click();await page.getByText('Desired 1 · Applied 1',{exact:true}).waitFor();
   await page.getByLabel('Default model',{exact:true}).selectOption({label:`${process.env.RSI_LIVE_MODEL} · live-deepseek`});
   await page.getByText('default_model · confirmed',{exact:true}).waitFor();
@@ -46,12 +53,13 @@ try {
   const input=page.getByLabel('Main message',{exact:true});
   await input.fill('This is an isolated GUI integration test. Use the available bash tool to write exactly 12 UTF-8 bytes: "rsi-live-ok" followed by one LF newline to milestone.txt in the current workspace, then use bash to read that file back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.');
   await page.getByTestId('composer-send').click();
-  const deadline=Date.now()+150000;let approvals=0;
+  const deadline=Date.now()+420000;let approvals=0;
   while(Date.now()<deadline) {
+    assert(await page.locator('#workbench').isVisible(),'Live browser connection was lost');
     const review=page.locator('.pending button').filter({hasText:'Review:'});
     if(await review.count() && await review.first().isVisible()) {await review.first().click();await page.getByRole('button',{name:'Allow once',exact:true}).click();approvals++;}
     const status=await page.locator('.pane-status').innerText();
-    if(status==='Completed' || status==='Failed') break;
+    if(['Completed','Failed','Interrupted','Cancelled'].includes(status)) break;
     await page.waitForTimeout(100);
   }
   const transcript=await page.locator('.transcript').innerText();
@@ -66,9 +74,9 @@ try {
   await writeFile(join(report,'transcript.txt'),transcript);
   await assertNoNotices(page);
   await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);
-  await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browser.version(),model:process.env.RSI_LIVE_MODEL,protocol:'chat-completions',elapsed_ms:Date.now()-started,approvals,file_bytes:bytes.length,file_text:bytes.toString(),mock_requests:0,clean_sign_out:true},null,2));
+  await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browserName,version:browser.version(),model:process.env.RSI_LIVE_MODEL,limits,protocol:'chat-completions',elapsed_ms:Date.now()-started,approvals,file_bytes:bytes.length,file_text:bytes.toString(),mock_requests:0,clean_sign_out:true},null,2));
 } catch(error) {
-  if(page) {await page.screenshot({path:join(report,'failure.png'),fullPage:true}).catch(()=>{});await writeFile(join(report,'failure.txt'),String(error).replaceAll(key,'[REDACTED]'));}
+  if(page) {await page.screenshot({path:join(report,'failure.png'),fullPage:true}).catch(()=>{});await writeFile(join(report,'failure.txt'),String(error).replaceAll(key,'[REDACTED]'));await writeFile(join(report,'failure-network.json'),JSON.stringify({errors,networkFailures,omittedNetworkFailures},null,2).replaceAll(key,'[REDACTED]'));}
   throw new Error(String(error).replaceAll(key,'[REDACTED]'));
 } finally {
   await browser.close();await service?.close();

@@ -89,6 +89,11 @@ By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
 DeepSeek instead: it reads only that key into the isolated child environment,
 checks actual tool-created file bytes and redacts evidence if the key appears.
+Live mode requires explicit `DEEPSEEK_CONTEXT_WINDOW_TOKENS`,
+`DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS` and `DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS`.
+Positive u32 limits are validated before startup and entered into the provider
+form before Apply; the maximum reserve must accommodate the default reserve.
+The bounded credential file rejects empty or whitespace-only keys after unquoting.
 `--window-close` exercises the platform window close request and retained drain.
 `--restart` additionally reopens the same private state and checks the persisted
 conversation and unsent draft before closing it again.
