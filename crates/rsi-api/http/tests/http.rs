@@ -248,6 +248,43 @@ impl rsi_api_http::HttpAssets for Assets {
 }
 
 #[tokio::test]
+async fn svg_assets_retain_their_mime_bytes_and_document_policy_over_http() {
+    use rsi_api_http::{AssetType, DocumentPolicy, HttpAsset, HttpAssets};
+    #[derive(Debug)]
+    struct Logo(RetainedBytes);
+    impl HttpAssets for Logo {
+        fn get(&self, path: &str) -> Result<Option<HttpAsset>> {
+            Ok((path == "/logo.svg").then(|| HttpAsset {
+                kind: AssetType::Svg,
+                policy: DocumentPolicy::default(),
+                bytes: self.0.clone(),
+            }))
+        }
+    }
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    let budget = rsi_api_protocol::ByteBudget::new(1024).unwrap();
+    let harness =
+        Harness::start_with_assets(false, Some(Arc::new(Logo(budget.copy(svg).unwrap())))).await;
+    let response = Harness::client()
+        .get(format!("{}/logo.svg", harness.origin))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        DocumentPolicy::default()
+            .content_security_policy(&harness.origin)
+            .unwrap()
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), svg);
+    harness.close().await;
+}
+
+#[tokio::test]
 async fn sandbox_policies_survive_real_http_asset_delivery() {
     use rsi_api_http::{AssetType, DocumentPolicy, HttpAsset, HttpAssets};
     #[derive(Debug)]

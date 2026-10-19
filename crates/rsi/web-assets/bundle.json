@@ -5,6 +5,10 @@
       "stage": "document"
     },
     {
+      "name": "logo.svg",
+      "stage": "document"
+    },
+    {
       "name": "preview-local.html",
       "stage": "preview"
     },

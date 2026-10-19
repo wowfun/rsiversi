@@ -1,24 +1,41 @@
-"""Render the committed rect/circle SVG, preserving one artwork source."""
+"""Generate native icons from the shared SVG using resvg 0.45.1 and Pillow."""
+import argparse
 from pathlib import Path
-from xml.etree import ElementTree
-from PIL import Image, ImageDraw
+import subprocess
+import tempfile
 
-icons = Path(__file__).resolve().parent
-scale = 4
-canvas = Image.new("RGBA", (256 * scale, 256 * scale), (0, 0, 0, 0))
-draw = ImageDraw.Draw(canvas)
-for element in ElementTree.parse(icons / "icon.svg").getroot():
-    attrs = element.attrib
-    kind = element.tag.rsplit("}", 1)[-1]
-    if kind == "rect":
-        x, y, width, height = (float(attrs[k]) * scale for k in ("x", "y", "width", "height"))
-        draw.rounded_rectangle((x, y, x + width - 1, y + height - 1), radius=float(attrs.get("rx", 0)) * scale, fill=attrs["fill"])
-    elif kind == "circle":
-        x, y, radius = (float(attrs[k]) * scale for k in ("cx", "cy", "r"))
-        draw.ellipse((x - radius, y - radius, x + radius - 1, y + radius - 1), fill=attrs["fill"])
-    else:
-        raise ValueError(kind)
-canvas = canvas.resize((256, 256), Image.Resampling.LANCZOS)
-canvas.save(icons / "icon.png")
-canvas.save(icons / "icon.ico", sizes=[(n, n) for n in (16, 24, 32, 48, 64, 128, 256)])
-print({"png": canvas.size, "ico_sizes": sorted(Image.open(icons / "icon.ico").ico.sizes())})
+from PIL import Image
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resvg", default="resvg", help="path to resvg 0.45.1")
+    args = parser.parse_args()
+    version = subprocess.run(
+        [args.resvg, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if version != "0.45.1":
+        parser.error(f"resvg 0.45.1 is required; found {version!r}")
+    icons = Path(__file__).resolve().parent
+    source = icons.parents[1] / "web" / "public" / "logo.svg"
+    with tempfile.TemporaryDirectory(prefix="rsiversi-icons-") as temporary:
+        rendered = Path(temporary) / "logo.png"
+        subprocess.run(
+            [args.resvg, "--width", "1024", str(source), str(rendered)], check=True
+        )
+        with Image.open(rendered) as image:
+            if image.size != (1024, 1024):
+                raise ValueError("The shared logo must have a square viewBox")
+            canvas = image.convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS)
+    canvas.save(icons / "icon.png")
+    sizes = [(size, size) for size in (16, 24, 32, 48, 64, 128, 256)]
+    canvas.save(icons / "icon.ico", sizes=sizes)
+    with Image.open(icons / "icon.png") as png, Image.open(icons / "icon.ico") as ico:
+        actual_sizes = sorted(ico.ico.sizes())
+        if png.size != (256, 256) or png.mode != "RGBA" or actual_sizes != sizes:
+            raise ValueError("Generated icon dimensions or alpha channel differ from the contract")
+        print({"png": png.size, "ico_sizes": actual_sizes})
+
+
+if __name__ == "__main__":
+    main()

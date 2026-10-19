@@ -62,7 +62,7 @@ async fn skill_agent_file_and_frozen_reference_workflows_use_real_tui_actions() 
     terminal.until("PTY isolated reviewer").await;
     terminal.send(b"\x1bOQ");
     terminal.until("AGENT_BODY_ONLY_PTY").await;
-    terminal.until("RSI · Agent · page 1").await;
+    terminal.until("RSIversi · Agent · page 1").await;
     terminal.capture();
     terminal.send(b"\x1b");
     terminal.absent("AGENT_BODY_ONLY_PTY").await;

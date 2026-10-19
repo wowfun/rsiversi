@@ -74,12 +74,12 @@ def request_close():
                 name = C.c_void_p()
                 if x11.XFetchName(display, children[index], C.byref(name)) and name:
                     try:
-                        if C.string_at(name) == b'RSI': matches.append(children[index])
+                        if C.string_at(name) == b'RSIversi': matches.append(children[index])
                     finally: x11.XFree(name)
         finally:
             if children: x11.XFree(children)
         if len(matches) != 1:
-            raise RuntimeError(f'Expected one RSI fixture window, found {len(matches)}')
+            raise RuntimeError(f'Expected one RSIversi fixture window, found {len(matches)}')
         event = Event()
         event.client.type = 33  # X11 ClientMessage, per Xlib.h.
         event.client.display = display

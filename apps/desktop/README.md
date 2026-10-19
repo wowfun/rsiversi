@@ -6,9 +6,13 @@ These assets permit Windows resource compilation. Windows 11 24H2+ x64 uses
 WebView2 and embedded Host ownership; Linux uses WebKitGTK and existing Host
 attachment. A relocatable distribution still requires the platform system runtimes,
 including VC++ Runtime and WebView2 on Windows; it is not an installer.
-`icons/icon.svg` is the artwork source. Run `python icons/generate.py` with
-Pillow installed to regenerate both raster assets; the generator never runs
-during a normal build.
+The [Web logo](../web/public/logo.svg) is the sole artwork source, following the
+[shared graphical brand contract](../web/README.md). Run `python icons/generate.py`
+with Pillow and resvg 0.45.1 installed to regenerate both raster assets; use
+`--resvg /absolute/path/to/resvg` when the pinned renderer is not on PATH.
+The generator renders curves and gradients on a transparent canvas, preserves
+the SVG viewBox and writes ICO sizes 16, 24, 32, 48, 64, 128 and 256.
+It never runs during a normal build.
 
 Session export opens a Rust-owned native save dialog, then consumes the shared
 verified export stream into the [atomic file sink](../../crates/rsi/session-export/README.md).

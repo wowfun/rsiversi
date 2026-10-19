@@ -122,7 +122,7 @@ async fn fullscreen_dialogs_keep_context_and_filter_geometry_without_background_
         for (command, label) in [
             ("/model", "Model for next request"),
             ("/login", "Log in · choose provider"),
-            ("/help", "RSI · Help"),
+            ("/help", "RSIversi · Help"),
         ] {
             terminal.send(format!("{command}\r").as_bytes());
             terminal.until(label).await;

@@ -19,9 +19,12 @@ pub enum AssetType {
     Json,
     /// Raster PNG asset.
     Png,
+    /// Scalable SVG asset.
+    Svg,
 }
 impl AssetType {
-    fn mime(self) -> &'static str {
+    /// Canonical media type shared by HTTP and native application delivery.
+    pub fn mime(self) -> &'static str {
         match self {
             Self::Html => "text/html; charset=utf-8",
             Self::JavaScript => "text/javascript; charset=utf-8",
@@ -29,6 +32,7 @@ impl AssetType {
             Self::Wasm => "application/wasm",
             Self::Json => "application/json",
             Self::Png => "image/png",
+            Self::Svg => "image/svg+xml",
         }
     }
 }

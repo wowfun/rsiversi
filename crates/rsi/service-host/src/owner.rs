@@ -545,7 +545,7 @@ pub enum ServiceHostError {
     #[cfg_attr(
         windows,
         error(
-            "another RSI application owns these data directories; stop the other Web, TUI, ACP or offline device process first (do not delete owner.lock)"
+            "another RSIversi application owns these data directories; stop the other Web, TUI, ACP or offline device process first (do not delete owner.lock)"
         )
     )]
     #[cfg_attr(not(windows), error("another Service Host owner is active"))]

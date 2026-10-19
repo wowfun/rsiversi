@@ -57,6 +57,7 @@ fn kind(name: &str) -> Option<AssetType> {
         "wasm" => Some(AssetType::Wasm),
         "json" => Some(AssetType::Json),
         "png" => Some(AssetType::Png),
+        "svg" => Some(AssetType::Svg),
         _ => None,
     }
 }

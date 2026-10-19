@@ -1,5 +1,14 @@
 # Web document bridge
 
+The shared Web/Desktop shell displays the [product name](../../crates/rsi/README.md)
+with the canonical [logo](public/logo.svg). Its full viewBox, grayscale gradient
+and transparent background are preserved in every theme, without a background
+plate or color filter. Expanded navigation and login show the logo and name;
+the collapsed navigation rail shows the logo with an accessible product name.
+The same SVG supplies the favicon and the source for native application icons.
+Vite serves it from `public/` and copies it unchanged into the flat production
+bundle as a fixed document-stage bootstrap asset.
+
 Native document mode uses the exact local `rsi://localhost` or
 `http://rsi.localhost` location, including its scheme and authority. The latter
 is WebView2's visible Windows origin. Transport construction, automatic native

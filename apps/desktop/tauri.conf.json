@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "RSI",
+  "productName": "RSIversi",
   "version": "0.0.1",
   "identifier": "org.rsiversi.desktop",
   "build": { "frontendDist": "bootstrap" },

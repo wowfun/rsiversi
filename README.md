@@ -1,11 +1,15 @@
+<p align="center">
+  <img src="apps/web/public/logo.svg" alt="Psychevo" width="160">
+</p>
+
+English | [中文](README.zh.md)
+
 # RSIversi
 
 RSIversi is a pre-release Rust workspace for composing independently usable
 runtime products from ordinary `rsi-meta` plugins.
 
-[中文](README.zh.md)
-
-To use RSI, start with [your first conversation](crates/rsi/docs/user/first-conversation.md).
+To use RSIversi, start with [your first conversation](crates/rsi/docs/user/first-conversation.md).
 It covers source installation, model setup and returning to saved conversations.
 
 The repository-wide ownership and dependency rules live in
@@ -13,7 +17,7 @@ The repository-wide ownership and dependency rules live in
 setup, security, and verification documentation below its own subtree.
 
 Start with the [developer quick start](docs/quickstart.md) to build and run an
-isolated TUI or Web environment, or a paired Linux desktop distribution.
+isolated TUI or Web environment, or a paired Linux or Windows desktop distribution.
 
 Development builds optimize the SHA-256 dependency used to verify complete
 executable artifacts. This keeps local startup practical with full debug

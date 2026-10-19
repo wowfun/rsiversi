@@ -1,5 +1,4 @@
 use super::protocol::{Admission, NativeError};
-use rsi_api_http::AssetType;
 use rsi_api_http::HttpAssets;
 use rsi_application::ApplicationLifetime;
 use rsi_gui::GuiApplication;
@@ -233,14 +232,7 @@ impl Bridge {
             .get(path)
             .map_err(|cause| NativeError::Failed(error(cause)))?
             .ok_or_else(|| NativeError::Invalid("Asset is unavailable".into()))?;
-        let mime = match asset.kind {
-            AssetType::Html => "text/html; charset=utf-8",
-            AssetType::JavaScript => "text/javascript; charset=utf-8",
-            AssetType::Css => "text/css; charset=utf-8",
-            AssetType::Wasm => "application/wasm",
-            AssetType::Json => "application/json",
-            AssetType::Png => "image/png",
-        };
+        let mime = asset.kind.mime();
         Ok((asset.bytes.as_bytes().to_vec(), mime, asset.policy))
     }
     #[allow(clippy::too_many_lines)] // Native transport dispatch keeps the closed method grammar together.

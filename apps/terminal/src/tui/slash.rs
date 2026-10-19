@@ -652,7 +652,7 @@ impl Ui {
         });
         Ok(Scene::from(ApplicationScene {
             revision:self.revision,
-            title:if self.previewing {format!("RSI · {} · page {}",self.preview_kind,self.page+1)} else if detail.is_some() {format!("RSI · Help · page {}",self.page+1)} else {"RSI · Help".into()},
+            title:if self.previewing {format!("RSIversi · {} · page {}",self.preview_kind,self.page+1)} else if detail.is_some() {format!("RSIversi · Help · page {}",self.page+1)} else {"RSIversi · Help".into()},
             explanation:if self.previewing {"Preview only · Esc returns to your draft"} else {"Enter sends · Shift+Enter / Ctrl+J line · Ctrl+P actions · Ctrl+R recall · Ctrl+Y copy ID · Ctrl+C cancel turn"}.into(),
             items:if detail.is_some() {vec![]} else {self.help_entries().iter().map(|e|format!("/{} · {}",e.name,bounded(&e.description,256))).collect()},
             selected:if detail.is_some() {0} else {self.selected},
@@ -1016,6 +1016,7 @@ mod tests {
             panic!("help")
         };
         assert_eq!(ui.page, 1);
+        assert_eq!(scene.title, "RSIversi · Help · page 2");
         assert!(scene.detail.as_ref().unwrap().len() <= 8192);
         Scene::decode(&Scene::from(*scene).encode().unwrap())
             .unwrap()
@@ -1050,6 +1051,7 @@ mod tests {
             text.contains("line-19"),
             "Down scrolled past all content: {text}"
         );
+        assert!(text.contains("RSIversi · Help"), "{text}");
         if let Some(directory) = std::env::var_os("RSI_TUI_VISUAL_DIR") {
             std::fs::create_dir_all(&directory).unwrap();
             let cells: Vec<_> = buffer.content.iter().enumerate().map(|(i, cell)| serde_json::json!({

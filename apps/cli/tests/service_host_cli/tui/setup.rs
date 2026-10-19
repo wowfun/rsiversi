@@ -591,7 +591,7 @@ async fn home_clipboard_helper_does_not_block_help_input() {
     terminal.send(b"\x1b");
     terminal.absent("clipboard-history").await;
     terminal.send(b"/help\r");
-    terminal.until("RSI · Help").await;
+    terminal.until("RSIversi · Help").await;
     let pid = std::fs::read_to_string(&entered).unwrap();
     let active = Command::new("kill")
         .args(["-0", &pid])
@@ -599,7 +599,7 @@ async fn home_clipboard_helper_does_not_block_help_input() {
         .unwrap()
         .success();
     terminal.send(b"\x03");
-    terminal.absent("RSI · Help").await;
+    terminal.absent("RSIversi · Help").await;
     terminal.until("No session attached").await;
     terminal.send(b"\x03");
     terminal.finish().await;

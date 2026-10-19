@@ -18,7 +18,7 @@ source.subscribe(updateScope); selection.subscribe(updateScope)
 export const host: SlotRendererHost = {
   subscribe: slots.subscribe.bind(slots), getVersion: slots.getVersion.bind(slots), entriesOf: slots.entries.bind(slots),
   entriesOfSlot: slots.entriesOfSlot.bind(slots), reportEntryError: slots.reportEntryError.bind(slots), specOf: slots.specDynamic.bind(slots), isLive: slots.isLive.bind(slots),
-  storeOf(entry) { if (entry.store) throw new Error('RSI slot composition does not install a DSH store engine'); return undefined },
+  storeOf(entry) { if (entry.store) throw new Error('RSIversi slot composition does not install a DSH store engine'); return undefined },
   root: observable(empty), scopeRevision: observable(0),
   scope() { return {current, resolve: key => binding?.key === key ? binding : undefined} },
 }

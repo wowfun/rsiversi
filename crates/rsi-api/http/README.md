@@ -22,6 +22,9 @@ immutable budget lease; no response copy or filesystem lookup occurs here.
 Responses use a closed MIME set, no-store, nosniff and a same-origin CSP permitting
 WASM compilation but no inline or remote scripts. The provider owns bundle input
 validation, aggregate retention and retirement.
+`AssetType` owns MIME selection shared by HTTP and native document transports.
+SVG application assets use `image/svg+xml`; their bytes follow the same immutable
+delivery, budget and document policy as the other admitted application assets.
 Assets use `Referrer-Policy: same-origin`: foreign requests disclose no referrer,
 while browser Worker POSTs retain the concrete Origin required by authentication.
 `no-referrer` causes Firefox to send `Origin: null` and cannot satisfy that gate.

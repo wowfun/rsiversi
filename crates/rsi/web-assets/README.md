@@ -5,7 +5,7 @@ an explicit absolute bundle directory and a closed list of flat filenames at
 activation. The compiled [bundle manifest](bundle.json) owns the fixed bootstrap set, each
 file's production stage, and initial renderer filenames. Rust admission, the
 frontend producer and development proxy consume that same source. It is build
-input, never a receipt- or renderer-supplied override. Only HTML, JavaScript, CSS, WASM, JSON and PNG
+input, never a receipt- or renderer-supplied override. Only HTML, JavaScript, CSS, WASM, JSON, PNG and SVG
 extensions are accepted; names contain ASCII letters, digits, dot, dash or
 underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must

@@ -146,7 +146,7 @@ fn run() -> Result<i32, String> {
                 tauri::WebviewUrl::External(document::root_url()),
             )
             .on_navigation(document::admits_navigation)
-            .title("RSI")
+            .title("RSIversi")
             .inner_size(1440.0, 980.0)
             .data_directory(data)
             .build()?;

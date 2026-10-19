@@ -51,6 +51,8 @@ fn webview2_origin_methods_and_document_ipc_permissions() {
     assert_eq!(result["native_mode"], true);
     assert_eq!(result["close_events"], 1);
     assert_eq!(result["inline_blocked"], true);
+    assert_eq!(result["logo_mime"], "image/svg+xml");
+    assert_eq!(result["logo_width"], 1254);
     for permission in ["dialog", "clipboard"] {
         assert!(
             result[permission].as_str().unwrap().contains("not allowed"),
@@ -125,6 +127,7 @@ fn build_probe(
                 "/" => (b"<!doctype html><title>Native transport probe</title><script>globalThis.__inlineRan=true</script><script type='module' src='/probe.js'></script>".to_vec(), "text/html"),
                 "/probe.js" => (SCRIPT.as_bytes().to_vec(), "text/javascript"),
                 "/document-mode.js" => (include_str!("../../web/document-mode.js").as_bytes().to_vec(), "text/javascript"),
+                "/logo.svg" => (include_bytes!("../../web/public/logo.svg").to_vec(), rsi_api_http::AssetType::Svg.mime()),
                 _ => (b"{}".to_vec(), "application/json"),
             };
             responder.respond(
@@ -149,6 +152,7 @@ fn build_probe(
                 "main",
                 tauri::WebviewUrl::External(crate::document::root_url()),
             )
+            .title("RSIversi")
             .visible(false)
             .data_directory(profile)
             .on_page_load(|view, event| {
@@ -157,6 +161,7 @@ fn build_probe(
                 }
             })
             .build()?;
+            assert_eq!(app.get_webview_window("main").unwrap().title()?, "RSIversi");
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -169,6 +174,8 @@ window.addEventListener('rsi-native-close', () => { close_events++; });
 (async () => {
     const post = await fetch('/_frame', {method:'POST'});
     const get = await fetch('/_frame');
+    const logo = await fetch('/logo.svg');
+    const image = new Image(); image.src = '/logo.svg'; await image.decode();
     const denied = async (command, args) => {
         try { await window.__TAURI_INTERNALS__.invoke(command, args); return 'unexpected admission'; }
         catch (error) { return String(error); }
@@ -178,5 +185,5 @@ window.addEventListener('rsi-native-close', () => { close_events++; });
     const dialog = await denied('plugin:dialog|open', {options:'invalid options'});
     const clipboard = await denied('plugin:clipboard-manager|write_text', {text:{invalid:true}});
     const native_mode = isNativeDocument(location), inline_blocked = globalThis.__inlineRan !== true;
-    await fetch('/_probe_done', {method:'POST',body:JSON.stringify({post:post.status,get:get.status,dialog,clipboard,native_mode,close_events,inline_blocked})});
+    await fetch('/_probe_done', {method:'POST',body:JSON.stringify({post:post.status,get:get.status,dialog,clipboard,native_mode,close_events,inline_blocked,logo_mime:logo.headers.get('content-type'),logo_width:image.naturalWidth})});
 })()";

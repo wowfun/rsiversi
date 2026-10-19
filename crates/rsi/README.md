@@ -1,8 +1,13 @@
 # rsi
 
-RSI composes the Agent and capability products into terminal, line, Headless,
+RSIversi composes the Agent and capability products into terminal, line, Headless,
 Web and Linux/Windows Desktop applications. Its [architecture](docs/architecture.md)
 defines product ownership and the shared Service Host.
+
+User-facing product names use **RSIversi**, including application titles, navigation
+labels and terminal headings. Technical identities such as `rsi` commands, package
+names, protocol identifiers and data directories retain their own spelling.
+The [Web document](../../apps/web/README.md) owns the shared graphical brand source.
 
 For ordinary use, follow [your first conversation](docs/user/first-conversation.md)
 ([中文](docs/user/first-conversation.zh.md)).

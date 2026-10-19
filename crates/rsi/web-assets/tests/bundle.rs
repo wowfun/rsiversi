@@ -94,13 +94,25 @@ async fn complete_bundle_is_immutable_and_retirement_fences_escaped_capability()
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("index.html"), b"<main>fixture</main>").unwrap();
     std::fs::write(root.path().join("app.wasm"), b"wasm bytes").unwrap();
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    std::fs::write(root.path().join("logo.svg"), svg).unwrap();
     let running = host()
-        .start(profile(root.path(), &["index.html", "app.wasm"]))
+        .start(profile(
+            root.path(),
+            &["index.html", "app.wasm", "logo.svg"],
+        ))
         .await
         .unwrap();
     let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
     let page = assets.get("/").unwrap().unwrap();
     assert_eq!(page.kind, AssetType::Html);
+    let logo = assets.get("/logo.svg").unwrap().unwrap();
+    assert_eq!(logo.kind, AssetType::Svg);
+    std::fs::write(root.path().join("logo.svg"), b"tampered").unwrap();
+    assert_eq!(
+        assets.get("/logo.svg").unwrap().unwrap().bytes.as_bytes(),
+        svg
+    );
     assert_eq!(
         assets.get("/index.html").unwrap().unwrap().bytes.as_bytes(),
         page.bytes.as_bytes()

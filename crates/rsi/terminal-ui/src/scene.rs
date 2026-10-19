@@ -1170,7 +1170,7 @@ mod application_tests {
     #[test]
     fn completion_uses_neutral_selection_bands_and_keeps_narrow_descriptions() {
         let (cells, view) = Scene::from(ApplicationScene {
-            title: "RSI".into(),
+            title: "RSIversi".into(),
             field: Some("Input".into()),
             completion: Some(Completion {
                 revision: 1,

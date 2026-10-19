@@ -443,7 +443,7 @@ async fn assert_application_parity(
     old: &Arc<dyn rsi_terminal::presentation::FrameRenderer>,
 ) {
     let home = Scene::from(rsi_terminal_ui::scene::ApplicationScene {
-        title: "RSI · No session attached".into(),
+        title: "RSIversi · No session attached".into(),
         explanation: "/login or /model".into(),
         items: vec!["Choose provider".into()],
         selected: 0,
