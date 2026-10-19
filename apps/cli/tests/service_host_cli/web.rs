@@ -48,18 +48,12 @@ fn identity(response: &str) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_identity() {
     let mut fixture = CliFixture::new("http://127.0.0.1:1");
-    let binary = fixture.temporary.path().join("rsi");
     let paired = std::path::PathBuf::from(
-        std::env::var_os("RSI_PAIRED_BUNDLE").expect("paired-web-tests requires RSI_PAIRED_BUNDLE: run pnpm -C apps/web build --debug, then set RSI_PAIRED_BUNDLE to its bundle directory"),
+        std::env::var_os("RSI_PAIRED_BUNDLE").expect("paired-web-tests requires RSI_PAIRED_BUNDLE: run scripts/rsiversi.sh build web --debug, then set RSI_PAIRED_BUNDLE to its bundle directory"),
     );
-    std::fs::copy(paired.join("rsi"), &binary).unwrap();
-    fixture.binary = binary;
-    let assets = fixture.temporary.path().join("assets");
-    std::fs::create_dir(&assets).unwrap();
-    for file in std::fs::read_dir(paired.join("assets")).unwrap() {
-        let file = file.unwrap();
-        std::fs::copy(file.path(), assets.join(file.file_name())).unwrap();
-    }
+    let paired = paired.canonicalize().unwrap();
+    let _lease = rsi_build_info::GenerationLease::open(&paired).unwrap();
+    fixture.binary = paired.join(if cfg!(windows) { "rsi.exe" } else { "rsi" });
     let mut first = None;
     for args in [
         vec!["web", "--port", "0", "--no-open"],
@@ -141,7 +135,10 @@ fn web_help_and_failures_do_not_announce_readiness() {
     assert!(!String::from_utf8_lossy(&failure.stdout).contains("rsi web:"));
     let message = String::from_utf8_lossy(&failure.stderr);
     assert!(message.contains("no build family"), "{message}");
-    assert!(message.contains("pnpm -C apps/web build"), "{message}");
+    assert!(
+        message.contains("scripts/rsiversi.sh build web"),
+        "{message}"
+    );
     assert!(!fixture.temporary.path().join("state").exists());
     let invalid = fixture.run(&["web", "--port", "invalid"]);
     assert!(!invalid.status.success());

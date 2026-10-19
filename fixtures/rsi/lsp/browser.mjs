@@ -1,12 +1,12 @@
 import {resources,details} from '../web-product/controls.mjs';
-import '../web-product/paired-env.mjs';
+import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {startService,boundedRun,waitUntil} from '../web-product/service.mjs';
 const require=createRequire(new URL('../web-product/package.json',import.meta.url));const {chromium,firefox}=require('playwright');
-const analyzer=process.env.RSI_RUST_ANALYZER;assert(analyzer);const binary=resolve(process.env.RSI_BINARY),assets=process.env.RSI_WEB_ASSETS;assert(assets);const output=resolve(process.argv[2]);await mkdir(output,{recursive:true});const results=[];
+const analyzer=process.env.RSI_RUST_ANALYZER;assert(analyzer);const binary=paired.binary,assets=paired.assets;assert(assets);const output=resolve(process.argv[2]);await mkdir(output,{recursive:true});const results=[];
 for(const [name,engine]of (process.env.RSI_LSP_BROWSER==='chromium'?[['chromium',chromium]]:[['chromium',chromium],['firefox',firefox]])){
  const report=join(output,name);await mkdir(report,{recursive:true});let position;const service=await startService({binary,assets,report,configure:async({config,workspace})=>{
   const result=boundedRun('python3',[resolve('fixtures/rsi/lsp/prepare.py'),workspace,join(config,'host-profiles/fixture/host.profile.toml'),analyzer]);position=JSON.parse(result.stdout);

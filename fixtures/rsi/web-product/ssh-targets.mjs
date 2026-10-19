@@ -33,7 +33,7 @@ try {
   sshd=spawn(sshdBinary,['-D','-e','-f',config],{env:sshEnv,stdio:['ignore','ignore','pipe']});
   let log='';sshd.stderr.on('data',bytes=>{if(log.length<65536)log+=bytes.toString()});
   await waitUntil(async()=>{assert.equal(sshd.exitCode,null,log);return await new Promise(resolve=>{const socket=net.connect(port,'127.0.0.1');socket.once('connect',()=>{socket.destroy();resolve(true)});socket.once('error',()=>resolve(false))})},'isolated sshd');
-  if(liveMode){live=await liveFixture({ssh:true});service=live.service;}else service=await startService({binary:paired.binary,assets:paired.assets,report});
+  if(liveMode){live=await liveFixture();service=live.service;}else service=await startService({binary:paired.binary,assets:paired.assets,report});
   const local=request=>{const result=JSON.parse(service.probe(probe,request).stdout);assert('Ok' in result,JSON.stringify(result));return result.Ok};
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
   page=await context.newPage();page.setDefaultTimeout(60000);page.on('pageerror',error=>errors.push(error.message));

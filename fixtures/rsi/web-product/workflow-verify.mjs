@@ -1,8 +1,6 @@
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
-import {mkdir,copyFile,chmod,writeFile} from 'node:fs/promises';
-import {createReadStream} from 'node:fs';
-import {createHash} from 'node:crypto';
+import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {openBrowserPage,connectWorkbench,openWorkspace} from './browser-fixture.mjs';
@@ -16,10 +14,8 @@ assert(process.argv.slice(2).every(arg=>arg==='--dock-only'),'unknown workflow v
 const report=process.env.RSI_WEB_REPORT;
 assert(report && process.env.RSI_TEST_NODE,'new report and explicit RSI_TEST_NODE required');
 await mkdir(report,{recursive:false});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
-const binaryHash=createHash('sha256');
-for await(const chunk of createReadStream(binary))binaryHash.update(chunk);
-await writeFile(join(report,'binary.json'),JSON.stringify({sha256:binaryHash.digest('hex')}));
+const binary=process.env.RSI_WEB_BINARY;
+await writeFile(join(report,'binary.json'),JSON.stringify({sha256:paired.sha256}));
 const results=[];
 for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   const folder=join(report,name);await mkdir(folder);

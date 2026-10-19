@@ -23,8 +23,7 @@ for (const name of files.slice(1)) await cp(join(process.env.RSI_RENDERER_ASSETS
 const catalog = JSON.parse(await readFile(join(assets, "ui-renderers.json"), "utf8"));
 catalog.renderers.push({ id: "fixture.rust", abi: 1, entry: files[0], files: await Promise.all(files.map(async name => ({ name, sha256: createHash("sha256").update(await readFile(join(assets, name))).digest("hex") }))), schemas: [{ name: "fixture.counter", version: 1 }], capabilities: ["invoke", "source"], surfaces: ["root", "pane", "sidebar", "dialog"] });
 await writeFile(join(assets, "ui-renderers.json"), JSON.stringify(catalog));
-const binary = join(directory, "rsi");
-await cp(process.env.RSI_WEB_BINARY, binary);
+const binary = process.env.RSI_WEB_BINARY;
 if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
 const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chromium).launch({ headless: true });
 let service;

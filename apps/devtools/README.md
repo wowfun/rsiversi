@@ -171,6 +171,13 @@ hiding the original build failure. Running native processes pin managed publicat
 daemon after its launcher exits. Development supervisors own external publications
 for the lifetime of their processes and watchers. No full build tree is copied to /tmp.
 
+`fixture-lease ABSOLUTE_BUNDLE` canonicalizes a selected bundle and acquires its
+existing generation lease before emitting exactly `ready\n` on stdout. It retains
+that lease until stdin reaches EOF; diagnostics use stderr. External distributions
+need no GC lease and follow the same handshake. The
+[browser fixture owner](../../fixtures/rsi/web-product/README.md) defines its
+helper discovery, selection, readiness bounds and cleanup policy.
+
 ## Development supervision
 
 From the repository root, `cargo run --locked -p rsi-app-tools -- dev tui|web`

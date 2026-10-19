@@ -63,7 +63,7 @@ jobs:
               git("cat-file", "-e", base + "^{commit}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as output:
               output.write("base=" + base + "\n")
-      - name: Verify documentation structure
+      - name: Verify documentation structure and bilingual user guides
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 5
         run: cargo xtask verify-docs --structure-only
@@ -282,6 +282,7 @@ jobs:
           pnpm -C ../../../apps/web typecheck
           pnpm -C ../../../apps/web test
           pnpm -C ../../../apps/web build --debug
+          echo "RSI_APP_TOOLS_BINARY=$GITHUB_WORKSPACE/target/debug/rsi-app-tools" >> "$GITHUB_ENV"
 
       - name: Exercise the product Web application over TLS and HTTP/2
         id: web_product
@@ -307,7 +308,7 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
-          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)"
+          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/scripts/rsiversi.sh" path web)"
           npm test
           RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/alignment" node ui-alignment.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/dock-panels" node dock-panels.mjs
@@ -344,7 +345,7 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
-          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)"
+          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/scripts/rsiversi.sh" path web)"
           RSI_TEST_NODE="$(command -v node)" RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workflow-dock" node workflow-verify.mjs --dock-only
 
       - name: Preserve failed Workflow evidence before integration probes
@@ -356,7 +357,6 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-browser-logs/web_workflow.log
             ${{ runner.temp }}/rsi-web-evidence/workflow-dock
-            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
 
       - name: Preserve failed Web product captures before integration probes
@@ -395,10 +395,11 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
-          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)"
+          export RSI_PAIRED_BUNDLE="$(bash "$GITHUB_WORKSPACE/scripts/rsiversi.sh" path web)"
           cd ../../..
-          RSI_BUILD_FAMILY_MANIFEST="$RSI_PAIRED_BUNDLE/build-family.json" RSI_BUILD_FAMILY_SHA256="$(python3 -c 'import json,os; print(json.load(open(os.environ["RSI_PAIRED_BUNDLE"]+"/receipt.json"))["family_sha256"])')" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/rsi-app/build/target" cargo build --locked --manifest-path target/rsi-app/build/source/Cargo.toml --target x86_64-unknown-linux-gnu -p rsi-cli --example profile-leaf-probe
-          RSI_PROFILE_PROBE="$GITHUB_WORKSPACE/target/rsi-app/build/target/x86_64-unknown-linux-gnu/debug/examples/profile-leaf-probe" RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/ssh-targets" node fixtures/rsi/web-product/ssh-targets.mjs
+          cargo run --locked -p rsi-app-tools -- fixture-build profile-leaf-probe "$RUNNER_TEMP/rsi-profile-probe"
+          export RSI_PROFILE_PROBE="$RUNNER_TEMP/rsi-profile-probe/profile-leaf-probe"
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/ssh-targets" node fixtures/rsi/web-product/ssh-targets.mjs
           cargo test --locked -p rsi-cli --features paired-web-tests --test service_host_cli web::web_alias_and_profile_serve_default_assets_with_stable_authorized_identity -- --exact
           npm ci --ignore-scripts --prefix fixtures/rsi/acp
           export RSI_ACP_SDK_NODE="$(command -v node)"
@@ -410,10 +411,9 @@ jobs:
           cargo test --locked -p rsi-acp-host --test host independent_sdk_agent_new_permissions_resume_full_load_and_cancel -- --ignored --exact
           cargo test --locked -p rsi-lsp --lib tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored --exact --list | rg --fixed-strings --line-regexp 'tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox: test'
           cargo test --locked -p rsi-lsp --lib tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored --exact
-          cargo build --locked -p rsi-cli --example profile-leaf-probe
-          export RSI_BINARY="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)/rsi"
-          export RSI_WEB_ASSETS="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)/assets"
-          node fixtures/rsi/acp/verify.mjs --binary "$RSI_BINARY" --output "$RUNNER_TEMP/rsi-acp-sdk-evidence"
+          export RSI_WEB_BINARY="$RSI_PAIRED_BUNDLE/rsi"
+          export RSI_WEB_ASSETS="$RSI_PAIRED_BUNDLE/assets"
+          node fixtures/rsi/acp/verify.mjs --binary "$RSI_WEB_BINARY" --output "$RUNNER_TEMP/rsi-acp-sdk-evidence"
           node fixtures/rsi/acp/browser.mjs "$RUNNER_TEMP/rsi-acp-browser-evidence"
           node fixtures/rsi/profile-management/browser.mjs "$RUNNER_TEMP/rsi-profile-browser-evidence"
           node fixtures/rsi/lsp/browser.mjs "$RUNNER_TEMP/rsi-lsp-browser-evidence"
@@ -429,8 +429,8 @@ jobs:
         run: |
           mkdir -p "$RSI_WEB_REPORT"
           exec > >(tee "$RSI_WEB_REPORT/terminal-product.log") 2>&1
-          export RSI_WEB_BINARY="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)/rsi"
-          export RSI_WEB_ASSETS="$(bash "$GITHUB_WORKSPACE/rsi.sh" path)/assets"
+          export RSI_WEB_BINARY="$(bash "$GITHUB_WORKSPACE/scripts/rsiversi.sh" path web)/rsi"
+          export RSI_WEB_ASSETS="$(bash "$GITHUB_WORKSPACE/scripts/rsiversi.sh" path web)/assets"
           test -x "$RSI_WEB_BINARY"
           test -d "$RSI_WEB_ASSETS"
           declare -A previous_policy
@@ -504,18 +504,10 @@ jobs:
             ${{ runner.temp }}/rsi-browser-logs
             ${{ runner.temp }}/rsi-web-evidence
             ${{ runner.temp }}/rsi-web-export-evidence
-            !${{ runner.temp }}/rsi-web-export-evidence/rsi
             ${{ runner.temp }}/rsi-acp-sdk-evidence
             ${{ runner.temp }}/rsi-acp-browser-evidence
             ${{ runner.temp }}/rsi-profile-browser-evidence
             ${{ runner.temp }}/rsi-lsp-browser-evidence
-            !${{ runner.temp }}/rsi-web-evidence/chromium-recovery/rsi
-            !${{ runner.temp }}/rsi-web-evidence/firefox-recovery/rsi
-            !${{ runner.temp }}/rsi-web-evidence/chromium-tasks/rsi
-            !${{ runner.temp }}/rsi-web-evidence/firefox-tasks/rsi
-            !${{ runner.temp }}/rsi-web-evidence/chromium-plan-review/rsi
-            !${{ runner.temp }}/rsi-web-evidence/firefox-plan-review/rsi
-            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
       - name: Restore owned Linux user manager state
         if: ${{ always() && runner.os == 'Linux' }}

@@ -10,6 +10,26 @@ macro_rules! diagnostic {
 #[cfg(unix)]
 mod dev;
 mod dist;
+fn fixture_lease(bundle: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    let path = Path::new(bundle);
+    if !path.is_absolute() {
+        return Err("fixture-lease requires an absolute bundle path".into());
+    }
+    let path = path.canonicalize().map_err(|error| error.to_string())?;
+    if !path.is_dir() {
+        return Err("fixture-lease requires a bundle directory".into());
+    }
+    let _lease = rsi_build_info::GenerationLease::open(&path).map_err(|error| error.to_string())?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(b"ready\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|error| error.to_string())?;
+    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink())
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
 fn require_repository_root(root: &Path) -> Result<(), String> {
     if root.join("apps/devtools/Cargo.toml").is_file() && root.join("Cargo.toml").is_file() {
         Ok(())
@@ -17,7 +37,7 @@ fn require_repository_root(root: &Path) -> Result<(), String> {
         Err("rsi-app-tools must run from the repository root".into())
     }
 }
-const USAGE: &str = "usage: rsi-app-tools dev tui|web [OPTIONS] | dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | dist addon-workbench ABSOLUTE_NEW_REPORT | fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT | gc [tui|web|desktop|all] | --help | -h";
+const USAGE: &str = "usage: rsi-app-tools dev tui|web [OPTIONS] | dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | dist addon-workbench ABSOLUTE_NEW_REPORT | fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT | gc [tui|web|desktop|all] | fixture-lease ABSOLUTE_BUNDLE | --help | -h";
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let result = match args.as_slice() {
@@ -25,6 +45,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             Ok(())
         }
+        [command, bundle] if command == "fixture-lease" => fixture_lease(bundle),
         #[cfg(unix)]
         [command, rest @ ..] if command == "dev" => dev::run(rest),
         #[cfg(not(unix))]

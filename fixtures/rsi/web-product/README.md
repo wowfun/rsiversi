@@ -1,12 +1,37 @@
 # Web product verification
 
-The document projection checks load shipped modules through the same routed
-ES-module harness. `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
-composer controls, shared drafts, unknown outcomes and capacity recovery in
-desktop and narrow viewports. A MutationObserver checks that repeated frames and
-unchanged input do not rewrite the live alert region. Accepted edits in a sibling
-pane clear stale capacity notices. These checks provide browser rendering evidence
-without claiming ACP transport or live-provider coverage.
+Running fixtures select one paired publication and hold its
+[generation lease](../../../apps/devtools/README.md) through Node lifetime,
+including service restarts. Receipt hashes are checked after lease acquisition;
+all launches use the original binary and adjacent artifacts. Build the supervisor
+with `cargo build --locked -p rsi-app-tools` or set `RSI_APP_TOOLS_BINARY` for a
+custom target directory. The readiness handshake is bounded to 30 seconds and
+32 bytes; helper failure fails the fixture. Explicit cleanup allows five seconds
+for EOF, then kills and reaps the helper within another five seconds and reports
+the timeout. Only deliberate asset-mutation probes
+copy assets. Pure PNG test data comes from `png.mjs` without browser dependencies.
+Startup failure also kills and reaps a noncooperating helper. Stderr is drained
+before reporting early exit; cleanup diagnostics supplement the primary error.
+The verified `paired.sha256` also supplies binary reports, avoiding a second
+full executable read within each process. Each independent child still acquires
+its own lease and verifies its artifacts.
+
+The shared `paired-env.mjs` entry also serves the ACP, language, history,
+Profile and workspace-review browser fixtures. Its exported `paired` value is
+the verified binary/assets selection. Use `RSI_PAIRED_BUNDLE` for a complete
+publication, or supply both `RSI_WEB_BINARY` and `RSI_WEB_ASSETS`; otherwise the
+current generation record selects the publication. Every such fixture needs
+the lease supervisor above, even when given an explicit distribution.
+Simultaneous bundle and binary/assets overrides must resolve to the same pair;
+conflicting inherited overrides fail instead of silently selecting another bundle.
+The supervisor canonicalizes an explicit bundle override before passing it to
+children, so a child working-directory change cannot reinterpret a relative path.
+`fixture-startup.test.mjs` checks those sibling entrypoints in both explicit
+selection modes up to the Service launch boundary, with synthetic artifacts
+and a stub Service; it does not claim browser or native transport coverage.
+The startup/cleanup failure test uses a real Node child with invalid readiness,
+stubbing only executable selection and certificate generation. It runs on
+Windows and Linux without a POSIX shell or OpenSSL installation.
 
 CI runs `navigation-order.mjs` and `device-storage.mjs` alongside the Dock probes.
 The storage probe exercises real IndexedDB migration, concurrent writes, rollback,
@@ -72,9 +97,9 @@ captures and Workflow reports are uploaded before later integration probes,
 so those probes cannot delay access to the first failure's evidence.
 A successful product step must produce `results.json` with passing Chromium and
 Firefox results; skipped steps remain visibly skipped.
-Recovery, task and Workflow probes write `binary.json` with the frozen executable's SHA-256
-before starting the scenario. CI excludes their executable copies while retaining
-hashes, screenshots, action receipts, logs, assets and durable diagnostic data.
+Recovery, task and Workflow probes write `binary.json` with the leased executable's SHA-256
+before starting the scenario. CI retains hashes, screenshots, action receipts,
+logs, assets and durable diagnostic data.
 The archive identifies the executable but does not contain it for binary replay.
 Failure metadata is written even when a crashed renderer prevents HTML or
 screenshot capture; capture diagnostics supplement the original task error.
@@ -137,7 +162,6 @@ model request. This fixture uses the isolated deterministic provider.
 The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
 clean document before recording success. Product notices fail the live check;
 successful model output alone does not establish visual acceptance.
-
 The default runner includes `tasks.mjs`, which uses the same real Worker,
 Service and provider with explicit
 response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPORT`,
@@ -196,7 +220,7 @@ can arrive while IndexedDB is still loading the draft.
 They also check cached UTF-8 accounting without re-encoding inactive editors.
 These use the shipped document methods with a controlled Worker reply, not a
 live Session or provider. `recovery.mjs` owns
-a separate frozen executable and Service, restores a live Fresh Session and its
+a separately leased publication and Service, restores a live Fresh Session and its
 canonical image, checks cross-tab conflict controls and device-cookie fencing,
 then restarts the actual Service to expire the Fresh Session. Explicit recreation
 moves the saved input only after the replacement opens. An aborted save before
@@ -366,13 +390,13 @@ UI transition. Chromium reports the failed download directly.
 
 `plan-review.mjs` runs in the default verifier and is also a targeted closed-review probe using the actual document,
 Worker, Host and a deterministic provider. With explicit `RSI_WEB_REPORT` and
-`RSI_WEB_ASSETS` it checks literal plan rendering, three explicit choices,
+the paired publication selected as above, it checks literal plan rendering, three explicit choices,
 feedback, narrow containment and the next provider request after atomic approval
 in Chromium and Firefox. It retains the executable hash, screenshots and exact
 mock requests; this does not establish live model or native Desktop behavior.
 
 `plan-live.mjs` is opt-in via `RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL`,
-`RSI_WEB_REPORT` and `RSI_WEB_ASSETS`. It reads only the authorized DeepSeek key,
+`RSI_WEB_REPORT` and a paired publication selected as above. It reads only the authorized DeepSeek key,
 uses an isolated Workspace, explicitly approves a harmless computation plan,
 then requires durable successful save/review/spawn/read Tool facts and the actual
 structured result `answer: 42`. Reports distinguish the model and effort from
@@ -407,7 +431,7 @@ Node reaping. All keep real provider evidence, zero mock requests and browser
 screenshots separate from deterministic Kernel and process tests.
 
 `profile-status.mjs` is keyless and targeted to diagnostics. With explicit
-`RSI_WEB_REPORT` and `RSI_WEB_ASSETS`, it introduces a parse failure into an isolated
+`RSI_WEB_REPORT` and a paired publication selected as above, it introduces a parse failure into an isolated
 watched Host Profile, checks the unchanged desired revision and advanced observed
 revision, then restores the source. Chromium and Firefox verify the redacted last
 attempt, recovery, narrow containment and zero model requests.

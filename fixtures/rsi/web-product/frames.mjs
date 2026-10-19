@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { pairedBundle } from "./paired-bundle.mjs";
 
 export async function verifyFrameDom(page, report, browser) {
   const result = await page.evaluate(async () => {
@@ -43,8 +42,9 @@ export async function verifyFrameDom(page, report, browser) {
 // Actual Worker/Rust application and authenticated HTTP; the document deliberately
 // withholds acknowledgement. This does not infer cleanup from DOM disappearance.
 export async function verifyAcknowledgementDeadline(page, service) {
+  const {paired}=await import('./paired-env.mjs');
   const receipt = service.register("ack deadline fixture");
-  const { family: buildFamily } = await pairedBundle();
+  const { family: buildFamily } = paired;
   const result = await page.evaluate(async ({receipt, buildFamily}) => {
     const worker = new Worker("/worker.js", { type: "module" });
     let sequence = 0, frameCount = 0;

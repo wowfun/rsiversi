@@ -1,23 +1,22 @@
 import {details,resources} from "./controls.mjs";
 import {navigationFilter} from './controls.mjs';
-import './paired-env.mjs';
+import {paired} from './paired-env.mjs';
 import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real document/Worker/Host closed-review acceptance; provider is deterministic.
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {once} from 'node:events';
-import {readFile,writeFile,mkdir,copyFile,chmod} from 'node:fs/promises';
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
-import {createHash} from 'node:crypto';
 import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
 import {assertNoNotices} from './task-checks.mjs';
 const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS;
 assert(report && assets,'explicit report and built assets required');
 await mkdir(report,{recursive:false});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
-await writeFile(join(report,'binary.json'),JSON.stringify({sha256:createHash('sha256').update(await readFile(binary)).digest('hex')}));
+const binary=process.env.RSI_WEB_BINARY;
+await writeFile(join(report,'binary.json'),JSON.stringify({sha256:paired.sha256}));
 const results=[];
 function response(call) {
   const delta=call?{role:'assistant',tool_calls:[{index:0,id:call.id,type:'function',function:{name:call.name,arguments:JSON.stringify(call.arguments)}}]}:{role:'assistant',content:'REVIEW_SETTLED'};

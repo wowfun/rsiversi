@@ -1,7 +1,7 @@
 import http from 'node:http';
 import {once} from 'node:events';
 import assert from 'node:assert/strict';
-import {png} from './images.mjs';
+import {png} from './png.mjs';
 export async function startMcpFixture({requireCredential=true,protocol="2026-07-28",templates=false,images=false}={}) {
   const sockets=new Set(); const evidence={requests:0,authorized:0,calls:0,revision:1,protocol,initializations:0,methods:[]};
   const server=http.createServer(async(request,response)=>{

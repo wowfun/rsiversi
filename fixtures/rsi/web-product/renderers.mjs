@@ -27,8 +27,7 @@ async function writeGeneration(label, gate = false, fail = false) {
   await writeFile(join(assets, "ui-renderers.json"), JSON.stringify({ format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: files.map(file => ({ name: file.name, sha256: createHash("sha256").update(file.bytes).digest("hex") })), schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog", "pane"] }] }));
 }
 await writeGeneration("A");
-const binary = join(directory, "rsi");
-await cp(process.env.RSI_WEB_BINARY, binary);
+const binary = process.env.RSI_WEB_BINARY;
 let service;
 let diagnosticPage;
 let phase = 'service startup';

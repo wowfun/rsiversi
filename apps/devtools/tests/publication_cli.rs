@@ -5,6 +5,112 @@ use std::{
     time::Duration,
 };
 
+struct ReapedChild(std::process::Child);
+impl std::ops::Deref for ReapedChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ReapedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn fixture_supervisor_pins_one_generation_across_child_restart_gaps() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("apps/devtools")).unwrap();
+    fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(root.path().join("apps/devtools/Cargo.toml"), "").unwrap();
+    let cache = root.path().join("target/rsi-app/web");
+    fs::create_dir_all(cache.join("leases")).unwrap();
+    for id in 1..=4 {
+        let name = format!("{id:020}");
+        let bundle = cache.join("generations").join(&name).join("bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("receipt.json"), b"{}").unwrap();
+        fs::write(bundle.join(".rsi-generation.lock"), b"").unwrap();
+        fs::write(cache.join("leases").join(name), b"").unwrap();
+    }
+    let selected = cache.join("generations/00000000000000000001/bundle");
+    let mut helper = ReapedChild(
+        Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
+            .arg("fixture-lease")
+            .arg(&selected)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = helper.stdout.take().unwrap();
+    let (sent, ready) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        sent.send(line).unwrap();
+    });
+    let result = ready.recv_timeout(Duration::from_secs(10));
+    if result.is_err() {
+        let _ = helper.kill();
+    }
+    assert_eq!(result.unwrap(), "ready\n");
+    reader.join().unwrap();
+    let collect = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
+            .arg("gc")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for current in [3, 4] {
+        fs::write(cache.join("current"), format!("{current:020}\n")).unwrap();
+        collect();
+        assert!(
+            selected.is_dir(),
+            "supervisor lease must cover gaps with no service child"
+        );
+    }
+    drop(helper.stdin.take());
+    assert!(helper.wait().unwrap().success());
+    collect();
+    assert!(!selected.exists());
+
+    let missing = cache.join("generations/00000000000000000004/bundle");
+    fs::remove_file(cache.join("leases/00000000000000000004")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
+        .arg("fixture-lease")
+        .arg(missing)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let external = root.path().join("external");
+    fs::create_dir(&external).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
+        .arg("fixture-lease")
+        .arg(external)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"ready\n");
+}
+
 #[test]
 fn source_tool_lock_matches_the_web_package_manager() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

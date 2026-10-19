@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as bounds from '../image-bounds.js';
-import { png } from '../../../fixtures/rsi/web-product/images.mjs';
+import { png } from '../../../fixtures/rsi/web-product/png.mjs';
 const source=(await readFile(new URL('../preview-bootstrap.js',import.meta.url),'utf8')).replace(/^import[^\n]+\n/,'');
 
 test('HTML rejects aggregate image dimensions before writing any user document',()=>{

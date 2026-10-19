@@ -22,7 +22,9 @@ permission options, resume without replay, 1,200-record load and process cleanup
 `agent.py` is the deterministic byte peer shared by Host and native delegation
 and Linux PTY tests (including a Host without a native model); its results are not independent SDK interoperability evidence.
 
-`RSI_WEB_ASSETS=/absolute/assets RSI_BINARY=/absolute/rsi node
+Browser checks require the [shared paired-publication supervisor](../web-product/README.md).
+
+`RSI_WEB_ASSETS=/absolute/assets RSI_WEB_BINARY=/absolute/rsi node
 fixtures/rsi/acp/browser.mjs /absolute/report` runs Chromium and Firefox against
 the real service, Worker and independent SDK Agent. It starts a delegation through
 the deterministic native provider and opens the same Host conversation from its
@@ -46,7 +48,7 @@ process IDs before importing the unchanged built DSH entry.
 pinned DSH tests. Its optional call marker records fixture tool arguments, while
 credential checks never return credential values.
 
-`python3 fixtures/rsi/acp/opencode-live.py --assets /absolute/web-assets --report
+`python3 fixtures/rsi/acp/opencode-live.py --bundle /absolute/paired-bundle --report
 /absolute/new-report` exercises an installed OpenCode through the actual RSI
 browser, Host and managed ACP process. It explicitly selects the advertised model
 and effort before prompting, then checks a real file edit, permission, resume,
@@ -57,6 +59,10 @@ unknown transport failure does not replay work on another model.
 `--fallback-after /absolute/earlier-report/result.json` reuses a recorded primary
 availability failure and starts a fresh fallback attempt; its result retains the
 original evidence path.
+The explicit bundle selects both artifacts, overriding inherited binary/assets
+selectors, and uses the [shared fixture supervisor](../web-product/README.md).
+`python3 -m unittest discover -s fixtures/rsi/acp -p 'test_*.py'` checks this
+launcher with synthetic auth and a stub child, without invoking OpenCode.
 
 This opt-in fixture uses only the two selected providers from an explicitly
 read OpenCode credential file (default `~/.local/share/opencode/auth.json`), held

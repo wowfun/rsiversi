@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {waitUntil} from './service.mjs';
-import {png} from './images.mjs';
+import {png} from './png.mjs';
 
 export async function verifyFilePreviews(page,service,report,browser) {
   const directory=join(service.workspace,'previews');await mkdir(directory,{recursive:true});

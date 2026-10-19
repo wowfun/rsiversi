@@ -12,8 +12,11 @@ The probe's Unix transport is unavailable on other platforms; its executable
 rejects before reading stdin or consulting Service metadata there.
 
 Build with `cargo build -p rsi-cli --example profile-leaf-probe`. Run `browser.mjs`
-with `RSI_WEB_ASSETS` pointing to a fresh product build and an explicit report
-directory. It exercises Chromium and Firefox, reviewed publication, original
+with the [shared paired-publication supervisor](../web-product/README.md).
+Set `RSI_PROFILE_PROBE` to reuse an explicit paired fixture-build probe; otherwise
+it uses the ordinary debug example. Supply
+`RSI_PAIRED_BUNDLE` pointing to a complete product publication and an explicit
+report directory. It exercises Chromium and Firefox, reviewed publication, original
 receipt recovery, stale source, grant revocation, and a narrow viewport.
 The Linux desktop fixture consumes the same source UI through its native bridge.
 All default evidence uses isolated user state and a deterministic provider.

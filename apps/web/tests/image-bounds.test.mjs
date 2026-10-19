@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { boundedImage, boundedResource, imageBudget } from '../image-bounds.js';
 import { previewDocument } from '../preview-document.mjs';
-import { png } from '../../../fixtures/rsi/web-product/images.mjs';
+import { png } from '../../../fixtures/rsi/web-product/png.mjs';
 
 test('large SVG use expansion is rejected before XML parsing',()=>{
   const payload=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320"><g id="loop"><use href="#loop"/></g>'+ '<use href="#loop"/>'.repeat(20000)+'</svg>');

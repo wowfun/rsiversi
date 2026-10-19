@@ -1,4 +1,4 @@
-import '../web-product/paired-env.mjs';
+import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {appendFile, mkdir, readFile, writeFile} from 'node:fs/promises';
@@ -13,8 +13,8 @@ await mkdir(output, {recursive: true});
 const marker = join(output, 'peer-pids');
 let workspacePath;
 const service = await startService({
-  binary: resolve(process.env.RSI_BINARY),
-  assets: process.env.RSI_WEB_ASSETS,
+  binary: paired.binary,
+  assets: paired.assets,
   report: output,
   async configure({config, workspace}) {
     workspacePath = workspace;

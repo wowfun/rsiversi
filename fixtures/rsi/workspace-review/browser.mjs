@@ -1,4 +1,4 @@
-import '../web-product/paired-env.mjs';
+import {paired} from '../web-product/paired-env.mjs';
 import {resources} from '../web-product/controls.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
@@ -8,7 +8,7 @@ import {startService,boundedRun,waitUntil} from '../web-product/service.mjs';
 const require=createRequire(new URL('../web-product/package.json',import.meta.url));const {chromium,firefox}=require('playwright');
 const liveFile=process.env.RSI_LIVE_ENV_FILE,model=process.env.RSI_LIVE_MODEL;assert(Boolean(liveFile)===Boolean(model),'live requires both explicit inputs');let key;
 if(liveFile){assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));const bytes=await readFile(liveFile);assert(bytes.length<=65536);const match=bytes.toString().match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);assert(match);key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key);}
-const binary=resolve(process.env.RSI_BINARY),assets=process.env.RSI_WEB_ASSETS;assert(assets);const output=resolve(process.argv[2]);await mkdir(output,{recursive:true});const results=[];
+const binary=paired.binary,assets=paired.assets;assert(assets);const output=resolve(process.argv[2]);await mkdir(output,{recursive:true});const results=[];
 for(const [name,engine]of(liveFile?[['chromium',chromium]]:[['chromium',chromium],['firefox',firefox]])){
  const report=join(output,name);await mkdir(report,{recursive:true});const service=await startService({binary,assets,report,deepseekKey:key,configure:async({config,workspace})=>{
   if(liveFile){

@@ -3,9 +3,10 @@ import {readFile,writeFile,mkdir,chmod} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService} from './service.mjs';
+import {paired} from './paired-env.mjs';
 const report=resolve(process.env.RSI_AUTOMATION_WEB_REPORT),seed=resolve(process.env.RSI_AUTOMATION_WEB_SEED);
 await mkdir(report,{recursive:false});let receipt;
-const service=await startService({binary:resolve(process.env.RSI_WEB_BINARY),assets:resolve(process.env.RSI_WEB_ASSETS),report,configure:async({config,run})=>{
+const service=await startService({binary:paired.binary,assets:paired.assets,report,configure:async({config,run})=>{
  const runtime=JSON.parse(await readFile(join(seed,'runtime-config.json'))),host=join(config,'host-profiles/fixture/host.profile.toml');
  await writeFile(host,(await readFile(host,'utf8'))+'\n[[steps]]\nkind="patch"\ntarget="automation"\nconfig_json='+JSON.stringify(JSON.stringify({directory:seed,runtime}))+'\n[[steps]]\nkind="patch"\ntarget="automation"\nenabled=true\n');
 }});

@@ -2,7 +2,7 @@ import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, mkdir, cp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,13 +15,12 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
   const results = [];
   for (const [name, engine] of engines) {
     const root = await mkdtemp(join(tmpdir(), 'rlw-'));
-    const executable = join(root, 'rsi');
-    await cp(binary, executable);
+    const executable = binary;
     const env = { PATH: process.env.PATH };
     for (const [key, leaf] of [['HOME','home'],['XDG_CONFIG_HOME','config'],['XDG_STATE_HOME','state'],['XDG_CACHE_HOME','cache'],['XDG_RUNTIME_DIR','run']]) {
       env[key] = join(root, leaf); await mkdir(env[key], {mode:0o700});
     }
-    let child, browser;
+    let child, browser, connectingPage;
     let providerCalls = 0;
     const provider = http.createServer((_, response) => { providerCalls++; response.writeHead(500).end(); });
     await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
@@ -54,6 +53,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       const connected = async page => {
+        connectingPage = page;
         await page.locator('#workbench').waitFor({state:'visible',timeout:30_000});
         assert.equal(new URL(page.url()).hash, '');
         assert.equal(await page.locator('#login').isVisible(), false);
@@ -172,6 +172,12 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await context.close();
       results.push({browser:name, automaticLogin:true, configurationWrite:true, cookieRecovery:true, stableDevice:true, uncertainExchangeRecovery:true, definitiveRejectionPreserved:true, manualLogin:true, grantRevocation:true});
     } catch (error) {
+      if (connectingPage && process.env.RSI_WEB_REPORT) {
+        const report=process.env.RSI_WEB_REPORT;
+        await mkdir(report,{recursive:true});
+        await writeFile(join(report,`${name}-local-launch-failure.txt`),await connectingPage.locator('body').innerText().catch(()=> 'Page unavailable'));
+        await connectingPage.screenshot({path:join(report,`${name}-local-launch-failure.png`)}).catch(()=>{});
+      }
       // A navigation failure can include its URL in Playwright's diagnostic.
       throw new Error(String(error.stack ?? error).replace(/rsi-launch=[a-f0-9]{64}/g, 'rsi-launch=[redacted]'));
     } finally {

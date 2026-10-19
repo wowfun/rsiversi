@@ -1,10 +1,9 @@
 import {closeDetails,openResource,resourceSelector} from "./controls.mjs";
 import {detailMode,resources} from './controls.mjs';
-import './paired-env.mjs';
+import {paired} from './paired-env.mjs';
 import assert from "node:assert/strict";
-import { mkdir, writeFile, readFile, copyFile, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createHash } from "node:crypto";
 import { chromium, firefox } from "playwright";
 import { startService } from "./service.mjs";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
@@ -14,11 +13,8 @@ const report = process.env.RSI_WEB_REPORT;
 const assets = process.env.RSI_WEB_ASSETS;
 if (!report || !assets) throw new Error("Set RSI_WEB_REPORT and RSI_WEB_ASSETS");
 await mkdir(report, { recursive: false });
-const binary = join(report, "rsi");
-await copyFile(process.env.RSI_WEB_BINARY, binary);
-await chmod(binary, 0o700);
-const binaryHash = createHash("sha256").update(await readFile(binary)).digest("hex");
-await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: binaryHash }));
+const binary = process.env.RSI_WEB_BINARY;
+await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: paired.sha256 }));
 
 async function until(predicate, label, maximum = 30000) {
   const deadline = Date.now() + maximum;
@@ -275,7 +271,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.locator("#sign-out").click();
     await page.locator("#login").waitFor({ state: "visible" });
     assert.deepEqual(errors, []);
-    results.push({ browser: name, version: browser.version(), binary_sha256: binaryHash, ok: true,
+    results.push({ browser: name, version: browser.version(), binary_sha256: paired.sha256, ok: true,
       ui_invocations: await page.evaluate(() => window.taskInvocations), goal_errors: await page.evaluate(() => window.taskGoalErrors),
       measurements, visibility_retry: visibilityRetry, requests: service.provider.requests, jobs_terminal: "failed_unreported_job", clean_sign_out: true });
   } catch (error) {

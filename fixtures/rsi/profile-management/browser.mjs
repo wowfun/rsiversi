@@ -1,4 +1,4 @@
-import '../web-product/paired-env.mjs';
+import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir,readFile,appendFile,writeFile} from 'node:fs/promises';
@@ -6,9 +6,9 @@ import {join,resolve} from 'node:path';
 import {startService} from '../web-product/service.mjs';
 const require=createRequire(new URL('../web-product/package.json',import.meta.url));
 const {chromium,firefox}=require('playwright');
-const binary=resolve(process.env.RSI_BINARY);
-const probe=resolve('target/debug/examples/profile-leaf-probe');
-const assets=process.env.RSI_WEB_ASSETS;assert(assets);
+const binary=paired.binary;
+const probe=resolve(process.env.RSI_PROFILE_PROBE??'target/debug/examples/profile-leaf-probe');
+const assets=paired.assets;assert(assets);
 const output=resolve(process.argv[2]);await mkdir(output,{recursive:true});
 const results=[];
 for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {

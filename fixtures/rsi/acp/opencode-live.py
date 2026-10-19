@@ -11,7 +11,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--opencode', type=Path, default=Path(shutil.which('opencode') or 'opencode'))
 parser.add_argument('--auth', type=Path, default=Path.home()/'.local/share/opencode/auth.json')
-parser.add_argument('--assets', type=Path, required=True)
+parser.add_argument('--bundle', type=Path, required=True)
 parser.add_argument('--report', type=Path, required=True)
 parser.add_argument('--fallback-after', type=Path, help='Reuse an earlier recorded primary availability failure')
 args = parser.parse_args()
@@ -74,7 +74,9 @@ for index, (model, effort) in enumerate(candidates, start=len(attempts)):
         launch.write_text(json.dumps({'binary':str(args.opencode.resolve()),'model':model,
                                      'effort':effort,'environment':child_environment}))
         environment = os.environ.copy()
-        environment.update(RSI_OPENCODE_FIXTURE=str(launch), RSI_WEB_ASSETS=str(args.assets.resolve()))
+        for name in ('RSI_WEB_BINARY', 'RSI_WEB_ASSETS'):
+            environment.pop(name, None)
+        environment.update(RSI_OPENCODE_FIXTURE=str(launch), RSI_PAIRED_BUNDLE=str(args.bundle.resolve()))
         with (args.report/f'attempt-{index+1}.log').open('w') as log:
             completed = subprocess.run(['node','fixtures/rsi/acp/opencode-browser.mjs',str(destination.resolve())],
                                        env=environment,stdout=log,stderr=subprocess.STDOUT,timeout=600)

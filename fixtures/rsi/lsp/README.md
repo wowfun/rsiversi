@@ -29,7 +29,8 @@ or ContentModified (-32801), including hover; any other displayed read error
 fails immediately. The original deadline remains in force across repeats.
 Set `RSI_RUST_ANALYZER` to the pinned executable; no installer is invoked.
 
-With the same explicit server, `RSI_WEB_ASSETS=/absolute/assets node
+With the same explicit server and the [shared paired-publication supervisor](../web-product/README.md),
+`RSI_PAIRED_BUNDLE=/absolute/bundle node
 fixtures/rsi/lsp/browser.mjs /absolute/report` verifies Chromium and Firefox.
 `cargo test -p rsi-cli --test service_host_cli language_tui_opens_real_definition_and_closes_service_observation -- --ignored`
 exercises the actual PTY; `RSI_TUI_PTY_REPORT` retains cell frames. The desktop

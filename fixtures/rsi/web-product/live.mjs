@@ -2,7 +2,7 @@ import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Explicit opt-in only: no key is read by the deterministic suite.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir,copyFile,chmod,readdir,lstat} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,readdir,lstat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService} from './service.mjs';
@@ -15,7 +15,7 @@ const match=source.toString('utf8').match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*
 assert(match,'authorized DeepSeek key is absent');
 const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
 await mkdir(report,{recursive:true});
-const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
+const binary=process.env.RSI_WEB_BINARY;
 const browser=await chromium.launch();let service,page;
 const errors=[];const started=Date.now();
 try {

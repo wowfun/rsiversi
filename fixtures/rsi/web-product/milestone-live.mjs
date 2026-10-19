@@ -1,8 +1,9 @@
+import {liveLimits,readDeepseekKey,deepseekProfile} from './live-limits.mjs';
 import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Explicit live milestone acceptance. Never imported by the deterministic suite.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir,copyFile,chmod} from 'node:fs/promises';
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService,boundedRun} from './service.mjs';
@@ -10,11 +11,10 @@ import {startMcpFixture} from './mcp-fixture.mjs';
 import {liveTurnTerminal,settleLiveEvidence} from './evidence.mjs';
 const report=process.env.RSI_WEB_REPORT,model=process.env.RSI_LIVE_MODEL;
 assert(process.env.RSI_LIVE_ENV_FILE && report && model && process.env.RSI_WEB_ASSETS,'explicit live inputs required');
+const limits=liveLimits();
 assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));
-const bytes=await readFile(process.env.RSI_LIVE_ENV_FILE);assert(bytes.length<=65536);
-const match=bytes.toString('utf8').match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);assert(match,'authorized key missing');
-const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length>0);
-await mkdir(report,{recursive:true});const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
+const key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);
+await mkdir(report,{recursive:true});const binary=process.env.RSI_WEB_BINARY;
 const mcp=await startMcpFixture({requireCredential:false}),browser=await chromium.launch();
 let service,page;const errors=[],started=Date.now();let approvals=0;
 const bodyMarker='BODY_ONLY_7e29c6af';
@@ -51,7 +51,7 @@ try {
   service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report,deepseekKey:key,configure:async({config,workspace})=>{
     boundedRun('git',['init','--quiet',workspace]);
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},default_reasoning_effort:'off'},'rsi.retrieval':{web_fetch:true,web_search:true},'rsi.mcp':{servers:[{id:'fixture',enabled:true,tools:['echo'],transport:{kind:'streamable_http',url:mcp.url}}]}}));
-    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),`format=1\n[[steps]]\nkind="plugin"\nid="live"\nplugin="rsi.ai.provider.deepseek"\n[steps.config]\ndeployment="live"\nendpoint="https://api.deepseek.com"\ncredential={owner="rsi.ai.provider.deepseek",slot="default"}\n[steps.config.language_models.${model}]\ncontext_window_tokens=128000\ndefault_output_reserve_tokens=4096\nmax_output_reserve_tokens=16384\n[steps.config.reasoning_efforts.${model}]\nsupported=["off","low","high","max"]\ndefault="off"\n`);
+    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits));
     const cli=join(config,'application-profiles/evidence-cli');await mkdir(cli,{recursive:true});await writeFile(join(cli,'application.profile.toml'),'format=1\n[[steps]]\nkind="plugin"\nid="connection"\nplugin="rsi.application.connection"\nconfig={host_profile="fixture"}\n[[steps]]\nkind="plugin"\nid="cli"\nplugin="rsi.application.cli"\n');
     for(const [name,flags,text] of [['live-check','',`The exact test token is ${bodyMarker}. Use this token in your final response after the requested checks.`],['human-only','disable-model-invocation: true\n','This user-only text must not be returned by skill_read.']]) {
       const directory=join(workspace,'.agents/skills',name);await mkdir(directory,{recursive:true});await writeFile(join(directory,'SKILL.md'),`---\nname: ${name}\ndescription: Isolated live verification skill\n${flags}---\n\n${text}\n`);

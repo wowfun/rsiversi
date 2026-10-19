@@ -1,9 +1,10 @@
+import {liveLimits,readDeepseekKey,deepseekProfile} from './live-limits.mjs';
 import {assistantText} from './model-attempt.mjs';
 import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Opt-in real model acceptance; this file is never loaded by default tests.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir,copyFile,chmod} from 'node:fs/promises';
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {startService,waitUntil,boundedRun} from './service.mjs';
@@ -11,11 +12,10 @@ import {liveTurnTerminal,settleLiveEvidence} from './evidence.mjs';
 import {browserNames} from './task-checks.mjs';
 const report=process.env.RSI_WEB_REPORT,model=process.env.RSI_LIVE_MODEL;
 assert(report&&model&&process.env.RSI_LIVE_ENV_FILE&&process.env.RSI_WEB_ASSETS&&process.env.RSI_WEB_BINARY,'explicit live inputs required');
+const limits=liveLimits();
 assert(/^[a-zA-Z0-9_.-]{1,128}$/.test(model));
-const environment=await readFile(process.env.RSI_LIVE_ENV_FILE);assert(environment.length<=65536);
-const match=environment.toString().match(/^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.*?)\s*$/m);assert(match,'authorized key absent');
-const key=match[1].trim().replace(/^(["'])(.*)\1$/,'$2');assert(key.length);
-await mkdir(report,{recursive:true});const binary=join(report,'rsi');await copyFile(process.env.RSI_WEB_BINARY,binary);await chmod(binary,0o700);
+const key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);
+await mkdir(report,{recursive:true});const binary=process.env.RSI_WEB_BINARY;
 const tokens=['ROLE_SOURCE_V1_f387e5','ROLE_SOURCE_V2_9ab12c'];
 const definition=version=>`---\ndescription: Give a concise isolated review\nmodel: { deployment: live, model: ${model} }\nreasoning_effort: off\nallow: []\n---\nYou are the isolated review subagent. Return exactly ${tokens[version-1]} followed by one short sentence reviewing the supplied task. You have no tools.\n`;
 const html='<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;padding:32px;background:#edf7f1;color:#0b5149}button{padding:12px;font-size:20px}</style></head><body><h1>Live model artifact</h1><p>Generated through the real coding tools.</p><button onclick="this.textContent=\'Clicked successfully\'">Click to verify</button></body></html>';
@@ -47,7 +47,7 @@ try {
  service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report,deepseekKey:key,configure:async({config,workspace})=>{
   boundedRun('git',['init','--quiet',workspace]);
   await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},default_reasoning_effort:'off'}}));
-  await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),`format=1\n[[steps]]\nkind="plugin"\nid="live"\nplugin="rsi.ai.provider.deepseek"\n[steps.config]\ndeployment="live"\nendpoint="https://api.deepseek.com"\ncredential={owner="rsi.ai.provider.deepseek",slot="default"}\n[steps.config.language_models.${model}]\ncontext_window_tokens=128000\ndefault_output_reserve_tokens=4096\nmax_output_reserve_tokens=16384\n[steps.config.reasoning_efforts.${model}]\nsupported=["off","low","high","max"]\ndefault="off"\n`);
+  await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits));
   const cli=join(config,'application-profiles/evidence-cli');await mkdir(cli,{recursive:true});await writeFile(join(cli,'application.profile.toml'),'format=1\n[[steps]]\nkind="plugin"\nid="connection"\nplugin="rsi.application.connection"\nconfig={host_profile="fixture"}\n[[steps]]\nkind="plugin"\nid="cli"\nplugin="rsi.application.cli"\n');
   await mkdir(join(workspace,'.agents/agents'),{recursive:true});await writeFile(join(workspace,'.agents/agents/live-reviewer.md'),definition(1));
  }});

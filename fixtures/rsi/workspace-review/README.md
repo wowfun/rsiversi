@@ -1,6 +1,7 @@
 # Workspace review acceptance
 
-`RSI_WEB_ASSETS=/absolute/assets node fixtures/rsi/workspace-review/browser.mjs REPORT`
+With the [shared paired-publication supervisor](../web-product/README.md),
+`RSI_PAIRED_BUNDLE=/absolute/bundle node fixtures/rsi/workspace-review/browser.mjs REPORT`
 uses the real CLI HTTPS service, a deterministic model provider and Chromium / Firefox.
 It applies a native patch in a dirty Git worktree, inspects the durable interval,
 opens the exact diff and checks a narrow viewport. UI reads cause no model calls.

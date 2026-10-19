@@ -1,15 +1,14 @@
-import './paired-env.mjs';
+import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
-import {mkdir,writeFile,copyFile,chmod,readFile} from 'node:fs/promises';
+import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {createHash} from 'node:crypto';
 import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
 import {verifyFilePreviews} from './file-previews.mjs';
 import {verifyMarkdownAgents} from './markdown-agents.mjs';
 const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS,sourceBinary=process.env.RSI_WEB_BINARY;
 assert(report&&assets&&sourceBinary,'explicit isolated inputs required');await mkdir(report,{recursive:true});
-const binary=join(report,'rsi');await copyFile(sourceBinary,binary);await chmod(binary,0o700);await writeFile(join(report,'binary.json'),JSON.stringify({source:sourceBinary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex')}));
+const binary=sourceBinary;await writeFile(join(report,'binary.json'),JSON.stringify({source:sourceBinary,sha256:paired.sha256}));
 for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
  if(process.env.RSI_WEB_BROWSER&&process.env.RSI_WEB_BROWSER!==name)continue;
  const directory=join(report,name);await mkdir(directory,{recursive:true});
