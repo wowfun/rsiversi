@@ -4,14 +4,10 @@ use rsi_host::{Host, HostBuilder, Profile, ProfileEntry, ProfileProgram};
 use rsi_meta::{Runtime, UpdateMode};
 use rsi_meta_native_loader::{CatalogOptions, NativeCatalog};
 use rsi_terminal::presentation::{
-    FrameRendererContract, LinkedPresentationFactory, PortablePresentationFactory,
+    FrameRendererContract, FrameRequest, LinkedPresentationFactory, PortablePresentationFactory,
 };
 use rsi_terminal_ui::{
-    Input,
-    editor::Editor,
-    scene::Scene,
-    transcript::Transcript,
-    wire::{Identity, Request},
+    Input, editor::Editor, scene::Scene, transcript::Transcript, wire::Identity,
 };
 use std::{
     path::{Path, PathBuf},
@@ -142,8 +138,8 @@ fn scene() -> Vec<u8> {
     .encode()
     .unwrap()
 }
-fn request(presentation: u64, bytes: usize) -> Request {
-    Request {
+fn request(presentation: u64) -> FrameRequest {
+    FrameRequest {
         identity: Identity {
             attachment: 0,
             presentation,
@@ -151,7 +147,6 @@ fn request(presentation: u64, bytes: usize) -> Request {
         },
         width: 80,
         height: 24,
-        bytes,
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -172,10 +167,56 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
     drop(original);
     let old = profile.lookup_local::<FrameRendererContract>().unwrap();
     let source = scene();
+    for invalid in [
+        FrameRequest {
+            width: 0,
+            ..request(1)
+        },
+        FrameRequest {
+            height: 257,
+            ..request(1)
+        },
+        FrameRequest {
+            identity: Identity {
+                revision: 0,
+                ..request(1).identity
+            },
+            ..request(1)
+        },
+        FrameRequest {
+            identity: Identity {
+                presentation: 0,
+                ..request(1).identity
+            },
+            ..request(1)
+        },
+    ] {
+        assert!(matches!(
+            old.render(
+                invalid,
+                Scene::decode(&source).unwrap(),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .as_str(),
+            "terminal dimension bound" | "invalid render request"
+        ));
+    }
+    let oversized = Scene::from(rsi_terminal_ui::scene::ApplicationScene {
+        title: "x".repeat(rsi_terminal_ui::scene::MAXIMUM_SCENE_BYTES + 1),
+        ..Default::default()
+    });
+    assert_eq!(
+        old.render(request(1), oversized, CancellationToken::new())
+            .await
+            .unwrap_err(),
+        "encoded byte bound"
+    );
     let (cells, map) = old
         .render(
-            request(1, source.len()),
-            source.clone(),
+            request(1),
+            Scene::decode(&source).unwrap(),
             CancellationToken::new(),
         )
         .await
@@ -202,8 +243,8 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
     ));
     assert!(
         old.render(
-            request(2, source.len()),
-            source.clone(),
+            request(2),
+            Scene::decode(&source).unwrap(),
             CancellationToken::new()
         )
         .await
@@ -213,8 +254,8 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
     let renderer = profile.lookup_local::<FrameRendererContract>().unwrap();
     let (next, _) = renderer
         .render(
-            request(2, source.len()),
-            source.clone(),
+            request(2),
+            Scene::decode(&source).unwrap(),
             CancellationToken::new(),
         )
         .await
@@ -286,19 +327,19 @@ async fn assert_linked_parity(
         assert_eq!(
             renderer
                 .render(
-                    request(1, source.len() + 1),
-                    source.to_vec(),
+                    request(0),
+                    Scene::decode(source).unwrap(),
                     CancellationToken::new()
                 )
                 .await
                 .unwrap_err(),
-            "scene source length mismatch"
+            "invalid render request"
         );
     }
     let linked_frame = linked_renderer
         .render(
-            request(1, source.len()),
-            source.to_vec(),
+            request(1),
+            Scene::decode(source).unwrap(),
             CancellationToken::new(),
         )
         .await
@@ -371,7 +412,11 @@ async fn stalled_portable_frame_has_a_local_deadline_and_releases_its_call() {
     let source = scene();
     let error = tokio::time::timeout(
         Duration::from_secs(3),
-        renderer.render(request(1, source.len()), source, CancellationToken::new()),
+        renderer.render(
+            request(1),
+            Scene::decode(&source).unwrap(),
+            CancellationToken::new(),
+        ),
     )
     .await
     .expect("frame must time out before the Meta service deadline")
@@ -382,7 +427,7 @@ async fn stalled_portable_frame_has_a_local_deadline_and_releases_its_call() {
     stop.cancel();
     assert_eq!(
         renderer
-            .render(request(1, source.len()), source, stop)
+            .render(request(1), Scene::decode(&source).unwrap(), stop)
             .await
             .unwrap_err(),
         "presentation stopped"
@@ -415,8 +460,8 @@ async fn assert_application_parity(
     .unwrap();
     let (home_cells, home_map) = old
         .render(
-            request(2, home.len()),
-            home.clone(),
+            request(2),
+            Scene::decode(&home).unwrap(),
             CancellationToken::new(),
         )
         .await

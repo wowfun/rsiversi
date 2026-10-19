@@ -110,8 +110,11 @@ revision. Source windows advance by raw bytes, including UTF-8 boundaries. The H
 the peer. Only Close peer ends that connection. Native model, Goal and preset
 controls remain with the native Session view.
 
-The resident input loop captures a bounded scene snapshot. JSON encoding and
-linked decoding, source validation, layout and cell rendering run on blocking
+The resident input loop captures a bounded typed Scene. The linked renderer
+validates its semantics, lays out and renders cells in one blocking worker.
+Only the Portable adapter encodes JSON, bounding bytes during serialization after
+validating the frame identity and viewport once at admission;
+its peer decodes and validates the Scene before rendering. These operations run on blocking
 workers. Home and attached Sessions use the same render job. Each loop admits
 one job at a time; cancellation and attachment/presentation/revision checks keep
 obsolete results from replacing the acknowledged frame. Blocking work already
@@ -226,7 +229,8 @@ code, not a plugin sandbox. Presentation Profiles may compose dependencies from
 the application catalog; the resident controller does not transfer its terminal
 descriptor or Session controller through the rendering contract.
 
-Portable frame exchange has a two-second deadline, including sending the scene.
+Portable frame exchange has a two-second deadline, including queued scene encoding
+and sending the scene. Cancellation covers the same interval.
 Expiry cancels the read and enters the resident diagnostic-frame and 250 ms retry
 path; terminal input and draft ownership remain resident. This bounds the local
 wait, not execution or destruction of trusted native code. Linked synchronous

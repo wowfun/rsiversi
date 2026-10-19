@@ -5,10 +5,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, ContractVersion, LocalContract, Message, MetaError, PluginFactory,
     PreparedActivation, Requirement,
 };
-use rsi_terminal_ui::{
-    scene::Scene,
-    wire::{self, Request},
-};
+use rsi_terminal_ui::{scene::Scene, wire};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -16,13 +13,34 @@ const PORTABLE_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// One complete display result; the resident writer owns presentation acknowledgement.
 pub type Frame = (ratatui::buffer::Buffer, rsi_terminal_ui::render::View);
+/// Process-local frame identity and viewport; encoded lengths belong to Portable.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameRequest {
+    /// Attachment, presentation generation and monotonic frame revision.
+    /// Attachment zero identifies an unattached application scene; presentation
+    /// and revision must be nonzero.
+    pub identity: wire::Identity,
+    /// Viewport columns, checked by the renderer.
+    pub width: u16,
+    /// Viewport rows, checked by the renderer.
+    pub height: u16,
+}
+impl FrameRequest {
+    fn validate(self) -> Result<(), &'static str> {
+        wire::dimensions(self.width, self.height)?;
+        if self.identity.presentation == 0 || self.identity.revision == 0 {
+            return Err("invalid render request");
+        }
+        Ok(())
+    }
+}
 /// The renderer holds no terminal descriptor or Session controller.
 pub trait FrameRenderer: std::fmt::Debug + Send + Sync {
     /// Materializes a complete replacement frame under one read cancellation token.
     fn render(
         &self,
-        request: Request,
-        scene: Vec<u8>,
+        request: FrameRequest,
+        scene: Scene,
         stop: CancellationToken,
     ) -> BoxFuture<'static, Result<Frame, String>>;
 }
@@ -41,12 +59,13 @@ struct Linked(Arc<std::sync::Mutex<rsi_terminal_ui::scene::Renderer>>);
 impl FrameRenderer for Linked {
     fn render(
         &self,
-        request: Request,
-        scene: Vec<u8>,
+        request: FrameRequest,
+        scene: Scene,
         stop: CancellationToken,
     ) -> BoxFuture<'static, Result<Frame, String>> {
         let renderer = self.0.clone();
         Box::pin(async move {
+            request.validate().map_err(str::to_owned)?;
             if stop.is_cancelled() {
                 return Err("presentation stopped".into());
             }
@@ -55,26 +74,16 @@ impl FrameRenderer for Linked {
                 if worker_stop.is_cancelled() {
                     return Err("presentation stopped".into());
                 }
-                request
-                    .validate()
-                    .and({
-                        if scene.len() == request.bytes {
-                            Ok(())
-                        } else {
-                            Err("scene source length mismatch")
-                        }
-                    })
-                    .and_then(|()| Scene::decode(&scene))
-                    .and_then(|scene| {
-                        let mut renderer = renderer
-                            .lock()
-                            .map_err(|_| "linked presentation poisoned")?;
-                        if worker_stop.is_cancelled() {
-                            return Err("presentation stopped");
-                        }
-                        renderer.render(scene, request.width, request.height)
-                    })
-                    .map_err(str::to_owned)
+                (|| {
+                    let mut renderer = renderer
+                        .lock()
+                        .map_err(|_| "linked presentation poisoned")?;
+                    if worker_stop.is_cancelled() {
+                        return Err("presentation stopped");
+                    }
+                    renderer.render(scene, request.width, request.height)
+                })()
+                .map_err(str::to_owned)
             })
             .await
             .map_err(|error| format!("presentation worker failed: {error}"))?;
@@ -107,17 +116,29 @@ struct Portable(rsi_meta::Capability);
 impl FrameRenderer for Portable {
     fn render(
         &self,
-        request: Request,
-        scene: Vec<u8>,
+        request: FrameRequest,
+        scene: Scene,
         stop: CancellationToken,
     ) -> BoxFuture<'static, Result<Frame, String>> {
         let capability = self.0.clone();
         Box::pin(async move {
+            request.validate().map_err(str::to_owned)?;
+            if stop.is_cancelled() {
+                return Err("presentation stopped".into());
+            }
             let work = async {
-                request.validate().map_err(str::to_owned)?;
-                if scene.len() != request.bytes {
-                    return Err("scene source length mismatch".into());
-                }
+                let scene = tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(
+                    move || scene.encode(),
+                ))
+                .await
+                .map_err(|error| format!("scene worker failed: {error}"))?
+                .map_err(str::to_owned)?;
+                let request = wire::Request {
+                    identity: request.identity,
+                    width: request.width,
+                    height: request.height,
+                    bytes: scene.len(),
+                };
                 let mut call = capability.open().map_err(|e| e.to_string())?;
                 call.send(Message::new(
                     wire::request_header(&request).map_err(str::to_owned)?,
@@ -250,10 +271,10 @@ impl Owner {
     }
     pub fn render(
         &self,
-        mut request: Request,
+        request: FrameRequest,
         scene: Scene,
         stop: CancellationToken,
-    ) -> BoxFuture<'static, (Request, Result<Frame, String>)> {
+    ) -> BoxFuture<'static, (FrameRequest, Result<Frame, String>)> {
         let renderer = self.renderer();
         Box::pin(async move {
             let result = async {
@@ -261,23 +282,7 @@ impl Owner {
                 if stop.is_cancelled() {
                     return Err("presentation stopped".into());
                 }
-                let source = tokio::task::spawn_blocking(move || scene.encode())
-                    .await
-                    .map_err(|error| format!("scene worker failed: {error}"))?
-                    .map_err(str::to_owned)?;
-                request.bytes = source.len();
-                renderer
-                    .render(
-                        Request {
-                            identity: request.identity,
-                            width: request.width,
-                            height: request.height,
-                            bytes: request.bytes,
-                        },
-                        source,
-                        stop,
-                    )
-                    .await
+                renderer.render(request, scene, stop).await
             }
             .await;
             (request, result)
@@ -313,6 +318,112 @@ fn failure(error: impl std::fmt::Display) -> crate::RsiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
+
+    #[derive(Debug)]
+    struct UnusedEndpoint;
+    #[async_trait]
+    impl rsi_meta::ServiceEndpoint for UnusedEndpoint {
+        async fn serve(
+            &self,
+            _: rsi_meta::InvocationContext,
+            _: rsi_meta::ProviderChannel<'_>,
+        ) -> rsi_meta::Result<()> {
+            panic!("queued encoding must time out before opening the service")
+        }
+    }
+    #[async_trait]
+    impl PluginFactory for UnusedEndpoint {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+        async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+            plan.context().provide(
+                wire::SERVICE,
+                wire::CONTRACT,
+                ContractVersion(wire::VERSION),
+                Arc::new(Self),
+            )?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn portable_deadline_and_cancellation_cover_queued_encoding() {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let runtime = rsi_meta::Runtime::default();
+            let mut builder = HostBuilder::without_paths(std::env::consts::OS);
+            builder
+                .register_local_contract::<FrameRendererContract>()
+                .unwrap();
+            builder
+                .register_linked(
+                    "test.renderer",
+                    "1",
+                    rsi_meta::UpdateMode::Replayable,
+                    Arc::new(UnusedEndpoint),
+                )
+                .unwrap();
+            builder
+                .register_linked(
+                    "test.adapter",
+                    "1",
+                    rsi_meta::UpdateMode::Replayable,
+                    Arc::new(PortablePresentationFactory),
+                )
+                .unwrap();
+            let profile = rsi_application::ScopedProfile::start(
+                &builder.build().unwrap(),
+                &runtime.root(),
+                ProfileProgram::from_profile(Profile::new([
+                    ProfileEntry::new("renderer", "test.renderer", ConfigValue::Null),
+                    ProfileEntry::new("adapter", "test.adapter", ConfigValue::Null),
+                ])),
+            )
+            .await
+            .unwrap();
+            let renderer = profile.lookup_local::<FrameRendererContract>().unwrap();
+            for cancelled in [false, true] {
+                let (release, wait) = std::sync::mpsc::channel();
+                let (entered, ready) = tokio::sync::oneshot::channel();
+                let blocked = tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    let _ = wait.recv();
+                });
+                ready.await.unwrap();
+                let stop = CancellationToken::new();
+                let (request, source) = scene();
+                let mut render = renderer.render(request, source, stop.clone());
+                assert!(futures_util::poll!(&mut render).is_pending());
+                if cancelled {
+                    stop.cancel();
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(3), render).await;
+                // Release even on regression, so executor shutdown cannot hang.
+                release.send(()).unwrap();
+                blocked.await.unwrap();
+                assert_eq!(
+                    result
+                        .expect("encoding escaped the render deadline")
+                        .unwrap_err(),
+                    if cancelled {
+                        "presentation stopped"
+                    } else {
+                        "terminal rendering exceeded 2 seconds"
+                    }
+                );
+            }
+            assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
+            drop(renderer);
+            assert!(profile.shutdown().await.is_clean());
+            assert!(runtime.shutdown().await.is_clean());
+        });
+    }
 
     #[tokio::test]
     async fn linked_render_creation_does_not_wait_for_the_renderer() {
@@ -348,8 +459,84 @@ mod tests {
         assert!(future.await.is_ok());
     }
 
-    fn scene() -> (Request, Vec<u8>) {
+    fn scene() -> (FrameRequest, Scene) {
         scene_with(&rsi_terminal_ui::transcript::Transcript::default())
+    }
+
+    #[tokio::test]
+    async fn typed_linked_scene_matches_portable_cells_and_source_map() {
+        let (request, source) = scene();
+        let decoded = Scene::decode(&source.encode().unwrap()).unwrap();
+        let expected = decoded.render(request.width, request.height).unwrap();
+        let actual = Linked(Arc::default())
+            .render(request, source, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            wire::encode(request.identity, &actual.0, &actual.1).unwrap(),
+            wire::encode(request.identity, &expected.0, &expected.1).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn unattached_application_frame_accepts_zero_attachment() {
+        let request = FrameRequest {
+            identity: wire::Identity {
+                attachment: 0,
+                presentation: 1,
+                revision: 1,
+            },
+            width: 80,
+            height: 24,
+        };
+        let source = Scene::from(rsi_terminal_ui::scene::ApplicationScene {
+            title: "No session attached".into(),
+            ..Default::default()
+        });
+        let encoded = source.encode().unwrap();
+        let wire_request = wire::Request {
+            identity: request.identity,
+            width: request.width,
+            height: request.height,
+            bytes: encoded.len(),
+        };
+        wire::parse_header(&wire::request_header(&wire_request).unwrap()).unwrap();
+        let (cells, view) = Linked(Arc::default())
+            .render(request, source, CancellationToken::new())
+            .await
+            .unwrap();
+        let encoded = wire::encode(request.identity, &cells, &view).unwrap();
+        let (decoded, _) = wire::decode(&encoded, &wire_request).unwrap();
+        assert_eq!(decoded, cells);
+        let text: String = cells
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(text.contains("No session attached"));
+    }
+
+    #[tokio::test]
+    async fn typed_linked_scene_still_rejects_invalid_public_fields_and_cancelled_work() {
+        let (request, _) = scene();
+        let invalid = Scene::from(rsi_terminal_ui::scene::ApplicationScene {
+            title: "x".repeat(rsi_terminal_ui::scene::MAXIMUM_SCENE_BYTES + 1),
+            ..Default::default()
+        });
+        let renderer = Linked(Arc::default());
+        assert!(
+            renderer
+                .render(request, invalid, CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let (_, valid) = scene();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        assert_eq!(
+            renderer.render(request, valid, stop).await.unwrap_err(),
+            "presentation stopped"
+        );
     }
     fn capture_scene(transcript: &rsi_terminal_ui::transcript::Transcript) -> Scene {
         use rsi_agent_session_protocol::{
@@ -407,10 +594,10 @@ mod tests {
         )
         .unwrap()
     }
-    fn scene_with(transcript: &rsi_terminal_ui::transcript::Transcript) -> (Request, Vec<u8>) {
-        let source = capture_scene(transcript).encode().unwrap();
+    fn scene_with(transcript: &rsi_terminal_ui::transcript::Transcript) -> (FrameRequest, Scene) {
+        let source = capture_scene(transcript);
         (
-            Request {
+            FrameRequest {
                 identity: wire::Identity {
                     attachment: 1,
                     presentation: 1,
@@ -418,14 +605,13 @@ mod tests {
                 },
                 width: 80,
                 height: 24,
-                bytes: source.len(),
             },
             source,
         )
     }
 
     #[tokio::test]
-    #[ignore = "diagnostic linked capture/JSON/render benchmark; no timing threshold"]
+    #[ignore = "diagnostic typed Local versus JSON/render benchmark; no timing threshold"]
     async fn linked_visible_window_capture_and_render_cost() {
         use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
         let mut transcript = rsi_terminal_ui::transcript::Transcript::default();
@@ -447,7 +633,9 @@ mod tests {
             );
         }
         let mut renderer = rsi_terminal_ui::scene::Renderer::default();
-        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let runtime = rsi_meta::Runtime::default();
+        let mut owner = Owner::start(&runtime.root(), None).await.unwrap();
+        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         let mut scene_bytes = 0;
         for _ in 0..100 {
             let started = std::time::Instant::now();
@@ -463,10 +651,28 @@ mod tests {
             let started = std::time::Instant::now();
             std::hint::black_box(renderer.render(decoded, 80, 24).unwrap());
             samples[3].push(started.elapsed());
+            let (request, source) = scene_with(&transcript);
+            let started = std::time::Instant::now();
+            std::hint::black_box(
+                owner
+                    .render(request, source, CancellationToken::new())
+                    .await
+                    .1
+                    .unwrap(),
+            );
+            samples[4].push(started.elapsed());
         }
-        for (phase, mut values) in ["capture", "encode", "decode", "render"]
-            .into_iter()
-            .zip(samples)
+        owner.close().await.unwrap();
+        assert!(runtime.shutdown().await.is_clean());
+        for (phase, mut values) in [
+            "capture",
+            "encode",
+            "decode",
+            "render",
+            "typed-owner-to-frame",
+        ]
+        .into_iter()
+        .zip(samples)
         {
             values.sort_unstable();
             eprintln!(
@@ -532,11 +738,7 @@ mod tests {
         let (request, source) = scene();
         assert_eq!(
             owner
-                .render(
-                    request,
-                    Scene::decode(&source).unwrap(),
-                    CancellationToken::new()
-                )
+                .render(request, source, CancellationToken::new())
                 .await
                 .1
                 .unwrap_err(),
@@ -554,13 +756,9 @@ mod tests {
             .wait()
             .await
             .unwrap();
-        let (request, _) = scene();
+        let (request, source) = scene();
         let (frame, _) = owner
-            .render(
-                request,
-                Scene::decode(&source).unwrap(),
-                CancellationToken::new(),
-            )
+            .render(request, source, CancellationToken::new())
             .await
             .1
             .unwrap();

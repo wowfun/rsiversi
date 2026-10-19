@@ -258,7 +258,7 @@ type RenderJob = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = (
-                    rsi_terminal_ui::wire::Request,
+                    crate::presentation::FrameRequest,
                     std::result::Result<crate::presentation::Frame, String>,
                 ),
             > + Send,
@@ -2290,7 +2290,7 @@ async fn run_inner(
                                 continue;
                             }
                         };
-                        let request = rsi_terminal_ui::wire::Request {identity:rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision},width,height,bytes:0};
+                        let request = crate::presentation::FrameRequest {identity:rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision},width,height};
                         rendering_turn = if profiles.active || external.active { None } else { client.state.activity.as_ref().map(|activity| activity.turn_id.clone()) };
                         rendering=Some(presentation.render(request,scene,rendering_stop.clone()));
                         dirty=false;

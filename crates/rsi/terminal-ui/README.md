@@ -86,8 +86,8 @@ membership and the attachment/presentation/revision tuple before publishing it.
 Only the matching completed write acknowledges a frame. Replacing a renderer
 preserves drafts, controllers and unresolved mutations; its private layout cache
 may reset.
-Linked and Portable adapters both validate the declared scene byte length before
-decoding. A resident recovery frame reuses cells only from the same attachment,
+Application adapters follow the [terminal application contract](../../../apps/terminal/README.md).
+A resident recovery frame reuses cells only from the same attachment,
 presentation epoch and dimensions; it carries no source-map authority.
 
 Each presentation Renderer owns its private body layout cache.
